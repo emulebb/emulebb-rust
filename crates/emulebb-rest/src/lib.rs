@@ -154,6 +154,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route("/api/v1/transfers/{hash}/details", get(transfer))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
+        .route("/api/v1/uploads", get(uploads))
+        .route("/api/v1/uploads/{client_id}", get(upload))
+        .route("/api/v1/upload-queue", get(upload_queue))
+        .route("/api/v1/upload-queue/{client_id}", get(upload_queue_client))
         .route(
             "/api/v1/transfers/{hash}/operations/pause",
             post(transfer_pause),
@@ -421,6 +425,40 @@ async fn transfer_sources(
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
+    }
+}
+
+async fn uploads(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection(state.core.uploads().await)
+}
+
+async fn upload(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    upload_by_client_id(state, client_id, false).await
+}
+
+async fn upload_queue(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection_page(state.core.upload_queue().await)
+}
+
+async fn upload_queue_client(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    upload_by_client_id(state, client_id, true).await
+}
+
+async fn upload_by_client_id(state: RestState, client_id: String, waiting_queue: bool) -> Response {
+    match state.core.upload(&client_id, waiting_queue).await {
+        Some(upload) => api_ok(upload).into_response(),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload queue client not found",
+        )
+        .into_response(),
     }
 }
 
@@ -739,6 +777,40 @@ mod tests {
                 .iter()
                 .any(|entry| entry == "rest.emulebb.v1")
         );
+    }
+
+    #[tokio::test]
+    async fn uploads_and_upload_queue_use_canonical_envelopes() {
+        let app = test_router();
+        for path in ["/api/v1/uploads", "/api/v1/upload-queue"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("X-API-Key", "secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/upload-queue/unknown")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

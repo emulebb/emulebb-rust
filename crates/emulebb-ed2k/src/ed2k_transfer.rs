@@ -51,6 +51,7 @@ use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::{
     Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
+pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
 
 /// Canonical ED2K part size used by eMule-compatible file hashing.
 pub const ED2K_PART_SIZE: u64 = 9_728_000;

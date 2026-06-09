@@ -114,6 +114,28 @@ enum Ed2kUploadSessionPhase {
     Uploading,
 }
 
+/// Queue-visible upload session phase for management surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kUploadSessionPhaseSnapshot {
+    Waiting,
+    Granted,
+    Uploading,
+}
+
+/// Read-only snapshot of one inbound upload queue session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kUploadQueueSnapshotEntry {
+    pub ip: IpAddr,
+    pub tcp_port: u16,
+    pub user_hash: Option<[u8; 16]>,
+    pub client_id: Option<u32>,
+    pub friend_slot: bool,
+    pub file_hash: String,
+    pub phase: Ed2kUploadSessionPhaseSnapshot,
+    pub queue_rank: Option<u16>,
+    pub wait_time_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 struct Ed2kUploadSessionEntry {
     phase: Ed2kUploadSessionPhase,
@@ -263,6 +285,39 @@ impl Ed2kUploadQueueState {
         }
         self.reap_expired_sessions(now);
         self.promote_waiters(now);
+    }
+
+    pub(super) fn snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
+        self.reap_expired_sessions(now);
+        let mut entries = self
+            .sessions
+            .iter()
+            .map(|(key, session)| Ed2kUploadQueueSnapshotEntry {
+                ip: key.peer.ip,
+                tcp_port: key.peer.tcp_port,
+                user_hash: key.peer.user_hash,
+                client_id: key.peer.client_id,
+                friend_slot: key.peer.friend_slot,
+                file_hash: key.file_hash.clone(),
+                phase: phase_snapshot(session.phase),
+                queue_rank: (session.phase == Ed2kUploadSessionPhase::Waiting)
+                    .then(|| self.rank_for_key(key, now)),
+                wait_time_ms: now
+                    .saturating_duration_since(session.queued_at)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            upload_snapshot_sort_key(left)
+                .cmp(&upload_snapshot_sort_key(right))
+                .then_with(|| left.client_id.cmp(&right.client_id))
+                .then_with(|| left.ip.cmp(&right.ip))
+                .then_with(|| left.tcp_port.cmp(&right.tcp_port))
+                .then_with(|| left.file_hash.cmp(&right.file_hash))
+        });
+        entries
     }
 
     fn status_for_key(&self, key: &Ed2kUploadSessionKey, now: Instant) -> Ed2kUploadSessionStatus {
@@ -445,4 +500,20 @@ fn file_priority_score(_key: &Ed2kUploadSessionKey) -> i128 {
 
 fn is_low_id_client_id(client_id: u32) -> bool {
     client_id != 0 && client_id < 0x0100_0000
+}
+
+fn phase_snapshot(phase: Ed2kUploadSessionPhase) -> Ed2kUploadSessionPhaseSnapshot {
+    match phase {
+        Ed2kUploadSessionPhase::Waiting => Ed2kUploadSessionPhaseSnapshot::Waiting,
+        Ed2kUploadSessionPhase::Granted => Ed2kUploadSessionPhaseSnapshot::Granted,
+        Ed2kUploadSessionPhase::Uploading => Ed2kUploadSessionPhaseSnapshot::Uploading,
+    }
+}
+
+fn upload_snapshot_sort_key(entry: &Ed2kUploadQueueSnapshotEntry) -> (u8, u16) {
+    match entry.phase {
+        Ed2kUploadSessionPhaseSnapshot::Uploading => (0, 0),
+        Ed2kUploadSessionPhaseSnapshot::Granted => (1, 0),
+        Ed2kUploadSessionPhaseSnapshot::Waiting => (2, entry.queue_rank.unwrap_or(u16::MAX)),
+    }
 }

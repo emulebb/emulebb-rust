@@ -7,7 +7,8 @@ use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
     ed2k_transfer::{
-        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionStatus,
+        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig,
+        Ed2kUploadSessionPhaseSnapshot, Ed2kUploadSessionStatus,
     },
     paths::unique_test_dir,
 };
@@ -30,6 +31,32 @@ fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUploadPeerIden
         client_id: Some(client_id),
         friend_slot: false,
     }
+}
+
+#[tokio::test]
+async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
+    let root = unique_test_dir("ed2k-upload-queue-snapshot");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (_waiting_handle, waiting_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x22, 0x0A00_0002), &file_hash)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    let snapshot = runtime.upload_queue_snapshot().await;
+
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].phase, Ed2kUploadSessionPhaseSnapshot::Granted);
+    assert_eq!(snapshot[0].queue_rank, None);
+    assert_eq!(snapshot[1].phase, Ed2kUploadSessionPhaseSnapshot::Waiting);
+    assert_eq!(snapshot[1].queue_rank, Some(1));
+    assert_eq!(snapshot[1].file_hash, file_hash.to_string());
 }
 
 #[tokio::test]

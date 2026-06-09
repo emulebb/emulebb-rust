@@ -28,7 +28,8 @@ use emulebb_ed2k::{
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job,
+        ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime,
+        Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::KadFirewallState,
 };
@@ -212,6 +213,40 @@ pub struct TransferSource {
     pub endpoint: String,
     pub user_hash: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Upload {
+    pub client_id: String,
+    pub user_name: String,
+    pub user_hash: Option<String>,
+    pub client_software: String,
+    pub client_mod: String,
+    pub upload_state: String,
+    pub upload_speed_ki_bps: f64,
+    pub uploaded_bytes: u64,
+    pub queue_session_uploaded: u64,
+    pub payload_buffered: u64,
+    pub wait_time_ms: u64,
+    pub wait_started_tick: u64,
+    pub score: u64,
+    pub address: String,
+    pub port: u16,
+    pub server_ip: String,
+    pub server_port: u16,
+    pub low_id: bool,
+    pub friend_slot: bool,
+    pub uploading: bool,
+    pub waiting_queue: bool,
+    pub requested_file_hash: Option<String>,
+    pub requested_file_name: Option<String>,
+    pub requested_file_size_bytes: Option<u64>,
+    pub requested_parts_obtained: u32,
+    pub requested_parts_total: u32,
+    pub requested_parts_progress_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_rank: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -619,6 +654,21 @@ impl EmulebbCore {
             .find(|share| share.hash.eq_ignore_ascii_case(hash))
     }
 
+    pub async fn uploads(&self) -> Vec<Upload> {
+        self.uploads_by_queue_state(false).await
+    }
+
+    pub async fn upload_queue(&self) -> Vec<Upload> {
+        self.uploads_by_queue_state(true).await
+    }
+
+    pub async fn upload(&self, client_id: &str, waiting_queue: bool) -> Option<Upload> {
+        self.uploads_by_queue_state(waiting_queue)
+            .await
+            .into_iter()
+            .find(|upload| upload.client_id == client_id)
+    }
+
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
         if let Some(transfer) = self.state.lock().await.transfers.get(hash).cloned() {
             return Some(transfer);
@@ -668,6 +718,31 @@ impl EmulebbCore {
             .await?;
         self.state.lock().await.transfers.remove(hash);
         Ok(Some(transfer))
+    }
+
+    async fn uploads_by_queue_state(&self, waiting_queue: bool) -> Vec<Upload> {
+        let manifests = match self.ed2k_transfers.manifests().await {
+            Ok(manifests) => manifests
+                .into_iter()
+                .map(|manifest| (manifest.file_hash.clone(), manifest))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                tracing::warn!("failed to enumerate ED2K manifests for upload snapshot: {error}");
+                HashMap::new()
+            }
+        };
+        self.ed2k_transfers
+            .upload_queue_snapshot()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                matches!(entry.phase, Ed2kUploadSessionPhaseSnapshot::Waiting) == waiting_queue
+            })
+            .map(|entry| {
+                let manifest = manifests.get(&entry.file_hash);
+                upload_from_snapshot(entry, manifest)
+            })
+            .collect()
     }
 
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
@@ -1255,6 +1330,97 @@ fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<Transfer
             status: "remembered".to_string(),
         })
         .collect()
+}
+
+fn upload_from_snapshot(
+    entry: Ed2kUploadQueueSnapshotEntry,
+    manifest: Option<&Ed2kResumeManifest>,
+) -> Upload {
+    let user_hash = entry.user_hash.map(hex::encode);
+    let client_id = user_hash
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", entry.ip, entry.tcp_port));
+    let requested_parts_total = manifest
+        .map(|manifest| manifest.pieces.len() as u32)
+        .unwrap_or_default();
+    let requested_parts_obtained = manifest.map(upload_obtained_part_count).unwrap_or_default();
+    let requested_parts_progress_text = if requested_parts_total == 0 {
+        String::new()
+    } else {
+        format!("{requested_parts_obtained}/{requested_parts_total}")
+    };
+    let upload_state = upload_state_name(entry.phase).to_string();
+    let waiting_queue = matches!(entry.phase, Ed2kUploadSessionPhaseSnapshot::Waiting);
+    let uploading = matches!(
+        entry.phase,
+        Ed2kUploadSessionPhaseSnapshot::Granted | Ed2kUploadSessionPhaseSnapshot::Uploading
+    );
+    Upload {
+        client_id,
+        user_name: format!("{}:{}", entry.ip, entry.tcp_port),
+        user_hash,
+        client_software: "unknown".to_string(),
+        client_mod: String::new(),
+        upload_state,
+        upload_speed_ki_bps: 0.0,
+        uploaded_bytes: 0,
+        queue_session_uploaded: 0,
+        payload_buffered: 0,
+        wait_time_ms: entry.wait_time_ms,
+        wait_started_tick: 0,
+        score: 0,
+        address: entry.ip.to_string(),
+        port: entry.tcp_port,
+        server_ip: String::new(),
+        server_port: 0,
+        low_id: entry.client_id.is_some_and(is_low_id_client_id),
+        friend_slot: entry.friend_slot,
+        uploading,
+        waiting_queue,
+        requested_file_hash: Some(entry.file_hash),
+        requested_file_name: manifest.map(|manifest| manifest.canonical_name.clone()),
+        requested_file_size_bytes: manifest.map(|manifest| manifest.file_size),
+        requested_parts_obtained,
+        requested_parts_total,
+        requested_parts_progress_text,
+        queue_rank: entry.queue_rank,
+    }
+}
+
+fn upload_state_name(phase: Ed2kUploadSessionPhaseSnapshot) -> &'static str {
+    match phase {
+        Ed2kUploadSessionPhaseSnapshot::Waiting => "queued",
+        Ed2kUploadSessionPhaseSnapshot::Granted => "connecting",
+        Ed2kUploadSessionPhaseSnapshot::Uploading => "uploading",
+    }
+}
+
+fn upload_obtained_part_count(manifest: &Ed2kResumeManifest) -> u32 {
+    if manifest.completed {
+        return manifest.pieces.len() as u32;
+    }
+    manifest
+        .pieces
+        .iter()
+        .filter(|piece| {
+            piece.bytes_written >= upload_expected_piece_length(manifest, piece.piece_index)
+        })
+        .count() as u32
+}
+
+fn upload_expected_piece_length(manifest: &Ed2kResumeManifest, piece_index: u32) -> u64 {
+    let start = u64::from(piece_index).saturating_mul(manifest.piece_size);
+    if start >= manifest.file_size {
+        return 0;
+    }
+    manifest
+        .file_size
+        .saturating_sub(start)
+        .min(manifest.piece_size)
+}
+
+fn is_low_id_client_id(client_id: u32) -> bool {
+    client_id != 0 && client_id < 0x0100_0000
 }
 
 fn found_source_from_hint(file_hash: Ed2kHash, hint: &Ed2kSourceHint) -> Result<Ed2kFoundSource> {

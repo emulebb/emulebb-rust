@@ -5,7 +5,8 @@ use std::{sync::atomic::Ordering, time::Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
+    Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueSnapshotEntry,
+    Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
 
 impl Ed2kTransferRuntime {
@@ -62,5 +63,10 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .release_session(handle, Instant::now());
+    }
+
+    /// Return a management snapshot of active and waiting inbound upload sessions.
+    pub async fn upload_queue_snapshot(&self) -> Vec<Ed2kUploadQueueSnapshotEntry> {
+        self.upload_queue.lock().await.snapshot(Instant::now())
     }
 }
