@@ -404,6 +404,7 @@ dependencies = [
  "emulebb-index",
  "serde",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -415,13 +416,16 @@ dependencies = [
  "axum",
  "clap",
  "emulebb-core",
+ "emulebb-ed2k",
  "emulebb-index",
  "emulebb-rest",
+ "hex",
  "serde",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

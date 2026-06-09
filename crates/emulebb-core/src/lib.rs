@@ -1,13 +1,17 @@
-use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
+use std::{collections::HashMap, net::Ipv4Addr, path::Path, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use emulebb_ed2k::ed2k_transfer::{
-    Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job,
+use emulebb_ed2k::{
+    config::Ed2kConfig,
+    ed2k_server::{Ed2kKeywordSearchOptions, Ed2kSearchFile, search_keyword_servers},
+    ed2k_tcp::{Ed2kHelloIdentity, emule_connect_options},
+    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job},
 };
 use emulebb_index::{FileIndex, IndexedFile};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +47,15 @@ pub struct NetworkStatus {
     pub running: bool,
     pub connected: bool,
     pub peer_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfo {
+    pub endpoint: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +136,13 @@ pub struct Transfer {
     pub ed2k_link: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct Ed2kNetworkConfig {
+    pub bind_ip: Ipv4Addr,
+    pub user_hash: [u8; 16],
+    pub config: Ed2kConfig,
+}
+
 #[derive(Debug)]
 struct CoreState {
     searches: HashMap<String, Search>,
@@ -137,6 +157,7 @@ pub struct EmulebbCore {
     version: String,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
+    ed2k_network: Option<Ed2kNetworkConfig>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -146,12 +167,22 @@ impl EmulebbCore {
         index: FileIndex,
         transfer_root: impl AsRef<Path>,
     ) -> Result<Self> {
+        Self::new_with_network(version, index, transfer_root, None)
+    }
+
+    pub fn new_with_network(
+        version: impl Into<String>,
+        index: FileIndex,
+        transfer_root: impl AsRef<Path>,
+        ed2k_network: Option<Ed2kNetworkConfig>,
+    ) -> Result<Self> {
         let ed2k_transfers = Ed2kTransferRuntime::load_or_create(transfer_root.as_ref())?;
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
+            ed2k_network,
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
@@ -226,14 +257,50 @@ impl EmulebbCore {
         self.state.lock().await.ed2k_connected = connected;
     }
 
+    pub async fn servers(&self) -> Vec<ServerInfo> {
+        let connected = self.state.lock().await.ed2k_connected;
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Vec::new();
+        };
+        let mut servers = network
+            .config
+            .server_entries
+            .iter()
+            .map(|entry| ServerInfo {
+                endpoint: format!("{}:{}", entry.host, entry.port),
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                connected,
+            })
+            .collect::<Vec<_>>();
+        servers.extend(
+            network
+                .config
+                .server_endpoints
+                .iter()
+                .map(|endpoint| ServerInfo {
+                    endpoint: endpoint.clone(),
+                    name: None,
+                    description: None,
+                    connected,
+                }),
+        );
+        servers
+    }
+
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
         let search_id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let mut results = Vec::new();
+        if let Some(ed2k_results) = self.search_ed2k_servers(&search_id, &request).await? {
+            results.extend(ed2k_results);
+        }
         let indexed = self.index.lock().await.search(&request.query, 200)?;
-        let results = indexed
-            .into_iter()
-            .map(|file| search_result_from_indexed(&search_id, &request, file))
-            .collect();
+        results.extend(
+            indexed
+                .into_iter()
+                .map(|file| search_result_from_indexed(&search_id, &request, file)),
+        );
         let search = Search {
             id: search_id.clone(),
             query: request.query,
@@ -345,6 +412,58 @@ impl EmulebbCore {
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(transfer)
     }
+
+    async fn search_ed2k_servers(
+        &self,
+        search_id: &str,
+        request: &SearchCreate,
+    ) -> Result<Option<Vec<SearchResult>>> {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Ok(None);
+        };
+        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+            return Ok(None);
+        }
+
+        let cancel = CancellationToken::new();
+        let hello_identity = Ed2kHelloIdentity {
+            user_hash: network.user_hash,
+            client_id: 0,
+            tcp_port: network.config.listen_port,
+            udp_port: 0,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(network.config.obfuscation_enabled),
+            direct_udp_callback: false,
+        };
+        let shared_catalog = self.ed2k_transfers.shared_catalog();
+        let shared_catalog_snapshot = shared_catalog.read().await.clone();
+        let max_attempts = network.config.keyword_server_attempt_budget.max(1).min(
+            network
+                .config
+                .server_entries
+                .len()
+                .max(network.config.server_endpoints.len())
+                .max(1),
+        );
+        let files = search_keyword_servers(Ed2kKeywordSearchOptions {
+            bind_ip: network.bind_ip,
+            config: &network.config,
+            hello_identity,
+            shared_catalog: &shared_catalog_snapshot,
+            preferred_endpoint: None,
+            max_attempts,
+            query: &request.query,
+            cancel: &cancel,
+        })
+        .await?;
+        Ok(Some(
+            files
+                .into_iter()
+                .map(|file| search_result_from_ed2k(search_id, request, file))
+                .collect(),
+        ))
+    }
 }
 
 fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
@@ -396,6 +515,28 @@ fn search_result_from_indexed(
         file_type: file.content_type.clone(),
         complete: false,
         known_type: file.content_type,
+        directory: String::new(),
+    }
+}
+
+fn search_result_from_ed2k(
+    search_id: &str,
+    request: &SearchCreate,
+    file: Ed2kSearchFile,
+) -> SearchResult {
+    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash: file.file_hash.to_string(),
+        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
+        size_bytes: file.file_size.unwrap_or_default(),
+        sources: file.source_count.unwrap_or_default(),
+        complete_sources: 0,
+        file_type: file_type.clone(),
+        complete: false,
+        known_type: file_type,
         directory: String::new(),
     }
 }

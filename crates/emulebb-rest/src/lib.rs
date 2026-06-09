@@ -123,8 +123,8 @@ async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.status().await.kad)
 }
 
-async fn servers() -> impl IntoResponse {
-    api_collection(Vec::<Value>::new())
+async fn servers(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection(state.core.servers().await)
 }
 
 async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {

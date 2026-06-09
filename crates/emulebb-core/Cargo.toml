@@ -12,4 +12,5 @@ emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
 serde.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
