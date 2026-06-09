@@ -214,6 +214,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             post(servers_disconnect),
         )
         .route(
+            "/api/v1/servers/operations/import-met-url",
+            post(servers_import_met_url),
+        )
+        .route(
             "/api/v1/servers/{server_id}",
             get(server).patch(update_server).delete(delete_server),
         )
@@ -598,6 +602,18 @@ async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
 
 async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.disconnect_ed2k().await)
+}
+
+async fn servers_import_met_url(
+    State(state): State<RestState>,
+    Json(request): Json<UrlImportRequest>,
+) -> impl IntoResponse {
+    match state.core.import_server_met_url(&request.url).await {
+        Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn server(

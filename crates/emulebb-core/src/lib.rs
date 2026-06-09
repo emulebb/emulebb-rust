@@ -707,6 +707,11 @@ impl EmulebbCore {
         Ok(false)
     }
 
+    pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
+        validate_url_import(url)?;
+        Ok(false)
+    }
+
     pub async fn recheck_kad_firewall(&self) -> NetworkStatus {
         let mut status = kad_status_from_running(self.state.lock().await.kad_running);
         status.operation_queued = Some(status.running);
