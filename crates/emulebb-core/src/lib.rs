@@ -139,6 +139,24 @@ pub struct NetworkStatus {
     pub running: bool,
     pub connected: bool,
     pub peer_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firewalled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrapping: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_progress: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub users: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_queued: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub already_running: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,11 +681,7 @@ impl EmulebbCore {
                 state: "running".to_string(),
             },
             uptime_secs: self.started_at.elapsed().as_secs(),
-            kad: NetworkStatus {
-                running: kad_running,
-                connected: kad_running,
-                peer_count: 0,
-            },
+            kad: kad_status_from_running(kad_running),
             ed2k: self.ed2k_status().await,
             indexing: IndexingStatus {
                 enabled: true,
@@ -679,6 +693,25 @@ impl EmulebbCore {
 
     pub async fn set_kad_running(&self, running: bool) {
         self.state.lock().await.kad_running = running;
+    }
+
+    pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {
+        ensure!(!address.trim().is_empty(), "address must not be empty");
+        ensure!(port != 0, "port must be between 1 and 65535");
+        self.set_kad_running(true).await;
+        Ok(kad_status_from_running(self.state.lock().await.kad_running))
+    }
+
+    pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
+        validate_url_import(url)?;
+        Ok(false)
+    }
+
+    pub async fn recheck_kad_firewall(&self) -> NetworkStatus {
+        let mut status = kad_status_from_running(self.state.lock().await.kad_running);
+        status.operation_queued = Some(status.running);
+        status.already_running = Some(false);
+        status
     }
 
     pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
@@ -2130,6 +2163,15 @@ impl EmulebbCore {
                     running: false,
                     connected: false,
                     peer_count: 0,
+                    firewalled: None,
+                    bootstrapping: None,
+                    bootstrap_progress: None,
+                    contact_count: None,
+                    lan_mode: None,
+                    users: None,
+                    files: None,
+                    operation_queued: None,
+                    already_running: None,
                 };
             };
             Arc::clone(&runtime.server_state)
@@ -2139,6 +2181,15 @@ impl EmulebbCore {
             running: true,
             connected: state.connected,
             peer_count: u32::from(state.connected),
+            firewalled: None,
+            bootstrapping: None,
+            bootstrap_progress: None,
+            contact_count: None,
+            lan_mode: None,
+            users: None,
+            files: None,
+            operation_queued: None,
+            already_running: None,
         }
     }
 }
@@ -2182,6 +2233,23 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
         priority: "normal".to_string(),
         category_id: 0,
         category_name: default_transfer_category_name().to_string(),
+    }
+}
+
+fn kad_status_from_running(running: bool) -> NetworkStatus {
+    NetworkStatus {
+        running,
+        connected: running,
+        peer_count: 0,
+        firewalled: if running { Some(false) } else { None },
+        bootstrapping: Some(false),
+        bootstrap_progress: Some(0),
+        contact_count: if running { Some(0) } else { None },
+        lan_mode: Some(false),
+        users: if running { Some(0) } else { None },
+        files: if running { Some(0) } else { None },
+        operation_queued: None,
+        already_running: None,
     }
 }
 
@@ -2381,6 +2449,20 @@ fn source_friend_name(source: &TransferSource) -> String {
     } else {
         source.user_name.clone()
     }
+}
+
+fn validate_url_import(url: &str) -> Result<String> {
+    let trimmed = url.trim();
+    ensure!(!trimmed.is_empty(), "url must not be empty");
+    ensure!(
+        !trimmed.chars().any(char::is_control),
+        "url must be valid UTF-8 without control characters"
+    );
+    ensure!(
+        trimmed.chars().count() <= 2048,
+        "url must be at most 2048 characters"
+    );
+    Ok(trimmed.to_string())
 }
 
 fn validate_shared_upload_priority(priority: &str) -> Result<(&str, bool)> {

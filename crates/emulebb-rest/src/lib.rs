@@ -161,6 +161,19 @@ struct ClearCompletedTransfersRequest {
     confirm_clear_completed: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UrlImportRequest {
+    url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KadBootstrapRequest {
+    address: String,
+    port: u16,
+}
+
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     let state = RestState {
         core,
@@ -183,9 +196,17 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         .route("/api/v1/friends", get(friends).post(create_friend))
         .route("/api/v1/friends/{user_hash}", delete(delete_friend))
         .route("/api/v1/kad", get(kad))
+        .route(
+            "/api/v1/kad/operations/import-nodes-url",
+            post(kad_import_nodes_url),
+        )
         .route("/api/v1/kad/operations/start", post(kad_start))
         .route("/api/v1/kad/operations/stop", post(kad_stop))
-        .route("/api/v1/kad/operations/bootstrap", post(kad_start))
+        .route("/api/v1/kad/operations/bootstrap", post(kad_bootstrap))
+        .route(
+            "/api/v1/kad/operations/recheck-firewall",
+            post(kad_recheck_firewall),
+        )
         .route("/api/v1/servers", get(servers).post(create_server))
         .route("/api/v1/servers/operations/connect", post(servers_connect))
         .route(
@@ -412,6 +433,54 @@ async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
 async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(false).await;
     api_ok(state.core.status().await.kad)
+}
+
+async fn kad_import_nodes_url(
+    State(state): State<RestState>,
+    Json(request): Json<UrlImportRequest>,
+) -> impl IntoResponse {
+    match state.core.import_kad_nodes_url(&request.url).await {
+        Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn kad_bootstrap(
+    State(state): State<RestState>,
+    Json(request): Json<KadBootstrapRequest>,
+) -> impl IntoResponse {
+    if request.address.trim().is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "address must not be empty",
+        )
+        .into_response();
+    }
+    if request.port == 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "port must be between 1 and 65535",
+        )
+        .into_response();
+    }
+    match state
+        .core
+        .bootstrap_kad(&request.address, request.port)
+        .await
+    {
+        Ok(status) => api_ok(status).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn kad_recheck_firewall(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(state.core.recheck_kad_firewall().await)
 }
 
 async fn categories(State(state): State<RestState>) -> impl IntoResponse {
