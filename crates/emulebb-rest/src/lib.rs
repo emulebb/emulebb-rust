@@ -12,7 +12,7 @@ use axum::{
 use emulebb_core::{
     CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare, LocalShareCreate,
     PreferencesUpdate, Search, SearchCreate, SearchResult, SearchResultDownloadCreate,
-    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate,
+    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate, TransferUpdate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -250,7 +250,7 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route(
             "/api/v1/transfers/{hash}",
-            get(transfer).delete(transfer_delete),
+            get(transfer).patch(update_transfer).delete(transfer_delete),
         )
         .route(
             "/api/v1/transfers/{hash}/files",
@@ -860,6 +860,22 @@ async fn transfer(State(state): State<RestState>, Path(hash): Path<String>) -> i
     match state.core.transfer(&hash).await {
         Some(transfer) => api_ok(transfer).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+    }
+}
+
+async fn update_transfer(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+    Json(request): Json<TransferUpdate>,
+) -> impl IntoResponse {
+    match state.core.update_transfer(&hash, request).await {
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
     }
 }
 
@@ -2129,6 +2145,119 @@ mod tests {
             .unwrap();
 
         assert_eq!(resume_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn transfer_patch_uses_canonical_update_families() {
+        let app = test_router();
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"link":"ed2k://|file|Patch.Me.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let created_category = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/categories")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"Media"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created_category.status(), StatusCode::OK);
+
+        let priority_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"priority":"veryhigh"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(priority_response.status(), StatusCode::OK);
+        let body = to_bytes(priority_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["priority"], "veryhigh");
+
+        let category_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"categoryName":"media"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(category_response.status(), StatusCode::OK);
+        let body = to_bytes(category_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["categoryId"], 1);
+        assert_eq!(value["data"]["categoryName"], "Media");
+
+        let rename_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":" Renamed.bin "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rename_response.status(), StatusCode::OK);
+        let body = to_bytes(rename_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["name"], "Renamed.bin");
+        assert_eq!(value["data"]["priority"], "veryhigh");
+        assert_eq!(value["data"]["categoryId"], 1);
+
+        let multi_family_response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"priority":"high","name":"Nope.bin"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(multi_family_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

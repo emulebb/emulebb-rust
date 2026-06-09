@@ -262,6 +262,19 @@ pub struct TransferCreate {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TransferUpdate {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<u32>,
+    #[serde(default)]
+    pub category_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchResultDownloadCreate {
     #[serde(default)]
     pub category_id: Option<u32>,
@@ -424,6 +437,9 @@ pub struct Transfer {
     pub sources: u32,
     pub download_speed_bytes_per_sec: u64,
     pub ed2k_link: String,
+    pub priority: String,
+    pub category_id: u32,
+    pub category_name: String,
 }
 
 /// One remembered ED2K peer source for a transfer.
@@ -977,6 +993,9 @@ impl EmulebbCore {
             request.category_id,
             request.category_name.as_deref(),
         )?;
+        let category = self
+            .resolve_transfer_category(request.category_id, request.category_name.as_deref())
+            .await?;
         let result = {
             let state = self.state.lock().await;
             state
@@ -993,6 +1012,7 @@ impl EmulebbCore {
             result.name,
             result.size_bytes,
             transfer_create_state_name(request.paused),
+            Some(category),
         )
         .await
         .map(Some)
@@ -1012,14 +1032,23 @@ impl EmulebbCore {
             request.category_id,
             request.category_name.as_deref(),
         )?;
+        let category = self
+            .resolve_transfer_category(request.category_id, request.category_name.as_deref())
+            .await?;
         let state_name = transfer_create_state_name(request.paused);
         let links = transfer_create_links(request)?;
         let mut transfers = Vec::with_capacity(links.len());
         for link in links {
             let parsed = parse_ed2k_link(&link)?;
             transfers.push(
-                self.upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
-                    .await?,
+                self.upsert_transfer_from_parts(
+                    parsed.0,
+                    parsed.1,
+                    parsed.2,
+                    state_name,
+                    Some(category.clone()),
+                )
+                .await?,
             );
         }
         Ok(transfers)
@@ -1219,6 +1248,69 @@ impl EmulebbCore {
         }
     }
 
+    pub async fn update_transfer(
+        &self,
+        hash: &str,
+        request: TransferUpdate,
+    ) -> Result<Option<Transfer>> {
+        validate_transfer_update_family(&request)?;
+        if self.transfer(hash).await.is_none() {
+            return Ok(None);
+        }
+        if let Some(priority) = request.priority.as_deref() {
+            let priority = validate_transfer_priority(priority)?.to_string();
+            let mut state = self.state.lock().await;
+            let Some(transfer) = state.transfers.get_mut(hash) else {
+                return Ok(None);
+            };
+            transfer.priority = priority;
+            return Ok(Some(transfer.clone()));
+        }
+        if request.category_id.is_some() || request.category_name.is_some() {
+            let (category_id, category_name) = self
+                .resolve_transfer_category(request.category_id, request.category_name.as_deref())
+                .await?;
+            let mut state = self.state.lock().await;
+            let Some(transfer) = state.transfers.get_mut(hash) else {
+                return Ok(None);
+            };
+            transfer.category_id = category_id;
+            transfer.category_name = category_name;
+            return Ok(Some(transfer.clone()));
+        }
+        let name = normalize_transfer_name(request.name)?;
+        let current = self.state.lock().await.transfers.get(hash).cloned();
+        if current
+            .as_ref()
+            .is_some_and(|transfer| matches!(transfer.state.as_str(), "completed" | "completing"))
+        {
+            anyhow::bail!("completed transfers cannot be renamed through this endpoint");
+        }
+        let manifest = self
+            .ed2k_transfers
+            .reconcile_job_metadata(hash, Some(&name), None)
+            .await?;
+        let state_name = current
+            .as_ref()
+            .map(|transfer| transfer.state.as_str())
+            .unwrap_or_else(|| manifest_default_state_name(&manifest));
+        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        if let Some(existing) = current.as_ref() {
+            preserve_transfer_public_metadata(&mut transfer, existing);
+        }
+        transfer.name = name;
+        transfer.ed2k_link = format!(
+            "ed2k://|file|{}|{}|{}|/",
+            transfer.name, transfer.size_bytes, transfer.hash
+        );
+        self.state
+            .lock()
+            .await
+            .transfers
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(Some(transfer))
+    }
+
     pub async fn transfer_sources(&self, hash: &str) -> Result<Option<Vec<TransferSource>>> {
         if self.transfer(hash).await.is_none() {
             return Ok(None);
@@ -1413,6 +1505,7 @@ impl EmulebbCore {
         name: String,
         size_bytes: u64,
         state_name: &str,
+        category: Option<(u32, String)>,
     ) -> Result<Transfer> {
         let file_hash = hash.parse()?;
         let job = new_transfer_job(file_hash, name, size_bytes);
@@ -1429,7 +1522,21 @@ impl EmulebbCore {
                 .set_control_state(&manifest.file_hash, Some(state_name))
                 .await?;
         }
-        let transfer = transfer_from_manifest(&manifest, state_name);
+        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        if let Some(existing) = self
+            .state
+            .lock()
+            .await
+            .transfers
+            .get(&transfer.hash)
+            .cloned()
+        {
+            preserve_transfer_public_metadata(&mut transfer, &existing);
+        }
+        if let Some((category_id, category_name)) = category {
+            transfer.category_id = category_id;
+            transfer.category_name = category_name;
+        }
         self.state
             .lock()
             .await
@@ -1451,7 +1558,10 @@ impl EmulebbCore {
                 .get(&manifest.file_hash)
                 .map(|transfer| transfer.state.clone())
                 .unwrap_or_else(|| manifest_default_state_name(&manifest).to_string());
-            let transfer = transfer_from_manifest(&manifest, &state_name);
+            let mut transfer = transfer_from_manifest(&manifest, &state_name);
+            if let Some(existing) = state.transfers.get(&manifest.file_hash) {
+                preserve_transfer_public_metadata(&mut transfer, existing);
+            }
             state.transfers.insert(transfer.hash.clone(), transfer);
         }
         Ok(())
@@ -1463,10 +1573,12 @@ impl EmulebbCore {
         state_name: &str,
     ) -> Result<Option<Transfer>> {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
-        let transfer = transfer_from_manifest(&manifest, state_name);
-        self.state
-            .lock()
-            .await
+        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut state = self.state.lock().await;
+        if let Some(existing) = state.transfers.get(&transfer.hash) {
+            preserve_transfer_public_metadata(&mut transfer, existing);
+        }
+        state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(Some(transfer))
@@ -1483,13 +1595,54 @@ impl EmulebbCore {
             return Ok(None);
         }
         let state_name = manifest_default_state_name(&manifest);
-        let transfer = transfer_from_manifest(&manifest, state_name);
-        self.state
-            .lock()
-            .await
+        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut state = self.state.lock().await;
+        if let Some(existing) = state.transfers.get(&transfer.hash) {
+            preserve_transfer_public_metadata(&mut transfer, existing);
+        }
+        state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(Some(transfer))
+    }
+
+    async fn resolve_transfer_category(
+        &self,
+        category_id: Option<u32>,
+        category_name: Option<&str>,
+    ) -> Result<(u32, String)> {
+        let state = self.state.lock().await;
+        if let Some(category_id) = category_id {
+            let Some(category) = state.categories.get(&category_id) else {
+                anyhow::bail!("category is out of range");
+            };
+            return Ok((category.id, category.name.clone()));
+        }
+        let Some(category_name) = category_name.map(str::trim) else {
+            let category = state
+                .categories
+                .get(&0)
+                .expect("default category must exist");
+            return Ok((category.id, category.name.clone()));
+        };
+        ensure!(!category_name.is_empty(), "categoryName must not be empty");
+        if category_name.eq_ignore_ascii_case("Default")
+            || category_name.eq_ignore_ascii_case("All")
+        {
+            let category = state
+                .categories
+                .get(&0)
+                .expect("default category must exist");
+            return Ok((category.id, category.name.clone()));
+        }
+        let Some(category) = state
+            .categories
+            .values()
+            .find(|category| category.name.eq_ignore_ascii_case(category_name))
+        else {
+            anyhow::bail!("categoryName does not match a configured category");
+        };
+        Ok((category.id, category.name.clone()))
     }
 
     async fn search_ed2k_servers(
@@ -1860,7 +2013,16 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
         progress,
         sources: manifest.sources.len() as u32,
         download_speed_bytes_per_sec: 0,
+        priority: "normal".to_string(),
+        category_id: 0,
+        category_name: default_transfer_category_name().to_string(),
     }
+}
+
+fn preserve_transfer_public_metadata(transfer: &mut Transfer, existing: &Transfer) {
+    transfer.priority = existing.priority.clone();
+    transfer.category_id = existing.category_id;
+    transfer.category_name = existing.category_name.clone();
 }
 
 fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
@@ -1881,6 +2043,60 @@ fn transfer_create_state_name(paused: Option<bool>) -> &'static str {
     } else {
         "queued"
     }
+}
+
+fn validate_transfer_update_family(request: &TransferUpdate) -> Result<()> {
+    let mut mutation_family_count = 0;
+    if request.priority.is_some() {
+        mutation_family_count += 1;
+    }
+    if request.category_id.is_some() || request.category_name.is_some() {
+        mutation_family_count += 1;
+    }
+    if request.name.is_some() {
+        mutation_family_count += 1;
+    }
+    ensure!(
+        mutation_family_count != 0,
+        "transfer PATCH requires priority, categoryId, categoryName, or name"
+    );
+    ensure!(
+        mutation_family_count == 1,
+        "transfer PATCH accepts only one mutation family"
+    );
+    if let Some(priority) = request.priority.as_deref() {
+        let _ = validate_transfer_priority(priority)?;
+    }
+    Ok(())
+}
+
+fn validate_transfer_priority(priority: &str) -> Result<&str> {
+    match priority {
+        "auto" | "verylow" | "low" | "normal" | "high" | "veryhigh" => Ok(priority),
+        _ => Err(anyhow::anyhow!(
+            "priority must be one of auto, verylow, low, normal, high, veryhigh"
+        )),
+    }
+}
+
+fn normalize_transfer_name(name: Option<String>) -> Result<String> {
+    let Some(name) = name else {
+        anyhow::bail!("name must be a string");
+    };
+    let name = name.trim();
+    ensure!(!name.is_empty(), "name must not be empty");
+    ensure!(
+        !name.chars().any(|character| matches!(
+            character,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+        ) || character.is_control()),
+        "name must be a valid eD2K filename"
+    );
+    Ok(name.to_string())
+}
+
+fn default_transfer_category_name() -> &'static str {
+    "All"
 }
 
 fn ensure_category_selector_is_unambiguous(
