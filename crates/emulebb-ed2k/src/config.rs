@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Ed2kConfig {
-    /// Local ED2K peer TCP listener port.
-    pub listen_port: u16,
+    /// Local ED2K peer TCP listener port, resolved by the daemon from config.
+    pub listen_port: Option<u16>,
     /// Ordered ED2K server bootstrap entries mirrored from `server.met`.
     pub server_entries: Vec<Ed2kServerEntry>,
     /// Ordered ED2K server bootstrap endpoints in `host:port` form.
@@ -64,7 +64,7 @@ pub struct Ed2kServerEntry {
 impl Default for Ed2kConfig {
     fn default() -> Self {
         Self {
-            listen_port: 41_001,
+            listen_port: None,
             server_entries: Vec::new(),
             server_endpoints: Vec::new(),
             obfuscation_enabled: true,

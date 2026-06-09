@@ -186,6 +186,7 @@ pub struct Transfer {
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
     pub kad_bind_addr: SocketAddr,
+    pub listen_port: u16,
     pub user_hash: [u8; 16],
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub config: Ed2kConfig,
@@ -331,8 +332,7 @@ impl EmulebbCore {
         })
         .await
         .context("failed to initialize Kad runtime for ED2K listener")?;
-        let ed2k_bind_addr =
-            SocketAddr::new(IpAddr::V4(network.bind_ip), network.config.listen_port);
+        let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
         let ed2k_listener =
             Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
                 format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
@@ -625,7 +625,7 @@ impl EmulebbCore {
         let hello_identity = Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: network.config.listen_port,
+            tcp_port: network.listen_port,
             udp_port: 0,
             server_ip: 0,
             server_port: 0,
@@ -827,7 +827,7 @@ impl EmulebbCore {
         Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: network.config.listen_port,
+            tcp_port: network.listen_port,
             udp_port: 0,
             server_ip: 0,
             server_port: 0,

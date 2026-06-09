@@ -97,6 +97,7 @@ impl DaemonConfig {
             return Ok(None);
         }
         let bind_ip = self.resolve_p2p_bind_ip()?;
+        let listen_port = self.resolve_ed2k_listen_port()?;
         let user_hash = match self.ed2k_user_hash.as_deref() {
             Some(value) => parse_user_hash(value)?,
             None => load_or_create_user_hash(self.ed2k_user_hash_path())?,
@@ -107,6 +108,7 @@ impl DaemonConfig {
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
+            listen_port,
             user_hash,
             secure_ident,
             config: self.ed2k.clone(),
@@ -125,6 +127,13 @@ impl DaemonConfig {
             bail!("kad.listenPort is required when ED2K servers are configured");
         };
         Ok(SocketAddr::new(IpAddr::V4(bind_ip), listen_port))
+    }
+
+    fn resolve_ed2k_listen_port(&self) -> Result<u16> {
+        let Some(listen_port) = self.ed2k.listen_port else {
+            bail!("ed2k.listenPort is required when ED2K servers are configured");
+        };
+        Ok(listen_port)
     }
 
     pub fn rest_bind_addr(&self) -> Result<SocketAddr> {
@@ -193,6 +202,7 @@ mod tests {
 
     fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
         let mut ed2k = Ed2kConfig::default();
+        ed2k.listen_port = Some(41001);
         ed2k.server_endpoints = vec!["192.0.2.20:4661".to_string()];
         DaemonConfig {
             runtime_dir,
@@ -267,7 +277,7 @@ reconnectIntervalSecs = 60
             Some("192.0.2.10:13301".parse().unwrap())
         );
         assert_eq!(config.kad.listen_port, Some(41002));
-        assert_eq!(config.ed2k.listen_port, 41001);
+        assert_eq!(config.ed2k.listen_port, Some(41001));
         assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
         assert_eq!(config.ed2k.connect_timeout_secs, 1);
         assert_eq!(config.ed2k.reconnect_interval_secs, 60);
@@ -359,6 +369,19 @@ reconnectIntervalSecs = 60
     }
 
     #[test]
+    fn ed2k_network_config_requires_configured_ed2k_listen_port() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.ed2k.listen_port = None;
+
+        let error = config.ed2k_network_config().unwrap_err().to_string();
+        assert!(error.contains("ed2k.listenPort is required"));
+    }
+
+    #[test]
     fn ed2k_network_config_accepts_configured_loopback_bind_ip() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_server(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
@@ -366,6 +389,7 @@ reconnectIntervalSecs = 60
         let network = config.ed2k_network_config().unwrap().unwrap();
 
         assert_eq!(network.bind_ip, Ipv4Addr::LOCALHOST);
+        assert_eq!(network.listen_port, 41001);
         assert_eq!(network.kad_bind_addr, "127.0.0.1:41002".parse().unwrap());
     }
 
@@ -380,6 +404,7 @@ reconnectIntervalSecs = 60
         let network = config.ed2k_network_config().unwrap().unwrap();
 
         assert_eq!(network.bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(network.listen_port, 41001);
         assert_eq!(network.kad_bind_addr, "192.0.2.10:41002".parse().unwrap());
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
