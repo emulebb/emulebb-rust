@@ -338,6 +338,24 @@ pub enum CategoryPriorityValue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Friend {
+    pub user_hash: String,
+    pub name: String,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub address: Option<String>,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FriendCreate {
+    pub user_hash: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalShareCreate {
     pub path: String,
     pub name: Option<String>,
@@ -471,6 +489,7 @@ struct CoreState {
     preferences: Preferences,
     categories: BTreeMap<u32, Category>,
     next_category_id: u32,
+    friends: BTreeMap<String, Friend>,
     servers: HashMap<String, ServerInfo>,
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
@@ -526,6 +545,7 @@ impl EmulebbCore {
                 preferences: default_preferences(),
                 categories: default_categories(),
                 next_category_id: 1,
+                friends: BTreeMap::new(),
                 servers: HashMap::new(),
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
@@ -914,6 +934,33 @@ impl EmulebbCore {
     pub async fn delete_category(&self, category_id: u32) -> Result<Option<Category>> {
         ensure!(category_id != 0, "default category cannot be deleted");
         Ok(self.state.lock().await.categories.remove(&category_id))
+    }
+
+    pub async fn friends(&self) -> Vec<Friend> {
+        self.state.lock().await.friends.values().cloned().collect()
+    }
+
+    pub async fn add_friend(&self, request: FriendCreate) -> Result<Friend> {
+        let user_hash = normalize_user_hash(&request.user_hash)?;
+        let name = normalize_friend_name(request.name.as_deref())?;
+        let mut state = self.state.lock().await;
+        if let Some(friend) = state.friends.get(&user_hash) {
+            return Ok(friend.clone());
+        }
+        let friend = Friend {
+            user_hash: user_hash.clone(),
+            name,
+            last_seen: None,
+            address: None,
+            port: 0,
+        };
+        state.friends.insert(user_hash, friend.clone());
+        Ok(friend)
+    }
+
+    pub async fn delete_friend(&self, user_hash: &str) -> Result<Option<Friend>> {
+        let user_hash = normalize_user_hash(user_hash)?;
+        Ok(self.state.lock().await.friends.remove(&user_hash))
     }
 
     pub async fn download_search_result(
@@ -2433,6 +2480,30 @@ fn parse_category_priority(priority: CategoryPriorityValue) -> Result<u32> {
             _ => anyhow::bail!("priority must be one of verylow, low, normal, high, veryhigh"),
         },
     }
+}
+
+fn normalize_user_hash(user_hash: &str) -> Result<String> {
+    ensure!(
+        user_hash.len() == 32
+            && user_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "userHash must be a 32-character lowercase hex string"
+    );
+    Ok(user_hash.to_string())
+}
+
+fn normalize_friend_name(name: Option<&str>) -> Result<String> {
+    let name = name.unwrap_or_default();
+    ensure!(
+        !name.chars().any(char::is_control),
+        "name must be valid UTF-8 without control characters"
+    );
+    ensure!(
+        name.encode_utf16().count() <= 128,
+        "name must be at most 128 characters"
+    );
+    Ok(name.to_string())
 }
 
 fn shared_directory_update_parts(root: SharedDirectoryRootUpdate) -> (String, bool) {

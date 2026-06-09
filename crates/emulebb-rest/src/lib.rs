@@ -10,9 +10,9 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    CategoryCreate, CategoryUpdate, EmulebbCore, LocalShare, LocalShareCreate, PreferencesUpdate,
-    SearchCreate, SearchResultDownloadCreate, ServerCreate, ServerUpdate, SharedDirectoriesUpdate,
-    Transfer, TransferCreate,
+    CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare, LocalShareCreate,
+    PreferencesUpdate, SearchCreate, SearchResultDownloadCreate, ServerCreate, ServerUpdate,
+    SharedDirectoriesUpdate, Transfer, TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -141,6 +141,8 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/categories/{category_id}",
             get(category).patch(update_category).delete(delete_category),
         )
+        .route("/api/v1/friends", get(friends).post(create_friend))
+        .route("/api/v1/friends/{user_hash}", delete(delete_friend))
         .route("/api/v1/kad", get(kad))
         .route("/api/v1/kad/operations/start", post(kad_start))
         .route("/api/v1/kad/operations/stop", post(kad_stop))
@@ -381,6 +383,37 @@ async fn delete_category(
         Ok(Some(_category)) => api_ok(json!({ "ok": true })).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "category not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn friends(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection(state.core.friends().await)
+}
+
+async fn create_friend(
+    State(state): State<RestState>,
+    Json(request): Json<FriendCreate>,
+) -> impl IntoResponse {
+    match state.core.add_friend(request).await {
+        Ok(friend) => api_ok(friend).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn delete_friend(
+    State(state): State<RestState>,
+    Path(user_hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.delete_friend(&user_hash).await {
+        Ok(Some(_friend)) => api_ok(json!({ "ok": true })).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
         }
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
@@ -1482,6 +1515,116 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/categories/1")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn friends_use_canonical_crud_routes() {
+        let app = test_router();
+        let user_hash = "00112233445566778899aabbccddeeff";
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/friends")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/friends")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"userHash":"{user_hash}","name":"Harness Peer"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["userHash"], user_hash);
+        assert_eq!(value["data"]["name"], "Harness Peer");
+        assert_eq!(value["data"]["lastSeen"], Value::Null);
+        assert_eq!(value["data"]["address"], Value::Null);
+        assert_eq!(value["data"]["port"], 0);
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/friends")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"userHash":"{user_hash}","name":"Ignored Rename"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let body = to_bytes(duplicate.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["name"], "Harness Peer");
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/friends")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"userHash":"00112233445566778899AABBCCDDEEFF"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/friends/{user_hash}"))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::OK);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/friends/{user_hash}"))
                     .header("X-API-Key", "secret")
                     .body(Body::empty())
                     .unwrap(),
