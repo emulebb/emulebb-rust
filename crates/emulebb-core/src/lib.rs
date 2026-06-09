@@ -346,6 +346,7 @@ struct CoreState {
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
     shared_directories: Vec<SharedDirectoryRoot>,
+    unshared_hashes: HashSet<String>,
     kad_running: bool,
 }
 
@@ -397,6 +398,7 @@ impl EmulebbCore {
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
                 shared_directories: Vec::new(),
+                unshared_hashes: HashSet::new(),
                 kad_running: false,
             })),
         })
@@ -797,6 +799,11 @@ impl EmulebbCore {
             .ed2k_transfers
             .ingest_local_file(source_path, &canonical_name)
             .await?;
+        self.state
+            .lock()
+            .await
+            .unshared_hashes
+            .remove(&summary.file_hash);
         self.refresh_transfer_from_manifest(&summary.file_hash, "completed")
             .await?;
         if let Err(error) = self.publish_ed2k_shared_catalog().await {
@@ -806,10 +813,13 @@ impl EmulebbCore {
     }
 
     pub async fn shares(&self) -> Vec<LocalShare> {
+        let unshared_hashes = self.state.lock().await.unshared_hashes.clone();
         match self.ed2k_transfers.manifests().await {
             Ok(manifests) => manifests
                 .into_iter()
-                .filter(|manifest| manifest.completed)
+                .filter(|manifest| {
+                    manifest.completed && !unshared_hashes.contains(&manifest.file_hash)
+                })
                 .map(|manifest| LocalShare {
                     hash: manifest.file_hash.clone(),
                     name: manifest.canonical_name.clone(),
@@ -839,6 +849,19 @@ impl EmulebbCore {
             .await
             .into_iter()
             .find(|share| share.hash.eq_ignore_ascii_case(hash))
+    }
+
+    pub async fn unshare_file(&self, hash: &str) -> Result<Option<LocalShare>> {
+        let Some(share) = self.share(hash).await else {
+            return Ok(None);
+        };
+        self.ed2k_transfers
+            .remove_completed_transfer_row(&share.hash)
+            .await?;
+        let mut state = self.state.lock().await;
+        state.transfers.remove(&share.hash);
+        state.unshared_hashes.insert(share.hash.clone());
+        Ok(Some(share))
     }
 
     pub async fn shared_directories(&self) -> SharedDirectories {
@@ -966,7 +989,9 @@ impl EmulebbCore {
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
         }
-        self.state.lock().await.transfers.remove(hash);
+        let mut state = self.state.lock().await;
+        state.transfers.remove(hash);
+        state.unshared_hashes.remove(hash);
         Ok(Some(transfer))
     }
 

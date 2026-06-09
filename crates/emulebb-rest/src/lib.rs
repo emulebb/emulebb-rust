@@ -100,6 +100,15 @@ struct Ed2kLinkResult {
     link: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedFileRemoveResult {
+    ok: bool,
+    deleted_files: bool,
+    path: String,
+    hash: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConfirmQuery {
@@ -146,7 +155,18 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/shared-files/operations/reload",
             post(reload_shared_directories),
         )
-        .route("/api/v1/shared-files/{hash}", get(shared_file))
+        .route(
+            "/api/v1/shared-files/{hash}",
+            get(shared_file).delete(delete_shared_file),
+        )
+        .route(
+            "/api/v1/shared-files/{hash}/file",
+            delete(delete_shared_file_payload),
+        )
+        .route(
+            "/api/v1/shared-files/{hash}/comments",
+            get(shared_file_comments),
+        )
         .route(
             "/api/v1/shared-files/{hash}/ed2k-link",
             get(shared_file_ed2k_link),
@@ -445,6 +465,79 @@ async fn shared_file(
 ) -> impl IntoResponse {
     match state.core.share(&hash).await {
         Some(share) => api_ok(shared_file_response(&share)).into_response(),
+        None => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
+        }
+    }
+}
+
+async fn delete_shared_file(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    let Some(share) = state.core.share(&hash).await else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found")
+            .into_response();
+    };
+    let path = managed_shared_file_path(&share);
+    match state.core.unshare_file(&hash).await {
+        Ok(Some(_share)) => api_ok(SharedFileRemoveResult {
+            ok: true,
+            deleted_files: false,
+            path,
+            hash: share.hash,
+        })
+        .into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn delete_shared_file_payload(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+    Query(query): Query<ConfirmQuery>,
+) -> impl IntoResponse {
+    if query.confirm != Some(true) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "shared file deletion requires confirm=true",
+        )
+        .into_response();
+    }
+    let Some(share) = state.core.share(&hash).await else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found")
+            .into_response();
+    };
+    let path = managed_shared_file_path(&share);
+    match state.core.delete_transfer_files(&hash).await {
+        Ok(Some(_transfer)) => api_ok(SharedFileRemoveResult {
+            ok: true,
+            deleted_files: true,
+            path,
+            hash: share.hash,
+        })
+        .into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn shared_file_comments(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.share(&hash).await {
+        Some(_share) => api_collection(Vec::<Value>::new()).into_response(),
         None => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
         }

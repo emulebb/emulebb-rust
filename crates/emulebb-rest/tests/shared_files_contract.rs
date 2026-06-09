@@ -118,6 +118,114 @@ async fn shared_files_use_canonical_route_and_envelope() {
     assert_eq!(value["data"]["hash"], hash);
     assert_eq!(value["data"]["link"], ed2k_link);
 
+    let comments_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/shared-files/{hash}/comments"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(comments_response.status(), StatusCode::OK);
+    let body = to_bytes(comments_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+
+    let remove_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/shared-files/{hash}"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove_response.status(), StatusCode::OK);
+    let body = to_bytes(remove_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["ok"], true);
+    assert_eq!(value["data"]["deletedFiles"], false);
+
+    let missing_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/shared-files/{hash}"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+    let recreate_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-files")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"path":"{}"}}"#,
+                    payload_path.display().to_string().replace('\\', "\\\\")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recreate_response.status(), StatusCode::OK);
+    let body = to_bytes(recreate_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let hash = value["data"]["file"]["hash"].as_str().unwrap().to_string();
+
+    let delete_without_confirm = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/shared-files/{hash}/file"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_without_confirm.status(), StatusCode::BAD_REQUEST);
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/shared-files/{hash}/file?confirm=true"))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    let body = to_bytes(delete_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["ok"], true);
+    assert_eq!(value["data"]["deletedFiles"], true);
+
     let retired_route = app
         .oneshot(
             Request::builder()
