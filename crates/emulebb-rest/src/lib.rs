@@ -258,6 +258,38 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route("/api/v1/transfers/{hash}/details", get(transfer))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}",
+            get(transfer_source),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/browse",
+            post(transfer_source_browse),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/add-friend",
+            post(transfer_source_add_friend),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/remove-friend",
+            post(transfer_source_remove_friend),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/remove",
+            post(transfer_source_remove),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/ban",
+            post(transfer_source_ban),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/unban",
+            post(transfer_source_unban),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/sources/{client_id}/operations/release-slot",
+            post(transfer_source_release_slot),
+        )
         .route("/api/v1/uploads", get(uploads))
         .route("/api/v1/uploads/{client_id}", get(upload))
         .route("/api/v1/upload-queue", get(upload_queue))
@@ -888,6 +920,162 @@ async fn transfer_sources(
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
         }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.transfer_source(&hash, &client_id).await {
+        Ok(Some(source)) => api_ok(source).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_browse(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.browse_transfer_source(&hash, &client_id).await {
+        Ok(true) => {
+            api_ok(json!({"ok": true, "alreadyPending": false, "searchId": null})).into_response()
+        }
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_add_friend(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state
+        .core
+        .add_transfer_source_friend(&hash, &client_id)
+        .await
+    {
+        Ok(Some(friend)) => api_ok(friend).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_remove_friend(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state
+        .core
+        .remove_transfer_source_friend(&hash, &client_id)
+        .await
+    {
+        Ok(Some(_friend)) => api_ok(json!({"ok": true})).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_remove(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.remove_transfer_source(&hash, &client_id).await {
+        Ok(Some(())) => api_ok(json!({"ok": true})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_ban(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.ban_transfer_source(&hash, &client_id).await {
+        Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_unban(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.unban_transfer_source(&hash, &client_id).await {
+        Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_source_release_slot(
+    State(state): State<RestState>,
+    Path((hash, client_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.core.transfer_source(&hash, &client_id).await {
+        Ok(Some(_source)) => api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "client does not currently hold an upload slot",
+        )
+        .into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "transfer source not found",
+        )
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

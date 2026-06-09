@@ -446,11 +446,27 @@ pub struct Transfer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferSource {
+    pub client_id: String,
     pub hash: String,
     pub ip: String,
     pub tcp_port: u16,
+    pub port: u16,
     pub endpoint: String,
     pub user_hash: Option<String>,
+    pub user_name: String,
+    pub client_software: String,
+    pub download_state: String,
+    pub download_speed_ki_bps: f64,
+    pub available_parts: u32,
+    pub part_count: u32,
+    pub address: String,
+    pub server_ip: String,
+    pub server_port: u16,
+    pub low_id: bool,
+    pub queue_rank: u32,
+    pub view_shared_files: bool,
+    pub shared_files_request_pending: bool,
+    pub banned: bool,
     pub status: String,
 }
 
@@ -509,6 +525,7 @@ struct CoreState {
     servers: HashMap<String, ServerInfo>,
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
+    banned_source_clients: HashSet<String>,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
     kad_running: bool,
@@ -565,6 +582,7 @@ impl EmulebbCore {
                 servers: HashMap::new(),
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
+                banned_source_clients: HashSet::new(),
                 shared_directories: Vec::new(),
                 unshared_hashes: HashSet::new(),
                 kad_running: false,
@@ -1316,7 +1334,104 @@ impl EmulebbCore {
             return Ok(None);
         }
         let manifest = self.ed2k_transfers.manifest(hash).await?;
-        Ok(Some(transfer_sources_from_manifest(&manifest)))
+        let banned = self.state.lock().await.banned_source_clients.clone();
+        Ok(Some(transfer_sources_from_manifest(&manifest, &banned)))
+    }
+
+    pub async fn transfer_source(
+        &self,
+        hash: &str,
+        client_id: &str,
+    ) -> Result<Option<TransferSource>> {
+        validate_source_client_id(client_id)?;
+        Ok(self
+            .transfer_sources(hash)
+            .await?
+            .and_then(|sources| source_by_client_id(sources, client_id)))
+    }
+
+    pub async fn browse_transfer_source(&self, hash: &str, client_id: &str) -> Result<bool> {
+        let Some(source) = self.transfer_source(hash, client_id).await? else {
+            return Ok(false);
+        };
+        ensure!(
+            source.view_shared_files,
+            "transfer source does not support shared-file browsing"
+        );
+        Ok(true)
+    }
+
+    pub async fn add_transfer_source_friend(
+        &self,
+        hash: &str,
+        client_id: &str,
+    ) -> Result<Option<Friend>> {
+        let Some(source) = self.transfer_source(hash, client_id).await? else {
+            return Ok(None);
+        };
+        let Some(user_hash) = source.user_hash.as_deref() else {
+            anyhow::bail!("transfer source does not expose a userHash");
+        };
+        self.add_friend(FriendCreate {
+            user_hash: user_hash.to_string(),
+            name: Some(source_friend_name(&source)),
+        })
+        .await
+        .map(Some)
+    }
+
+    pub async fn remove_transfer_source_friend(
+        &self,
+        hash: &str,
+        client_id: &str,
+    ) -> Result<Option<Friend>> {
+        let Some(source) = self.transfer_source(hash, client_id).await? else {
+            return Ok(None);
+        };
+        let Some(user_hash) = source.user_hash.as_deref() else {
+            return Ok(None);
+        };
+        self.delete_friend(user_hash).await
+    }
+
+    pub async fn ban_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<bool>> {
+        let Some(source) = self.transfer_source(hash, client_id).await? else {
+            return Ok(None);
+        };
+        self.state
+            .lock()
+            .await
+            .banned_source_clients
+            .insert(source.client_id);
+        Ok(Some(true))
+    }
+
+    pub async fn unban_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<bool>> {
+        let Some(source) = self.transfer_source(hash, client_id).await? else {
+            return Ok(None);
+        };
+        self.state
+            .lock()
+            .await
+            .banned_source_clients
+            .remove(&source.client_id);
+        Ok(Some(false))
+    }
+
+    pub async fn remove_transfer_source(&self, hash: &str, client_id: &str) -> Result<Option<()>> {
+        validate_source_client_id(client_id)?;
+        if self.transfer(hash).await.is_none() {
+            return Ok(None);
+        }
+        if !self.ed2k_transfers.remove_source(hash, client_id).await? {
+            return Ok(None);
+        }
+        self.state
+            .lock()
+            .await
+            .banned_source_clients
+            .remove(client_id);
+        Ok(Some(()))
     }
 
     pub async fn pause_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
@@ -2137,19 +2252,84 @@ fn transfer_create_links(request: TransferCreate) -> Result<Vec<String>> {
     }
 }
 
-fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferSource> {
+fn transfer_sources_from_manifest(
+    manifest: &Ed2kResumeManifest,
+    banned_clients: &HashSet<String>,
+) -> Vec<TransferSource> {
     manifest
         .sources
         .iter()
-        .map(|source| TransferSource {
-            hash: manifest.file_hash.clone(),
-            endpoint: format!("{}:{}", source.ip, source.tcp_port),
-            ip: source.ip.clone(),
-            tcp_port: source.tcp_port,
-            user_hash: source.user_hash.clone(),
-            status: "remembered".to_string(),
+        .map(|source| {
+            let endpoint = format!("{}:{}", source.ip, source.tcp_port);
+            let client_id = source.user_hash.clone().unwrap_or_else(|| endpoint.clone());
+            let banned = banned_clients.contains(&client_id);
+            TransferSource {
+                client_id,
+                hash: manifest.file_hash.clone(),
+                endpoint: endpoint.clone(),
+                ip: source.ip.clone(),
+                tcp_port: source.tcp_port,
+                port: source.tcp_port,
+                user_hash: source.user_hash.clone(),
+                user_name: endpoint.clone(),
+                client_software: "unknown".to_string(),
+                download_state: if banned { "banned" } else { "remembered" }.to_string(),
+                download_speed_ki_bps: 0.0,
+                available_parts: 0,
+                part_count: manifest.pieces.len() as u32,
+                address: source.ip.clone(),
+                server_ip: String::new(),
+                server_port: 0,
+                low_id: false,
+                queue_rank: 0,
+                view_shared_files: false,
+                shared_files_request_pending: false,
+                banned,
+                status: "remembered".to_string(),
+            }
         })
         .collect()
+}
+
+fn source_by_client_id(sources: Vec<TransferSource>, client_id: &str) -> Option<TransferSource> {
+    sources.into_iter().find(|source| {
+        source.client_id == client_id
+            || source.endpoint == client_id
+            || source.user_hash.as_deref() == Some(client_id)
+    })
+}
+
+fn validate_source_client_id(client_id: &str) -> Result<()> {
+    if client_id.len() == 32
+        && client_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        return Ok(());
+    }
+    let Some((address, port)) = client_id.rsplit_once(':') else {
+        anyhow::bail!("clientId must be a 32-character lowercase hex string or address:port");
+    };
+    ensure!(
+        !address.trim().is_empty(),
+        "clientId must be a 32-character lowercase hex string or address:port"
+    );
+    let port = port.parse::<u16>().map_err(|_| {
+        anyhow::anyhow!("clientId must be a 32-character lowercase hex string or address:port")
+    })?;
+    ensure!(
+        port != 0,
+        "clientId must be a 32-character lowercase hex string or address:port"
+    );
+    Ok(())
+}
+
+fn source_friend_name(source: &TransferSource) -> String {
+    if source.user_name.trim().is_empty() {
+        source.client_id.clone()
+    } else {
+        source.user_name.clone()
+    }
 }
 
 fn server_info_from_parts(

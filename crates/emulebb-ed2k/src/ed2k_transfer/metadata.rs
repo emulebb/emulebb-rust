@@ -184,6 +184,22 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Remove one remembered source hint by public source selector.
+    pub async fn remove_source(&self, file_hash: &str, client_id: &str) -> Result<bool> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let before = manifest.sources.len();
+        manifest.sources.retain(|source| {
+            source.user_hash.as_deref() != Some(client_id)
+                && format!("{}:{}", source.ip, source.tcp_port) != client_id
+        });
+        if manifest.sources.len() == before {
+            return Ok(false);
+        }
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(true)
+    }
+
     /// Persist the user-facing transfer control state across process restarts.
     pub async fn set_control_state(
         &self,
