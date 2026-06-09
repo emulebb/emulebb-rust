@@ -11,8 +11,8 @@ use axum::{
 };
 use emulebb_core::{
     CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare, LocalShareCreate,
-    PreferencesUpdate, SearchCreate, SearchResultDownloadCreate, ServerCreate, ServerUpdate,
-    SharedDirectoriesUpdate, Transfer, TransferCreate,
+    PreferencesUpdate, Search, SearchCreate, SearchResult, SearchResultDownloadCreate,
+    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -120,6 +120,32 @@ struct ConfirmQuery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SnapshotQuery {
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchResultsQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+    #[serde(default)]
+    include_evidence: Option<bool>,
+    #[serde(default)]
+    exact_total: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultsPage {
+    id: String,
+    query: String,
+    method: String,
+    #[serde(rename = "type")]
+    file_type: String,
+    status: String,
+    total: usize,
+    offset: usize,
+    limit: usize,
+    results: Vec<SearchResult>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -545,9 +571,10 @@ async fn create_search(
 async fn search(
     State(state): State<RestState>,
     Path(search_id): Path<String>,
+    Query(query): Query<SearchResultsQuery>,
 ) -> impl IntoResponse {
     match state.core.search(&search_id).await {
-        Some(search) => api_ok(search).into_response(),
+        Some(search) => api_ok(search_results_page(search, query)).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response(),
     }
 }
@@ -1037,6 +1064,31 @@ fn api_collection_page<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>)
             "meta": BTreeMap::<String, Value>::new()
         })),
     )
+}
+
+fn search_results_page(search: Search, query: SearchResultsQuery) -> SearchResultsPage {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let _include_evidence = query.include_evidence.unwrap_or(true);
+    let _exact_total = query.exact_total.unwrap_or(true);
+    let total = search.results.len();
+    let results = search
+        .results
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    SearchResultsPage {
+        id: search.id,
+        query: search.query,
+        method: search.method,
+        file_type: search.r#type,
+        status: search.status,
+        total,
+        offset,
+        limit,
+        results,
+    }
 }
 
 fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {
@@ -1808,6 +1860,93 @@ mod tests {
         let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn search_results_use_canonical_paging_query() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        core.index_file(IndexedFile {
+            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Paged.Result.One.iso".to_string(),
+            size_bytes: 42,
+            content_type: "iso".to_string(),
+            availability_score: 2,
+        })
+        .await
+        .unwrap();
+        core.index_file(IndexedFile {
+            ed2k_hash: "ffeeddccbbaa99887766554433221100".to_string(),
+            name: "Paged.Result.Two.iso".to_string(),
+            size_bytes: 84,
+            content_type: "iso".to_string(),
+            availability_score: 3,
+        })
+        .await
+        .unwrap();
+        let app = router(
+            core,
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/searches")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"paged result","method":"automatic","type":""}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let search_id = value["data"]["id"].as_str().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/searches/{search_id}?offset=1&limit=1&includeEvidence=false&exactTotal=true"
+                    ))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["id"], search_id);
+        assert_eq!(value["data"]["total"], 2);
+        assert_eq!(value["data"]["offset"], 1);
+        assert_eq!(value["data"]["limit"], 1);
+        assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
+
+        let clamped = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/searches/{search_id}?limit=5000"))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(clamped.status(), StatusCode::OK);
+        let body = to_bytes(clamped.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["limit"], 1000);
     }
 
     #[tokio::test]
