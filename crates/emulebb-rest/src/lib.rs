@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use emulebb_core::{EmulebbCore, SearchCreate, TransferCreate};
+use emulebb_core::{EmulebbCore, LocalShareCreate, SearchCreate, TransferCreate};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -48,6 +48,7 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/searches/{search_id}",
             get(search).delete(delete_search),
         )
+        .route("/api/v1/shares", get(shares).post(create_share))
         .route(
             "/api/v1/searches/{search_id}/results/{hash}/operations/download",
             post(download_search_result),
@@ -174,6 +175,22 @@ async fn delete_search(
         api_ok(json!({ "deleted": true })).into_response()
     } else {
         api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
+    }
+}
+
+async fn shares(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection(state.core.shares().await)
+}
+
+async fn create_share(
+    State(state): State<RestState>,
+    Json(request): Json<LocalShareCreate>,
+) -> impl IntoResponse {
+    match state.core.share_local_file(request).await {
+        Ok(share) => api_ok(share).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
     }
 }
 

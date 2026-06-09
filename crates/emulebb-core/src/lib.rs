@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::{
         Arc,
@@ -23,16 +23,18 @@ use emulebb_ed2k::{
         search_source_udp_servers, search_source_via_background_session,
     },
     ed2k_tcp::{
-        Ed2kHelloIdentity, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kSecureIdent,
-        download_file_from_peer, emule_connect_options,
+        Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
+        Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
     ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job},
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
+use emulebb_kad_dht::{DhtConfig, DhtNode};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
 use tokio::{
+    net::TcpListener,
     sync::{Mutex, RwLock},
     task::JoinHandle,
 };
@@ -148,6 +150,24 @@ pub struct TransferCreate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalShareCreate {
+    pub path: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalShare {
+    pub hash: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub ed2k_link: String,
+    pub aich_root: String,
+    pub transfer_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transfer {
     pub hash: String,
     pub name: String,
@@ -164,6 +184,7 @@ pub struct Transfer {
 #[derive(Debug, Clone)]
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
+    pub kad_bind_addr: SocketAddr,
     pub user_hash: [u8; 16],
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub config: Ed2kConfig,
@@ -180,7 +201,7 @@ struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
     shutdown: Arc<AtomicBool>,
-    task: JoinHandle<()>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -244,6 +265,7 @@ impl EmulebbCore {
                 "rest.emulebb.v1".to_string(),
                 "search.keyword".to_string(),
                 "transfer.downloads".to_string(),
+                "share.localFiles".to_string(),
                 "indexing.localFts".to_string(),
             ],
         }
@@ -299,23 +321,50 @@ impl EmulebbCore {
 
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
+        let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(network.kad_bind_addr),
+            obfuscation_enabled: network.config.obfuscation_enabled,
+            ..DhtConfig::default()
+        })
+        .await
+        .context("failed to initialize Kad runtime for ED2K listener")?;
+        let ed2k_bind_addr =
+            SocketAddr::new(IpAddr::V4(network.bind_ip), network.config.listen_port);
+        let ed2k_listener =
+            Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
+                format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
+            })?);
+        let hello_identity = self.ed2k_hello_identity(&network);
+        let mut tasks = Vec::new();
+        tasks.push(dht.start());
+        tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
+            listener: ed2k_listener,
+            dht,
+            server_state: Arc::clone(&server_state),
+            kad_firewall: Arc::clone(&kad_firewall),
+            secure_ident: Arc::clone(&network.secure_ident),
+            transfer_runtime: Arc::clone(&self.ed2k_transfers),
+            hello_identity,
+            shutdown: Arc::clone(&shutdown),
+        })));
+        tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::new(NatManager),
             config: network.config.clone(),
-            hello_identity: self.ed2k_hello_identity(&network),
+            hello_identity,
             shared_catalog: self.ed2k_transfers.shared_catalog(),
             state: Arc::clone(&server_state),
             search_inbox,
-            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            kad_firewall,
             shutdown: Arc::clone(&shutdown),
-        }));
+        })));
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
             shutdown,
-            task,
+            tasks,
         });
         drop(runtime_guard);
         Ok(self.ed2k_status().await)
@@ -324,7 +373,9 @@ impl EmulebbCore {
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
-            runtime.task.abort();
+            for task in runtime.tasks {
+                task.abort();
+            }
         }
         self.ed2k_status().await
     }
@@ -448,6 +499,44 @@ impl EmulebbCore {
             .transfers
             .values()
             .cloned()
+            .collect()
+    }
+
+    pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
+        let source_path = Path::new(&request.path);
+        let canonical_name = match request.name {
+            Some(name) => name,
+            None => source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?
+                .to_string(),
+        };
+        let summary = self
+            .ed2k_transfers
+            .ingest_local_file(source_path, &canonical_name)
+            .await?;
+        Ok(local_share_from_summary(summary))
+    }
+
+    pub async fn shares(&self) -> Vec<LocalShare> {
+        let catalog = self.ed2k_transfers.shared_catalog();
+        catalog
+            .read()
+            .await
+            .iter()
+            .filter(|entry| entry.verified_complete && !entry.compatibility_hint)
+            .map(|entry| LocalShare {
+                hash: entry.file_hash.clone(),
+                name: entry.canonical_name.clone(),
+                size_bytes: entry.file_size,
+                ed2k_link: format!(
+                    "ed2k://|file|{}|{}|{}|/",
+                    entry.canonical_name, entry.file_size, entry.file_hash
+                ),
+                aich_root: entry.aich_root.clone().unwrap_or_default(),
+                transfer_dir: String::new(),
+            })
             .collect()
     }
 
@@ -900,6 +989,22 @@ fn merge_download_sources(target: &mut Vec<Ed2kFoundSource>, incoming: Vec<Ed2kF
         if seen.insert(source_key(&source)) {
             target.push(source);
         }
+    }
+}
+
+fn local_share_from_summary(
+    summary: emulebb_ed2k::ed2k_transfer::Ed2kLocalIngestSummary,
+) -> LocalShare {
+    LocalShare {
+        ed2k_link: format!(
+            "ed2k://|file|{}|{}|{}|/",
+            summary.canonical_name, summary.file_size, summary.file_hash
+        ),
+        hash: summary.file_hash,
+        name: summary.canonical_name,
+        size_bytes: summary.file_size,
+        aich_root: summary.aich_root,
+        transfer_dir: summary.transfer_dir,
     }
 }
 

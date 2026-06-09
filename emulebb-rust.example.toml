@@ -5,6 +5,9 @@ p2pBindIp = "192.0.2.10"
 bindAddr = "192.0.2.10:13301"
 apiKey = "change-me"
 
+[kad]
+listenPort = 41002
+
 [ed2k]
 listenPort = 41001
 serverEndpoints = ["192.0.2.20:4661"]

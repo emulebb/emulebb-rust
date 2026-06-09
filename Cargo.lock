@@ -402,6 +402,7 @@ dependencies = [
  "chrono",
  "emulebb-ed2k",
  "emulebb-index",
+ "emulebb-kad-dht",
  "emulebb-kad-proto",
  "hex",
  "serde",
