@@ -17,6 +17,7 @@ use emulebb_core::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
 pub struct RestConfig {
@@ -27,6 +28,7 @@ pub struct RestConfig {
 pub struct RestState {
     core: Arc<EmulebbCore>,
     api_key: Arc<String>,
+    shutdown: Option<watch::Sender<bool>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +159,12 @@ struct LogsClearRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShutdownRequest {
+    confirm_shutdown: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClearCompletedTransfersRequest {
     confirm_clear_completed: bool,
 }
@@ -175,12 +183,22 @@ struct KadBootstrapRequest {
 }
 
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
+    router_with_shutdown(core, config, None)
+}
+
+pub fn router_with_shutdown(
+    core: Arc<EmulebbCore>,
+    config: RestConfig,
+    shutdown: Option<watch::Sender<bool>>,
+) -> Router {
     let state = RestState {
         core,
         api_key: Arc::new(config.api_key),
+        shutdown,
     };
     Router::new()
         .route("/api/v1/app", get(app))
+        .route("/api/v1/app/shutdown", post(shutdown_app))
         .route(
             "/api/v1/app/preferences",
             get(preferences).patch(update_preferences),
@@ -426,6 +444,24 @@ async fn require_api_key(
 
 async fn app(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.app_info())
+}
+
+async fn shutdown_app(
+    State(state): State<RestState>,
+    Json(request): Json<ShutdownRequest>,
+) -> impl IntoResponse {
+    if !request.confirm_shutdown {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirmShutdown must be true",
+        )
+        .into_response();
+    }
+    if let Some(shutdown) = state.shutdown.as_ref() {
+        let _ = shutdown.send(true);
+    }
+    api_ok(json!({"ok": true})).into_response()
 }
 
 async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
@@ -1784,6 +1820,55 @@ mod tests {
                 .iter()
                 .any(|entry| entry == "rest.emulebb.v1")
         );
+    }
+
+    #[tokio::test]
+    async fn app_shutdown_requires_confirmation_and_signals_daemon() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let app = router_with_shutdown(
+            core,
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+            Some(shutdown_tx),
+        );
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/app/shutdown")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmShutdown":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        assert!(!*shutdown_rx.borrow());
+
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/app/shutdown")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmShutdown":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+        assert!(shutdown_rx.changed().await.is_ok());
+        assert!(*shutdown_rx.borrow());
     }
 
     #[tokio::test]

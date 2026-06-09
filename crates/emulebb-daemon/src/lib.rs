@@ -9,8 +9,9 @@ use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
 use emulebb_ed2k::{config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
 use emulebb_index::FileIndex;
-use emulebb_rest::{RestConfig, router};
+use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,16 +156,26 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         config.transfer_root(),
         ed2k_network,
     )?);
-    let app = router(
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let app = router_with_shutdown(
         core,
         RestConfig {
             api_key: config.rest.api_key.clone(),
         },
+        Some(shutdown_tx),
     );
     let rest_bind_addr = config.rest_bind_addr()?;
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            while shutdown_rx.changed().await.is_ok() {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        })
+        .await?;
     Ok(())
 }
 
