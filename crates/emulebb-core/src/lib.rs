@@ -1618,6 +1618,28 @@ impl EmulebbCore {
         self.set_transfer_control_state(hash, "stopped").await
     }
 
+    pub async fn recheck_transfer(&self, hash: &str) -> Result<Option<()>> {
+        let Some(current) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        ensure!(
+            !matches!(current.state.as_str(), "hashing" | "completing"),
+            "transfer is already being hashed or completed"
+        );
+        Ok(Some(()))
+    }
+
+    pub async fn preview_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        ensure!(
+            transfer.state == "completed",
+            "transfer is not ready for preview"
+        );
+        Ok(Some(transfer))
+    }
+
     pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
         let transfer = if let Some(transfer) = self.transfer(hash).await {
             transfer

@@ -382,6 +382,14 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/transfers/{hash}/operations/stop",
             post(transfer_stop),
         )
+        .route(
+            "/api/v1/transfers/{hash}/operations/recheck",
+            post(transfer_recheck),
+        )
+        .route(
+            "/api/v1/transfers/{hash}/operations/preview",
+            post(transfer_preview),
+        )
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
         .fallback(fallback)
@@ -1428,6 +1436,36 @@ async fn transfer_stop(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_recheck(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.recheck_transfer(&hash).await {
+        Ok(Some(())) => api_ok(json!({"ok": true})).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_preview(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.preview_transfer(&hash).await {
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
         }
@@ -2604,6 +2642,47 @@ mod tests {
         assert_eq!(
             value["data"]["items"][0]["hash"],
             "00112233445566778899aabbccddeeff"
+        );
+
+        let recheck_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/operations/recheck")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recheck_response.status(), StatusCode::OK);
+        let body = to_bytes(recheck_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+
+        let preview_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/operations/preview")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview_response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(preview_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            "transfer is not ready for preview"
         );
 
         let stop_response = app
