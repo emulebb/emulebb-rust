@@ -167,7 +167,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/servers/{server_id}/operations/connect",
             post(connect_server),
         )
-        .route("/api/v1/searches", get(searches).post(create_search))
+        .route(
+            "/api/v1/searches",
+            get(searches).post(create_search).delete(delete_searches),
+        )
         .route(
             "/api/v1/searches/{search_id}",
             get(search).delete(delete_search),
@@ -548,6 +551,22 @@ async fn delete_search(
     } else {
         api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
     }
+}
+
+async fn delete_searches(
+    State(state): State<RestState>,
+    Query(query): Query<ConfirmQuery>,
+) -> impl IntoResponse {
+    if query.confirm != Some(true) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirm must be true",
+        )
+        .into_response();
+    }
+    state.core.clear_searches().await;
+    api_ok(json!({ "ok": true })).into_response()
 }
 
 async fn shared_files(State(state): State<RestState>) -> impl IntoResponse {
@@ -1688,6 +1707,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn search_clear_requires_canonical_query_confirmation() {
+        let app = test_router();
+
+        for query in ["first", "second"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/searches")
+                        .header("X-API-Key", "secret")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(format!(
+                            r#"{{"query":"{query}","method":"automatic","type":""}}"#
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/searches")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+        let cleared = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/searches?confirm=true")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let body = to_bytes(cleared.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/searches")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]

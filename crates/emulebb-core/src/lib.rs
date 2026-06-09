@@ -880,6 +880,10 @@ impl EmulebbCore {
         self.state.lock().await.searches.remove(search_id).is_some()
     }
 
+    pub async fn clear_searches(&self) {
+        self.state.lock().await.searches.clear();
+    }
+
     pub async fn categories(&self) -> Vec<Category> {
         self.state
             .lock()
