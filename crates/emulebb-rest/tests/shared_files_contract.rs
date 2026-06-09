@@ -78,7 +78,30 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["total"], 1);
+    assert_eq!(value["data"]["offset"], 0);
+    assert_eq!(value["data"]["limit"], 100);
     assert_eq!(value["data"]["items"][0]["hash"], hash);
+
+    let paged_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/shared-files?offset=1&limit=1")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(paged_response.status(), StatusCode::OK);
+    let body = to_bytes(paged_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["total"], 1);
+    assert_eq!(value["data"]["offset"], 1);
+    assert_eq!(value["data"]["limit"], 1);
+    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
 
     let read_response = app
         .clone()

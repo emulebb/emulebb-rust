@@ -125,6 +125,49 @@ struct SnapshotQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PageQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TransfersQuery {
+    state: Option<String>,
+    category_id: Option<u32>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UploadQueueQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+    #[serde(default)]
+    include_score_breakdown: Option<bool>,
+}
+
+impl TransfersQuery {
+    fn page(&self) -> PageQuery {
+        PageQuery {
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
+}
+
+impl UploadQueueQuery {
+    fn page(&self) -> PageQuery {
+        PageQuery {
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SearchResultsQuery {
@@ -818,7 +861,10 @@ async fn delete_searches(
     api_ok(json!({ "ok": true })).into_response()
 }
 
-async fn shared_files(State(state): State<RestState>) -> impl IntoResponse {
+async fn shared_files(
+    State(state): State<RestState>,
+    Query(query): Query<PageQuery>,
+) -> impl IntoResponse {
     let items = state
         .core
         .shares()
@@ -826,7 +872,7 @@ async fn shared_files(State(state): State<RestState>) -> impl IntoResponse {
         .iter()
         .map(shared_file_response)
         .collect::<Vec<_>>();
-    api_collection_page(items)
+    api_collection_page(items, query)
 }
 
 async fn create_shared_file(
@@ -1055,8 +1101,28 @@ async fn download_search_result(
     }
 }
 
-async fn transfers(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(state.core.transfers().await)
+async fn transfers(
+    State(state): State<RestState>,
+    Query(query): Query<TransfersQuery>,
+) -> impl IntoResponse {
+    let items = state
+        .core
+        .transfers()
+        .await
+        .into_iter()
+        .filter(|transfer| {
+            query
+                .state
+                .as_deref()
+                .is_none_or(|state| transfer.state == state)
+        })
+        .filter(|transfer| {
+            query
+                .category_id
+                .is_none_or(|category_id| transfer.category_id == category_id)
+        })
+        .collect::<Vec<_>>();
+    api_collection_page(items, query.page())
 }
 
 async fn create_transfer(
@@ -1302,8 +1368,12 @@ async fn upload(
     upload_by_client_id(state, client_id, false).await
 }
 
-async fn upload_queue(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection_page(state.core.upload_queue().await)
+async fn upload_queue(
+    State(state): State<RestState>,
+    Query(query): Query<UploadQueueQuery>,
+) -> impl IntoResponse {
+    let _include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
+    api_collection_page(state.core.upload_queue().await, query.page())
 }
 
 async fn upload_queue_client(
@@ -1598,16 +1668,23 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
     )
 }
 
-fn api_collection_page<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
+fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> (StatusCode, Json<Value>) {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     let total = items.len();
+    let items = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
     (
         StatusCode::OK,
         Json(json!({
             "data": {
                 "items": items,
                 "total": total,
-                "offset": 0,
-                "limit": total
+                "offset": offset,
+                "limit": limit
             },
             "meta": BTreeMap::<String, Value>::new()
         })),
@@ -2084,6 +2161,24 @@ mod tests {
             let value: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
         }
+
+        let paged_queue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/upload-queue?offset=1&limit=1&includeScoreBreakdown=true")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(paged_queue.status(), StatusCode::OK);
+        let body = to_bytes(paged_queue.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["total"], 0);
+        assert_eq!(value["data"]["offset"], 1);
+        assert_eq!(value["data"]["limit"], 1);
 
         let response = app
             .clone()
@@ -2916,6 +3011,7 @@ mod tests {
     async fn create_transfers_accepts_canonical_links_array() {
         let app = test_router();
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2944,6 +3040,26 @@ mod tests {
             value["data"]["items"][1]["hash"],
             "ffeeddccbbaa99887766554433221100"
         );
+
+        let paged = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/transfers?state=paused&offset=1&limit=1")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(paged.status(), StatusCode::OK);
+        let body = to_bytes(paged.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["total"], 2);
+        assert_eq!(value["data"]["offset"], 1);
+        assert_eq!(value["data"]["limit"], 1);
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["data"]["items"][0]["state"], "paused");
     }
 
     #[tokio::test]
