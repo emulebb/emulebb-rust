@@ -128,6 +128,12 @@ struct LogsClearRequest {
     confirm_clear_logs: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClearCompletedTransfersRequest {
+    confirm_clear_completed: bool,
+}
+
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     let state = RestState {
         core,
@@ -212,6 +218,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             post(download_search_result),
         )
         .route("/api/v1/transfers", get(transfers).post(create_transfer))
+        .route(
+            "/api/v1/transfers/operations/clear-completed",
+            post(clear_completed_transfers),
+        )
         .route(
             "/api/v1/transfers/{hash}",
             get(transfer).delete(transfer_delete),
@@ -793,6 +803,26 @@ async fn create_transfer(
                 .collect::<Vec<_>>(),
         )
         .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn clear_completed_transfers(
+    State(state): State<RestState>,
+    Json(request): Json<ClearCompletedTransfersRequest>,
+) -> impl IntoResponse {
+    if !request.confirm_clear_completed {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirmClearCompleted must be true",
+        )
+        .into_response();
+    }
+    match state.core.clear_completed_transfer_rows().await {
+        Ok(()) => api_ok(json!({ "ok": true })).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1764,6 +1794,7 @@ mod tests {
         assert_eq!(value["data"]["ok"], true);
 
         let list = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/searches")
@@ -2126,5 +2157,107 @@ mod tests {
                 .iter()
                 .any(|entry| entry.hash == share.hash)
         );
+    }
+
+    #[tokio::test]
+    async fn clear_completed_transfers_requires_confirmation_and_preserves_files() {
+        let runtime_dir = unique_test_dir("clear-completed-transfers");
+        let transfer_root = runtime_dir.join("transfers");
+        let first_path = runtime_dir.join("Completed.Rest.Clear.One.bin");
+        let second_path = runtime_dir.join("Completed.Rest.Clear.Two.bin");
+        std::fs::write(&first_path, b"completed clear row one").unwrap();
+        std::fs::write(&second_path, b"completed clear row two").unwrap();
+        let core = Arc::new(
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+        );
+        let first = core
+            .share_local_file(LocalShareCreate {
+                path: first_path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        let second = core
+            .share_local_file(LocalShareCreate {
+                path: second_path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        let app = router(
+            Arc::clone(&core),
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/operations/clear-completed")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmClearCompleted":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+        let cleared = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/operations/clear-completed")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmClearCompleted":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let body = to_bytes(cleared.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
+        assert!(std::path::Path::new(&first.transfer_dir).is_dir());
+        assert!(std::path::Path::new(&second.transfer_dir).is_dir());
+        assert_eq!(core.shares().await.len(), 2);
+
+        let delete_shared_file = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/shared-files/{}/file?confirm=true",
+                        first.hash
+                    ))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_shared_file.status(), StatusCode::OK);
+        assert!(!std::path::Path::new(&first.transfer_dir).exists());
     }
 }

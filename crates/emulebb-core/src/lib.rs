@@ -1236,8 +1236,14 @@ impl EmulebbCore {
     }
 
     pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(transfer) = self.transfer(hash).await else {
-            return Ok(None);
+        let transfer = if let Some(transfer) = self.transfer(hash).await {
+            transfer
+        } else {
+            let Ok(manifest) = self.ed2k_transfers.manifest(hash).await else {
+                return Ok(None);
+            };
+            let state_name = manifest_default_state_name(&manifest);
+            transfer_from_manifest(&manifest, state_name)
         };
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
@@ -1257,6 +1263,25 @@ impl EmulebbCore {
             .await?;
         self.state.lock().await.transfers.remove(hash);
         Ok(Some(transfer))
+    }
+
+    pub async fn clear_completed_transfer_rows(&self) -> Result<()> {
+        let hashes = {
+            let state = self.state.lock().await;
+            state
+                .transfers
+                .values()
+                .filter(|transfer| transfer.state == "completed")
+                .map(|transfer| transfer.hash.clone())
+                .collect::<Vec<_>>()
+        };
+        for hash in hashes {
+            self.ed2k_transfers
+                .remove_completed_transfer_row(&hash)
+                .await?;
+            self.state.lock().await.transfers.remove(&hash);
+        }
+        Ok(())
     }
 
     async fn uploads_by_queue_state(&self, waiting_queue: bool) -> Vec<Upload> {
