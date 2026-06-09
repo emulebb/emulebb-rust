@@ -249,4 +249,46 @@ impl Ed2kTransferRuntime {
         let _guard = self.manifest_io.lock().await;
         self.load_manifest_unlocked(file_hash).await
     }
+
+    /// Returns all readable persisted manifests under the transfer root.
+    pub async fn manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifests = Vec::new();
+        let mut entries = tokio::fs::read_dir(&self.root_dir).await.with_context(|| {
+            format!(
+                "failed to enumerate ED2K transfer root {}",
+                self.root_dir.display()
+            )
+        })?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path().join(MANIFEST_FILE_NAME);
+            if !tokio::fs::try_exists(&path).await? {
+                continue;
+            }
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable ED2K manifest {} during transfer load: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let manifest: Ed2kResumeManifest = match serde_json::from_slice(&bytes) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping malformed ED2K manifest {} during transfer load: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            self.mark_manifest_persisted_unlocked(&manifest).await;
+            manifests.push(manifest);
+        }
+        manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
+        Ok(manifests)
+    }
 }

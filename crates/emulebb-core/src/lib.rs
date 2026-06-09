@@ -27,7 +27,7 @@ use emulebb_ed2k::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job},
+    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, new_transfer_job},
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
@@ -274,6 +274,9 @@ impl EmulebbCore {
     }
 
     pub async fn status(&self) -> Status {
+        if let Err(error) = self.refresh_transfers_from_manifests().await {
+            tracing::warn!("failed to refresh ED2K transfers from manifests: {error}");
+        }
         let state = self.state.lock().await;
         let completed = state
             .transfers
@@ -494,6 +497,9 @@ impl EmulebbCore {
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
+        if let Err(error) = self.refresh_transfers_from_manifests().await {
+            tracing::warn!("failed to refresh ED2K transfers from manifests: {error}");
+        }
         self.state
             .lock()
             .await
@@ -516,6 +522,8 @@ impl EmulebbCore {
         let summary = self
             .ed2k_transfers
             .ingest_local_file(source_path, &canonical_name)
+            .await?;
+        self.refresh_transfer_from_manifest(&summary.file_hash, "completed")
             .await?;
         if let Err(error) = self.publish_ed2k_shared_catalog().await {
             tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
@@ -545,7 +553,16 @@ impl EmulebbCore {
     }
 
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
-        self.state.lock().await.transfers.get(hash).cloned()
+        if let Some(transfer) = self.state.lock().await.transfers.get(hash).cloned() {
+            return Some(transfer);
+        }
+        match self.refresh_transfer_from_manifest_default(hash).await {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                tracing::warn!("failed to refresh ED2K transfer {hash} from manifest: {error}");
+                None
+            }
+        }
     }
 
     pub async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
@@ -560,7 +577,10 @@ impl EmulebbCore {
             return Ok(None);
         };
         if let Some(next_state) = self.run_ed2k_download_attempt(&transfer).await? {
-            if let Some(updated) = self.set_transfer_state(hash, next_state).await {
+            if let Some(updated) = self
+                .refresh_transfer_from_manifest(hash, next_state)
+                .await?
+            {
                 transfer = updated;
             }
         }
@@ -588,6 +608,48 @@ impl EmulebbCore {
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(transfer)
+    }
+
+    async fn refresh_transfers_from_manifests(&self) -> Result<()> {
+        let manifests = self.ed2k_transfers.manifests().await?;
+        let mut state = self.state.lock().await;
+        for manifest in manifests {
+            let state_name = state
+                .transfers
+                .get(&manifest.file_hash)
+                .map(|transfer| transfer.state.clone())
+                .unwrap_or_else(|| manifest_default_state_name(&manifest).to_string());
+            let transfer = transfer_from_manifest(&manifest, &state_name);
+            state.transfers.insert(transfer.hash.clone(), transfer);
+        }
+        Ok(())
+    }
+
+    async fn refresh_transfer_from_manifest(
+        &self,
+        hash: &str,
+        state_name: &str,
+    ) -> Result<Option<Transfer>> {
+        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        let transfer = transfer_from_manifest(&manifest, state_name);
+        self.state
+            .lock()
+            .await
+            .transfers
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(Some(transfer))
+    }
+
+    async fn refresh_transfer_from_manifest_default(&self, hash: &str) -> Result<Option<Transfer>> {
+        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        let state_name = manifest_default_state_name(&manifest);
+        let transfer = transfer_from_manifest(&manifest, state_name);
+        self.state
+            .lock()
+            .await
+            .transfers
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(Some(transfer))
     }
 
     async fn search_ed2k_servers(
@@ -906,10 +968,7 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
     let completed_bytes = manifest
         .pieces
         .iter()
-        .map(|piece| match piece.state {
-            Ed2kTransferState::Verified | Ed2kTransferState::Written => manifest.piece_size,
-            Ed2kTransferState::Requested | Ed2kTransferState::Missing => piece.bytes_written,
-        })
+        .map(|piece| piece.bytes_written)
         .sum::<u64>()
         .min(manifest.file_size);
     let progress = if manifest.file_size == 0 {
@@ -931,6 +990,16 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
         progress,
         sources: manifest.sources.len() as u32,
         download_speed_bytes_per_sec: 0,
+    }
+}
+
+fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
+    if manifest.completed {
+        "completed"
+    } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
+        "downloading"
+    } else {
+        "queued"
     }
 }
 
@@ -1124,5 +1193,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(transfer.state, "queued");
+    }
+
+    #[tokio::test]
+    async fn transfers_reload_from_persisted_manifests() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-persisted-manifests");
+        let transfer_root = runtime_dir.join("transfers");
+        let payload_path = runtime_dir.join("Shared.Payload.bin");
+        let payload = b"persisted transfer payload";
+        std::fs::write(&payload_path, payload).unwrap();
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: payload_path.display().to_string(),
+                name: Some("Shared.Payload.bin".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let reloaded =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let transfers = reloaded.transfers().await;
+
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].hash, share.hash);
+        assert_eq!(transfers[0].state, "completed");
+        assert_eq!(transfers[0].completed_bytes, payload.len() as u64);
+        assert_eq!(transfers[0].progress, 1.0);
     }
 }
