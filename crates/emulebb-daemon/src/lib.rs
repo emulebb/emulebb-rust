@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
 };
@@ -102,9 +102,6 @@ impl DaemonConfig {
         let Some(candidate) = self.p2p_bind_ip else {
             bail!("p2pBindIp is required when ED2K servers are configured");
         };
-        if candidate.is_loopback() || candidate.is_unspecified() {
-            bail!("ED2K runtime bind IP must be an explicit non-loopback address, got {candidate}");
-        }
         Ok(candidate)
     }
 
@@ -112,19 +109,7 @@ impl DaemonConfig {
         let Some(candidate) = self.rest.bind_addr else {
             bail!("rest.bindAddr is required");
         };
-        match candidate.ip() {
-            IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => {
-                bail!(
-                    "REST bind address must be an explicit non-loopback address, got {candidate}"
-                );
-            }
-            IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => {
-                bail!(
-                    "REST bind address must be an explicit non-loopback address, got {candidate}"
-                );
-            }
-            _ => Ok(candidate),
-        }
+        Ok(candidate)
     }
 }
 
@@ -270,29 +255,31 @@ reconnectIntervalSecs = 60
     }
 
     #[test]
-    fn rest_bind_addr_rejects_loopback_address() {
+    fn rest_bind_addr_accepts_configured_loopback_address() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_rest_bind(
             temp.path().to_path_buf(),
             Some("127.0.0.1:13301".parse().unwrap()),
         );
 
-        let error = config.rest_bind_addr().unwrap_err().to_string();
-
-        assert!(error.contains("explicit non-loopback address"));
+        assert_eq!(
+            config.rest_bind_addr().unwrap(),
+            "127.0.0.1:13301".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]
-    fn rest_bind_addr_rejects_wildcard_address() {
+    fn rest_bind_addr_accepts_configured_wildcard_address() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_rest_bind(
             temp.path().to_path_buf(),
             Some("0.0.0.0:13301".parse().unwrap()),
         );
 
-        let error = config.rest_bind_addr().unwrap_err().to_string();
-
-        assert!(error.contains("explicit non-loopback address"));
+        assert_eq!(
+            config.rest_bind_addr().unwrap(),
+            "0.0.0.0:13301".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -330,12 +317,13 @@ reconnectIntervalSecs = 60
     }
 
     #[test]
-    fn ed2k_network_config_rejects_loopback_bind_ip() {
+    fn ed2k_network_config_accepts_configured_loopback_bind_ip() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_server(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
 
-        let error = config.ed2k_network_config().unwrap_err().to_string();
-        assert!(error.contains("explicit non-loopback address"));
+        let network = config.ed2k_network_config().unwrap().unwrap();
+
+        assert_eq!(network.bind_ip, Ipv4Addr::LOCALHOST);
     }
 
     #[test]
