@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path as FsPath, sync::Arc};
+use std::{path::Path as FsPath, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -1714,7 +1714,7 @@ fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
         StatusCode::OK,
         Json(json!({
             "data": data,
-            "meta": BTreeMap::<String, Value>::new()
+            "meta": api_meta()
         })),
     )
 }
@@ -1724,7 +1724,7 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
         StatusCode::OK,
         Json(json!({
             "data": { "items": items },
-            "meta": BTreeMap::<String, Value>::new()
+            "meta": api_meta()
         })),
     )
 }
@@ -1747,7 +1747,7 @@ fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> (Status
                 "offset": offset,
                 "limit": limit
             },
-            "meta": BTreeMap::<String, Value>::new()
+            "meta": api_meta()
         })),
     )
 }
@@ -1788,9 +1788,13 @@ fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Valu
                 "offset": 0,
                 "limit": total
             },
-            "meta": BTreeMap::<String, Value>::new()
+            "meta": api_meta()
         })),
     )
+}
+
+fn api_meta() -> Value {
+    json!({ "apiVersion": "v1" })
 }
 
 fn snapshot_limit(limit: Option<usize>) -> usize {
@@ -1868,7 +1872,7 @@ fn api_error(
                 "code": code,
                 "message": message.into()
             },
-            "meta": BTreeMap::<String, Value>::new()
+            "meta": api_meta()
         })),
     )
 }
@@ -1933,6 +1937,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["meta"]["apiVersion"], "v1");
     }
 
     #[tokio::test]
@@ -1950,6 +1957,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["meta"]["apiVersion"], "v1");
         assert_eq!(value["data"]["name"], "eMuleBB Rust");
         assert!(
             value["data"]["capabilities"]
