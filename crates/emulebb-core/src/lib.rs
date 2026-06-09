@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
@@ -83,10 +83,52 @@ pub struct NetworkStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
+    pub address: String,
+    pub port: u16,
     pub endpoint: String,
-    pub name: Option<String>,
-    pub description: Option<String>,
+    pub name: String,
+    pub priority: String,
+    #[serde(rename = "static")]
+    pub static_server: bool,
     pub connected: bool,
+    pub connecting: bool,
+    pub current: bool,
+    pub description: String,
+    pub dyn_ip: String,
+    pub failed_count: u32,
+    pub hard_files: u64,
+    pub ip: String,
+    pub ping: u32,
+    pub soft_files: u64,
+    pub version: String,
+    pub users: u64,
+    pub files: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerCreate {
+    pub address: String,
+    pub port: u16,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default, rename = "static")]
+    pub static_server: Option<bool>,
+    #[serde(default)]
+    pub connect: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerUpdate {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default, rename = "static")]
+    pub static_server: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +305,9 @@ pub struct Ed2kNetworkConfig {
 struct CoreState {
     searches: HashMap<String, Search>,
     transfers: HashMap<String, Transfer>,
+    servers: HashMap<String, ServerInfo>,
+    server_overrides: HashMap<String, ServerUpdate>,
+    disabled_servers: HashSet<String>,
     kad_running: bool,
 }
 
@@ -310,6 +355,9 @@ impl EmulebbCore {
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
+                servers: HashMap::new(),
+                server_overrides: HashMap::new(),
+                disabled_servers: HashSet::new(),
                 kad_running: false,
             })),
         })
@@ -378,10 +426,24 @@ impl EmulebbCore {
     }
 
     pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
+        self.connect_ed2k_to_server(None).await
+    }
+
+    pub async fn connect_ed2k_server(&self, endpoint: &str) -> Result<Option<NetworkStatus>> {
+        if self.server(endpoint).await.is_none() {
+            return Ok(None);
+        }
+        self.connect_ed2k_to_server(Some(endpoint)).await.map(Some)
+    }
+
+    async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
         let Some(network) = self.ed2k_network.clone() else {
             anyhow::bail!("ED2K network is not configured");
         };
-        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+        let config = self
+            .effective_ed2k_config(&network.config, endpoint)
+            .await?;
+        if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             anyhow::bail!("ED2K connect requires at least one configured server");
         }
 
@@ -423,7 +485,7 @@ impl EmulebbCore {
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::new(NatManager),
-            config: network.config.clone(),
+            config,
             hello_identity,
             shared_catalog: self.ed2k_transfers.shared_catalog(),
             state: Arc::clone(&server_state),
@@ -452,34 +514,120 @@ impl EmulebbCore {
     }
 
     pub async fn servers(&self) -> Vec<ServerInfo> {
-        let Some(network) = self.ed2k_network.as_ref() else {
-            return Vec::new();
-        };
         let connected_endpoint = self.ed2k_connected_endpoint().await;
-        let mut servers = network
-            .config
-            .server_entries
-            .iter()
-            .map(|entry| ServerInfo {
-                endpoint: format!("{}:{}", entry.host, entry.port),
-                name: entry.name.clone(),
-                description: entry.description.clone(),
-                connected: connected_endpoint
-                    .as_deref()
-                    .is_some_and(|endpoint| endpoint == format!("{}:{}", entry.host, entry.port)),
-            })
-            .collect::<Vec<_>>();
-        servers.extend(network.config.server_endpoints.iter().map(|endpoint| {
-            ServerInfo {
-                endpoint: endpoint.clone(),
-                name: None,
-                description: None,
-                connected: connected_endpoint
-                    .as_deref()
-                    .is_some_and(|connected| connected == endpoint),
+        let state = self.state.lock().await;
+        let mut server_map = BTreeMap::<String, ServerInfo>::new();
+        if let Some(network) = self.ed2k_network.as_ref() {
+            for entry in &network.config.server_entries {
+                let endpoint = format!("{}:{}", entry.host, entry.port);
+                if state.disabled_servers.contains(&endpoint) {
+                    continue;
+                }
+                let mut server = server_info_from_parts(
+                    &entry.host,
+                    entry.port,
+                    entry.name.as_deref(),
+                    entry.description.as_deref(),
+                    true,
+                    connected_endpoint.as_deref(),
+                );
+                apply_server_update(&mut server, state.server_overrides.get(&endpoint));
+                server_map.insert(endpoint, server);
             }
-        }));
+            for endpoint in &network.config.server_endpoints {
+                if state.disabled_servers.contains(endpoint) || server_map.contains_key(endpoint) {
+                    continue;
+                }
+                if let Ok((address, port)) = parse_server_endpoint(endpoint) {
+                    let mut server = server_info_from_parts(
+                        &address,
+                        port,
+                        None,
+                        None,
+                        true,
+                        connected_endpoint.as_deref(),
+                    );
+                    apply_server_update(&mut server, state.server_overrides.get(endpoint));
+                    server_map.insert(endpoint.clone(), server);
+                }
+            }
+        }
+        for (endpoint, server) in &state.servers {
+            if !state.disabled_servers.contains(endpoint) {
+                let mut server = server.clone();
+                server.current = connected_endpoint
+                    .as_deref()
+                    .is_some_and(|connected| connected == endpoint);
+                server.connected = server.current;
+                apply_server_update(&mut server, state.server_overrides.get(endpoint));
+                server_map.insert(endpoint.clone(), server);
+            }
+        }
+        drop(state);
+        let servers = server_map.into_values().collect::<Vec<_>>();
         servers
+    }
+
+    pub async fn server(&self, endpoint: &str) -> Option<ServerInfo> {
+        self.servers()
+            .await
+            .into_iter()
+            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
+    }
+
+    pub async fn add_server(&self, request: ServerCreate) -> Result<ServerInfo> {
+        let endpoint = server_endpoint_from_create(&request)?;
+        let connected_endpoint = self.ed2k_connected_endpoint().await;
+        let mut server = server_info_from_parts(
+            &request.address,
+            request.port,
+            request.name.as_deref(),
+            None,
+            request.static_server.unwrap_or(false),
+            connected_endpoint.as_deref(),
+        );
+        if let Some(priority) = request.priority.as_deref() {
+            server.priority = validate_server_priority(priority)?.to_string();
+        }
+        let mut state = self.state.lock().await;
+        state.disabled_servers.remove(&endpoint);
+        state.servers.insert(endpoint, server.clone());
+        drop(state);
+        if request.connect.unwrap_or(false) {
+            let _ = self.connect_ed2k_server(&server.endpoint).await?;
+        }
+        Ok(server)
+    }
+
+    pub async fn update_server(
+        &self,
+        endpoint: &str,
+        request: ServerUpdate,
+    ) -> Result<Option<ServerInfo>> {
+        let Some(mut server) = self.server(endpoint).await else {
+            return Ok(None);
+        };
+        validate_server_update(&request)?;
+        apply_server_update(&mut server, Some(&request));
+        let mut state = self.state.lock().await;
+        if let Some(dynamic) = state.servers.get_mut(&server.endpoint) {
+            apply_server_update(dynamic, Some(&request));
+        }
+        state
+            .server_overrides
+            .insert(server.endpoint.clone(), request);
+        Ok(Some(server))
+    }
+
+    pub async fn remove_server(&self, endpoint: &str) -> Result<Option<ServerInfo>> {
+        let Some(server) = self.server(endpoint).await else {
+            return Ok(None);
+        };
+        let mut state = self.state.lock().await;
+        state.servers.remove(&server.endpoint);
+        state.server_overrides.remove(&server.endpoint);
+        state.disabled_servers.insert(server.endpoint.clone());
+        Ok(Some(server))
     }
 
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
@@ -803,6 +951,46 @@ impl EmulebbCore {
         self.index.lock().await.upsert_file(&file)
     }
 
+    async fn effective_ed2k_config(
+        &self,
+        base: &Ed2kConfig,
+        target_endpoint: Option<&str>,
+    ) -> Result<Ed2kConfig> {
+        if let Some(target) = target_endpoint {
+            let _ = parse_server_endpoint(target)?;
+        }
+        let mut config = base.clone();
+        let state = self.state.lock().await;
+        config.server_entries.retain(|entry| {
+            let endpoint = format!("{}:{}", entry.host, entry.port);
+            !state.disabled_servers.contains(&endpoint)
+                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(&endpoint))
+        });
+        config.server_endpoints.retain(|endpoint| {
+            !state.disabled_servers.contains(endpoint)
+                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(endpoint))
+        });
+        for (endpoint, server) in &state.servers {
+            if state.disabled_servers.contains(endpoint)
+                || target_endpoint.is_some_and(|target| !target.eq_ignore_ascii_case(endpoint))
+            {
+                continue;
+            }
+            let exists = config.server_entries.iter().any(|entry| {
+                format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)
+            }) || config
+                .server_endpoints
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(endpoint));
+            if !exists {
+                config
+                    .server_endpoints
+                    .push(format!("{}:{}", server.address, server.port));
+            }
+        }
+        Ok(config)
+    }
+
     async fn upsert_transfer_from_parts(
         &self,
         hash: String,
@@ -896,13 +1084,14 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(None);
         };
-        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+        let config = self.effective_ed2k_config(&network.config, None).await?;
+        if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(None);
         }
 
         let cancel = CancellationToken::new();
         if let Some(handle) = self.connected_ed2k_search_handle().await {
-            let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+            let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
             match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
                 .await
             {
@@ -927,22 +1116,21 @@ impl EmulebbCore {
             udp_port: 0,
             server_ip: 0,
             server_port: 0,
-            connect_options: emule_connect_options(network.config.obfuscation_enabled),
+            connect_options: emule_connect_options(config.obfuscation_enabled),
             direct_udp_callback: false,
         };
         let shared_catalog = self.ed2k_transfers.shared_catalog();
         let shared_catalog_snapshot = shared_catalog.read().await.clone();
-        let max_attempts = network.config.keyword_server_attempt_budget.max(1).min(
-            network
-                .config
+        let max_attempts = config.keyword_server_attempt_budget.max(1).min(
+            config
                 .server_entries
                 .len()
-                .max(network.config.server_endpoints.len())
+                .max(config.server_endpoints.len())
                 .max(1),
         );
         let files = search_keyword_servers(Ed2kKeywordSearchOptions {
             bind_ip: network.bind_ip,
-            config: &network.config,
+            config: &config,
             hello_identity,
             shared_catalog: &shared_catalog_snapshot,
             preferred_endpoint: None,
@@ -1330,6 +1518,92 @@ fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<Transfer
             status: "remembered".to_string(),
         })
         .collect()
+}
+
+fn server_info_from_parts(
+    address: &str,
+    port: u16,
+    name: Option<&str>,
+    description: Option<&str>,
+    static_server: bool,
+    connected_endpoint: Option<&str>,
+) -> ServerInfo {
+    let endpoint = format!("{address}:{port}");
+    let current = connected_endpoint.is_some_and(|connected| connected == endpoint);
+    ServerInfo {
+        address: address.to_string(),
+        port,
+        endpoint,
+        name: name.unwrap_or_default().to_string(),
+        priority: "normal".to_string(),
+        static_server,
+        connected: current,
+        connecting: false,
+        current,
+        description: description.unwrap_or_default().to_string(),
+        dyn_ip: String::new(),
+        failed_count: 0,
+        hard_files: 0,
+        ip: String::new(),
+        ping: 0,
+        soft_files: 0,
+        version: String::new(),
+        users: 0,
+        files: 0,
+    }
+}
+
+fn apply_server_update(server: &mut ServerInfo, update: Option<&ServerUpdate>) {
+    let Some(update) = update else {
+        return;
+    };
+    if let Some(name) = update.name.as_ref() {
+        server.name = name.clone();
+    }
+    if let Some(priority) = update.priority.as_ref() {
+        server.priority = priority.clone();
+    }
+    if let Some(static_server) = update.static_server {
+        server.static_server = static_server;
+    }
+}
+
+fn validate_server_update(update: &ServerUpdate) -> Result<()> {
+    if let Some(priority) = update.priority.as_deref() {
+        let _ = validate_server_priority(priority)?;
+    }
+    Ok(())
+}
+
+fn validate_server_priority(priority: &str) -> Result<&str> {
+    match priority {
+        "low" | "normal" | "high" => Ok(priority),
+        _ => Err(anyhow::anyhow!("priority must be one of low, normal, high")),
+    }
+}
+
+fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
+    ensure!(!request.address.trim().is_empty(), "address is required");
+    ensure!(request.port != 0, "port must be in the range 1..65535");
+    if let Some(priority) = request.priority.as_deref() {
+        let _ = validate_server_priority(priority)?;
+    }
+    Ok(format!("{}:{}", request.address, request.port))
+}
+
+fn parse_server_endpoint(endpoint: &str) -> Result<(String, u16)> {
+    let Some((address, port)) = endpoint.rsplit_once(':') else {
+        anyhow::bail!("server id must use address:port");
+    };
+    ensure!(
+        !address.trim().is_empty(),
+        "server id must use address:port"
+    );
+    let port = port
+        .parse::<u16>()
+        .with_context(|| format!("invalid server endpoint port in {endpoint}"))?;
+    ensure!(port != 0, "port must be in the range 1..65535");
+    Ok((address.to_string(), port))
 }
 
 fn upload_from_snapshot(

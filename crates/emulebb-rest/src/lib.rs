@@ -10,8 +10,8 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    EmulebbCore, LocalShare, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, Transfer,
-    TransferCreate,
+    EmulebbCore, LocalShare, LocalShareCreate, SearchCreate, SearchResultDownloadCreate,
+    ServerCreate, ServerUpdate, Transfer, TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -119,11 +119,19 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         .route("/api/v1/kad/operations/start", post(kad_start))
         .route("/api/v1/kad/operations/stop", post(kad_stop))
         .route("/api/v1/kad/operations/bootstrap", post(kad_start))
-        .route("/api/v1/servers", get(servers))
+        .route("/api/v1/servers", get(servers).post(create_server))
         .route("/api/v1/servers/operations/connect", post(servers_connect))
         .route(
             "/api/v1/servers/operations/disconnect",
             post(servers_disconnect),
+        )
+        .route(
+            "/api/v1/servers/{server_id}",
+            get(server).patch(update_server).delete(delete_server),
+        )
+        .route(
+            "/api/v1/servers/{server_id}/operations/connect",
+            post(connect_server),
         )
         .route("/api/v1/searches", get(searches).post(create_search))
         .route(
@@ -229,6 +237,18 @@ async fn servers(State(state): State<RestState>) -> impl IntoResponse {
     api_collection(state.core.servers().await)
 }
 
+async fn create_server(
+    State(state): State<RestState>,
+    Json(request): Json<ServerCreate>,
+) -> impl IntoResponse {
+    match state.core.add_server(request).await {
+        Ok(server) => api_ok(server).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
 async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.connect_ed2k().await {
         Ok(status) => api_ok(status).into_response(),
@@ -240,6 +260,62 @@ async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
 
 async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.disconnect_ed2k().await)
+}
+
+async fn server(
+    State(state): State<RestState>,
+    Path(server_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.server(&server_id).await {
+        Some(server) => api_ok(server).into_response(),
+        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response(),
+    }
+}
+
+async fn update_server(
+    State(state): State<RestState>,
+    Path(server_id): Path<String>,
+    Json(request): Json<ServerUpdate>,
+) -> impl IntoResponse {
+    match state.core.update_server(&server_id, request).await {
+        Ok(Some(server)) => api_ok(server).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn delete_server(
+    State(state): State<RestState>,
+    Path(server_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.remove_server(&server_id).await {
+        Ok(Some(server)) => api_ok(server).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn connect_server(
+    State(state): State<RestState>,
+    Path(server_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.connect_ed2k_server(&server_id).await {
+        Ok(Some(status)) => api_ok(status).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn searches(State(state): State<RestState>) -> impl IntoResponse {
@@ -811,6 +887,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn servers_use_canonical_crud_routes() {
+        let app = test_router();
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/servers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"address":"192.0.2.20","port":4661,"name":"local","priority":"low","static":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["endpoint"], "192.0.2.20:4661");
+        assert_eq!(value["data"]["priority"], "low");
+        assert_eq!(value["data"]["static"], true);
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/servers/192.0.2.20:4661")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"renamed","priority":"high"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update.status(), StatusCode::OK);
+        let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["name"], "renamed");
+        assert_eq!(value["data"]["priority"], "high");
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/servers/192.0.2.20:4661")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::OK);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/servers/192.0.2.20:4661")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
