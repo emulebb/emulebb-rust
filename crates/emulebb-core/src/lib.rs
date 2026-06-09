@@ -629,6 +629,17 @@ impl EmulebbCore {
         self.set_transfer_control_state(hash, "stopped").await
     }
 
+    pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        if !self.ed2k_transfers.delete_transfer_files(hash).await? {
+            return Ok(None);
+        }
+        self.state.lock().await.transfers.remove(hash);
+        Ok(Some(transfer))
+    }
+
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
         let mut state = self.state.lock().await;
         let transfer = state.transfers.get_mut(hash)?;
@@ -1466,6 +1477,39 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown field `ed2kLink`"));
+    }
+
+    #[tokio::test]
+    async fn delete_transfer_files_removes_manifest_and_transfer_row() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-delete-transfer-files");
+        let transfer_root = runtime_dir.join("transfers");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(
+                    "ed2k://|file|Delete.Me.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
+            })
+            .await
+            .unwrap();
+        let transfer_dir = transfer_root.join(&transfer.hash);
+        assert!(transfer_dir.is_dir());
+
+        let deleted = core
+            .delete_transfer_files(&transfer.hash)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(deleted.hash, transfer.hash);
+        assert!(!transfer_dir.exists());
+        assert!(core.transfer(&transfer.hash).await.is_none());
     }
 
     #[tokio::test]

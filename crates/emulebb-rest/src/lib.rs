@@ -3,17 +3,17 @@ use std::{collections::BTreeMap, sync::Arc};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use emulebb_core::{
     EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, Transfer,
     TransferCreate,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -49,6 +49,12 @@ struct SearchResultDownloadResult {
     hash: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConfirmQuery {
+    confirm: Option<bool>,
+}
+
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     let state = RestState {
         core,
@@ -80,6 +86,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route("/api/v1/transfers", get(transfers).post(create_transfer))
         .route("/api/v1/transfers/{hash}", get(transfer))
+        .route(
+            "/api/v1/transfers/{hash}/files",
+            delete(transfer_delete_files),
+        )
         .route("/api/v1/transfers/{hash}/details", get(transfer))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
         .route(
@@ -337,6 +347,32 @@ async fn transfer_stop(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.stop_transfer(&hash).await {
+        Ok(Some(transfer)) => {
+            api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
+        }
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn transfer_delete_files(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+    Query(query): Query<ConfirmQuery>,
+) -> impl IntoResponse {
+    if query.confirm != Some(true) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "transfer file deletion requires confirm=true",
+        )
+        .into_response();
+    }
+    match state.core.delete_transfer_files(&hash).await {
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
@@ -711,5 +747,75 @@ mod tests {
             value["data"]["items"][1]["hash"],
             "ffeeddccbbaa99887766554433221100"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_transfer_files_requires_confirm_and_removes_transfer() {
+        let app = test_router();
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"link":"ed2k://|file|Delete.Me.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let missing_confirm = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/files")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_confirm.status(), StatusCode::BAD_REQUEST);
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/files?confirm=true")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+        let body = to_bytes(delete_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"][0]["ok"], true);
+        assert_eq!(
+            value["data"]["items"][0]["hash"],
+            "00112233445566778899aabbccddeeff"
+        );
+
+        let read_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_after_delete.status(), StatusCode::NOT_FOUND);
     }
 }

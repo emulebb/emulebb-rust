@@ -197,6 +197,35 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
+    /// Delete one transfer's manifest, payload, and upload/catalog state.
+    pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
+        let parsed_hash: Ed2kHash = file_hash.parse()?;
+        let file_hash = parsed_hash.to_string();
+        let _guard = self.manifest_io.lock().await;
+        let transfer_dir = self.transfer_dir(&file_hash);
+        if !tokio::fs::try_exists(&transfer_dir).await? {
+            return Ok(false);
+        }
+        tokio::fs::remove_dir_all(&transfer_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete ED2K transfer directory {}",
+                    transfer_dir.display()
+                )
+            })?;
+        self.manifest_cache.lock().await.remove(&file_hash);
+        self.manifest_checkpoint_state
+            .lock()
+            .await
+            .remove(&file_hash);
+        self.shared_catalog
+            .write()
+            .await
+            .retain(|entry| entry.file_hash != file_hash);
+        Ok(true)
+    }
+
     /// Return local manifest-backed file metadata even when only part of the
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
