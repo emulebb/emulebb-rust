@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     NatManager,
@@ -141,12 +141,28 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferCreate {
-    pub ed2k_link: Option<String>,
-    pub hash: Option<String>,
-    pub name: Option<String>,
-    pub size_bytes: Option<u64>,
+    pub link: Option<String>,
+    #[serde(default)]
+    pub links: Option<Vec<String>>,
+    #[serde(default)]
+    pub category_id: Option<u32>,
+    #[serde(default)]
+    pub category_name: Option<String>,
+    #[serde(default)]
+    pub paused: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchResultDownloadCreate {
+    #[serde(default)]
+    pub category_id: Option<u32>,
+    #[serde(default)]
+    pub category_name: Option<String>,
+    #[serde(default)]
+    pub paused: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,7 +490,12 @@ impl EmulebbCore {
         &self,
         search_id: &str,
         hash: &str,
+        request: SearchResultDownloadCreate,
     ) -> Result<Option<Transfer>> {
+        ensure_category_selector_is_unambiguous(
+            request.category_id,
+            request.category_name.as_deref(),
+        )?;
         let result = {
             let state = self.state.lock().await;
             state
@@ -486,26 +507,51 @@ impl EmulebbCore {
         let Some(result) = result else {
             return Ok(None);
         };
-        self.upsert_transfer_from_parts(result.hash, result.name, result.size_bytes, "queued")
-            .await
-            .map(Some)
+        self.upsert_transfer_from_parts(
+            result.hash,
+            result.name,
+            result.size_bytes,
+            transfer_create_state_name(request.paused),
+        )
+        .await
+        .map(Some)
     }
 
     pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
-        if let Some(link) = request.ed2k_link {
+        ensure_category_selector_is_unambiguous(
+            request.category_id,
+            request.category_name.as_deref(),
+        )?;
+        let state_name = transfer_create_state_name(request.paused);
+        if let Some(link) = request.link {
+            ensure!(
+                request.links.is_none(),
+                "link and links are mutually exclusive"
+            );
+            ensure!(!link.trim().is_empty(), "link is required");
             let parsed = parse_ed2k_link(&link)?;
             return Ok(self
-                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, "queued")
+                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
                 .await?);
         }
-        let hash = request
-            .hash
-            .ok_or_else(|| anyhow::anyhow!("transfer hash or ed2kLink is required"))?;
-        let name = request.name.unwrap_or_else(|| hash.clone());
-        let size_bytes = request.size_bytes.unwrap_or(0);
-        Ok(self
-            .upsert_transfer_from_parts(hash, name, size_bytes, "queued")
-            .await?)
+        if let Some(mut links) = request.links {
+            ensure!(
+                links.len() == 1,
+                "emulebb-rust currently accepts one transfer link per request"
+            );
+            let link = links
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("links must contain at least one entry"))?;
+            ensure!(
+                !link.trim().is_empty(),
+                "links must not contain empty entries"
+            );
+            let parsed = parse_ed2k_link(&link)?;
+            return Ok(self
+                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
+                .await?);
+        }
+        Err(anyhow::anyhow!("link or links is required"))
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
@@ -660,7 +706,13 @@ impl EmulebbCore {
     ) -> Result<Transfer> {
         let file_hash = hash.parse()?;
         let job = new_transfer_job(file_hash, name, size_bytes);
-        let manifest = self.ed2k_transfers.ensure_job(&job).await?;
+        let mut manifest = self.ed2k_transfers.ensure_job(&job).await?;
+        if matches!(state_name, "paused" | "stopped") {
+            manifest = self
+                .ed2k_transfers
+                .set_control_state(&manifest.file_hash, Some(state_name))
+                .await?;
+        }
         let transfer = transfer_from_manifest(&manifest, state_name);
         self.state
             .lock()
@@ -1095,6 +1147,31 @@ fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
     }
 }
 
+fn transfer_create_state_name(paused: Option<bool>) -> &'static str {
+    if paused.unwrap_or(false) {
+        "paused"
+    } else {
+        "queued"
+    }
+}
+
+fn ensure_category_selector_is_unambiguous(
+    category_id: Option<u32>,
+    category_name: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        category_id.is_none() || category_name.is_none(),
+        "categoryId and categoryName are mutually exclusive"
+    );
+    ensure!(
+        category_name
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(true),
+        "categoryName must not be empty"
+    );
+    Ok(())
+}
+
 fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferSource> {
     manifest
         .sources
@@ -1325,7 +1402,11 @@ mod tests {
             .unwrap();
 
         let transfer = core
-            .download_search_result(&search.id, "00112233445566778899aabbccddeeff")
+            .download_search_result(
+                &search.id,
+                "00112233445566778899aabbccddeeff",
+                SearchResultDownloadCreate::default(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1333,16 +1414,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_transfer_uses_canonical_link_and_paused_state() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-paused-transfer-create");
+        let transfer_root = runtime_dir.join("transfers");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(
+                    "ed2k://|file|Paused.Create.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: Some(true),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(transfer.state, "paused");
+        let reloaded =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        assert_eq!(
+            reloaded
+                .transfer("00112233445566778899aabbccddeeff")
+                .await
+                .unwrap()
+                .state,
+            "paused"
+        );
+    }
+
+    #[test]
+    fn transfer_create_rejects_legacy_ed2k_link_field() {
+        let error = serde_json::from_str::<TransferCreate>(
+            r#"{"ed2kLink":"ed2k://|file|Legacy.bin|1|00112233445566778899aabbccddeeff|/"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `ed2kLink`"));
+    }
+
+    #[tokio::test]
     async fn stopped_transfer_cannot_be_resumed() {
         let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
         let transfer = core
             .create_transfer(TransferCreate {
-                ed2k_link: Some(
+                link: Some(
                     "ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
                 ),
-                hash: None,
-                name: None,
-                size_bytes: None,
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
             })
             .await
             .unwrap();
@@ -1372,13 +1498,14 @@ mod tests {
             EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
         let transfer = core
             .create_transfer(TransferCreate {
-                ed2k_link: Some(
+                link: Some(
                     "ed2k://|file|Stopped.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
                         .to_string(),
                 ),
-                hash: None,
-                name: None,
-                size_bytes: None,
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
             })
             .await
             .unwrap();

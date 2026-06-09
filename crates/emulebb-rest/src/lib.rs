@@ -2,15 +2,17 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use emulebb_core::{EmulebbCore, LocalShareCreate, SearchCreate, TransferCreate};
-use serde::Serialize;
+use emulebb_core::{
+    EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, TransferCreate,
+};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -197,8 +199,20 @@ async fn create_share(
 async fn download_search_result(
     State(state): State<RestState>,
     Path((search_id, hash)): Path<(String, String)>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    match state.core.download_search_result(&search_id, &hash).await {
+    let request = match optional_json_body::<SearchResultDownloadCreate>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string())
+                .into_response();
+        }
+    };
+    match state
+        .core
+        .download_search_result(&search_id, &hash, request)
+        .await
+    {
         Ok(Some(transfer)) => api_ok(transfer).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -344,6 +358,17 @@ fn api_error(
     )
 }
 
+fn optional_json_body<T>(body: &[u8]) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned + Default,
+{
+    if body.is_empty() {
+        Ok(T::default())
+    } else {
+        serde_json::from_slice(body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -464,6 +489,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_result_download_accepts_paused_request_body() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        core.index_file(IndexedFile {
+            ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Paused.Indexed.Result.iso".to_string(),
+            size_bytes: 42,
+            content_type: "iso".to_string(),
+            availability_score: 2,
+        })
+        .await
+        .unwrap();
+        let app = router(
+            core,
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/searches")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"paused indexed","method":"automatic","type":""}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let search_id = value["data"]["id"].as_str().unwrap();
+
+        let download_uri = format!(
+            "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(download_uri)
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"paused":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["state"], "paused");
+    }
+
+    #[tokio::test]
     async fn stopped_transfer_resume_returns_bad_request() {
         let app = test_router();
         let create_response = app
@@ -475,7 +560,7 @@ mod tests {
                     .header("X-API-Key", "secret")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
-                        r#"{"ed2kLink":"ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
+                        r#"{"link":"ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
                     ))
                     .unwrap(),
             )
