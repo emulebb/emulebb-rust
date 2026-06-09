@@ -129,6 +129,10 @@ pub struct Ed2kResumeManifest {
     /// User-facing transfer control state persisted across restarts.
     #[serde(default)]
     pub control_state: Option<String>,
+    /// Whether the completed transfer row was removed without deleting the
+    /// local payload or shared-file registration.
+    #[serde(default)]
+    pub transfer_row_removed: bool,
 }
 
 impl Ed2kResumeManifest {
@@ -157,6 +161,7 @@ impl Ed2kResumeManifest {
                 .collect(),
             sources: Vec::new(),
             control_state: None,
+            transfer_row_removed: false,
         }
     }
 

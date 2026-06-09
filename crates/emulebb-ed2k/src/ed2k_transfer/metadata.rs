@@ -197,6 +197,39 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
+    /// Restore a completed transfer row when the same link is explicitly added again.
+    pub async fn restore_transfer_row(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
+        let parsed_hash: Ed2kHash = file_hash.parse()?;
+        let file_hash = parsed_hash.to_string();
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        if manifest.transfer_row_removed {
+            manifest.transfer_row_removed = false;
+            self.store_manifest_unlocked(&manifest).await?;
+        }
+        Ok(manifest)
+    }
+
+    /// Remove only a completed transfer row while preserving local files.
+    pub async fn remove_completed_transfer_row(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<Ed2kResumeManifest>> {
+        let parsed_hash: Ed2kHash = file_hash.parse()?;
+        let file_hash = parsed_hash.to_string();
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
+        if !manifest.completed {
+            anyhow::bail!("only completed transfers can be removed without deleting files");
+        }
+        if manifest.transfer_row_removed {
+            return Ok(None);
+        }
+        manifest.transfer_row_removed = true;
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(Some(manifest))
+    }
+
     /// Delete one transfer's manifest, payload, and upload/catalog state.
     pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;

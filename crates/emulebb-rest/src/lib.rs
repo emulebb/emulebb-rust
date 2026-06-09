@@ -85,7 +85,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             post(download_search_result),
         )
         .route("/api/v1/transfers", get(transfers).post(create_transfer))
-        .route("/api/v1/transfers/{hash}", get(transfer))
+        .route(
+            "/api/v1/transfers/{hash}",
+            get(transfer).delete(transfer_delete),
+        )
         .route(
             "/api/v1/transfers/{hash}/files",
             delete(transfer_delete_files),
@@ -359,6 +362,23 @@ async fn transfer_stop(
     }
 }
 
+async fn transfer_delete(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.delete_completed_transfer_row(&hash).await {
+        Ok(Some(transfer)) => {
+            api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
+        }
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
 async fn transfer_delete_files(
     State(state): State<RestState>,
     Path(hash): Path<String>,
@@ -492,6 +512,20 @@ mod tests {
                 api_key: "secret".to_string(),
             },
         )
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "emulebb-rest-{name}-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create test dir");
+        path
     }
 
     #[tokio::test]
@@ -817,5 +851,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read_after_delete.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_completed_transfer_row_preserves_files() {
+        let runtime_dir = unique_test_dir("delete-completed-transfer-row");
+        let transfer_root = runtime_dir.join("transfers");
+        let payload_path = runtime_dir.join("Completed.Rest.Row.bin");
+        std::fs::write(&payload_path, b"completed rest row payload").unwrap();
+        let core = Arc::new(
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+        );
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: payload_path.display().to_string(),
+                name: Some("Completed.Rest.Row.bin".to_string()),
+            })
+            .await
+            .unwrap();
+        let app = router(
+            Arc::clone(&core),
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/transfers/{}", share.hash))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+        let body = to_bytes(delete_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"][0]["ok"], true);
+        assert_eq!(value["data"]["items"][0]["hash"], share.hash);
+        assert!(std::path::Path::new(&share.transfer_dir).is_dir());
+
+        let read_after_delete = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/transfers/{}", share.hash))
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_after_delete.status(), StatusCode::NOT_FOUND);
+        assert!(
+            core.shares()
+                .await
+                .iter()
+                .any(|entry| entry.hash == share.hash)
+        );
     }
 }

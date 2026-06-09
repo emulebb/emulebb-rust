@@ -640,6 +640,17 @@ impl EmulebbCore {
         Ok(Some(transfer))
     }
 
+    pub async fn delete_completed_transfer_row(&self, hash: &str) -> Result<Option<Transfer>> {
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        self.ed2k_transfers
+            .remove_completed_transfer_row(hash)
+            .await?;
+        self.state.lock().await.transfers.remove(hash);
+        Ok(Some(transfer))
+    }
+
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
         let mut state = self.state.lock().await;
         let transfer = state.transfers.get_mut(hash)?;
@@ -708,6 +719,12 @@ impl EmulebbCore {
         let file_hash = hash.parse()?;
         let job = new_transfer_job(file_hash, name, size_bytes);
         let mut manifest = self.ed2k_transfers.ensure_job(&job).await?;
+        if manifest.transfer_row_removed {
+            manifest = self
+                .ed2k_transfers
+                .restore_transfer_row(&manifest.file_hash)
+                .await?;
+        }
         if matches!(state_name, "paused" | "stopped") {
             manifest = self
                 .ed2k_transfers
@@ -727,6 +744,10 @@ impl EmulebbCore {
         let manifests = self.ed2k_transfers.manifests().await?;
         let mut state = self.state.lock().await;
         for manifest in manifests {
+            if manifest.transfer_row_removed {
+                state.transfers.remove(&manifest.file_hash);
+                continue;
+            }
             let state_name = state
                 .transfers
                 .get(&manifest.file_hash)
@@ -755,6 +776,14 @@ impl EmulebbCore {
 
     async fn refresh_transfer_from_manifest_default(&self, hash: &str) -> Result<Option<Transfer>> {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
+        if manifest.transfer_row_removed {
+            self.state
+                .lock()
+                .await
+                .transfers
+                .remove(&manifest.file_hash);
+            return Ok(None);
+        }
         let state_name = manifest_default_state_name(&manifest);
         let transfer = transfer_from_manifest(&manifest, state_name);
         self.state
@@ -1510,6 +1539,97 @@ mod tests {
         assert_eq!(deleted.hash, transfer.hash);
         assert!(!transfer_dir.exists());
         assert!(core.transfer(&transfer.hash).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-delete-completed-transfer-row");
+        let transfer_root = runtime_dir.join("transfers");
+        let payload_path = runtime_dir.join("Completed.Row.bin");
+        std::fs::write(&payload_path, b"completed row removal payload").unwrap();
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: payload_path.display().to_string(),
+                name: Some("Completed.Row.bin".to_string()),
+            })
+            .await
+            .unwrap();
+        let transfer_dir = std::path::Path::new(&share.transfer_dir);
+        assert!(transfer_dir.is_dir());
+        assert!(core.transfer(&share.hash).await.is_some());
+
+        let deleted = core
+            .delete_completed_transfer_row(&share.hash)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(deleted.hash, share.hash);
+        assert!(transfer_dir.is_dir());
+        assert!(core.transfer(&share.hash).await.is_none());
+        assert!(
+            core.shares()
+                .await
+                .iter()
+                .any(|entry| entry.hash == share.hash)
+        );
+
+        let reloaded =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        assert!(reloaded.transfer(&share.hash).await.is_none());
+        assert!(reloaded.transfers().await.is_empty());
+        assert!(
+            reloaded
+                .shares()
+                .await
+                .iter()
+                .any(|entry| entry.hash == share.hash)
+        );
+
+        let restored = reloaded
+            .create_transfer(TransferCreate {
+                link: Some(share.ed2k_link.clone()),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(restored.hash, share.hash);
+        assert!(reloaded.transfer(&share.hash).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_completed_transfer_row_rejects_incomplete_transfer() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(
+                    "ed2k://|file|Incomplete.Row.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
+            })
+            .await
+            .unwrap();
+
+        let error = core
+            .delete_completed_transfer_row(&transfer.hash)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only completed transfers can be removed without deleting files")
+        );
+        assert!(core.transfer(&transfer.hash).await.is_some());
     }
 
     #[tokio::test]
