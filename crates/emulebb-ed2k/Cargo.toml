@@ -7,15 +7,23 @@ description = "ED2K transfer runtime extracted for emulebb-rust"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
+emulebb-kad-dht = { path = "../emulebb-kad-dht" }
+flate2 = "1"
 hex = "0.4"
 md4 = "0.10"
+md5 = "0.7"
+num-bigint = "0.4"
+rand.workspace = true
+rsa = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 sha1 = { version = "0.10", features = ["oid"] }
+tokio-stream = "0.1"
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-

@@ -1,0 +1,489 @@
+use std::{
+    borrow::Cow,
+    fs,
+    io::Write,
+    net::SocketAddr,
+    sync::{
+        Mutex as StdMutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+use chrono::SecondsFormat;
+use serde::Serialize;
+
+use super::{
+    Ed2kTransportMode, EmuleTcpPacket, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS,
+    OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS,
+    OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER,
+    OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
+    OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES,
+    OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER,
+    OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS,
+    OP_FWCHECKUDPREQ, OP_HASHSETANSWER, OP_HASHSETANSWER2, OP_HASHSETREQUEST, OP_HASHSETREQUEST2,
+    OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE, OP_MULTIPACKET,
+    OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER, OP_MULTIPACKETANSWER_EXT2,
+    OP_OUTOFPARTREQS, OP_PACKEDPROT, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
+    OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
+    OP_REQFILENAMEANSWER, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
+    OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SENDINGPART,
+    OP_SENDINGPART_I64, OP_SETREQFILEID, OP_SIGNATURE, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
+    encode_packet,
+};
+
+#[derive(Debug, Serialize)]
+struct Ed2kTcpDumpRecord<'a> {
+    schema: &'static str,
+    source: &'static str,
+    ts_utc: String,
+    event_seq: u64,
+    trace_key: String,
+    state_id: String,
+    state_label: &'a str,
+    flow: &'static str,
+    phase: &'a str,
+    direction: &'a str,
+    remote_addr: String,
+    transport_mode: &'a str,
+    protocol: Option<&'static str>,
+    protocol_marker: Option<u8>,
+    opcode: Option<u8>,
+    opcode_name: Option<&'static str>,
+    raw_len: Option<usize>,
+    raw_hex: Option<String>,
+    payload_len: Option<usize>,
+    payload_hex: Option<String>,
+    note: Option<String>,
+}
+
+fn ed2k_tcp_dump_event_seq() -> u64 {
+    static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+    NEXT_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+fn ed2k_tcp_trace_key(flow: &'static str, remote_addr: SocketAddr) -> String {
+    format!("{flow}:{remote_addr}")
+}
+
+fn ed2k_tcp_state_id(flow: &'static str, phase: &str) -> String {
+    format!("{flow}.{phase}")
+}
+
+fn ed2k_tcp_dump_file() -> &'static StdMutex<Option<fs::File>> {
+    static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
+    DUMP_FILE.get_or_init(|| {
+        let file = std::env::var("EMULEBB_RUST_LOG_DIR")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .and_then(|dir| {
+                fs::create_dir_all(&dir).ok()?;
+                let path = dir.join(format!(
+                    "agent-ed2k-tcp-dump-{}.jsonl",
+                    chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
+                ));
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .ok()
+            });
+        StdMutex::new(file)
+    })
+}
+
+fn ed2k_protocol_name(protocol: u8) -> &'static str {
+    match protocol {
+        OP_EDONKEYPROT => "ed2k",
+        OP_EMULEPROT => "emule",
+        OP_PACKEDPROT => "packed",
+        _ => "unknown",
+    }
+}
+
+fn ed2k_opcode_name(protocol: u8, opcode: u8) -> &'static str {
+    match (protocol, opcode) {
+        (OP_EDONKEYPROT, OP_HELLO) => "OP_HELLO",
+        (OP_EDONKEYPROT, OP_HELLOANSWER) => "OP_HELLOANSWER",
+        (OP_EMULEPROT, OP_COMPRESSEDPART) => "OP_COMPRESSEDPART",
+        (OP_EDONKEYPROT, OP_SENDINGPART) => "OP_SENDINGPART",
+        (OP_EDONKEYPROT, OP_REQUESTPARTS) => "OP_REQUESTPARTS",
+        (OP_EDONKEYPROT, OP_FILEREQANSNOFIL) => "OP_FILEREQANSNOFIL",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => "OP_ASKSHAREDFILES",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => "OP_ASKSHAREDFILESANSWER",
+        (OP_EDONKEYPROT, OP_SETREQFILEID) => "OP_SETREQFILEID",
+        (OP_EDONKEYPROT, OP_FILESTATUS) => "OP_FILESTATUS",
+        (OP_EDONKEYPROT, OP_HASHSETREQUEST) => "OP_HASHSETREQUEST",
+        (OP_EDONKEYPROT, OP_HASHSETANSWER) => "OP_HASHSETANSWER",
+        (OP_EDONKEYPROT, OP_STARTUPLOADREQ) => "OP_STARTUPLOADREQ",
+        (OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ) => "OP_ACCEPTUPLOADREQ",
+        (OP_EDONKEYPROT, OP_CANCELTRANSFER) => "OP_CANCELTRANSFER",
+        (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => "OP_CHANGE_CLIENT_ID",
+        (OP_EDONKEYPROT, OP_CHANGE_SLOT) => "OP_CHANGE_SLOT",
+        (OP_EDONKEYPROT, OP_MESSAGE) => "OP_MESSAGE",
+        (OP_EDONKEYPROT, OP_END_OF_DOWNLOAD) => "OP_END_OF_DOWNLOAD",
+        (OP_EDONKEYPROT, OP_OUTOFPARTREQS) => "OP_OUTOFPARTREQS",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDIRS) => "OP_ASKSHAREDDIRS",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => "OP_ASKSHAREDFILESDIR",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => "OP_ASKSHAREDDIRSANS",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => "OP_ASKSHAREDFILESDIRANS",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => "OP_ASKSHAREDDENIEDANS",
+        (OP_EDONKEYPROT, OP_REQUESTFILENAME) => "OP_REQUESTFILENAME",
+        (OP_EDONKEYPROT, OP_REQFILENAMEANSWER) => "OP_REQFILENAMEANSWER",
+        (OP_EMULEPROT, OP_REQUESTSOURCES) => "OP_REQUESTSOURCES",
+        (OP_EMULEPROT, OP_ANSWERSOURCES) => "OP_ANSWERSOURCES",
+        (OP_EMULEPROT, OP_REQUESTSOURCES2) => "OP_REQUESTSOURCES2",
+        (OP_EMULEPROT, OP_ANSWERSOURCES2) => "OP_ANSWERSOURCES2",
+        (OP_EMULEPROT, OP_REQUESTPREVIEW) => "OP_REQUESTPREVIEW",
+        (OP_EMULEPROT, OP_PREVIEWANSWER) => "OP_PREVIEWANSWER",
+        (OP_EMULEPROT, OP_AICHREQUEST) => "OP_AICHREQUEST",
+        (OP_EMULEPROT, OP_AICHANSWER) => "OP_AICHANSWER",
+        (OP_EMULEPROT, OP_AICHFILEHASHANS) => "OP_AICHFILEHASHANS",
+        (OP_EMULEPROT, OP_AICHFILEHASHREQ) => "OP_AICHFILEHASHREQ",
+        (OP_EMULEPROT, OP_EMULEINFO) => "OP_EMULEINFO",
+        (OP_EMULEPROT, OP_EMULEINFOANSWER) => "OP_EMULEINFOANSWER",
+        (OP_EDONKEYPROT, OP_QUEUERANK) => "OP_QUEUERANK",
+        (OP_EMULEPROT, OP_QUEUERANKING) => "OP_QUEUERANKING",
+        (OP_EMULEPROT, OP_FILEDESC) => "OP_FILEDESC",
+        (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => "OP_COMPRESSEDPART_I64",
+        (OP_EMULEPROT, OP_SENDINGPART_I64) => "OP_SENDINGPART_I64",
+        (OP_EMULEPROT, OP_REQUESTPARTS_I64) => "OP_REQUESTPARTS_I64",
+        (OP_EMULEPROT, OP_CHATCAPTCHAREQ) => "OP_CHATCAPTCHAREQ",
+        (OP_EMULEPROT, OP_CHATCAPTCHARES) => "OP_CHATCAPTCHARES",
+        (OP_EMULEPROT, OP_HASHSETREQUEST2) => "OP_HASHSETREQUEST2",
+        (OP_EMULEPROT, OP_HASHSETANSWER2) => "OP_HASHSETANSWER2",
+        (OP_EMULEPROT, OP_MULTIPACKET) => "OP_MULTIPACKET",
+        (OP_EMULEPROT, OP_MULTIPACKET_EXT) => "OP_MULTIPACKET_EXT",
+        (OP_EMULEPROT, OP_MULTIPACKET_EXT2) => "OP_MULTIPACKET_EXT2",
+        (OP_EMULEPROT, OP_MULTIPACKETANSWER) => "OP_MULTIPACKETANSWER",
+        (OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2) => "OP_MULTIPACKETANSWER_EXT2",
+        (OP_EMULEPROT, OP_PUBLICKEY) => "OP_PUBLICKEY",
+        (OP_EMULEPROT, OP_SIGNATURE) => "OP_SIGNATURE",
+        (OP_EMULEPROT, OP_SECIDENTSTATE) => "OP_SECIDENTSTATE",
+        (OP_EMULEPROT, OP_PUBLICIP_REQ) => "OP_PUBLICIP_REQ",
+        (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => "OP_PUBLICIP_ANSWER",
+        (OP_EMULEPROT, OP_CALLBACK) => "OP_CALLBACK",
+        (OP_EMULEPROT, OP_REASKCALLBACKTCP) => "OP_REASKCALLBACKTCP",
+        (OP_EMULEPROT, OP_PORTTEST) | (OP_EDONKEYPROT, OP_PORTTEST) => "OP_PORTTEST",
+        (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => "OP_KAD_FWTCPCHECK_ACK",
+        (OP_EMULEPROT, OP_BUDDYPING) => "OP_BUDDYPING",
+        (OP_EMULEPROT, OP_BUDDYPONG) => "OP_BUDDYPONG",
+        (OP_EMULEPROT, OP_FWCHECKUDPREQ) => "OP_FWCHECKUDPREQ",
+        _ => "UNKNOWN",
+    }
+}
+
+fn oracle_ed2k_send_phase(flow: &'static str, protocol: u8, opcode: u8) -> Option<&'static str> {
+    let phase = match (protocol, opcode) {
+        (OP_EDONKEYPROT, OP_HELLO) => "hello_request",
+        (OP_EDONKEYPROT, OP_HELLOANSWER) => "hello_answer",
+        (OP_EDONKEYPROT, OP_REQFILENAMEANSWER) => "filename_answer",
+        (OP_EDONKEYPROT, OP_FILESTATUS) => "file_status",
+        (OP_EMULEPROT, OP_EMULEINFO) => "mule_info",
+        (OP_EMULEPROT, OP_EMULEINFOANSWER) => "mule_info_answer",
+        (OP_EMULEPROT, OP_PUBLICKEY) => "public_key",
+        (OP_EMULEPROT, OP_SIGNATURE) => "signature",
+        (OP_EMULEPROT, OP_SECIDENTSTATE) => "secure_ident_probe",
+        (OP_EMULEPROT, OP_PUBLICIP_REQ) => "public_ip_request",
+        (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => "public_ip_answer",
+        (OP_EMULEPROT, OP_PORTTEST) | (OP_EDONKEYPROT, OP_PORTTEST) => "port_test",
+        (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => "kad_firewall_tcp_ack",
+        (OP_EMULEPROT, OP_BUDDYPING) | (OP_EMULEPROT, OP_BUDDYPONG) => "kad_buddy_ping_pong",
+        (OP_EDONKEYPROT, OP_CHANGE_SLOT) => "change_slot",
+        (OP_EDONKEYPROT, OP_MESSAGE) => "client_message",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => "ask_shared_files",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => "shared_files_answer",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDIRS) => "ask_shared_dirs",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => "ask_shared_files_dir",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => "shared_dirs_answer",
+        (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => "shared_files_dir_answer",
+        (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => "shared_browse_denied",
+        (OP_EMULEPROT, OP_REQUESTPREVIEW) => "preview_request",
+        (OP_EMULEPROT, OP_PREVIEWANSWER) => "preview_answer",
+        (OP_EMULEPROT, OP_CALLBACK) => "kad_callback",
+        (OP_EMULEPROT, OP_REASKCALLBACKTCP) => "reask_callback_tcp",
+        (OP_EMULEPROT, OP_CHATCAPTCHAREQ) => "chat_captcha_request",
+        (OP_EMULEPROT, OP_CHATCAPTCHARES) => "chat_captcha_result",
+        (OP_EMULEPROT, OP_AICHREQUEST) => "aich_recovery_request",
+        (OP_EMULEPROT, OP_AICHANSWER) => "aich_recovery_answer",
+        (OP_EMULEPROT, OP_FWCHECKUDPREQ) => "fwcheck_request",
+        _ => match flow {
+            // The oracle emits generic per-session labels for ordinary listener and
+            // downloader traffic, and only uses dedicated phase names for a small
+            // parity-critical subset.
+            "listener" | "native_download" => "session",
+            "udp_firewall_check" => "hello_exchange",
+            _ => return None,
+        },
+    };
+    Some(phase)
+}
+
+fn oracle_ed2k_recv_phase(flow: &'static str, protocol: u8, opcode: u8) -> Option<&'static str> {
+    let phase = match (protocol, opcode) {
+        (OP_EMULEPROT, OP_FWCHECKUDPREQ) => "fwcheck_request",
+        _ => match flow {
+            "listener" | "native_download" => "session",
+            "udp_firewall_check" => "hello_exchange",
+            _ => return None,
+        },
+    };
+    Some(phase)
+}
+
+pub(super) fn canonical_ed2k_send_phase<'a>(
+    flow: &'static str,
+    fallback: &'a str,
+    protocol: Option<u8>,
+    opcode: Option<u8>,
+) -> Cow<'a, str> {
+    if let Some((protocol, opcode)) = protocol.zip(opcode)
+        && let Some(phase) = oracle_ed2k_send_phase(flow, protocol, opcode)
+    {
+        return Cow::Borrowed(phase);
+    }
+
+    Cow::Borrowed(fallback)
+}
+
+pub(super) fn canonical_ed2k_recv_phase<'a>(
+    flow: &'static str,
+    fallback: &'a str,
+    protocol: u8,
+    opcode: u8,
+) -> Cow<'a, str> {
+    if let Some(phase) = oracle_ed2k_recv_phase(flow, protocol, opcode) {
+        return Cow::Borrowed(phase);
+    }
+
+    Cow::Borrowed(fallback)
+}
+
+fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
+    let Ok(line) = serde_json::to_string(record) else {
+        return;
+    };
+    let Ok(mut guard) = ed2k_tcp_dump_file().lock() else {
+        return;
+    };
+    let Some(file) = guard.as_mut() else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+fn dump_ed2k_tcp_meta(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Option<Ed2kTransportMode>,
+    phase: &str,
+    note: impl Into<String>,
+) {
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_tcp_helper_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, phase),
+        state_label: phase,
+        flow,
+        phase,
+        direction: "meta",
+        remote_addr: remote_addr.to_string(),
+        transport_mode: transport_mode.map_or("unknown", Ed2kTransportMode::as_str),
+        protocol: None,
+        protocol_marker: None,
+        opcode: None,
+        opcode_name: None,
+        raw_len: None,
+        raw_hex: None,
+        payload_len: None,
+        payload_hex: None,
+        note: Some(note.into()),
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
+fn dump_ed2k_tcp_send(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    bytes: &[u8],
+) {
+    let protocol = bytes.first().copied();
+    let opcode = bytes.get(5).copied();
+    let payload = if bytes.len() > TCP_PACKET_HEADER_LEN {
+        Some(&bytes[TCP_PACKET_HEADER_LEN..])
+    } else {
+        None
+    };
+    let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_tcp_helper_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
+        state_label: canonical_phase.as_ref(),
+        flow,
+        phase: canonical_phase.as_ref(),
+        direction: "send",
+        remote_addr: remote_addr.to_string(),
+        transport_mode: transport_mode.as_str(),
+        protocol: protocol.map(ed2k_protocol_name),
+        protocol_marker: protocol,
+        opcode,
+        opcode_name: protocol.zip(opcode).map(|(p, o)| ed2k_opcode_name(p, o)),
+        raw_len: Some(bytes.len()),
+        raw_hex: Some(hex::encode(bytes)),
+        payload_len: payload.map(<[u8]>::len),
+        payload_hex: payload.map(hex::encode),
+        note: None,
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
+fn dump_ed2k_tcp_recv(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    packet: &EmuleTcpPacket,
+) {
+    let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
+    let record = Ed2kTcpDumpRecord {
+        schema: "ed2k_tcp_helper_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: ed2k_tcp_dump_event_seq(),
+        trace_key: ed2k_tcp_trace_key(flow, remote_addr),
+        state_id: ed2k_tcp_state_id(flow, canonical_phase.as_ref()),
+        state_label: canonical_phase.as_ref(),
+        flow,
+        phase: canonical_phase.as_ref(),
+        direction: "recv",
+        remote_addr: remote_addr.to_string(),
+        transport_mode: transport_mode.as_str(),
+        protocol: Some(ed2k_protocol_name(packet.protocol)),
+        protocol_marker: Some(packet.protocol),
+        opcode: Some(packet.opcode),
+        opcode_name: Some(ed2k_opcode_name(packet.protocol, packet.opcode)),
+        raw_len: Some(TCP_PACKET_HEADER_LEN + packet.payload.len()),
+        raw_hex: Some(hex::encode(encode_packet(
+            packet.protocol,
+            packet.opcode,
+            &packet.payload,
+        ))),
+        payload_len: Some(packet.payload.len()),
+        payload_hex: Some(hex::encode(&packet.payload)),
+        note: None,
+    };
+    dump_ed2k_tcp_record(&record);
+}
+
+pub(super) fn dump_ed2k_tcp_helper_meta(
+    remote_addr: SocketAddr,
+    transport_mode: Option<Ed2kTransportMode>,
+    phase: &str,
+    note: impl Into<String>,
+) {
+    dump_ed2k_tcp_meta(
+        "udp_firewall_check",
+        remote_addr,
+        transport_mode,
+        phase,
+        note,
+    );
+}
+
+pub(super) fn dump_ed2k_tcp_helper_send(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    bytes: &[u8],
+) {
+    dump_ed2k_tcp_send(
+        "udp_firewall_check",
+        remote_addr,
+        transport_mode,
+        phase,
+        bytes,
+    );
+}
+
+pub(super) fn dump_ed2k_tcp_helper_recv(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    packet: &EmuleTcpPacket,
+) {
+    dump_ed2k_tcp_recv(
+        "udp_firewall_check",
+        remote_addr,
+        transport_mode,
+        phase,
+        packet,
+    );
+}
+
+pub(super) fn dump_ed2k_tcp_listener_meta(
+    remote_addr: SocketAddr,
+    transport_mode: Option<Ed2kTransportMode>,
+    phase: &str,
+    note: impl Into<String>,
+) {
+    dump_ed2k_tcp_meta("listener", remote_addr, transport_mode, phase, note);
+}
+
+pub(super) fn dump_ed2k_tcp_listener_send(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    bytes: &[u8],
+) {
+    dump_ed2k_tcp_send("listener", remote_addr, transport_mode, phase, bytes);
+}
+
+pub(super) fn dump_ed2k_tcp_listener_recv(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    packet: &EmuleTcpPacket,
+) {
+    dump_ed2k_tcp_recv("listener", remote_addr, transport_mode, phase, packet);
+}
+
+pub(crate) fn dump_ed2k_tcp_download_meta(
+    remote_addr: SocketAddr,
+    transport_mode: Option<Ed2kTransportMode>,
+    phase: &str,
+    note: impl Into<String>,
+) {
+    dump_ed2k_tcp_meta("native_download", remote_addr, transport_mode, phase, note);
+}
+
+pub(super) fn dump_ed2k_tcp_download_send(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    bytes: &[u8],
+) {
+    dump_ed2k_tcp_send("native_download", remote_addr, transport_mode, phase, bytes);
+}
+
+pub(super) fn dump_ed2k_tcp_download_recv(
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    packet: &EmuleTcpPacket,
+) {
+    dump_ed2k_tcp_recv(
+        "native_download",
+        remote_addr,
+        transport_mode,
+        phase,
+        packet,
+    );
+}

@@ -1,0 +1,82 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use anyhow::{Context, Result};
+use tokio::net::UdpSocket;
+
+use emulebb_kad_proto::Ed2kHash;
+
+use super::{
+    OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry, ServerUdpPacket,
+    decode_server_udp_datagram, encode_server_udp_datagram, encode_udp_search_request,
+    encode_udp_source_request,
+};
+
+pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
+    UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+        .await
+        .with_context(|| format!("failed to bind ED2K server UDP helper on {bind_ip}:0"))
+}
+
+async fn send_server_udp_packet(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+    opcode: u8,
+    payload: &[u8],
+) -> Result<()> {
+    let (endpoint, packet) = encode_server_udp_datagram(server, opcode, payload);
+    socket.send_to(&packet, endpoint).await.with_context(|| {
+        format!(
+            "failed to send ED2K server UDP opcode=0x{opcode:02X} to {}",
+            endpoint
+        )
+    })?;
+    Ok(())
+}
+
+pub(super) async fn send_server_udp_status_request(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+) -> Result<()> {
+    send_server_udp_packet(socket, server, OP_GLOBSERVSTATREQ, &[]).await
+}
+
+pub(super) async fn send_udp_keyword_search(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+    search_payload: &[u8],
+) -> Result<()> {
+    let (opcode, payload) = encode_udp_search_request(server, search_payload);
+    send_server_udp_packet(socket, server, opcode, &payload).await
+}
+
+pub(super) async fn send_udp_source_search(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+    file_hash: Ed2kHash,
+    file_size: u64,
+) -> Result<()> {
+    let (opcode, payload) = encode_udp_source_request(server, file_hash, file_size);
+    send_server_udp_packet(socket, server, opcode, &payload).await
+}
+
+pub(super) async fn read_server_udp_packet(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+) -> Result<Option<ServerUdpPacket>> {
+    let mut buffer = vec![0u8; 65_535];
+    let (len, from) = socket
+        .recv_from(&mut buffer)
+        .await
+        .context("failed to receive ED2K server UDP datagram")?;
+    let Some(packet) = decode_server_udp_datagram(server, &buffer[..len]) else {
+        return Ok(None);
+    };
+    if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {
+        return Ok(None);
+    }
+    Ok(Some(ServerUdpPacket {
+        opcode: packet[1],
+        payload: packet[2..].to_vec(),
+        from,
+    }))
+}

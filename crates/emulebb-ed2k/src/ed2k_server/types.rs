@@ -1,0 +1,137 @@
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
+
+use tokio::sync::{Mutex, RwLock};
+
+use crate::NatManager;
+use emulebb_kad_proto::Ed2kHash;
+
+use crate::{
+    config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedCatalog,
+    kad_firewall::KadFirewallState,
+};
+
+use super::{Ed2kServerSearchInbox, is_low_id};
+/// Live ED2K server session view used by the agent to decide whether TCP is
+/// still effectively firewalled from the network's point of view.
+#[derive(Debug, Clone, Default)]
+pub struct Ed2kServerState {
+    /// Currently connected server endpoint, if any.
+    pub endpoint: Option<SocketAddr>,
+    /// Server-assigned client ID from `OP_IDCHANGE`.
+    pub client_id: Option<u32>,
+    /// Last reported TCP capability flags from the server.
+    pub server_flags: Option<u32>,
+    /// Last reported server user count.
+    pub server_users: Option<u32>,
+    /// Last reported server file count.
+    pub server_files: Option<u32>,
+    /// Last advertised server name, when known.
+    pub server_name: Option<String>,
+    /// Last advertised server description, when known.
+    pub server_description: Option<String>,
+    /// Whether the current session is established.
+    pub connected: bool,
+}
+
+impl Ed2kServerState {
+    /// Returns whether the oracle-style HighID/LowID result says TCP is firewalled.
+    #[must_use]
+    pub fn tcp_firewalled(&self) -> Option<bool> {
+        self.client_id.map(is_low_id)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ServerSessionContext {
+    pub(super) bind_ip: Ipv4Addr,
+    pub(super) nat: Arc<NatManager>,
+    pub(super) hello_identity: Ed2kHelloIdentity,
+    pub(super) probe_search_term: Option<String>,
+    pub(super) shared_catalog: Ed2kSharedCatalog,
+    pub(super) state: Arc<RwLock<Ed2kServerState>>,
+    pub(super) kad_firewall: Arc<Mutex<KadFirewallState>>,
+    pub(super) keepalive_interval: Duration,
+    pub(super) connect_timeout: Duration,
+    pub(super) rotation_interval: Option<Duration>,
+    pub(super) shutdown: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CallbackRequest {
+    pub(super) peer_addr: SocketAddr,
+    pub(super) connect_options: Option<u8>,
+    pub(super) user_hash: Option<[u8; 16]>,
+}
+
+#[derive(Debug)]
+pub(super) struct ServerUdpPacket {
+    pub(super) opcode: u8,
+    pub(super) payload: Vec<u8>,
+    pub(super) from: SocketAddr,
+}
+
+/// One decoded ED2K server search result entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kSearchFile {
+    /// File hash reported by the ED2K server.
+    pub file_hash: Ed2kHash,
+    /// File name tag, when present.
+    pub file_name: Option<String>,
+    /// File size tag, when present.
+    pub file_size: Option<u64>,
+    /// ED2K file-type tag, when present.
+    pub file_type: Option<String>,
+    /// Server-reported source availability, when present.
+    pub source_count: Option<u32>,
+}
+
+/// One decoded ED2K server source-search entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kFoundSource {
+    /// File hash referenced by the source reply.
+    pub file_hash: Ed2kHash,
+    /// Source IPv4 address reported by the ED2K server when the source is a
+    /// direct-dial HighID peer. For LowID peers this is the server-reported
+    /// client-id rendered as IPv4, which is not directly dialable.
+    pub ip: Ipv4Addr,
+    /// Source TCP port reported by the ED2K server.
+    pub tcp_port: u16,
+    /// Raw client-id token reported by the ED2K server.
+    pub client_id: u32,
+    /// Whether the server source entry refers to a LowID peer that requires a
+    /// callback path instead of direct TCP dialing.
+    pub low_id: bool,
+    /// Whether the server used the obfuscated `OP_FOUNDSOURCES_OBFU` family.
+    pub obfuscated: bool,
+    /// Optional per-source obfuscation settings byte from the oracle wire shape.
+    pub obfuscation_options: Option<u8>,
+    /// Optional user hash present when the source advertises it in the obfuscated shape.
+    pub user_hash: Option<[u8; 16]>,
+    /// ED2K server endpoint that reported this source, when known.
+    pub source_server: Option<SocketAddr>,
+}
+
+impl Ed2kFoundSource {
+    /// Returns `true` when this source can be dialed directly over TCP.
+    #[must_use]
+    pub fn is_direct_dialable(&self) -> bool {
+        !self.low_id
+    }
+}
+
+/// Inputs for the long-lived ED2K server session loop.
+pub struct Ed2kServerLoopOptions {
+    pub bind_ip: Ipv4Addr,
+    pub nat: Arc<NatManager>,
+    pub config: Ed2kConfig,
+    pub hello_identity: Ed2kHelloIdentity,
+    pub shared_catalog: Ed2kSharedCatalog,
+    pub state: Arc<RwLock<Ed2kServerState>>,
+    pub search_inbox: Ed2kServerSearchInbox,
+    pub kad_firewall: Arc<Mutex<KadFirewallState>>,
+    pub shutdown: Arc<AtomicBool>,
+}

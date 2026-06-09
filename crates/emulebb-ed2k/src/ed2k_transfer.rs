@@ -38,6 +38,7 @@ mod upload_queue;
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
+pub(crate) use hashset::decode_aich_hash_hex;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
 use manifest::{Ed2kManifestCheckpointState, load_catalog_from_manifests};
