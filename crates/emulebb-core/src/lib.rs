@@ -585,7 +585,15 @@ impl EmulebbCore {
         Ok(Some(transfer_sources_from_manifest(&manifest)))
     }
 
-    pub async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
+    pub async fn pause_transfer(&self, hash: &str) -> Option<Transfer> {
+        self.set_transfer_state(hash, "paused").await
+    }
+
+    pub async fn stop_transfer(&self, hash: &str) -> Option<Transfer> {
+        self.set_transfer_state(hash, "stopped").await
+    }
+
+    async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
         let mut state = self.state.lock().await;
         let transfer = state.transfers.get_mut(hash)?;
         transfer.state = state_name.to_string();
@@ -593,6 +601,16 @@ impl EmulebbCore {
     }
 
     pub async fn resume_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        let Some(current) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        if current.state == "completed" {
+            return Ok(Some(current));
+        }
+        anyhow::ensure!(
+            current.state != "stopped",
+            "stopped transfer cannot be resumed"
+        );
         let Some(mut transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
         };
@@ -1288,6 +1306,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(transfer.state, "queued");
+    }
+
+    #[tokio::test]
+    async fn stopped_transfer_cannot_be_resumed() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                ed2k_link: Some(
+                    "ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
+                ),
+                hash: None,
+                name: None,
+                size_bytes: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            core.stop_transfer(&transfer.hash).await.unwrap().state,
+            "stopped"
+        );
+
+        let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("stopped transfer cannot be resumed")
+        );
     }
 
     #[tokio::test]

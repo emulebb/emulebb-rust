@@ -254,7 +254,10 @@ async fn transfer_pause(
     State(state): State<RestState>,
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
-    transfer_state(state, hash, "paused").await
+    match state.core.pause_transfer(&hash).await {
+        Some(transfer) => api_ok(transfer).into_response(),
+        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+    }
 }
 
 async fn transfer_resume(
@@ -276,11 +279,7 @@ async fn transfer_stop(
     State(state): State<RestState>,
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
-    transfer_state(state, hash, "stopped").await
-}
-
-async fn transfer_state(state: RestState, hash: String, next_state: &str) -> Response {
-    match state.core.set_transfer_state(&hash, next_state).await {
+    match state.core.stop_transfer(&hash).await {
         Some(transfer) => api_ok(transfer).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
     }
@@ -452,5 +451,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn stopped_transfer_resume_returns_bad_request() {
+        let app = test_router();
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"ed2kLink":"ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let stop_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/operations/stop")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stop_response.status(), StatusCode::OK);
+
+        let resume_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/operations/resume")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resume_response.status(), StatusCode::BAD_REQUEST);
     }
 }
