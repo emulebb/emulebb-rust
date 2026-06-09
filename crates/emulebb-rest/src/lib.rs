@@ -10,8 +10,9 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    EmulebbCore, LocalShare, LocalShareCreate, SearchCreate, SearchResultDownloadCreate,
-    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate,
+    CategoryCreate, CategoryUpdate, EmulebbCore, LocalShare, LocalShareCreate, SearchCreate,
+    SearchResultDownloadCreate, ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer,
+    TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -131,6 +132,11 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         .route("/api/v1/status", get(status))
         .route("/api/v1/stats", get(status))
         .route("/api/v1/snapshot", get(snapshot))
+        .route("/api/v1/categories", get(categories).post(create_category))
+        .route(
+            "/api/v1/categories/{category_id}",
+            get(category).patch(update_category).delete(delete_category),
+        )
         .route("/api/v1/kad", get(kad))
         .route("/api/v1/kad/operations/start", post(kad_start))
         .route("/api/v1/kad/operations/stop", post(kad_stop))
@@ -303,6 +309,63 @@ async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
 async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(false).await;
     api_ok(state.core.status().await.kad)
+}
+
+async fn categories(State(state): State<RestState>) -> impl IntoResponse {
+    api_collection(state.core.categories().await)
+}
+
+async fn create_category(
+    State(state): State<RestState>,
+    Json(request): Json<CategoryCreate>,
+) -> impl IntoResponse {
+    match state.core.create_category(request).await {
+        Ok(category) => api_ok(category).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn category(
+    State(state): State<RestState>,
+    Path(category_id): Path<u32>,
+) -> impl IntoResponse {
+    match state.core.category(category_id).await {
+        Some(category) => api_ok(category).into_response(),
+        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "category not found").into_response(),
+    }
+}
+
+async fn update_category(
+    State(state): State<RestState>,
+    Path(category_id): Path<u32>,
+    Json(request): Json<CategoryUpdate>,
+) -> impl IntoResponse {
+    match state.core.update_category(category_id, request).await {
+        Ok(Some(category)) => api_ok(category).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "category not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn delete_category(
+    State(state): State<RestState>,
+    Path(category_id): Path<u32>,
+) -> impl IntoResponse {
+    match state.core.delete_category(category_id).await {
+        Ok(Some(_category)) => api_ok(json!({ "ok": true })).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "category not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn servers(State(state): State<RestState>) -> impl IntoResponse {
@@ -1200,6 +1263,115 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/servers/192.0.2.20:4661")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn categories_use_canonical_crud_routes() {
+        let runtime_dir = unique_test_dir("categories");
+        let app = test_router();
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/categories")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"][0]["id"], 0);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/categories")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"name":" Media ","path":"{}","comment":"queue","color":65280,"priority":"high"}}"#,
+                        runtime_dir.display().to_string().replace('\\', "\\\\")
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["id"], 1);
+        assert_eq!(value["data"]["name"], "Media");
+        assert_eq!(value["data"]["priority"], 2);
+        assert_eq!(value["data"]["color"], 65280);
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/categories/1")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Archive","path":null,"color":null,"priority":"verylow"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update.status(), StatusCode::OK);
+        let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["name"], "Archive");
+        assert_eq!(value["data"]["path"], Value::Null);
+        assert_eq!(value["data"]["color"], Value::Null);
+        assert_eq!(value["data"]["priority"], 4);
+
+        let protected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/categories/0")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(protected.status(), StatusCode::BAD_REQUEST);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/categories/1")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::OK);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/categories/1")
                     .header("X-API-Key", "secret")
                     .body(Body::empty())
                     .unwrap(),

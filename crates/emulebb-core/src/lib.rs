@@ -212,6 +212,71 @@ pub struct SearchResultDownloadCreate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Category {
+    pub id: u32,
+    pub name: String,
+    pub path: Option<String>,
+    pub comment: String,
+    pub priority: u32,
+    pub color: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CategoryCreate {
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    pub path: NullableStringField,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_u32_field")]
+    pub color: NullableU32Field,
+    #[serde(default)]
+    pub priority: Option<CategoryPriorityValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CategoryUpdate {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    pub path: NullableStringField,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_u32_field")]
+    pub color: NullableU32Field,
+    #[serde(default)]
+    pub priority: Option<CategoryPriorityValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NullableStringField {
+    #[default]
+    Missing,
+    Null(()),
+    Value(String),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NullableU32Field {
+    #[default]
+    Missing,
+    Null(()),
+    Value(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CategoryPriorityValue {
+    Number(u32),
+    Name(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalShareCreate {
     pub path: String,
     pub name: Option<String>,
@@ -342,6 +407,8 @@ pub struct Ed2kNetworkConfig {
 struct CoreState {
     searches: HashMap<String, Search>,
     transfers: HashMap<String, Transfer>,
+    categories: BTreeMap<u32, Category>,
+    next_category_id: u32,
     servers: HashMap<String, ServerInfo>,
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
@@ -394,6 +461,8 @@ impl EmulebbCore {
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
+                categories: default_categories(),
+                next_category_id: 1,
                 servers: HashMap::new(),
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
@@ -712,6 +781,62 @@ impl EmulebbCore {
 
     pub async fn delete_search(&self, search_id: &str) -> bool {
         self.state.lock().await.searches.remove(search_id).is_some()
+    }
+
+    pub async fn categories(&self) -> Vec<Category> {
+        self.state
+            .lock()
+            .await
+            .categories
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn category(&self, category_id: u32) -> Option<Category> {
+        self.state
+            .lock()
+            .await
+            .categories
+            .get(&category_id)
+            .cloned()
+    }
+
+    pub async fn create_category(&self, request: CategoryCreate) -> Result<Category> {
+        let mut category = Category {
+            id: 0,
+            name: String::new(),
+            path: None,
+            comment: String::new(),
+            priority: PR_NORMAL,
+            color: None,
+        };
+        apply_category_create(&mut category, request)?;
+        let mut state = self.state.lock().await;
+        let category_id = state.next_category_id;
+        state.next_category_id = state.next_category_id.saturating_add(1).max(1);
+        category.id = category_id;
+        state.categories.insert(category_id, category.clone());
+        Ok(category)
+    }
+
+    pub async fn update_category(
+        &self,
+        category_id: u32,
+        request: CategoryUpdate,
+    ) -> Result<Option<Category>> {
+        ensure!(category_id != 0, "default category cannot be updated");
+        let mut state = self.state.lock().await;
+        let Some(category) = state.categories.get_mut(&category_id) else {
+            return Ok(None);
+        };
+        apply_category_update(category, request)?;
+        Ok(Some(category.clone()))
+    }
+
+    pub async fn delete_category(&self, category_id: u32) -> Result<Option<Category>> {
+        ensure!(category_id != 0, "default category cannot be deleted");
+        Ok(self.state.lock().await.categories.remove(&category_id))
     }
 
     pub async fn download_search_result(
@@ -1953,6 +2078,139 @@ fn local_share_from_summary(
         part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
+    }
+}
+
+const PR_LOW: u32 = 0;
+const PR_NORMAL: u32 = 1;
+const PR_HIGH: u32 = 2;
+const PR_VERYHIGH: u32 = 3;
+const PR_VERYLOW: u32 = 4;
+
+fn default_categories() -> BTreeMap<u32, Category> {
+    BTreeMap::from([(
+        0,
+        Category {
+            id: 0,
+            name: "All".to_string(),
+            path: None,
+            comment: String::new(),
+            priority: PR_NORMAL,
+            color: None,
+        },
+    )])
+}
+
+fn apply_category_create(category: &mut Category, request: CategoryCreate) -> Result<()> {
+    category.name = normalize_category_name(Some(request.name))?;
+    apply_category_path(category, request.path)?;
+    if let Some(comment) = request.comment {
+        category.comment = comment;
+    }
+    apply_category_color(category, request.color)?;
+    if let Some(priority) = request.priority {
+        category.priority = parse_category_priority(priority)?;
+    }
+    Ok(())
+}
+
+fn deserialize_nullable_string_field<'de, D>(
+    deserializer: D,
+) -> std::result::Result<NullableStringField, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Ok(NullableStringField::Null(())),
+        serde_json::Value::String(value) => Ok(NullableStringField::Value(value)),
+        _ => Err(serde::de::Error::custom("path must be a string or null")),
+    }
+}
+
+fn deserialize_nullable_u32_field<'de, D>(
+    deserializer: D,
+) -> std::result::Result<NullableU32Field, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Ok(NullableU32Field::Null(())),
+        serde_json::Value::Number(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(NullableU32Field::Value)
+            .ok_or_else(|| serde::de::Error::custom("color must be null or an RGB integer")),
+        _ => Err(serde::de::Error::custom(
+            "color must be null or an RGB integer",
+        )),
+    }
+}
+
+fn apply_category_update(category: &mut Category, request: CategoryUpdate) -> Result<()> {
+    if request.name.is_some() {
+        category.name = normalize_category_name(request.name)?;
+    }
+    apply_category_path(category, request.path)?;
+    if let Some(comment) = request.comment {
+        category.comment = comment;
+    }
+    apply_category_color(category, request.color)?;
+    if let Some(priority) = request.priority {
+        category.priority = parse_category_priority(priority)?;
+    }
+    Ok(())
+}
+
+fn normalize_category_name(name: Option<String>) -> Result<String> {
+    let name = name
+        .ok_or_else(|| anyhow::anyhow!("name must be a non-empty string"))?
+        .trim()
+        .to_string();
+    ensure!(!name.is_empty(), "name must not be empty");
+    Ok(name)
+}
+
+fn apply_category_path(category: &mut Category, path: NullableStringField) -> Result<()> {
+    category.path = match path {
+        NullableStringField::Missing => return Ok(()),
+        NullableStringField::Value(path) => {
+            let path = path.trim();
+            ensure!(!path.is_empty(), "path must not be empty");
+            let canonical =
+                fs::canonicalize(path).with_context(|| format!("failed to resolve {path}"))?;
+            ensure!(canonical.is_dir(), "path is not a directory");
+            Some(canonical.display().to_string())
+        }
+        NullableStringField::Null(()) => None,
+    };
+    Ok(())
+}
+
+fn apply_category_color(category: &mut Category, color: NullableU32Field) -> Result<()> {
+    match color {
+        NullableU32Field::Missing => {}
+        NullableU32Field::Value(color) => {
+            ensure!(color <= 0x00ff_ffff, "color must be null or an RGB integer");
+            category.color = Some(color);
+        }
+        NullableU32Field::Null(()) => {
+            category.color = None;
+        }
+    }
+    Ok(())
+}
+
+fn parse_category_priority(priority: CategoryPriorityValue) -> Result<u32> {
+    match priority {
+        CategoryPriorityValue::Number(value) => Ok(value),
+        CategoryPriorityValue::Name(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "verylow" => Ok(PR_VERYLOW),
+            "low" => Ok(PR_LOW),
+            "normal" => Ok(PR_NORMAL),
+            "high" => Ok(PR_HIGH),
+            "veryhigh" => Ok(PR_VERYHIGH),
+            _ => anyhow::bail!("priority must be one of verylow, low, normal, high, veryhigh"),
+        },
     }
 }
 
