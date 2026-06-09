@@ -229,6 +229,7 @@ async fn search_keyword_on_server(
                 send_connected_server_startup(
                     &mut session,
                     &active_catalog,
+                    bind_ip,
                     hello_identity.tcp_port,
                 )
                 .await?;

@@ -152,6 +152,7 @@ pub(super) async fn run_one_server_session(
                             server_udp_socket.as_ref(),
                             context.hello_identity.connect_options,
                             &context.shared_catalog,
+                            context.bind_ip,
                             context.hello_identity.tcp_port,
                             request,
                         )
@@ -332,6 +333,7 @@ pub(super) async fn run_one_server_session(
                         server_udp_socket.as_ref(),
                         context.hello_identity.connect_options,
                         &context.shared_catalog,
+                        context.bind_ip,
                         context.hello_identity.tcp_port,
                         request,
                     )
@@ -372,6 +374,7 @@ pub(super) async fn run_one_server_session(
                     send_offer_files_advertisement(
                         &mut session,
                         &context.shared_catalog,
+                        context.bind_ip,
                         context.hello_identity.tcp_port,
                     )
                     .await?;

@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -334,6 +334,7 @@ pub(super) async fn start_background_server_search(
     server_udp_socket: Option<&UdpSocket>,
     connect_options: u8,
     shared_catalog: &Ed2kSharedCatalog,
+    bind_ip: Ipv4Addr,
     tcp_port: u16,
     request: BackgroundServerSearchRequest,
 ) -> Result<Option<PendingBackgroundServerSearch>> {
@@ -431,7 +432,7 @@ pub(super) async fn start_background_server_search(
             Ok(None)
         }
         BackgroundServerSearchRequest::Publish { response } => {
-            send_offer_files_advertisement(session, shared_catalog, tcp_port).await?;
+            send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
             let _ = response.send(Ok(()));
             Ok(None)
         }

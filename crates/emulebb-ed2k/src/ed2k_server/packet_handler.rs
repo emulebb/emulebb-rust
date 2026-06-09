@@ -62,6 +62,7 @@ pub(super) async fn handle_server_packet(
             send_connected_server_startup(
                 session,
                 &context.shared_catalog,
+                context.bind_ip,
                 context.hello_identity.tcp_port,
             )
             .await?;

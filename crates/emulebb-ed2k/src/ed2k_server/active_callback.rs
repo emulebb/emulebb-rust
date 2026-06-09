@@ -99,6 +99,7 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                 send_connected_server_startup(
                     &mut session,
                     &Arc::new(RwLock::new(shared_catalog.to_vec())),
+                    bind_ip,
                     hello_identity.tcp_port,
                 )
                 .await?;

@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    net::Ipv4Addr,
     time::Instant,
 };
 
@@ -62,11 +63,12 @@ pub(super) fn login_identity_for_server_transport(
 pub(super) fn encode_offer_files_payload(
     shared_catalog: &[Ed2kSharedEntry],
     client_id: Option<u32>,
+    bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
 ) -> Vec<u8> {
     let (advertised_client_id, advertised_client_port) =
-        advertised_client_endpoint_for_offer_file(client_id, tcp_port, server_flags);
+        advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
     let offered_files = offered_files_catalog(shared_catalog);
     let mut payload = Vec::with_capacity(80 * offered_files.len());
     payload.extend_from_slice(
@@ -94,6 +96,7 @@ pub(super) fn encode_offer_files_payload(
 
 fn advertised_client_endpoint_for_offer_file(
     client_id: Option<u32>,
+    bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
 ) -> (u32, u16) {
@@ -103,8 +106,9 @@ fn advertised_client_endpoint_for_offer_file(
             OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
         );
     }
+    let bind_client_id = u32::from_le_bytes(bind_ip.octets());
     match client_id {
-        Some(client_id) if !is_low_id(client_id) => (client_id, tcp_port),
+        Some(client_id) if !is_low_id(client_id) => (bind_client_id, tcp_port),
         _ => (0, 0),
     }
 }
@@ -254,6 +258,7 @@ fn emule_version_tag() -> u32 {
 pub(super) async fn send_offer_files_advertisement(
     session: &mut ServerSession,
     shared_catalog: &Ed2kSharedCatalog,
+    bind_ip: Ipv4Addr,
     tcp_port: u16,
 ) -> Result<()> {
     let shared_catalog = shared_catalog.read().await.clone();
@@ -266,6 +271,7 @@ pub(super) async fn send_offer_files_advertisement(
     let payload = encode_offer_files_payload(
         &shared_catalog,
         session.assigned_client_id,
+        bind_ip,
         tcp_port,
         session.server_flags,
     );
@@ -293,13 +299,14 @@ pub(super) async fn send_offer_files_advertisement(
 pub(super) async fn send_connected_server_startup(
     session: &mut ServerSession,
     shared_catalog: &Ed2kSharedCatalog,
+    bind_ip: Ipv4Addr,
     tcp_port: u16,
 ) -> Result<()> {
     session.set_phase(
         ServerSessionPhase::Connected,
         "server session accepted after OP_IDCHANGE",
     );
-    send_offer_files_advertisement(session, shared_catalog, tcp_port).await?;
+    send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
     send_server_list_request(session).await?;
     Ok(())
 }
@@ -321,5 +328,71 @@ pub(super) async fn wait_for_offer_files_settle(session: &ServerSession) {
     let elapsed = sent_at.elapsed();
     if elapsed < OFFER_FILE_SEARCH_SETTLE_DELAY {
         tokio::time::sleep(OFFER_FILE_SEARCH_SETTLE_DELAY - elapsed).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use crate::ed2k_transfer::Ed2kSharedEntry;
+
+    use super::*;
+
+    fn one_entry() -> Ed2kSharedEntry {
+        Ed2kSharedEntry {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            canonical_name: "lan-bind-source.bin".to_string(),
+            file_size: 1234,
+            verified_complete: true,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+        }
+    }
+
+    #[test]
+    fn offer_files_uses_bind_ip_for_dialable_same_host_lan_sources() {
+        let bind_ip = Ipv4Addr::new(192, 168, 1, 210);
+        let synthetic_duplicate_high_id = u32::from_le_bytes([1, 0, 0, 1]);
+        let payload = encode_offer_files_payload(
+            &[one_entry()],
+            Some(synthetic_duplicate_high_id),
+            bind_ip,
+            4662,
+            None,
+        );
+
+        assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(payload[20..24].try_into().unwrap()),
+            u32::from_le_bytes(bind_ip.octets())
+        );
+        assert_eq!(
+            u16::from_le_bytes(payload[24..26].try_into().unwrap()),
+            4662
+        );
+    }
+
+    #[test]
+    fn offer_files_preserves_complete_sentinel_for_compression_servers() {
+        let bind_ip = Ipv4Addr::new(192, 168, 1, 210);
+        let payload = encode_offer_files_payload(
+            &[one_entry()],
+            Some(u32::from_le_bytes([192, 168, 1, 210])),
+            bind_ip,
+            4662,
+            Some(SERVER_TCP_FLAG_COMPRESSION),
+        );
+
+        assert_eq!(
+            u32::from_le_bytes(payload[20..24].try_into().unwrap()),
+            OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID
+        );
+        assert_eq!(
+            u16::from_le_bytes(payload[24..26].try_into().unwrap()),
+            OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT
+        );
     }
 }
