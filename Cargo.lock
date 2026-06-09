@@ -402,9 +402,12 @@ dependencies = [
  "chrono",
  "emulebb-ed2k",
  "emulebb-index",
+ "emulebb-kad-proto",
+ "hex",
  "serde",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -421,6 +424,7 @@ dependencies = [
  "emulebb-rest",
  "hex",
  "serde",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

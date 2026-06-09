@@ -10,7 +10,10 @@ anyhow.workspace = true
 chrono.workspace = true
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
+emulebb-kad-proto = { path = "../emulebb-kad-proto" }
+hex = "0.4"
 serde.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 uuid.workspace = true

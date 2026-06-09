@@ -230,7 +230,15 @@ async fn transfer_resume(
     State(state): State<RestState>,
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
-    transfer_state(state, hash, "downloading").await
+    match state.core.resume_transfer(&hash).await {
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn transfer_stop(

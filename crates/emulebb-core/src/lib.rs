@@ -1,14 +1,28 @@
-use std::{collections::HashMap, net::Ipv4Addr, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     config::Ed2kConfig,
-    ed2k_server::{Ed2kKeywordSearchOptions, Ed2kSearchFile, search_keyword_servers},
-    ed2k_tcp::{Ed2kHelloIdentity, emule_connect_options},
+    ed2k_server::{
+        Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile, Ed2kSourceSearchOptions,
+        Ed2kUdpSourceSearchOptions, search_keyword_servers, search_source_servers,
+        search_source_udp_servers,
+    },
+    ed2k_tcp::{
+        Ed2kHelloIdentity, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kSecureIdent,
+        download_file_from_peer, emule_connect_options,
+    },
     ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job},
 };
 use emulebb_index::{FileIndex, IndexedFile};
+use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -140,6 +154,7 @@ pub struct Transfer {
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
     pub user_hash: [u8; 16],
+    pub secure_ident: Arc<Ed2kSecureIdent>,
     pub config: Ed2kConfig,
 }
 
@@ -390,6 +405,18 @@ impl EmulebbCore {
         Some(transfer.clone())
     }
 
+    pub async fn resume_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        let Some(mut transfer) = self.set_transfer_state(hash, "downloading").await else {
+            return Ok(None);
+        };
+        if let Some(next_state) = self.run_ed2k_download_attempt(&transfer).await? {
+            if let Some(updated) = self.set_transfer_state(hash, next_state).await {
+                transfer = updated;
+            }
+        }
+        Ok(Some(transfer))
+    }
+
     pub async fn index_file(&self, file: IndexedFile) -> Result<()> {
         self.index.lock().await.upsert_file(&file)
     }
@@ -463,6 +490,151 @@ impl EmulebbCore {
                 .map(|file| search_result_from_ed2k(search_id, request, file))
                 .collect(),
         ))
+    }
+
+    async fn run_ed2k_download_attempt(&self, transfer: &Transfer) -> Result<Option<&'static str>> {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Ok(Some("queued"));
+        };
+        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+            return Ok(Some("queued"));
+        }
+        if transfer.size_bytes == 0 {
+            return Ok(Some("queued"));
+        }
+
+        let file_hash: Ed2kHash = transfer
+            .hash
+            .parse()
+            .with_context(|| format!("invalid ED2K transfer hash {}", transfer.hash))?;
+        let mut sources = self
+            .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
+            .await?;
+        if sources.is_empty() {
+            return Ok(Some("queued"));
+        }
+        sort_download_sources(&mut sources);
+        let mut accepted_incomplete = false;
+        let mut last_error = None;
+        let hello_identity = self.ed2k_hello_identity(network);
+        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
+        let max_peers = network.config.max_parallel_download_peers.max(1);
+        for source in sources
+            .iter()
+            .filter(|source| source.is_direct_dialable())
+            .take(max_peers)
+        {
+            match download_file_from_peer(Ed2kPeerDownloadOptions {
+                bind_ip: network.bind_ip,
+                peer: source,
+                hello_identity,
+                secure_ident: &network.secure_ident,
+                transfer_runtime: self.ed2k_transfers.as_ref(),
+                canonical_name: transfer.name.clone(),
+                file_size: transfer.size_bytes,
+                timeout,
+            })
+            .await
+            {
+                Ok(Ed2kPeerDownloadOutcome::Completed) => {
+                    return Ok(Some("completed"));
+                }
+                Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete) => {
+                    accepted_incomplete = true;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+        if accepted_incomplete {
+            return Ok(Some("downloading"));
+        }
+        if let Some(error) = last_error {
+            return Err(error).context("ED2K direct download did not complete");
+        }
+        Ok(Some("queued"))
+    }
+
+    async fn acquire_ed2k_sources(
+        &self,
+        network: &Ed2kNetworkConfig,
+        file_hash: Ed2kHash,
+        file_size: u64,
+    ) -> Result<Vec<Ed2kFoundSource>> {
+        let cancel = CancellationToken::new();
+        let shared_catalog = self.ed2k_transfers.shared_catalog();
+        let shared_catalog_snapshot = shared_catalog.read().await.clone();
+        let attempts = configured_server_attempts(&network.config)
+            .min(network.config.source_server_attempt_budget.max(1));
+        let mut sources = Vec::new();
+        match search_source_servers(Ed2kSourceSearchOptions {
+            bind_ip: network.bind_ip,
+            config: &network.config,
+            hello_identity: self.ed2k_hello_identity(network),
+            shared_catalog: &shared_catalog_snapshot,
+            preferred_endpoint: None,
+            excluded_endpoint: None,
+            max_attempts: attempts,
+            file_hash,
+            file_size,
+            cancel: &cancel,
+        })
+        .await
+        {
+            Ok(results) => merge_download_sources(&mut sources, results),
+            Err(error) => tracing::warn!(
+                "ED2K TCP source search failed file_hash={} error={error}",
+                file_hash
+            ),
+        }
+        if sources.is_empty() {
+            match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
+                bind_ip: network.bind_ip,
+                config: &network.config,
+                preferred_endpoint: None,
+                excluded_endpoint: None,
+                max_attempts: attempts,
+                file_hash,
+                file_size,
+                timeout: Duration::from_secs(network.config.connect_timeout_secs.max(15)),
+                cancel: &cancel,
+            })
+            .await
+            {
+                Ok(results) => merge_download_sources(&mut sources, results),
+                Err(error) => tracing::warn!(
+                    "ED2K UDP source search failed file_hash={} error={error}",
+                    file_hash
+                ),
+            }
+        }
+        for source in &sources {
+            self.ed2k_transfers
+                .remember_source(
+                    &file_hash.to_string(),
+                    emulebb_ed2k::ed2k_transfer::Ed2kSourceHint {
+                        ip: source.ip.to_string(),
+                        tcp_port: source.tcp_port,
+                        user_hash: source.user_hash.map(hex::encode),
+                    },
+                )
+                .await?;
+        }
+        Ok(sources)
+    }
+
+    fn ed2k_hello_identity(&self, network: &Ed2kNetworkConfig) -> Ed2kHelloIdentity {
+        Ed2kHelloIdentity {
+            user_hash: network.user_hash,
+            client_id: 0,
+            tcp_port: network.config.listen_port,
+            udp_port: 0,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(network.config.obfuscation_enabled),
+            direct_udp_callback: false,
+        }
     }
 }
 
@@ -539,6 +711,46 @@ fn search_result_from_ed2k(
         known_type: file_type,
         directory: String::new(),
     }
+}
+
+fn configured_server_attempts(config: &Ed2kConfig) -> usize {
+    config
+        .server_entries
+        .len()
+        .max(config.server_endpoints.len())
+        .max(1)
+}
+
+fn sort_download_sources(sources: &mut [Ed2kFoundSource]) {
+    sources.sort_by_key(|source| {
+        (
+            !source.is_direct_dialable(),
+            source.user_hash.is_none(),
+            source.obfuscation_options.is_none(),
+        )
+    });
+}
+
+fn merge_download_sources(target: &mut Vec<Ed2kFoundSource>, incoming: Vec<Ed2kFoundSource>) {
+    let mut seen =
+        target
+            .iter()
+            .map(source_key)
+            .collect::<HashSet<(Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>)>>();
+    for source in incoming {
+        if seen.insert(source_key(&source)) {
+            target.push(source);
+        }
+    }
+}
+
+fn source_key(source: &Ed2kFoundSource) -> (Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>) {
+    (
+        source.ip,
+        source.tcp_port,
+        source.user_hash,
+        source.obfuscation_options,
+    )
 }
 
 fn default_search_method() -> String {

@@ -7,7 +7,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
     /// UDP bind address.
-    pub bind_addr: SocketAddr,
+    pub bind_addr: Option<SocketAddr>,
     /// Our Kad2 node ID. All-zeros = generate random on start.
     pub node_id: NodeId,
     /// Max contacts in routing table.
@@ -49,7 +49,7 @@ pub struct DhtConfig {
 impl Default for DhtConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:4672".parse().unwrap(),
+            bind_addr: None,
             node_id: NodeId::ZERO,
             max_routing_table_size: 12000,
             bootstrap_min_routing_contacts: 10,
@@ -69,5 +69,15 @@ impl Default for DhtConfig {
             nodes_dat: None,
             nodes_text: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_does_not_invent_bind_addr() {
+        assert!(DhtConfig::default().bind_addr.is_none());
     }
 }

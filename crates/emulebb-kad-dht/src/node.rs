@@ -69,7 +69,8 @@ impl DhtNode {
             config.udp_key = rand::thread_rng().r#gen();
         }
 
-        let transport = UdpTransport::bind(config.bind_addr).await?;
+        let bind_addr = config.bind_addr.ok_or(DhtError::MissingBindAddr)?;
+        let transport = UdpTransport::bind(bind_addr).await?;
         let obfuscation =
             ObfuscationLayer::new(config.node_id, config.udp_key, config.obfuscation_enabled);
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_max_size(
