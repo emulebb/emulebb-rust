@@ -8,8 +8,8 @@ description = "Local emulebb-rust application state and orchestration"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
 serde.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-

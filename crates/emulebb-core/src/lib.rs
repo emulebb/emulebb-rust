@@ -1,7 +1,10 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use emulebb_ed2k::ed2k_transfer::{
+    Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job,
+};
 use emulebb_index::{FileIndex, IndexedFile};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -133,22 +136,33 @@ pub struct EmulebbCore {
     started_at: Instant,
     version: String,
     index: Arc<Mutex<FileIndex>>,
+    ed2k_transfers: Arc<Ed2kTransferRuntime>,
     state: Arc<Mutex<CoreState>>,
 }
 
 impl EmulebbCore {
-    pub fn new(version: impl Into<String>, index: FileIndex) -> Self {
-        Self {
+    pub fn new(
+        version: impl Into<String>,
+        index: FileIndex,
+        transfer_root: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let ed2k_transfers = Ed2kTransferRuntime::load_or_create(transfer_root.as_ref())?;
+        Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
             index: Arc::new(Mutex::new(index)),
+            ed2k_transfers: Arc::new(ed2k_transfers),
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
                 kad_running: false,
                 ed2k_connected: false,
             })),
-        }
+        })
+    }
+
+    pub fn new_in_memory(version: impl Into<String>, index: FileIndex) -> Result<Self> {
+        Self::new(version, index, unique_runtime_dir("emulebb-core-transfers"))
     }
 
     pub fn app_info(&self) -> AppInfo {
@@ -266,24 +280,17 @@ impl EmulebbCore {
         let Some(result) = result else {
             return Ok(None);
         };
-        Ok(Some(
-            self.upsert_transfer_from_parts(
-                result.hash,
-                result.name,
-                result.size_bytes,
-                0,
-                "queued",
-            )
-            .await,
-        ))
+        self.upsert_transfer_from_parts(result.hash, result.name, result.size_bytes, "queued")
+            .await
+            .map(Some)
     }
 
     pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
         if let Some(link) = request.ed2k_link {
             let parsed = parse_ed2k_link(&link)?;
             return Ok(self
-                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, 0, "queued")
-                .await);
+                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, "queued")
+                .await?);
         }
         let hash = request
             .hash
@@ -291,8 +298,8 @@ impl EmulebbCore {
         let name = request.name.unwrap_or_else(|| hash.clone());
         let size_bytes = request.size_bytes.unwrap_or(0);
         Ok(self
-            .upsert_transfer_from_parts(hash, name, size_bytes, 0, "queued")
-            .await)
+            .upsert_transfer_from_parts(hash, name, size_bytes, "queued")
+            .await?)
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
@@ -325,32 +332,50 @@ impl EmulebbCore {
         hash: String,
         name: String,
         size_bytes: u64,
-        completed_bytes: u64,
         state_name: &str,
-    ) -> Transfer {
-        let progress = if size_bytes == 0 {
-            0.0
-        } else {
-            completed_bytes as f64 / size_bytes as f64
-        };
-        let transfer = Transfer {
-            ed2k_link: format!("ed2k://|file|{}|{}|{}|/", name, size_bytes, hash),
-            hash: hash.clone(),
-            name,
-            path: String::new(),
-            size_bytes,
-            completed_bytes,
-            state: state_name.to_string(),
-            progress,
-            sources: 0,
-            download_speed_bytes_per_sec: 0,
-        };
+    ) -> Result<Transfer> {
+        let file_hash = hash.parse()?;
+        let job = new_transfer_job(file_hash, name, size_bytes);
+        let manifest = self.ed2k_transfers.ensure_job(&job).await?;
+        let transfer = transfer_from_manifest(&manifest, state_name);
         self.state
             .lock()
             .await
             .transfers
-            .insert(hash, transfer.clone());
-        transfer
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(transfer)
+    }
+}
+
+fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
+    let completed_bytes = manifest
+        .pieces
+        .iter()
+        .map(|piece| match piece.state {
+            Ed2kTransferState::Verified | Ed2kTransferState::Written => manifest.piece_size,
+            Ed2kTransferState::Requested | Ed2kTransferState::Missing => piece.bytes_written,
+        })
+        .sum::<u64>()
+        .min(manifest.file_size);
+    let progress = if manifest.file_size == 0 {
+        0.0
+    } else {
+        completed_bytes as f64 / manifest.file_size as f64
+    };
+    Transfer {
+        ed2k_link: format!(
+            "ed2k://|file|{}|{}|{}|/",
+            manifest.canonical_name, manifest.file_size, manifest.file_hash
+        ),
+        hash: manifest.file_hash.clone(),
+        name: manifest.canonical_name.clone(),
+        path: String::new(),
+        size_bytes: manifest.file_size,
+        completed_bytes,
+        state: state_name.to_string(),
+        progress,
+        sources: manifest.sources.len() as u32,
+        download_speed_bytes_per_sec: 0,
     }
 }
 
@@ -394,6 +419,20 @@ fn parse_ed2k_link(link: &str) -> Result<(String, String, u64)> {
     ))
 }
 
+fn unique_runtime_dir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "emulebb-rust-{name}-{}-{stamp}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("create runtime dir");
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use emulebb_index::IndexedFile;
@@ -402,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_uses_local_index() {
-        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap());
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
         core.index_file(IndexedFile {
             ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "Local.Indexed.File.iso".to_string(),
@@ -427,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_search_result_creates_transfer() {
-        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap());
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
         core.index_file(IndexedFile {
             ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "Download.Me.bin".to_string(),

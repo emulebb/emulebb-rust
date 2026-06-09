@@ -309,7 +309,8 @@ mod tests {
     use super::*;
 
     fn test_router() -> Router {
-        let core = Arc::new(EmulebbCore::new("test", FileIndex::in_memory().unwrap()));
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         router(
             core,
             RestConfig {
@@ -359,7 +360,8 @@ mod tests {
 
     #[tokio::test]
     async fn search_to_download_flow_uses_local_index() {
-        let core = Arc::new(EmulebbCore::new("test", FileIndex::in_memory().unwrap()));
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
         core.index_file(IndexedFile {
             ed2k_hash: "00112233445566778899aabbccddeeff".to_string(),
             name: "Indexed.Result.iso".to_string(),

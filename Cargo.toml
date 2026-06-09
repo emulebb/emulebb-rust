@@ -2,6 +2,7 @@
 members = [
     "crates/emulebb-core",
     "crates/emulebb-daemon",
+    "crates/emulebb-ed2k",
     "crates/emulebb-index",
     "crates/emulebb-kad-dht",
     "crates/emulebb-kad-net",

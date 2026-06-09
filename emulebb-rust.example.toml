@@ -1,6 +1,6 @@
 runtimeDir = "runtime"
 
 [rest]
-bindAddr = "127.0.0.1:13301"
+# Harnesses should replace this with X_LOCAL_IP on the operator LAN.
+bindAddr = "192.0.2.10:13301"
 apiKey = "change-me"
-

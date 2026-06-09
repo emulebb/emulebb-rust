@@ -33,7 +33,7 @@ impl Default for DaemonConfig {
 impl Default for RestListenerConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:13301".parse().expect("valid default REST bind"),
+            bind_addr: "0.0.0.0:13301".parse().expect("valid default REST bind"),
             api_key: "change-me".to_string(),
         }
     }
@@ -55,13 +55,21 @@ impl DaemonConfig {
     pub fn index_path(&self) -> PathBuf {
         self.runtime_dir.join("index.sqlite")
     }
+
+    pub fn transfer_root(&self) -> PathBuf {
+        self.runtime_dir.join("transfers")
+    }
 }
 
 pub async fn run(config: DaemonConfig) -> Result<()> {
     fs::create_dir_all(&config.runtime_dir)
         .with_context(|| format!("failed to create {}", config.runtime_dir.display()))?;
     let index = FileIndex::open(config.index_path())?;
-    let core = Arc::new(EmulebbCore::new(env!("CARGO_PKG_VERSION"), index));
+    let core = Arc::new(EmulebbCore::new(
+        env!("CARGO_PKG_VERSION"),
+        index,
+        config.transfer_root(),
+    )?);
     let app = router(
         core,
         RestConfig {

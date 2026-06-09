@@ -1,0 +1,252 @@
+//! Manifest metadata reconciliation and read views for ED2K transfers.
+
+use anyhow::{Context, Result};
+use emulebb_kad_proto::Ed2kHash;
+
+use super::hashset::{
+    decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
+    validate_aich_hashset, validate_md4_hashset,
+};
+use super::manifest::{manifest_has_structural_progress, piece_count};
+use super::{
+    Ed2kAichHashset, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
+    Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState, MANIFEST_FILE_NAME,
+};
+
+impl Ed2kTransferRuntime {
+    /// Ensure a transfer manifest exists for the provided job.
+    pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let transfer_dir = self.transfer_dir(&job.file_hash);
+        tokio::fs::create_dir_all(&transfer_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create ED2K transfer directory {}",
+                    transfer_dir.display()
+                )
+            })?;
+        let manifest_path = transfer_dir.join(MANIFEST_FILE_NAME);
+        if tokio::fs::try_exists(&manifest_path).await? {
+            return self.load_manifest_or_rebuild_unlocked(job).await;
+        }
+        let manifest = Ed2kResumeManifest::new(job);
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
+    /// Reconcile canonical metadata for an existing transfer after a peer
+    /// reveals a better file name or previously unknown file size.
+    pub async fn reconcile_job_metadata(
+        &self,
+        file_hash: &str,
+        canonical_name: Option<&str>,
+        file_size: Option<u64>,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut changed = false;
+
+        if let Some(canonical_name) = canonical_name.map(str::trim)
+            && !canonical_name.is_empty()
+            && manifest.canonical_name != canonical_name
+        {
+            manifest.canonical_name = canonical_name.to_string();
+            changed = true;
+        }
+
+        if let Some(file_size) = file_size.filter(|file_size| *file_size != 0) {
+            if manifest.file_size == 0 {
+                if manifest_has_structural_progress(&manifest) {
+                    anyhow::bail!(
+                        "cannot adopt ED2K file size {} for {} after transfer progress already exists",
+                        file_size,
+                        file_hash
+                    );
+                }
+                manifest.file_size = file_size;
+                manifest.pieces = (0..piece_count(file_size, manifest.piece_size))
+                    .map(|piece_index| Ed2kPieceState {
+                        piece_index,
+                        state: Ed2kTransferState::Missing,
+                        bytes_written: 0,
+                    })
+                    .collect();
+                changed = true;
+            } else if manifest.file_size != file_size {
+                anyhow::bail!(
+                    "refusing to change ED2K file size for {} from {} to {}",
+                    file_hash,
+                    manifest.file_size,
+                    file_size
+                );
+            }
+        }
+
+        if changed {
+            self.store_manifest_unlocked(&manifest).await?;
+            self.upsert_verified_catalog_entry(&manifest).await;
+        }
+
+        Ok(manifest)
+    }
+
+    /// Persist the canonical ED2K MD4 hashset after validating it against the
+    /// expected file hash.
+    pub async fn store_md4_hashset(
+        &self,
+        file_hash: &str,
+        md4_hashset: Vec<[u8; 16]>,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let expected_hash_count = expected_md4_hash_count(manifest.file_size);
+        if md4_hashset.len() != usize::from(expected_hash_count) {
+            anyhow::bail!(
+                "unexpected MD4 hashset length {} expected {} for {}",
+                md4_hashset.len(),
+                expected_hash_count,
+                file_hash
+            );
+        }
+        validate_md4_hashset(file_hash, &md4_hashset)?;
+        manifest.md4_hashset = md4_hashset.iter().map(hex::encode).collect();
+        manifest.md4_hashset_acquired = true;
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
+    /// Persist the canonical ED2K AICH root and part hashset after validating
+    /// the payload against the expected file size.
+    pub(crate) async fn store_aich_hashset(
+        &self,
+        file_hash: &str,
+        aich_hashset: Ed2kAichHashset,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if let Some(existing_root) = manifest.aich_root.as_deref() {
+            let existing_root = decode_aich_hash_hex(existing_root)?;
+            if existing_root != aich_hashset.master_hash {
+                anyhow::bail!(
+                    "refusing to replace AICH root for {} with conflicting data",
+                    file_hash
+                );
+            }
+        }
+        validate_aich_hashset(manifest.file_size, &aich_hashset)?;
+        manifest.aich_root = Some(hex::encode(aich_hashset.master_hash));
+        manifest.aich_hashset = aich_hashset.part_hashes.iter().map(hex::encode).collect();
+        manifest.aich_hashset_acquired = true;
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        Ok(manifest)
+    }
+
+    /// Persist only the canonical AICH root learned from peer file metadata.
+    pub async fn reconcile_aich_root(
+        &self,
+        file_hash: &str,
+        aich_root: Option<[u8; 20]>,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let mut changed = false;
+        if let Some(aich_root) = aich_root {
+            let encoded = hex::encode(aich_root);
+            if let Some(existing_root) = manifest.aich_root.as_deref() {
+                if existing_root != encoded {
+                    anyhow::bail!(
+                        "refusing to replace AICH root for {} with conflicting metadata",
+                        file_hash
+                    );
+                }
+            } else {
+                manifest.aich_root = Some(encoded);
+                changed = true;
+            }
+        }
+        if changed {
+            self.store_manifest_unlocked(&manifest).await?;
+            self.upsert_verified_catalog_entry(&manifest).await;
+        }
+        Ok(manifest)
+    }
+
+    /// Record one remembered source hint for a job.
+    pub async fn remember_source(&self, file_hash: &str, source: Ed2kSourceHint) -> Result<()> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if !manifest.sources.contains(&source) {
+            manifest.sources.push(source);
+            self.store_manifest_unlocked(&manifest).await?;
+        }
+        Ok(())
+    }
+
+    /// Return local manifest-backed file metadata even when only part of the
+    /// payload has been verified already.
+    pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
+        let hash_hex = file_hash.to_string();
+        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
+        if !tokio::fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        let _guard = self.manifest_io.lock().await;
+        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+        Ok(Some(Ed2kSharedEntry::from_manifest(&manifest)))
+    }
+
+    /// Return the canonical MD4 hashset for this file when known.
+    pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
+        let hash_hex = file_hash.to_string();
+        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
+        if !tokio::fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        let _guard = self.manifest_io.lock().await;
+        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+        if !manifest.md4_hashset_acquired {
+            return Ok(None);
+        }
+        manifest
+            .md4_hashset
+            .iter()
+            .map(|hash| {
+                let bytes = hex::decode(hash).with_context(|| {
+                    format!("invalid stored MD4 hashset entry for {}", file_hash)
+                })?;
+                let array: [u8; 16] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("stored MD4 hashset entry has wrong length"))?;
+                Ok(array)
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
+    }
+
+    /// Return the canonical AICH root plus per-part hashes for this file when known.
+    pub(crate) async fn aich_hashset(
+        &self,
+        file_hash: &Ed2kHash,
+    ) -> Result<Option<Ed2kAichHashset>> {
+        let hash_hex = file_hash.to_string();
+        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
+        if !tokio::fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        let _guard = self.manifest_io.lock().await;
+        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+        if !manifest.aich_hashset_acquired || manifest.aich_root.is_none() {
+            return Ok(None);
+        }
+        decode_manifest_aich_hashset(&manifest).map(Some)
+    }
+
+    /// Returns the persisted manifest for orchestration code that needs to read
+    /// the current verification or hashset state.
+    pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        self.load_manifest_unlocked(file_hash).await
+    }
+}
