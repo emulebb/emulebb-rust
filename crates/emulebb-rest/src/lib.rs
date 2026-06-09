@@ -122,6 +122,12 @@ struct SnapshotQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogsClearRequest {
+    confirm_clear_logs: bool,
+}
+
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     let state = RestState {
         core,
@@ -230,6 +236,7 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             post(transfer_stop),
         )
         .route("/api/v1/logs", get(logs))
+        .route("/api/v1/logs/operations/clear", post(clear_logs))
         .fallback(fallback)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -927,6 +934,18 @@ async fn logs() -> impl IntoResponse {
     api_collection(Vec::<Value>::new())
 }
 
+async fn clear_logs(Json(request): Json<LogsClearRequest>) -> impl IntoResponse {
+    if !request.confirm_clear_logs {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirmClearLogs must be true",
+        )
+        .into_response();
+    }
+    api_ok(json!({ "ok": true })).into_response()
+}
+
 async fn fallback() -> impl IntoResponse {
     api_error(
         StatusCode::NOT_IMPLEMENTED,
@@ -1308,6 +1327,43 @@ mod tests {
         assert!(data["kad"].is_object());
         assert!(data["network"]["ed2k"].is_object());
         assert_eq!(data["logs"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn logs_clear_requires_canonical_confirmation() {
+        let app = test_router();
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/logs/operations/clear")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmClearLogs":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+        let cleared = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/logs/operations/clear")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmClearLogs":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let body = to_bytes(cleared.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
     }
 
     #[tokio::test]
