@@ -10,9 +10,9 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    CategoryCreate, CategoryUpdate, EmulebbCore, LocalShare, LocalShareCreate, SearchCreate,
-    SearchResultDownloadCreate, ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer,
-    TransferCreate,
+    CategoryCreate, CategoryUpdate, EmulebbCore, LocalShare, LocalShareCreate, PreferencesUpdate,
+    SearchCreate, SearchResultDownloadCreate, ServerCreate, ServerUpdate, SharedDirectoriesUpdate,
+    Transfer, TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -129,6 +129,10 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     };
     Router::new()
         .route("/api/v1/app", get(app))
+        .route(
+            "/api/v1/app/preferences",
+            get(preferences).patch(update_preferences),
+        )
         .route("/api/v1/status", get(status))
         .route("/api/v1/stats", get(status))
         .route("/api/v1/snapshot", get(snapshot))
@@ -258,6 +262,22 @@ async fn require_api_key(
 
 async fn app(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.app_info())
+}
+
+async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(state.core.preferences().await)
+}
+
+async fn update_preferences(
+    State(state): State<RestState>,
+    Json(request): Json<PreferencesUpdate>,
+) -> impl IntoResponse {
+    match state.core.update_preferences(request).await {
+        Ok(preferences) => api_ok(preferences).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn status(State(state): State<RestState>) -> impl IntoResponse {
@@ -1099,6 +1119,96 @@ mod tests {
                 .iter()
                 .any(|entry| entry == "rest.emulebb.v1")
         );
+    }
+
+    #[tokio::test]
+    async fn preferences_use_canonical_get_and_patch_route() {
+        let app = test_router();
+        let read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/app/preferences")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::OK);
+        let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["uploadLimitKiBps"], 1024);
+        assert_eq!(value["data"]["downloadAutoBroadbandIo"], true);
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/app/preferences")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"networkEd2k":false,"downloadAutoBroadbandIo":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update.status(), StatusCode::OK);
+        let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["uploadLimitKiBps"], 2048);
+        assert_eq!(value["data"]["uploadClientDataRate"], 64);
+        assert_eq!(value["data"]["maxUploadSlots"], 4);
+        assert_eq!(value["data"]["queueSize"], 3000);
+        assert_eq!(value["data"]["networkEd2k"], false);
+        assert_eq!(value["data"]["downloadAutoBroadbandIo"], false);
+
+        let empty_patch = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/app/preferences")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_patch.status(), StatusCode::BAD_REQUEST);
+
+        let unknown_key = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/app/preferences")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"notARealPreference":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let invalid_range = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/app/preferences")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"queueSize":1999}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_range.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

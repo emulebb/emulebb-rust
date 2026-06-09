@@ -63,6 +63,67 @@ pub struct AppLifecycle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Preferences {
+    pub upload_limit_ki_bps: u32,
+    pub download_limit_ki_bps: u32,
+    pub max_connections: u32,
+    pub max_connections_per_five_seconds: u32,
+    pub max_sources_per_file: u32,
+    pub upload_client_data_rate: u32,
+    pub max_upload_slots: u32,
+    pub upload_slot_elastic_percent: u32,
+    pub queue_size: u32,
+    pub auto_connect: bool,
+    pub new_auto_up: bool,
+    pub new_auto_down: bool,
+    pub credit_system: bool,
+    pub safe_server_connect: bool,
+    pub network_kademlia: bool,
+    pub network_ed2k: bool,
+    pub download_auto_broadband_io: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreferencesUpdate {
+    #[serde(default)]
+    pub upload_limit_ki_bps: Option<u32>,
+    #[serde(default)]
+    pub download_limit_ki_bps: Option<u32>,
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+    #[serde(default)]
+    pub max_connections_per_five_seconds: Option<u32>,
+    #[serde(default)]
+    pub max_sources_per_file: Option<u32>,
+    #[serde(default)]
+    pub upload_client_data_rate: Option<u32>,
+    #[serde(default)]
+    pub max_upload_slots: Option<u32>,
+    #[serde(default)]
+    pub upload_slot_elastic_percent: Option<u32>,
+    #[serde(default)]
+    pub queue_size: Option<u32>,
+    #[serde(default)]
+    pub auto_connect: Option<bool>,
+    #[serde(default)]
+    pub new_auto_up: Option<bool>,
+    #[serde(default)]
+    pub new_auto_down: Option<bool>,
+    #[serde(default)]
+    pub credit_system: Option<bool>,
+    #[serde(default)]
+    pub safe_server_connect: Option<bool>,
+    #[serde(default)]
+    pub network_kademlia: Option<bool>,
+    #[serde(default)]
+    pub network_ed2k: Option<bool>,
+    #[serde(default)]
+    pub download_auto_broadband_io: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub lifecycle: AppLifecycle,
     pub uptime_secs: u64,
@@ -407,6 +468,7 @@ pub struct Ed2kNetworkConfig {
 struct CoreState {
     searches: HashMap<String, Search>,
     transfers: HashMap<String, Transfer>,
+    preferences: Preferences,
     categories: BTreeMap<u32, Category>,
     next_category_id: u32,
     servers: HashMap<String, ServerInfo>,
@@ -461,6 +523,7 @@ impl EmulebbCore {
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
+                preferences: default_preferences(),
                 categories: default_categories(),
                 next_category_id: 1,
                 servers: HashMap::new(),
@@ -496,6 +559,20 @@ impl EmulebbCore {
                 "indexing.localFts".to_string(),
             ],
         }
+    }
+
+    pub async fn preferences(&self) -> Preferences {
+        self.state.lock().await.preferences.clone()
+    }
+
+    pub async fn update_preferences(&self, request: PreferencesUpdate) -> Result<Preferences> {
+        ensure!(
+            !preferences_update_is_empty(&request),
+            "preferences PATCH requires at least one preference"
+        );
+        let mut state = self.state.lock().await;
+        apply_preferences_update(&mut state.preferences, request)?;
+        Ok(state.preferences.clone())
     }
 
     pub async fn status(&self) -> Status {
@@ -2079,6 +2156,150 @@ fn local_share_from_summary(
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
     }
+}
+
+fn default_preferences() -> Preferences {
+    Preferences {
+        upload_limit_ki_bps: 1024,
+        download_limit_ki_bps: 4096,
+        max_connections: 500,
+        max_connections_per_five_seconds: 20,
+        max_sources_per_file: 400,
+        upload_client_data_rate: 32,
+        max_upload_slots: 8,
+        upload_slot_elastic_percent: 25,
+        queue_size: 5000,
+        auto_connect: false,
+        new_auto_up: true,
+        new_auto_down: true,
+        credit_system: true,
+        safe_server_connect: true,
+        network_kademlia: true,
+        network_ed2k: true,
+        download_auto_broadband_io: true,
+    }
+}
+
+fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
+    update.upload_limit_ki_bps.is_none()
+        && update.download_limit_ki_bps.is_none()
+        && update.max_connections.is_none()
+        && update.max_connections_per_five_seconds.is_none()
+        && update.max_sources_per_file.is_none()
+        && update.upload_client_data_rate.is_none()
+        && update.max_upload_slots.is_none()
+        && update.upload_slot_elastic_percent.is_none()
+        && update.queue_size.is_none()
+        && update.auto_connect.is_none()
+        && update.new_auto_up.is_none()
+        && update.new_auto_down.is_none()
+        && update.credit_system.is_none()
+        && update.safe_server_connect.is_none()
+        && update.network_kademlia.is_none()
+        && update.network_ed2k.is_none()
+        && update.download_auto_broadband_io.is_none()
+}
+
+fn apply_preferences_update(
+    preferences: &mut Preferences,
+    update: PreferencesUpdate,
+) -> Result<()> {
+    if let Some(value) = update.upload_limit_ki_bps {
+        ensure_finite_kibps(value, "uploadLimitKiBps")?;
+        preferences.upload_limit_ki_bps = value;
+    }
+    if let Some(value) = update.download_limit_ki_bps {
+        ensure_finite_kibps(value, "downloadLimitKiBps")?;
+        preferences.download_limit_ki_bps = value;
+    }
+    if let Some(value) = update.max_connections {
+        ensure_positive_u32(value, "maxConnections")?;
+        preferences.max_connections = value;
+    }
+    if let Some(value) = update.max_connections_per_five_seconds {
+        ensure_positive_u32(value, "maxConnectionsPerFiveSeconds")?;
+        preferences.max_connections_per_five_seconds = value;
+    }
+    if let Some(value) = update.max_sources_per_file {
+        ensure_positive_u32(value, "maxSourcesPerFile")?;
+        preferences.max_sources_per_file = value;
+    }
+    if let Some(value) = update.upload_client_data_rate {
+        ensure!(
+            value > 0,
+            "uploadClientDataRate must be an unsigned number in the range 1..4294967295"
+        );
+        preferences.upload_client_data_rate = value;
+        preferences.max_upload_slots = derive_upload_slots(preferences.upload_limit_ki_bps, value);
+    }
+    if let Some(value) = update.max_upload_slots {
+        ensure!(
+            (1..=64).contains(&value),
+            "maxUploadSlots must be an unsigned number in the range 1..64"
+        );
+        preferences.max_upload_slots = value;
+    }
+    if let Some(value) = update.upload_slot_elastic_percent {
+        ensure!(
+            value <= 100,
+            "uploadSlotElasticPercent must be an unsigned number in the range 0..100"
+        );
+        preferences.upload_slot_elastic_percent = value;
+    }
+    if let Some(value) = update.queue_size {
+        ensure!(
+            (2000..=10000).contains(&value),
+            "queueSize must be an unsigned number in the range 2000..10000"
+        );
+        preferences.queue_size = value;
+    }
+    if let Some(value) = update.auto_connect {
+        preferences.auto_connect = value;
+    }
+    if let Some(value) = update.new_auto_up {
+        preferences.new_auto_up = value;
+    }
+    if let Some(value) = update.new_auto_down {
+        preferences.new_auto_down = value;
+    }
+    if let Some(value) = update.credit_system {
+        preferences.credit_system = value;
+    }
+    if let Some(value) = update.safe_server_connect {
+        preferences.safe_server_connect = value;
+    }
+    if let Some(value) = update.network_kademlia {
+        preferences.network_kademlia = value;
+    }
+    if let Some(value) = update.network_ed2k {
+        preferences.network_ed2k = value;
+    }
+    if let Some(value) = update.download_auto_broadband_io {
+        preferences.download_auto_broadband_io = value;
+    }
+    Ok(())
+}
+
+fn ensure_finite_kibps(value: u32, name: &str) -> Result<()> {
+    ensure!(
+        value > 0 && value < u32::MAX,
+        "{name} must be an unsigned number in the range 1..4294967294"
+    );
+    Ok(())
+}
+
+fn ensure_positive_u32(value: u32, name: &str) -> Result<()> {
+    ensure!(
+        value > 0 && value <= i32::MAX as u32,
+        "{name} must be an unsigned number in the range 1..2147483647"
+    );
+    Ok(())
+}
+
+fn derive_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rate: u32) -> u32 {
+    upload_limit_ki_bps
+        .div_ceil(upload_client_data_rate)
+        .clamp(1, 64)
 }
 
 const PR_LOW: u32 = 0;
