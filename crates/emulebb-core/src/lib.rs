@@ -27,7 +27,7 @@ use emulebb_ed2k::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, new_transfer_job},
+    ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job},
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
@@ -182,6 +182,7 @@ pub struct Transfer {
     pub ed2k_link: String,
 }
 
+/// One remembered ED2K peer source for a transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferSource {
@@ -877,6 +878,9 @@ impl EmulebbCore {
                 ),
             }
         }
+        if sources.is_empty() {
+            merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
+        }
         for source in &sources {
             self.remember_ed2k_sources(file_hash, std::slice::from_ref(source))
                 .await?;
@@ -890,10 +894,13 @@ impl EmulebbCore {
         sources: &[Ed2kFoundSource],
     ) -> Result<()> {
         for source in sources {
+            if !source.is_direct_dialable() {
+                continue;
+            }
             self.ed2k_transfers
                 .remember_source(
                     &file_hash.to_string(),
-                    emulebb_ed2k::ed2k_transfer::Ed2kSourceHint {
+                    Ed2kSourceHint {
                         ip: source.ip.to_string(),
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
@@ -902,6 +909,30 @@ impl EmulebbCore {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn remembered_ed2k_sources(&self, file_hash: Ed2kHash) -> Result<Vec<Ed2kFoundSource>> {
+        let manifest = match self.ed2k_transfers.manifest(&file_hash.to_string()).await {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::warn!("failed to read remembered ED2K sources for {file_hash}: {error}");
+                return Ok(Vec::new());
+            }
+        };
+        let sources = manifest
+            .sources
+            .iter()
+            .filter_map(|hint| match found_source_from_hint(file_hash, hint) {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping invalid remembered ED2K source for {file_hash}: {error}"
+                    );
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(sources)
     }
 
     fn ed2k_hello_identity(&self, network: &Ed2kNetworkConfig) -> Ed2kHelloIdentity {
@@ -1035,6 +1066,36 @@ fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<Transfer
             status: "remembered".to_string(),
         })
         .collect()
+}
+
+fn found_source_from_hint(file_hash: Ed2kHash, hint: &Ed2kSourceHint) -> Result<Ed2kFoundSource> {
+    let ip = hint
+        .ip
+        .parse::<Ipv4Addr>()
+        .with_context(|| format!("invalid remembered source IP {}", hint.ip))?;
+    let user_hash = hint
+        .user_hash
+        .as_deref()
+        .map(|value| -> Result<[u8; 16]> {
+            let bytes = hex::decode(value)
+                .with_context(|| format!("invalid remembered source user hash {value}"))?;
+            let user_hash: [u8; 16] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("remembered source user hash has wrong length"))?;
+            Ok(user_hash)
+        })
+        .transpose()?;
+    Ok(Ed2kFoundSource {
+        file_hash,
+        ip,
+        tcp_port: hint.tcp_port,
+        client_id: u32::from_be_bytes(ip.octets()),
+        low_id: false,
+        obfuscated: user_hash.is_some(),
+        obfuscation_options: None,
+        user_hash,
+        source_server: None,
+    })
 }
 
 fn search_result_from_indexed(
@@ -1255,5 +1316,29 @@ mod tests {
         assert_eq!(transfers[0].state, "completed");
         assert_eq!(transfers[0].completed_bytes, payload.len() as u64);
         assert_eq!(transfers[0].progress, 1.0);
+    }
+
+    #[test]
+    fn remembered_source_hint_becomes_direct_dial_source() {
+        let file_hash: Ed2kHash = "00112233445566778899aabbccddeeff".parse().unwrap();
+        let source = found_source_from_hint(
+            file_hash,
+            &Ed2kSourceHint {
+                ip: "192.0.2.10".to_string(),
+                tcp_port: 4662,
+                user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.file_hash, file_hash);
+        assert_eq!(source.ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(source.tcp_port, 4662);
+        assert!(source.is_direct_dialable());
+        assert!(source.obfuscated);
+        assert_eq!(
+            source.user_hash,
+            Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+        );
     }
 }
