@@ -184,6 +184,19 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Persist the user-facing transfer control state across process restarts.
+    pub async fn set_control_state(
+        &self,
+        file_hash: &str,
+        control_state: Option<&str>,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        manifest.control_state = control_state.map(str::to_string);
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
     /// Return local manifest-backed file metadata even when only part of the
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {

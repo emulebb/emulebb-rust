@@ -126,6 +126,9 @@ pub struct Ed2kResumeManifest {
     pub pieces: Vec<Ed2kPieceState>,
     /// Remembered source hints.
     pub sources: Vec<Ed2kSourceHint>,
+    /// User-facing transfer control state persisted across restarts.
+    #[serde(default)]
+    pub control_state: Option<String>,
 }
 
 impl Ed2kResumeManifest {
@@ -153,6 +156,7 @@ impl Ed2kResumeManifest {
                 })
                 .collect(),
             sources: Vec::new(),
+            control_state: None,
         }
     }
 

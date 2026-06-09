@@ -585,12 +585,12 @@ impl EmulebbCore {
         Ok(Some(transfer_sources_from_manifest(&manifest)))
     }
 
-    pub async fn pause_transfer(&self, hash: &str) -> Option<Transfer> {
-        self.set_transfer_state(hash, "paused").await
+    pub async fn pause_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        self.set_transfer_control_state(hash, "paused").await
     }
 
-    pub async fn stop_transfer(&self, hash: &str) -> Option<Transfer> {
-        self.set_transfer_state(hash, "stopped").await
+    pub async fn stop_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
+        self.set_transfer_control_state(hash, "stopped").await
     }
 
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
@@ -598,6 +598,27 @@ impl EmulebbCore {
         let transfer = state.transfers.get_mut(hash)?;
         transfer.state = state_name.to_string();
         Some(transfer.clone())
+    }
+
+    async fn set_transfer_control_state(
+        &self,
+        hash: &str,
+        state_name: &str,
+    ) -> Result<Option<Transfer>> {
+        if self.transfer(hash).await.is_none() {
+            return Ok(None);
+        }
+        let manifest = self
+            .ed2k_transfers
+            .set_control_state(hash, Some(state_name))
+            .await?;
+        let transfer = transfer_from_manifest(&manifest, state_name);
+        self.state
+            .lock()
+            .await
+            .transfers
+            .insert(transfer.hash.clone(), transfer.clone());
+        Ok(Some(transfer))
     }
 
     pub async fn resume_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
@@ -611,6 +632,7 @@ impl EmulebbCore {
             current.state != "stopped",
             "stopped transfer cannot be resumed"
         );
+        self.ed2k_transfers.set_control_state(hash, None).await?;
         let Some(mut transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
         };
@@ -1064,6 +1086,8 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
 fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
     if manifest.completed {
         "completed"
+    } else if let Some(control_state) = manifest.control_state.as_deref() {
+        control_state
     } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
         "downloading"
     } else {
@@ -1323,12 +1347,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            core.stop_transfer(&transfer.hash).await.unwrap().state,
+            core.stop_transfer(&transfer.hash)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             "stopped"
         );
 
         let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
 
+        assert!(
+            error
+                .to_string()
+                .contains("stopped transfer cannot be resumed")
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_transfer_state_survives_restart() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-stopped-transfer");
+        let transfer_root = runtime_dir.join("transfers");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                ed2k_link: Some(
+                    "ed2k://|file|Stopped.Restart.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                hash: None,
+                name: None,
+                size_bytes: None,
+            })
+            .await
+            .unwrap();
+        core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
+
+        let reloaded =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap();
+
+        assert_eq!(reloaded_transfer.state, "stopped");
+        let error = reloaded.resume_transfer(&transfer.hash).await.unwrap_err();
         assert!(
             error
                 .to_string()

@@ -255,8 +255,13 @@ async fn transfer_pause(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.pause_transfer(&hash).await {
-        Some(transfer) => api_ok(transfer).into_response(),
-        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
     }
 }
 
@@ -280,8 +285,13 @@ async fn transfer_stop(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.stop_transfer(&hash).await {
-        Some(transfer) => api_ok(transfer).into_response(),
-        None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
     }
 }
 
