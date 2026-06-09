@@ -208,6 +208,20 @@ struct ShutdownRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticDumpRequest {
+    confirm_dump: bool,
+    #[serde(default)]
+    full_memory: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiagnosticCrashTestRequest {
+    confirm_crash: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClearCompletedTransfersRequest {
     confirm_clear_completed: bool,
 }
@@ -242,6 +256,11 @@ pub fn router_with_shutdown(
     Router::new()
         .route("/api/v1/app", get(app))
         .route("/api/v1/app/shutdown", post(shutdown_app))
+        .route("/api/v1/diagnostics/dumps", post(capture_diagnostic_dump))
+        .route(
+            "/api/v1/diagnostics/crash-tests",
+            post(trigger_diagnostic_crash_test),
+        )
         .route(
             "/api/v1/app/preferences",
             get(preferences).patch(update_preferences),
@@ -504,6 +523,48 @@ async fn shutdown_app(
     if let Some(shutdown) = state.shutdown.as_ref() {
         let _ = shutdown.send(true);
     }
+    api_ok(json!({"ok": true})).into_response()
+}
+
+async fn capture_diagnostic_dump(
+    State(state): State<RestState>,
+    Json(request): Json<DiagnosticDumpRequest>,
+) -> impl IntoResponse {
+    if !request.confirm_dump {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirmDump must be true",
+        )
+        .into_response();
+    }
+    match state
+        .core
+        .capture_diagnostic_dump(request.full_memory)
+        .await
+    {
+        Ok(result) => api_ok(result).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn trigger_diagnostic_crash_test(
+    Json(request): Json<DiagnosticCrashTestRequest>,
+) -> impl IntoResponse {
+    if !request.confirm_crash {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "confirmCrash must be true",
+        )
+        .into_response();
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::process::abort();
+    });
     api_ok(json!({"ok": true})).into_response()
 }
 
@@ -1946,6 +2007,78 @@ mod tests {
         assert_eq!(value["data"]["ok"], true);
         assert!(shutdown_rx.changed().await.is_ok());
         assert!(*shutdown_rx.borrow());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
+        let runtime_dir = unique_test_dir("diagnostic-dump");
+        let transfer_root = runtime_dir.join("transfers");
+        let core = Arc::new(
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+        );
+        let app = router(
+            core,
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/diagnostics/dumps")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmDump":false,"fullMemory":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/diagnostics/dumps")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmDump":true,"fullMemory":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+        assert_eq!(value["data"]["fullMemory"], false);
+        assert_eq!(value["data"]["kind"], "json");
+        let path = value["data"]["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path).is_file());
+        assert_eq!(
+            value["data"]["sizeBytes"].as_u64().unwrap(),
+            std::fs::metadata(path).unwrap().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_crash_test_requires_confirmation() {
+        let denied = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/diagnostics/crash-tests")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"confirmCrash":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

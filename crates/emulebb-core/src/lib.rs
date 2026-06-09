@@ -37,6 +37,7 @@ use emulebb_index::{FileIndex, IndexedFile};
 use emulebb_kad_dht::{DhtConfig, DhtNode};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock},
@@ -53,6 +54,16 @@ pub struct AppInfo {
     pub api_version: String,
     pub lifecycle: AppLifecycle,
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticDumpResult {
+    pub ok: bool,
+    pub path: String,
+    pub full_memory: bool,
+    pub kind: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,6 +588,7 @@ pub struct EmulebbCore {
     version: String,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
+    transfer_root: PathBuf,
     ed2k_network: Option<Ed2kNetworkConfig>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
     state: Arc<Mutex<CoreState>>,
@@ -597,12 +609,14 @@ impl EmulebbCore {
         transfer_root: impl AsRef<Path>,
         ed2k_network: Option<Ed2kNetworkConfig>,
     ) -> Result<Self> {
-        let ed2k_transfers = Ed2kTransferRuntime::load_or_create(transfer_root.as_ref())?;
+        let transfer_root = transfer_root.as_ref().to_path_buf();
+        let ed2k_transfers = Ed2kTransferRuntime::load_or_create(&transfer_root)?;
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
+            transfer_root,
             ed2k_network,
             ed2k_runtime: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(CoreState {
@@ -646,6 +660,42 @@ impl EmulebbCore {
                 "indexing.localFts".to_string(),
             ],
         }
+    }
+
+    pub async fn capture_diagnostic_dump(&self, full_memory: bool) -> Result<DiagnosticDumpResult> {
+        let dump_dir = self
+            .transfer_root
+            .parent()
+            .unwrap_or(self.transfer_root.as_path())
+            .join("diagnostics");
+        fs::create_dir_all(&dump_dir).with_context(|| {
+            format!(
+                "failed to create diagnostics directory {}",
+                dump_dir.display()
+            )
+        })?;
+
+        let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+        let path = dump_dir.join(format!(
+            "emulebb-rust-diagnostic-dump-{stamp}-{}.json",
+            Uuid::new_v4()
+        ));
+        let payload = serde_json::to_vec_pretty(&json!({
+            "app": self.app_info(),
+            "status": self.status().await,
+            "fullMemory": full_memory,
+            "kind": "json",
+            "capturedAt": Utc::now(),
+        }))?;
+        fs::write(&path, &payload)
+            .with_context(|| format!("failed to write diagnostic dump {}", path.display()))?;
+        Ok(DiagnosticDumpResult {
+            ok: true,
+            path: path.display().to_string(),
+            full_memory,
+            kind: "json".to_string(),
+            size_bytes: payload.len() as u64,
+        })
     }
 
     pub async fn preferences(&self) -> Preferences {
