@@ -115,6 +115,12 @@ struct ConfirmQuery {
     confirm: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SnapshotQuery {
+    limit: Option<usize>,
+}
+
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
     let state = RestState {
         core,
@@ -124,6 +130,7 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         .route("/api/v1/app", get(app))
         .route("/api/v1/status", get(status))
         .route("/api/v1/stats", get(status))
+        .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/kad", get(kad))
         .route("/api/v1/kad/operations/start", post(kad_start))
         .route("/api/v1/kad/operations/stop", post(kad_stop))
@@ -249,6 +256,39 @@ async fn app(State(state): State<RestState>) -> impl IntoResponse {
 
 async fn status(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.status().await)
+}
+
+async fn snapshot(
+    State(state): State<RestState>,
+    Query(query): Query<SnapshotQuery>,
+) -> impl IntoResponse {
+    let limit = snapshot_limit(query.limit);
+    let status = state.core.status().await;
+    let shared_files = bounded(
+        state
+            .core
+            .shares()
+            .await
+            .iter()
+            .map(shared_file_response)
+            .collect::<Vec<_>>(),
+        limit,
+    );
+    api_ok(json!({
+        "app": state.core.app_info(),
+        "status": status,
+        "transfers": bounded(state.core.transfers().await, limit),
+        "sharedFiles": shared_files,
+        "uploads": bounded(state.core.uploads().await, limit),
+        "uploadQueue": bounded(state.core.upload_queue().await, limit),
+        "servers": bounded(state.core.servers().await, limit),
+        "kad": status.kad,
+        "network": {
+            "ed2k": status.ed2k,
+            "kad": status.kad
+        },
+        "logs": Vec::<Value>::new()
+    }))
 }
 
 async fn kad(State(state): State<RestState>) -> impl IntoResponse {
@@ -831,6 +871,14 @@ fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Valu
     )
 }
 
+fn snapshot_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(100).clamp(1, 1000)
+}
+
+fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {
+    items.into_iter().take(limit).collect()
+}
+
 fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
     let path = managed_shared_file_path(share);
     SharedFileResponse {
@@ -988,6 +1036,72 @@ mod tests {
                 .iter()
                 .any(|entry| entry == "rest.emulebb.v1")
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_bounded_emulebb_polling_shape() {
+        let runtime_dir = unique_test_dir("snapshot");
+        let transfer_root = runtime_dir.join("transfers");
+        let first_file = runtime_dir.join("First.Snapshot.bin");
+        let second_file = runtime_dir.join("Second.Snapshot.bin");
+        std::fs::write(&first_file, b"first snapshot payload").unwrap();
+        std::fs::write(&second_file, b"second snapshot payload").unwrap();
+        let core = Arc::new(
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+        );
+        core.share_local_file(LocalShareCreate {
+            path: first_file.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+        core.share_local_file(LocalShareCreate {
+            path: second_file.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+        core.add_server(ServerCreate {
+            address: "192.0.2.20".to_string(),
+            port: 4661,
+            name: Some("snapshot-server".to_string()),
+            priority: None,
+            static_server: Some(true),
+            connect: None,
+        })
+        .await
+        .unwrap();
+        let app = router(
+            core,
+            RestConfig {
+                api_key: "secret".to_string(),
+            },
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/snapshot?limit=1")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let data = &value["data"];
+        assert_eq!(data["app"]["name"], "eMuleBB Rust");
+        assert_eq!(data["status"]["lifecycle"]["state"], "running");
+        assert_eq!(data["transfers"].as_array().unwrap().len(), 1);
+        assert_eq!(data["sharedFiles"].as_array().unwrap().len(), 1);
+        assert_eq!(data["servers"].as_array().unwrap().len(), 1);
+        assert_eq!(data["uploads"].as_array().unwrap().len(), 0);
+        assert_eq!(data["uploadQueue"].as_array().unwrap().len(), 0);
+        assert!(data["kad"].is_object());
+        assert!(data["network"]["ed2k"].is_object());
+        assert_eq!(data["logs"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
