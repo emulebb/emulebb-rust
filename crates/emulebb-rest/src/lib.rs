@@ -235,8 +235,19 @@ async fn transfer(State(state): State<RestState>, Path(hash): Path<String>) -> i
     }
 }
 
-async fn transfer_sources() -> impl IntoResponse {
-    api_collection(Vec::<Value>::new())
+async fn transfer_sources(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.transfer_sources(&hash).await {
+        Ok(Some(sources)) => api_collection(sources).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 async fn transfer_pause(

@@ -182,6 +182,17 @@ pub struct Transfer {
     pub ed2k_link: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferSource {
+    pub hash: String,
+    pub ip: String,
+    pub tcp_port: u16,
+    pub endpoint: String,
+    pub user_hash: Option<String>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
@@ -563,6 +574,14 @@ impl EmulebbCore {
                 None
             }
         }
+    }
+
+    pub async fn transfer_sources(&self, hash: &str) -> Result<Option<Vec<TransferSource>>> {
+        if self.transfer(hash).await.is_none() {
+            return Ok(None);
+        }
+        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        Ok(Some(transfer_sources_from_manifest(&manifest)))
     }
 
     pub async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
@@ -1001,6 +1020,21 @@ fn manifest_default_state_name(manifest: &Ed2kResumeManifest) -> &str {
     } else {
         "queued"
     }
+}
+
+fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferSource> {
+    manifest
+        .sources
+        .iter()
+        .map(|source| TransferSource {
+            hash: manifest.file_hash.clone(),
+            endpoint: format!("{}:{}", source.ip, source.tcp_port),
+            ip: source.ip.clone(),
+            tcp_port: source.tcp_port,
+            user_hash: source.user_hash.clone(),
+            status: "remembered".to_string(),
+        })
+        .collect()
 }
 
 fn search_result_from_indexed(
