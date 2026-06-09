@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Ed2kConfig {
     /// Local ED2K peer TCP listener port.
     pub listen_port: u16,
@@ -38,7 +38,7 @@ pub struct Ed2kConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Ed2kUploadQueuePolicyConfig {
     pub active_slots: usize,
     pub waiting_capacity: usize,
@@ -48,7 +48,7 @@ pub struct Ed2kUploadQueuePolicyConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Ed2kServerEntry {
     pub host: String,
     pub port: u16,

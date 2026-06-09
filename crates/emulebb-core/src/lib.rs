@@ -1,30 +1,41 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     net::Ipv4Addr,
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
+    NatManager,
     config::Ed2kConfig,
     ed2k_server::{
-        Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile, Ed2kSourceSearchOptions,
-        Ed2kUdpSourceSearchOptions, search_keyword_servers, search_source_servers,
-        search_source_udp_servers,
+        Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile, Ed2kServerLoopOptions,
+        Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
+        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel, run_ed2k_server_loop,
+        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
+        search_source_udp_servers, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kSecureIdent,
         download_file_from_peer, emule_connect_options,
     },
     ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, new_transfer_job},
+    kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -163,16 +174,23 @@ struct CoreState {
     searches: HashMap<String, Search>,
     transfers: HashMap<String, Transfer>,
     kad_running: bool,
-    ed2k_connected: bool,
 }
 
-#[derive(Debug, Clone)]
+struct Ed2kRuntime {
+    search_handle: Ed2kServerSearchHandle,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    shutdown: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
 pub struct EmulebbCore {
     started_at: Instant,
     version: String,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     ed2k_network: Option<Ed2kNetworkConfig>,
+    ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -198,11 +216,11 @@ impl EmulebbCore {
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             ed2k_network,
+            ed2k_runtime: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
                 transfers: HashMap::new(),
                 kad_running: false,
-                ed2k_connected: false,
             })),
         })
     }
@@ -238,29 +256,26 @@ impl EmulebbCore {
             .values()
             .filter(|transfer| transfer.state == "completed")
             .count();
+        let active = state.transfers.len().saturating_sub(completed);
+        let kad_running = state.kad_running;
+        drop(state);
+
         Status {
             lifecycle: AppLifecycle {
                 state: "running".to_string(),
             },
             uptime_secs: self.started_at.elapsed().as_secs(),
             kad: NetworkStatus {
-                running: state.kad_running,
-                connected: state.kad_running,
+                running: kad_running,
+                connected: kad_running,
                 peer_count: 0,
             },
-            ed2k: NetworkStatus {
-                running: state.ed2k_connected,
-                connected: state.ed2k_connected,
-                peer_count: 0,
-            },
+            ed2k: self.ed2k_status().await,
             indexing: IndexingStatus {
                 enabled: true,
                 backend: "sqlite-fts5".to_string(),
             },
-            transfers: TransferStats {
-                active: state.transfers.len().saturating_sub(completed),
-                completed,
-            },
+            transfers: TransferStats { active, completed },
         }
     }
 
@@ -268,15 +283,57 @@ impl EmulebbCore {
         self.state.lock().await.kad_running = running;
     }
 
-    pub async fn set_ed2k_connected(&self, connected: bool) {
-        self.state.lock().await.ed2k_connected = connected;
+    pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
+        let Some(network) = self.ed2k_network.clone() else {
+            anyhow::bail!("ED2K network is not configured");
+        };
+        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+            anyhow::bail!("ED2K connect requires at least one configured server");
+        }
+
+        let mut runtime_guard = self.ed2k_runtime.lock().await;
+        if runtime_guard.is_some() {
+            drop(runtime_guard);
+            return Ok(self.ed2k_status().await);
+        }
+
+        let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
+        let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
+            bind_ip: network.bind_ip,
+            nat: Arc::new(NatManager),
+            config: network.config.clone(),
+            hello_identity: self.ed2k_hello_identity(&network),
+            shared_catalog: self.ed2k_transfers.shared_catalog(),
+            state: Arc::clone(&server_state),
+            search_inbox,
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            shutdown: Arc::clone(&shutdown),
+        }));
+        *runtime_guard = Some(Ed2kRuntime {
+            search_handle,
+            server_state,
+            shutdown,
+            task,
+        });
+        drop(runtime_guard);
+        Ok(self.ed2k_status().await)
+    }
+
+    pub async fn disconnect_ed2k(&self) -> NetworkStatus {
+        if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
+            runtime.shutdown.store(true, Ordering::SeqCst);
+            runtime.task.abort();
+        }
+        self.ed2k_status().await
     }
 
     pub async fn servers(&self) -> Vec<ServerInfo> {
-        let connected = self.state.lock().await.ed2k_connected;
         let Some(network) = self.ed2k_network.as_ref() else {
             return Vec::new();
         };
+        let connected_endpoint = self.ed2k_connected_endpoint().await;
         let mut servers = network
             .config
             .server_entries
@@ -285,21 +342,21 @@ impl EmulebbCore {
                 endpoint: format!("{}:{}", entry.host, entry.port),
                 name: entry.name.clone(),
                 description: entry.description.clone(),
-                connected,
+                connected: connected_endpoint
+                    .as_deref()
+                    .is_some_and(|endpoint| endpoint == format!("{}:{}", entry.host, entry.port)),
             })
             .collect::<Vec<_>>();
-        servers.extend(
-            network
-                .config
-                .server_endpoints
-                .iter()
-                .map(|endpoint| ServerInfo {
-                    endpoint: endpoint.clone(),
-                    name: None,
-                    description: None,
-                    connected,
-                }),
-        );
+        servers.extend(network.config.server_endpoints.iter().map(|endpoint| {
+            ServerInfo {
+                endpoint: endpoint.clone(),
+                name: None,
+                description: None,
+                connected: connected_endpoint
+                    .as_deref()
+                    .is_some_and(|connected| connected == endpoint),
+            }
+        }));
         servers
     }
 
@@ -453,6 +510,25 @@ impl EmulebbCore {
         }
 
         let cancel = CancellationToken::new();
+        if let Some(handle) = self.connected_ed2k_search_handle().await {
+            let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+            match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
+                .await
+            {
+                Ok(files) => {
+                    return Ok(Some(
+                        files
+                            .into_iter()
+                            .map(|file| search_result_from_ed2k(search_id, request, file))
+                            .collect(),
+                    ));
+                }
+                Err(error) => tracing::warn!(
+                    "ED2K background keyword search failed query={:?} error={error}",
+                    request.query
+                ),
+            }
+        }
         let hello_identity = Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
@@ -568,6 +644,24 @@ impl EmulebbCore {
         let attempts = configured_server_attempts(&network.config)
             .min(network.config.source_server_attempt_budget.max(1));
         let mut sources = Vec::new();
+        if let Some(handle) = self.connected_ed2k_search_handle().await {
+            let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+            match search_source_via_background_session(
+                &handle, file_hash, file_size, timeout, &cancel,
+            )
+            .await
+            {
+                Ok(results) => merge_download_sources(&mut sources, results),
+                Err(error) => tracing::warn!(
+                    "ED2K background source search failed file_hash={} error={error}",
+                    file_hash
+                ),
+            }
+        }
+        if !sources.is_empty() {
+            self.remember_ed2k_sources(file_hash, &sources).await?;
+            return Ok(sources);
+        }
         match search_source_servers(Ed2kSourceSearchOptions {
             bind_ip: network.bind_ip,
             config: &network.config,
@@ -610,6 +704,18 @@ impl EmulebbCore {
             }
         }
         for source in &sources {
+            self.remember_ed2k_sources(file_hash, std::slice::from_ref(source))
+                .await?;
+        }
+        Ok(sources)
+    }
+
+    async fn remember_ed2k_sources(
+        &self,
+        file_hash: Ed2kHash,
+        sources: &[Ed2kFoundSource],
+    ) -> Result<()> {
+        for source in sources {
             self.ed2k_transfers
                 .remember_source(
                     &file_hash.to_string(),
@@ -621,7 +727,7 @@ impl EmulebbCore {
                 )
                 .await?;
         }
-        Ok(sources)
+        Ok(())
     }
 
     fn ed2k_hello_identity(&self, network: &Ed2kNetworkConfig) -> Ed2kHelloIdentity {
@@ -635,6 +741,59 @@ impl EmulebbCore {
             connect_options: emule_connect_options(network.config.obfuscation_enabled),
             direct_udp_callback: false,
         }
+    }
+
+    async fn connected_ed2k_search_handle(&self) -> Option<Ed2kServerSearchHandle> {
+        let (handle, server_state) = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            let runtime = runtime_guard.as_ref()?;
+            (
+                runtime.search_handle.clone(),
+                Arc::clone(&runtime.server_state),
+            )
+        };
+        server_state.read().await.connected.then_some(handle)
+    }
+
+    async fn ed2k_connected_endpoint(&self) -> Option<String> {
+        let server_state = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            Arc::clone(&runtime_guard.as_ref()?.server_state)
+        };
+        let state = server_state.read().await;
+        state
+            .connected
+            .then(|| state.endpoint.map(|endpoint| endpoint.to_string()))?
+    }
+
+    async fn ed2k_status(&self) -> NetworkStatus {
+        let server_state = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            let Some(runtime) = runtime_guard.as_ref() else {
+                return NetworkStatus {
+                    running: false,
+                    connected: false,
+                    peer_count: 0,
+                };
+            };
+            Arc::clone(&runtime.server_state)
+        };
+        let state = server_state.read().await;
+        NetworkStatus {
+            running: true,
+            connected: state.connected,
+            peer_count: u32::from(state.connected),
+        }
+    }
+}
+
+impl fmt::Debug for EmulebbCore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmulebbCore")
+            .field("started_at", &self.started_at)
+            .field("version", &self.version)
+            .field("ed2k_network_configured", &self.ed2k_network.is_some())
+            .finish_non_exhaustive()
     }
 }
 

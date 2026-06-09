@@ -224,6 +224,42 @@ mod tests {
     }
 
     #[test]
+    fn load_parses_camel_case_ed2k_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("emulebb-rust.toml");
+        fs::write(
+            &config_path,
+            r#"
+runtimeDir = "runtime"
+p2pBindIp = "192.0.2.10"
+
+[rest]
+bindAddr = "192.0.2.10:13301"
+apiKey = "secret"
+
+[ed2k]
+listenPort = 41001
+serverEndpoints = ["192.0.2.20:4661"]
+connectTimeoutSecs = 1
+reconnectIntervalSecs = 60
+"#,
+        )
+        .unwrap();
+
+        let config = DaemonConfig::load(Some(config_path)).unwrap();
+
+        assert_eq!(config.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(
+            config.rest.bind_addr,
+            Some("192.0.2.10:13301".parse().unwrap())
+        );
+        assert_eq!(config.ed2k.listen_port, 41001);
+        assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
+        assert_eq!(config.ed2k.connect_timeout_secs, 1);
+        assert_eq!(config.ed2k.reconnect_interval_secs, 60);
+    }
+
+    #[test]
     fn rest_bind_addr_requires_configured_address() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_rest_bind(temp.path().to_path_buf(), None);
