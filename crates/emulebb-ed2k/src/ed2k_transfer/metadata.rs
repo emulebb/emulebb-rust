@@ -200,6 +200,28 @@ impl Ed2kTransferRuntime {
         Ok(true)
     }
 
+    /// Persist shared-file metadata exposed through the eMuleBB REST contract.
+    pub async fn update_shared_file_metadata(
+        &self,
+        file_hash: &str,
+        priority: Option<(&str, bool)>,
+        comment_rating: Option<(&str, u8)>,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if let Some((priority, auto_upload_priority)) = priority {
+            manifest.upload_priority = priority.to_string();
+            manifest.auto_upload_priority = auto_upload_priority;
+        }
+        if let Some((comment, rating)) = comment_rating {
+            manifest.comment = comment.to_string();
+            manifest.rating = rating;
+        }
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        Ok(manifest)
+    }
+
     /// Persist the user-facing transfer control state across process restarts.
     pub async fn set_control_state(
         &self,

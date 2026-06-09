@@ -126,6 +126,18 @@ pub struct Ed2kResumeManifest {
     pub pieces: Vec<Ed2kPieceState>,
     /// Remembered source hints.
     pub sources: Vec<Ed2kSourceHint>,
+    /// Public upload-priority token for shared-file REST metadata.
+    #[serde(default = "default_shared_upload_priority")]
+    pub upload_priority: String,
+    /// Whether upload priority should be automatically managed.
+    #[serde(default)]
+    pub auto_upload_priority: bool,
+    /// Locally configured shared-file comment.
+    #[serde(default)]
+    pub comment: String,
+    /// Locally configured shared-file rating in the public 0..5 range.
+    #[serde(default)]
+    pub rating: u8,
     /// User-facing transfer control state persisted across restarts.
     #[serde(default)]
     pub control_state: Option<String>,
@@ -160,6 +172,10 @@ impl Ed2kResumeManifest {
                 })
                 .collect(),
             sources: Vec::new(),
+            upload_priority: default_shared_upload_priority(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
             control_state: None,
             transfer_row_removed: false,
         }
@@ -172,4 +188,8 @@ impl Ed2kResumeManifest {
             .iter()
             .all(|piece| piece.state == Ed2kTransferState::Verified)
     }
+}
+
+fn default_shared_upload_priority() -> String {
+    "normal".to_string()
 }

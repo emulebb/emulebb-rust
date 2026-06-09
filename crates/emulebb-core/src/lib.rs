@@ -385,6 +385,21 @@ pub struct LocalShare {
     pub ed2k_link: String,
     pub aich_root: String,
     pub transfer_dir: String,
+    pub priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedFileUpdate {
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub rating: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1135,6 +1150,10 @@ impl EmulebbCore {
                         .payload_path(&manifest.file_hash)
                         .display()
                         .to_string(),
+                    priority: manifest.upload_priority.clone(),
+                    auto_upload_priority: manifest.auto_upload_priority,
+                    comment: manifest.comment.clone(),
+                    rating: manifest.rating,
                 })
                 .collect(),
             Err(error) => {
@@ -1149,6 +1168,38 @@ impl EmulebbCore {
             .await
             .into_iter()
             .find(|share| share.hash.eq_ignore_ascii_case(hash))
+    }
+
+    pub async fn update_shared_file(
+        &self,
+        hash: &str,
+        request: SharedFileUpdate,
+    ) -> Result<Option<LocalShare>> {
+        let Some(_share) = self.share(hash).await else {
+            return Ok(None);
+        };
+        let priority = request
+            .priority
+            .as_deref()
+            .map(validate_shared_upload_priority)
+            .transpose()?
+            .map(|priority| (priority.0.to_string(), priority.1));
+        let comment_rating = validate_shared_file_comment_rating(&request)?;
+        if priority.is_none() && comment_rating.is_none() {
+            anyhow::bail!("shared-file PATCH requires priority, comment, or rating");
+        }
+        self.ed2k_transfers
+            .update_shared_file_metadata(
+                hash,
+                priority
+                    .as_ref()
+                    .map(|(priority, auto)| (priority.as_str(), *auto)),
+                comment_rating
+                    .as_ref()
+                    .map(|(comment, rating)| (comment.as_str(), *rating)),
+            )
+            .await?;
+        Ok(self.share(hash).await)
     }
 
     pub async fn unshare_file(&self, hash: &str) -> Result<Option<LocalShare>> {
@@ -2332,6 +2383,27 @@ fn source_friend_name(source: &TransferSource) -> String {
     }
 }
 
+fn validate_shared_upload_priority(priority: &str) -> Result<(&str, bool)> {
+    match priority {
+        "auto" => Ok((priority, true)),
+        "verylow" | "low" | "normal" | "high" | "release" => Ok((priority, false)),
+        _ => Err(anyhow::anyhow!(
+            "priority must be one of auto, verylow, low, normal, high, release"
+        )),
+    }
+}
+
+fn validate_shared_file_comment_rating(request: &SharedFileUpdate) -> Result<Option<(String, u8)>> {
+    match (&request.comment, request.rating) {
+        (None, None) => Ok(None),
+        (Some(comment), Some(rating)) if rating <= 5 => Ok(Some((comment.clone(), rating))),
+        (None, Some(_)) => anyhow::bail!("comment must be a string"),
+        (Some(_), Some(_)) | (Some(_), None) => {
+            anyhow::bail!("rating must be an integer between 0 and 5")
+        }
+    }
+}
+
 fn server_info_from_parts(
     address: &str,
     port: u16,
@@ -2627,6 +2699,10 @@ fn local_share_from_summary(
         part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
+        priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
     }
 }
 

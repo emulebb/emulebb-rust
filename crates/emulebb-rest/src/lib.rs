@@ -12,7 +12,8 @@ use axum::{
 use emulebb_core::{
     CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare, LocalShareCreate,
     PreferencesUpdate, Search, SearchCreate, SearchResult, SearchResultDownloadCreate,
-    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate, TransferUpdate,
+    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, SharedFileUpdate, Transfer,
+    TransferCreate, TransferUpdate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -58,7 +59,7 @@ struct SharedFileResponse {
     path: String,
     directory: String,
     size_bytes: u64,
-    priority: &'static str,
+    priority: String,
     auto_upload_priority: bool,
     requests: u64,
     accepted_requests: u64,
@@ -217,7 +218,9 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route(
             "/api/v1/shared-files/{hash}",
-            get(shared_file).delete(delete_shared_file),
+            get(shared_file)
+                .patch(update_shared_file)
+                .delete(delete_shared_file),
         )
         .route(
             "/api/v1/shared-files/{hash}/file",
@@ -722,6 +725,22 @@ async fn shared_file(
     }
 }
 
+async fn update_shared_file(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+    Json(request): Json<SharedFileUpdate>,
+) -> impl IntoResponse {
+    match state.core.update_shared_file(&hash, request).await {
+        Ok(Some(share)) => api_ok(shared_file_response(&share)).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
 async fn delete_shared_file(
     State(state): State<RestState>,
     Path(hash): Path<String>,
@@ -788,7 +807,20 @@ async fn shared_file_comments(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.share(&hash).await {
-        Some(_share) => api_collection(Vec::<Value>::new()).into_response(),
+        Some(share) => {
+            let items = if share.comment.is_empty() && share.rating == 0 {
+                Vec::<Value>::new()
+            } else {
+                vec![json!({
+                    "source": "local",
+                    "userName": null,
+                    "fileName": share.name,
+                    "comment": share.comment,
+                    "rating": share.rating
+                })]
+            };
+            api_collection(items).into_response()
+        }
         None => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
         }
@@ -1327,8 +1359,8 @@ fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
         directory: shared_file_directory(&path),
         path,
         size_bytes: share.size_bytes,
-        priority: "normal",
-        auto_upload_priority: false,
+        priority: share.priority.clone(),
+        auto_upload_priority: share.auto_upload_priority,
         requests: 0,
         accepted_requests: 0,
         transferred_bytes: 0,
@@ -1338,10 +1370,10 @@ fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
         part_count: share.part_count,
         part_file: false,
         complete: true,
-        comment: String::new(),
-        rating: 0,
-        has_comment: false,
-        user_rating: 0,
+        comment: share.comment.clone(),
+        rating: share.rating,
+        has_comment: !share.comment.is_empty(),
+        user_rating: share.rating,
         published_ed2k: true,
         shared_by_rule: false,
         ed2k_link: share.ed2k_link.clone(),
