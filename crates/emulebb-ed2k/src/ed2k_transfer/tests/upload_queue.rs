@@ -84,6 +84,36 @@ async fn upload_queue_grants_immediately_then_promotes_waiter() {
 }
 
 #[tokio::test]
+async fn upload_queue_release_client_selects_waiter_or_active_slot() {
+    let root = unique_test_dir("ed2k-upload-queue-release-client");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x6B; 16]);
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 1), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x22, 2), &file_hash)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    assert!(runtime.release_upload_client("10.0.0.2:4662", true).await);
+    assert_eq!(
+        runtime.poll_upload_session(&waiting_handle, true).await,
+        Ed2kUploadSessionStatus::Stale
+    );
+
+    assert!(
+        runtime
+            .release_upload_client("11111111111111111111111111111111", false)
+            .await
+    );
+    assert!(runtime.upload_queue_snapshot().await.is_empty());
+}
+
+#[tokio::test]
 async fn upload_queue_reconnect_replaces_stale_connection() {
     let root = unique_test_dir("ed2k-upload-queue-reconnect");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

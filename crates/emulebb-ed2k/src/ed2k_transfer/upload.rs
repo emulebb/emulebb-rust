@@ -65,6 +65,14 @@ impl Ed2kTransferRuntime {
             .release_session(handle, Instant::now());
     }
 
+    /// Release one queue-visible upload client selected from REST management state.
+    pub async fn release_upload_client(&self, client_id: &str, waiting_queue: bool) -> bool {
+        self.upload_queue
+            .lock()
+            .await
+            .release_client(client_id, waiting_queue, Instant::now())
+    }
+
     /// Return a management snapshot of active and waiting inbound upload sessions.
     pub async fn upload_queue_snapshot(&self) -> Vec<Ed2kUploadQueueSnapshotEntry> {
         self.upload_queue.lock().await.snapshot(Instant::now())

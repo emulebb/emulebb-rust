@@ -287,6 +287,35 @@ impl Ed2kUploadQueueState {
         self.promote_waiters(now);
     }
 
+    pub(super) fn release_client(
+        &mut self,
+        client_id: &str,
+        waiting_queue: bool,
+        now: Instant,
+    ) -> bool {
+        self.reap_expired_sessions(now);
+        let Some(key) = self
+            .sessions
+            .iter()
+            .find(|(key, session)| {
+                let is_waiting = session.phase == Ed2kUploadSessionPhase::Waiting;
+                is_waiting == waiting_queue && upload_client_id_matches(&key.peer, client_id)
+            })
+            .map(|(key, _session)| key.clone())
+        else {
+            return false;
+        };
+        let Some(session) = self.sessions.remove(&key) else {
+            return false;
+        };
+        if session.phase == Ed2kUploadSessionPhase::Waiting {
+            self.waiting_order.retain(|queued| queued != &key);
+        }
+        self.reap_expired_sessions(now);
+        self.promote_waiters(now);
+        true
+    }
+
     pub(super) fn snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
         self.reap_expired_sessions(now);
         let mut entries = self
@@ -516,4 +545,10 @@ fn upload_snapshot_sort_key(entry: &Ed2kUploadQueueSnapshotEntry) -> (u8, u16) {
         Ed2kUploadSessionPhaseSnapshot::Granted => (1, 0),
         Ed2kUploadSessionPhaseSnapshot::Waiting => (2, entry.queue_rank.unwrap_or(u16::MAX)),
     }
+}
+
+fn upload_client_id_matches(peer: &Ed2kUploadPeerIdentity, client_id: &str) -> bool {
+    peer.user_hash
+        .is_some_and(|user_hash| hex::encode(user_hash) == client_id)
+        || format!("{}:{}", peer.ip, peer.tcp_port) == client_id
 }

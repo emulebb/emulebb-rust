@@ -320,8 +320,56 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
         )
         .route("/api/v1/uploads", get(uploads))
         .route("/api/v1/uploads/{client_id}", get(upload))
+        .route(
+            "/api/v1/uploads/{client_id}/operations/remove",
+            post(upload_remove),
+        )
+        .route(
+            "/api/v1/uploads/{client_id}/operations/release-slot",
+            post(upload_release_slot),
+        )
+        .route(
+            "/api/v1/uploads/{client_id}/operations/add-friend",
+            post(upload_add_friend),
+        )
+        .route(
+            "/api/v1/uploads/{client_id}/operations/remove-friend",
+            post(upload_remove_friend),
+        )
+        .route(
+            "/api/v1/uploads/{client_id}/operations/ban",
+            post(upload_ban),
+        )
+        .route(
+            "/api/v1/uploads/{client_id}/operations/unban",
+            post(upload_unban),
+        )
         .route("/api/v1/upload-queue", get(upload_queue))
         .route("/api/v1/upload-queue/{client_id}", get(upload_queue_client))
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/remove",
+            post(upload_remove),
+        )
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/release-slot",
+            post(upload_release_slot),
+        )
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/add-friend",
+            post(upload_add_friend),
+        )
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/remove-friend",
+            post(upload_remove_friend),
+        )
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/ban",
+            post(upload_ban),
+        )
+        .route(
+            "/api/v1/upload-queue/{client_id}/operations/unban",
+            post(upload_unban),
+        )
         .route(
             "/api/v1/transfers/{hash}/operations/pause",
             post(transfer_pause),
@@ -1233,6 +1281,111 @@ async fn upload_by_client_id(state: RestState, client_id: String, waiting_queue:
     }
 }
 
+async fn upload_remove(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.remove_upload_client(&client_id).await {
+        Ok(Some(removed)) => api_ok(json!({"ok": true, "removed": removed})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload client not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn upload_release_slot(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.release_upload_slot(&client_id).await {
+        Ok(Some(())) => api_ok(json!({"ok": true})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload client not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn upload_add_friend(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.add_upload_client_friend(&client_id).await {
+        Ok(Some(friend)) => api_ok(friend).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload client not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn upload_remove_friend(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.remove_upload_client_friend(&client_id).await {
+        Ok(Some(_friend)) => api_ok(json!({"ok": true})).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "friend not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn upload_ban(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.ban_upload_client(&client_id).await {
+        Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload client not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn upload_unban(
+    State(state): State<RestState>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    match state.core.unban_upload_client(&client_id).await {
+        Ok(Some(banned)) => api_ok(json!({"ok": true, "banned": banned})).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "upload client not found",
+        )
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
 async fn transfer_pause(
     State(state): State<RestState>,
     Path(hash): Path<String>,
@@ -1810,6 +1963,7 @@ mod tests {
         }
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/upload-queue/unknown")
@@ -1820,6 +1974,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        for path in [
+            "/api/v1/uploads/unknown/operations/remove",
+            "/api/v1/uploads/unknown/operations/release-slot",
+            "/api/v1/uploads/unknown/operations/add-friend",
+            "/api/v1/uploads/unknown/operations/remove-friend",
+            "/api/v1/uploads/unknown/operations/ban",
+            "/api/v1/uploads/unknown/operations/unban",
+            "/api/v1/upload-queue/unknown/operations/remove",
+            "/api/v1/upload-queue/unknown/operations/release-slot",
+            "/api/v1/upload-queue/unknown/operations/add-friend",
+            "/api/v1/upload-queue/unknown/operations/remove-friend",
+            "/api/v1/upload-queue/unknown/operations/ban",
+            "/api/v1/upload-queue/unknown/operations/unban",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("X-API-Key", "secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

@@ -1342,6 +1342,93 @@ impl EmulebbCore {
             .find(|upload| upload.client_id == client_id)
     }
 
+    pub async fn add_upload_client_friend(&self, client_id: &str) -> Result<Option<Friend>> {
+        let Some(upload) = self.upload_client_for_control(client_id).await else {
+            return Ok(None);
+        };
+        let Some(user_hash) = upload.user_hash.as_deref() else {
+            anyhow::bail!("upload client does not expose a userHash");
+        };
+        self.add_friend(FriendCreate {
+            user_hash: user_hash.to_string(),
+            name: Some(upload.user_name),
+        })
+        .await
+        .map(Some)
+    }
+
+    pub async fn remove_upload_client_friend(&self, client_id: &str) -> Result<Option<Friend>> {
+        let Some(upload) = self.upload_client_for_control(client_id).await else {
+            return Ok(None);
+        };
+        let Some(user_hash) = upload.user_hash.as_deref() else {
+            return Ok(None);
+        };
+        self.delete_friend(user_hash).await
+    }
+
+    pub async fn ban_upload_client(&self, client_id: &str) -> Result<Option<bool>> {
+        let Some(upload) = self.upload_client_for_control(client_id).await else {
+            return Ok(None);
+        };
+        self.state
+            .lock()
+            .await
+            .banned_source_clients
+            .insert(upload.client_id);
+        Ok(Some(true))
+    }
+
+    pub async fn unban_upload_client(&self, client_id: &str) -> Result<Option<bool>> {
+        let Some(upload) = self.upload_client_for_control(client_id).await else {
+            return Ok(None);
+        };
+        self.state
+            .lock()
+            .await
+            .banned_source_clients
+            .remove(&upload.client_id);
+        Ok(Some(false))
+    }
+
+    pub async fn remove_upload_client(&self, client_id: &str) -> Result<Option<&'static str>> {
+        if self
+            .ed2k_transfers
+            .release_upload_client(client_id, true)
+            .await
+        {
+            return Ok(Some("queue"));
+        }
+        if self
+            .ed2k_transfers
+            .release_upload_client(client_id, false)
+            .await
+        {
+            return Ok(Some("slot"));
+        }
+        if self.upload_client_for_control(client_id).await.is_none() {
+            return Ok(None);
+        }
+        anyhow::bail!("upload client is not active or queued");
+    }
+
+    pub async fn release_upload_slot(&self, client_id: &str) -> Result<Option<()>> {
+        if self.upload(client_id, false).await.is_some() {
+            if self
+                .ed2k_transfers
+                .release_upload_client(client_id, false)
+                .await
+            {
+                return Ok(Some(()));
+            }
+            return Ok(None);
+        }
+        if self.upload(client_id, true).await.is_some() {
+            anyhow::bail!("client does not currently hold an upload slot");
+        }
+        Ok(None)
+    }
+
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
         if let Some(transfer) = self.state.lock().await.transfers.get(hash).cloned() {
             return Some(transfer);
@@ -1603,6 +1690,13 @@ impl EmulebbCore {
                 upload_from_snapshot(entry, manifest)
             })
             .collect()
+    }
+
+    async fn upload_client_for_control(&self, client_id: &str) -> Option<Upload> {
+        if let Some(upload) = self.upload(client_id, false).await {
+            return Some(upload);
+        }
+        self.upload(client_id, true).await
     }
 
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
