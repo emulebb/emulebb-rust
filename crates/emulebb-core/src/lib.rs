@@ -518,40 +518,30 @@ impl EmulebbCore {
     }
 
     pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
+        let mut transfers = self.create_transfers(request).await?;
+        ensure!(
+            transfers.len() == 1,
+            "create_transfer requires exactly one transfer link"
+        );
+        Ok(transfers.remove(0))
+    }
+
+    pub async fn create_transfers(&self, request: TransferCreate) -> Result<Vec<Transfer>> {
         ensure_category_selector_is_unambiguous(
             request.category_id,
             request.category_name.as_deref(),
         )?;
         let state_name = transfer_create_state_name(request.paused);
-        if let Some(link) = request.link {
-            ensure!(
-                request.links.is_none(),
-                "link and links are mutually exclusive"
-            );
-            ensure!(!link.trim().is_empty(), "link is required");
+        let links = transfer_create_links(request)?;
+        let mut transfers = Vec::with_capacity(links.len());
+        for link in links {
             let parsed = parse_ed2k_link(&link)?;
-            return Ok(self
-                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
-                .await?);
-        }
-        if let Some(mut links) = request.links {
-            ensure!(
-                links.len() == 1,
-                "emulebb-rust currently accepts one transfer link per request"
+            transfers.push(
+                self.upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
+                    .await?,
             );
-            let link = links
-                .pop()
-                .ok_or_else(|| anyhow::anyhow!("links must contain at least one entry"))?;
-            ensure!(
-                !link.trim().is_empty(),
-                "links must not contain empty entries"
-            );
-            let parsed = parse_ed2k_link(&link)?;
-            return Ok(self
-                .upsert_transfer_from_parts(parsed.0, parsed.1, parsed.2, state_name)
-                .await?);
         }
-        Err(anyhow::anyhow!("link or links is required"))
+        Ok(transfers)
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
@@ -1170,6 +1160,27 @@ fn ensure_category_selector_is_unambiguous(
         "categoryName must not be empty"
     );
     Ok(())
+}
+
+fn transfer_create_links(request: TransferCreate) -> Result<Vec<String>> {
+    match (request.link, request.links) {
+        (Some(link), None) => {
+            ensure!(!link.trim().is_empty(), "link is required");
+            Ok(vec![link])
+        }
+        (None, Some(links)) => {
+            ensure!(!links.is_empty(), "links must contain at least one entry");
+            for link in &links {
+                ensure!(
+                    !link.trim().is_empty(),
+                    "links must not contain empty entries"
+                );
+            }
+            Ok(links)
+        }
+        (Some(_), Some(_)) => Err(anyhow::anyhow!("link and links are mutually exclusive")),
+        (None, None) => Err(anyhow::anyhow!("link or links is required")),
+    }
 }
 
 fn transfer_sources_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferSource> {

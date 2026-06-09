@@ -10,7 +10,8 @@ use axum::{
     routing::{get, post},
 };
 use emulebb_core::{
-    EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, TransferCreate,
+    EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, Transfer,
+    TransferCreate,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -24,6 +25,28 @@ pub struct RestConfig {
 pub struct RestState {
     core: Arc<EmulebbCore>,
     api_key: Arc<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkOperationResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultDownloadResult {
+    ok: bool,
+    search_id: String,
+    hash: String,
 }
 
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
@@ -213,7 +236,12 @@ async fn download_search_result(
         .download_search_result(&search_id, &hash, request)
         .await
     {
-        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(Some(_transfer)) => api_ok(SearchResultDownloadResult {
+            ok: true,
+            search_id,
+            hash,
+        })
+        .into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -234,8 +262,14 @@ async fn create_transfer(
     State(state): State<RestState>,
     Json(request): Json<TransferCreate>,
 ) -> impl IntoResponse {
-    match state.core.create_transfer(request).await {
-        Ok(transfer) => api_ok(transfer).into_response(),
+    match state.core.create_transfers(request).await {
+        Ok(transfers) => api_bulk_operation(
+            transfers
+                .iter()
+                .map(bulk_result_from_transfer)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -269,7 +303,9 @@ async fn transfer_pause(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.pause_transfer(&hash).await {
-        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(Some(transfer)) => {
+            api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
+        }
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
         }
@@ -284,7 +320,9 @@ async fn transfer_resume(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.resume_transfer(&hash).await {
-        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(Some(transfer)) => {
+            api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
+        }
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
         }
@@ -299,7 +337,9 @@ async fn transfer_stop(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     match state.core.stop_transfer(&hash).await {
-        Ok(Some(transfer)) => api_ok(transfer).into_response(),
+        Ok(Some(transfer)) => {
+            api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
+        }
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
         }
@@ -339,6 +379,32 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
             "meta": BTreeMap::<String, Value>::new()
         })),
     )
+}
+
+fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {
+    let total = items.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "items": items,
+                "total": total,
+                "offset": 0,
+                "limit": total
+            },
+            "meta": BTreeMap::<String, Value>::new()
+        })),
+    )
+}
+
+fn bulk_result_from_transfer(transfer: &Transfer) -> BulkOperationResult {
+    BulkOperationResult {
+        ok: true,
+        id: None,
+        hash: Some(transfer.hash.clone()),
+        name: Some(transfer.name.clone()),
+        error: None,
+    }
 }
 
 fn api_error(
@@ -486,6 +552,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["ok"], true);
+        assert_eq!(value["data"]["searchId"], search_id);
+        assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
     }
 
     #[tokio::test]
@@ -545,7 +616,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["state"], "paused");
+        assert_eq!(value["data"]["ok"], true);
+        assert_eq!(value["data"]["searchId"], search_id);
+        assert_eq!(value["data"]["hash"], "00112233445566778899aabbccddeeff");
     }
 
     #[tokio::test]
@@ -563,10 +636,19 @@ mod tests {
                         r#"{"link":"ed2k://|file|Stopped.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
                     ))
                     .unwrap(),
-            )
+        )
+        .await
+        .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let body = to_bytes(create_response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(create_response.status(), StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["items"][0]["ok"], true);
+        assert_eq!(
+            value["data"]["items"][0]["hash"],
+            "00112233445566778899aabbccddeeff"
+        );
 
         let stop_response = app
             .clone()
@@ -595,5 +677,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(resume_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_transfers_accepts_canonical_links_array() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"links":["ed2k://|file|One.bin|1|00112233445566778899aabbccddeeff|/","ed2k://|file|Two.bin|2|ffeeddccbbaa99887766554433221100|/"],"paused":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["total"], 2);
+        assert_eq!(value["data"]["items"][0]["ok"], true);
+        assert_eq!(value["data"]["items"][1]["ok"], true);
+        assert_eq!(
+            value["data"]["items"][0]["hash"],
+            "00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
+            value["data"]["items"][1]["hash"],
+            "ffeeddccbbaa99887766554433221100"
+        );
     }
 }
