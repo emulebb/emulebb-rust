@@ -52,7 +52,8 @@ pub(crate) use upload_queue::{
     Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
 
-pub(crate) const ED2K_PART_SIZE: u64 = 9_728_000;
+/// Canonical ED2K part size used by eMule-compatible file hashing.
+pub const ED2K_PART_SIZE: u64 = 9_728_000;
 /// Canonical eMule upload block size used inside one ED2K part request.
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
 const MANIFEST_FILE_NAME: &str = "resume-manifest.json";

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::Path as FsPath, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -10,7 +10,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, Transfer,
+    EmulebbCore, LocalShare, LocalShareCreate, SearchCreate, SearchResultDownloadCreate, Transfer,
     TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -49,6 +49,57 @@ struct SearchResultDownloadResult {
     hash: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedFileResponse {
+    hash: String,
+    name: String,
+    path: String,
+    directory: String,
+    size_bytes: u64,
+    priority: &'static str,
+    auto_upload_priority: bool,
+    requests: u64,
+    accepted_requests: u64,
+    transferred_bytes: u64,
+    all_time_requests: u64,
+    all_time_accepts: u64,
+    all_time_transferred: u64,
+    part_count: u32,
+    part_file: bool,
+    complete: bool,
+    comment: String,
+    rating: u8,
+    has_comment: bool,
+    user_rating: u8,
+    published_ed2k: bool,
+    shared_by_rule: bool,
+    ed2k_link: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedFileCreateRequest {
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedFileCreateResult {
+    ok: bool,
+    path: String,
+    already_shared: bool,
+    queued: bool,
+    file: SharedFileResponse,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Ed2kLinkResult {
+    hash: String,
+    link: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConfirmQuery {
@@ -79,7 +130,15 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/searches/{search_id}",
             get(search).delete(delete_search),
         )
-        .route("/api/v1/shares", get(shares).post(create_share))
+        .route(
+            "/api/v1/shared-files",
+            get(shared_files).post(create_shared_file),
+        )
+        .route("/api/v1/shared-files/{hash}", get(shared_file))
+        .route(
+            "/api/v1/shared-files/{hash}/ed2k-link",
+            get(shared_file_ed2k_link),
+        )
         .route(
             "/api/v1/searches/{search_id}/results/{hash}/operations/download",
             post(download_search_result),
@@ -216,18 +275,72 @@ async fn delete_search(
     }
 }
 
-async fn shares(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(state.core.shares().await)
+async fn shared_files(State(state): State<RestState>) -> impl IntoResponse {
+    let items = state
+        .core
+        .shares()
+        .await
+        .iter()
+        .map(shared_file_response)
+        .collect::<Vec<_>>();
+    api_collection_page(items)
 }
 
-async fn create_share(
+async fn create_shared_file(
     State(state): State<RestState>,
-    Json(request): Json<LocalShareCreate>,
+    Json(request): Json<SharedFileCreateRequest>,
 ) -> impl IntoResponse {
-    match state.core.share_local_file(request).await {
-        Ok(share) => api_ok(share).into_response(),
+    if request.path.trim().is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
+            .into_response();
+    }
+    let path = request.path;
+    match state
+        .core
+        .share_local_file(LocalShareCreate {
+            path: path.clone(),
+            name: None,
+        })
+        .await
+    {
+        Ok(share) => api_ok(SharedFileCreateResult {
+            ok: true,
+            path,
+            already_shared: false,
+            queued: false,
+            file: shared_file_response(&share),
+        })
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn shared_file(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.share(&hash).await {
+        Some(share) => api_ok(shared_file_response(&share)).into_response(),
+        None => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
+        }
+    }
+}
+
+async fn shared_file_ed2k_link(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.share(&hash).await {
+        Some(share) => api_ok(Ed2kLinkResult {
+            hash: share.hash,
+            link: share.ed2k_link,
+        })
+        .into_response(),
+        None => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
         }
     }
 }
@@ -413,7 +526,7 @@ async fn fallback() -> impl IntoResponse {
     api_error(
         StatusCode::NOT_IMPLEMENTED,
         "NOT_IMPLEMENTED",
-        "route is outside the emulebb-rust MVP REST subset",
+        "route is outside the current emulebb-rust REST subset",
     )
 }
 
@@ -437,6 +550,22 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
     )
 }
 
+fn api_collection_page<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
+    let total = items.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "items": items,
+                "total": total,
+                "offset": 0,
+                "limit": total
+            },
+            "meta": BTreeMap::<String, Value>::new()
+        })),
+    )
+}
+
 fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {
     let total = items.len();
     (
@@ -451,6 +580,51 @@ fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Valu
             "meta": BTreeMap::<String, Value>::new()
         })),
     )
+}
+
+fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
+    let path = managed_shared_file_path(share);
+    SharedFileResponse {
+        hash: share.hash.clone(),
+        name: share.name.clone(),
+        directory: shared_file_directory(&path),
+        path,
+        size_bytes: share.size_bytes,
+        priority: "normal",
+        auto_upload_priority: false,
+        requests: 0,
+        accepted_requests: 0,
+        transferred_bytes: 0,
+        all_time_requests: 0,
+        all_time_accepts: 0,
+        all_time_transferred: 0,
+        part_count: share.part_count,
+        part_file: false,
+        complete: true,
+        comment: String::new(),
+        rating: 0,
+        has_comment: false,
+        user_rating: 0,
+        published_ed2k: true,
+        shared_by_rule: false,
+        ed2k_link: share.ed2k_link.clone(),
+    }
+}
+
+fn managed_shared_file_path(share: &LocalShare) -> String {
+    let path = FsPath::new(&share.transfer_dir);
+    if path.is_dir() {
+        path.join("pieces.bin").display().to_string()
+    } else {
+        share.transfer_dir.clone()
+    }
+}
+
+fn shared_file_directory(path: &str) -> String {
+    FsPath::new(path)
+        .parent()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_default()
 }
 
 fn bulk_result_from_transfer(transfer: &Transfer) -> BulkOperationResult {

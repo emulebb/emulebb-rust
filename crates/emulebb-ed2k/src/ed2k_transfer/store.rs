@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use super::manifest::{manifest_progress_bytes, quarantine_corrupt_manifest};
 use super::{
     ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
-    Ed2kTransferRuntime, MANIFEST_FILE_NAME,
+    Ed2kTransferRuntime, MANIFEST_FILE_NAME, PAYLOAD_FILE_NAME,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -114,5 +114,11 @@ impl Ed2kTransferRuntime {
 
     pub(super) fn transfer_dir(&self, file_hash: &str) -> PathBuf {
         self.root_dir.join(file_hash)
+    }
+
+    /// Return the managed payload path for one ED2K transfer hash.
+    #[must_use]
+    pub fn payload_path(&self, file_hash: &str) -> PathBuf {
+        self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME)
     }
 }

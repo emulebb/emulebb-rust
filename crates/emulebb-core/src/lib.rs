@@ -27,7 +27,9 @@ use emulebb_ed2k::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
-    ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job},
+    ed2k_transfer::{
+        ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, new_transfer_job,
+    },
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
@@ -178,6 +180,8 @@ pub struct LocalShare {
     pub hash: String,
     pub name: String,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub part_count: u32,
     pub ed2k_link: String,
     pub aich_root: String,
     pub transfer_dir: String,
@@ -580,24 +584,39 @@ impl EmulebbCore {
     }
 
     pub async fn shares(&self) -> Vec<LocalShare> {
-        let catalog = self.ed2k_transfers.shared_catalog();
-        catalog
-            .read()
+        match self.ed2k_transfers.manifests().await {
+            Ok(manifests) => manifests
+                .into_iter()
+                .filter(|manifest| manifest.completed)
+                .map(|manifest| LocalShare {
+                    hash: manifest.file_hash.clone(),
+                    name: manifest.canonical_name.clone(),
+                    size_bytes: manifest.file_size,
+                    part_count: ed2k_part_count(manifest.file_size),
+                    ed2k_link: format!(
+                        "ed2k://|file|{}|{}|{}|/",
+                        manifest.canonical_name, manifest.file_size, manifest.file_hash
+                    ),
+                    aich_root: manifest.aich_root.clone().unwrap_or_default(),
+                    transfer_dir: self
+                        .ed2k_transfers
+                        .payload_path(&manifest.file_hash)
+                        .display()
+                        .to_string(),
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!("failed to enumerate ED2K shared-file manifests: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn share(&self, hash: &str) -> Option<LocalShare> {
+        self.shares()
             .await
-            .iter()
-            .filter(|entry| entry.verified_complete && !entry.compatibility_hint)
-            .map(|entry| LocalShare {
-                hash: entry.file_hash.clone(),
-                name: entry.canonical_name.clone(),
-                size_bytes: entry.file_size,
-                ed2k_link: format!(
-                    "ed2k://|file|{}|{}|{}|/",
-                    entry.canonical_name, entry.file_size, entry.file_hash
-                ),
-                aich_root: entry.aich_root.clone().unwrap_or_default(),
-                transfer_dir: String::new(),
-            })
-            .collect()
+            .into_iter()
+            .find(|share| share.hash.eq_ignore_ascii_case(hash))
     }
 
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
@@ -1353,8 +1372,17 @@ fn local_share_from_summary(
         hash: summary.file_hash,
         name: summary.canonical_name,
         size_bytes: summary.file_size,
+        part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
+    }
+}
+
+fn ed2k_part_count(size_bytes: u64) -> u32 {
+    if size_bytes == 0 {
+        0
+    } else {
+        size_bytes.div_ceil(ED2K_PART_SIZE) as u32
     }
 }
 

@@ -5,10 +5,10 @@ implements the eMuleBB `/api/v1` controller shape for aMuTorrent and keeps local
 client state plus indexing data in SQLite.
 
 This repository was bootstrapped from the Kad and ED2K work in
-`p2p-overlord-agents`, but it is intentionally a local client product. The MVP
-does not expose a coordinator API.
+`p2p-overlord-agents`, but it is intentionally a local client product. The
+0.0.x line does not expose a coordinator API.
 
-## MVP Shape
+## 0.0.x Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
 - `emulebb-rest`: eMuleBB-compatible `/api/v1` routes, envelopes, and API-key
@@ -18,7 +18,7 @@ does not expose a coordinator API.
 - `emulebb-index`: SQLite + FTS5 local file index.
 - `emulebb-kad-*`: copied and renamed Kad protocol/runtime crates.
 
-Indexing is a capability in the MVP, not a separate public API. It improves
+Indexing is a client capability, not a separate public API. It improves
 search results returned through the eMuleBB search resources.
 
 ## Binding Contract

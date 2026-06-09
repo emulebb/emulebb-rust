@@ -396,7 +396,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "emulebb-core"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-daemon"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-ed2k"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-index"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-dht"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "binrw",
  "emulebb-kad-net",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-net"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-proto"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "binrw",
  "encoding_rs",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-routing"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "emulebb-kad-proto",
  "thiserror",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-rest"
-version = "0.1.0"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",
