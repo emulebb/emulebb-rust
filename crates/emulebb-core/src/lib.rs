@@ -18,7 +18,8 @@ use emulebb_ed2k::{
     ed2k_server::{
         Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile, Ed2kServerLoopOptions,
         Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
-        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel, run_ed2k_server_loop,
+        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel,
+        publish_shared_catalog_via_background_session, run_ed2k_server_loop,
         search_keyword_servers, search_keyword_via_background_session, search_source_servers,
         search_source_udp_servers, search_source_via_background_session,
     },
@@ -516,6 +517,9 @@ impl EmulebbCore {
             .ed2k_transfers
             .ingest_local_file(source_path, &canonical_name)
             .await?;
+        if let Err(error) = self.publish_ed2k_shared_catalog().await {
+            tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
+        }
         Ok(local_share_from_summary(summary))
     }
 
@@ -842,6 +846,18 @@ impl EmulebbCore {
             )
         };
         server_state.read().await.connected.then_some(handle)
+    }
+
+    async fn publish_ed2k_shared_catalog(&self) -> Result<()> {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Ok(());
+        };
+        let Some(handle) = self.connected_ed2k_search_handle().await else {
+            return Ok(());
+        };
+        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
+        publish_shared_catalog_via_background_session(&handle, timeout, &CancellationToken::new())
+            .await
     }
 
     async fn ed2k_connected_endpoint(&self) -> Option<String> {

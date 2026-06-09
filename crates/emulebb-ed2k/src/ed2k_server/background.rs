@@ -20,13 +20,16 @@ use super::{
     OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, ResolvedServerEntry, ServerSession,
     ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
     decode_udp_search_result_pages, encode_search_request, encode_source_request,
-    merge_found_sources, send_udp_keyword_search, send_udp_source_search, source_request_opcode,
-    validate_found_sources, wait_for_offer_files_settle,
+    merge_found_sources, send_offer_files_advertisement, send_udp_keyword_search,
+    send_udp_source_search, source_request_opcode, validate_found_sources,
+    wait_for_offer_files_settle,
 };
+use crate::ed2k_transfer::Ed2kSharedCatalog;
 
 type BackgroundKeywordSearchResponse = std::result::Result<Vec<Ed2kSearchFile>, String>;
 type BackgroundSourceSearchResponse = std::result::Result<Vec<Ed2kFoundSource>, String>;
 type BackgroundCallbackRequestResponse = std::result::Result<(), String>;
+type BackgroundPublishResponse = std::result::Result<(), String>;
 
 /// Handle used by active jobs to execute a keyword search through the
 /// long-lived ED2K background session.
@@ -56,6 +59,9 @@ pub(super) enum BackgroundServerSearchRequest {
     Callback {
         client_id: u32,
         response: oneshot::Sender<BackgroundCallbackRequestResponse>,
+    },
+    Publish {
+        response: oneshot::Sender<BackgroundPublishResponse>,
     },
 }
 
@@ -184,6 +190,30 @@ pub async fn request_callback_via_background_session(
     }
 }
 
+/// Requests an immediate offer-files refresh on the connected ED2K server session.
+pub async fn publish_shared_catalog_via_background_session(
+    handle: &Ed2kServerSearchHandle,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let (response, receive_response) = oneshot::channel();
+    handle
+        .sender
+        .send(BackgroundServerSearchRequest::Publish { response })
+        .await
+        .context("ED2K background publish channel is closed")?;
+
+    tokio::select! {
+        _ = cancel.cancelled() => Ok(()),
+        result = tokio::time::timeout(timeout, receive_response) => {
+            let response = result
+                .with_context(|| format!("timed out waiting for ED2K background publish response after {timeout:?}"))?
+                .context("ED2K background publish responder dropped")?;
+            response.map_err(anyhow::Error::msg)
+        }
+    }
+}
+
 pub(super) fn handle_background_udp_packet(
     server: &ResolvedServerEntry,
     packet: &ServerUdpPacket,
@@ -275,6 +305,9 @@ pub(super) fn fail_background_search_request(
             BackgroundServerSearchRequest::Callback { response, .. } => {
                 let _ = response.send(Err(error.to_string()));
             }
+            BackgroundServerSearchRequest::Publish { response } => {
+                let _ = response.send(Err(error.to_string()));
+            }
         }
     }
 }
@@ -300,6 +333,8 @@ pub(super) async fn start_background_server_search(
     server: &ResolvedServerEntry,
     server_udp_socket: Option<&UdpSocket>,
     connect_options: u8,
+    shared_catalog: &Ed2kSharedCatalog,
+    tcp_port: u16,
     request: BackgroundServerSearchRequest,
 ) -> Result<Option<PendingBackgroundServerSearch>> {
     match request {
@@ -392,6 +427,11 @@ pub(super) async fn start_background_server_search(
                 "sent ED2K background callback request client_id={} endpoint={} trace_id={} role={}",
                 client_id, session.endpoint, session.trace_id, session.trace_role
             );
+            let _ = response.send(Ok(()));
+            Ok(None)
+        }
+        BackgroundServerSearchRequest::Publish { response } => {
+            send_offer_files_advertisement(session, shared_catalog, tcp_port).await?;
             let _ = response.send(Ok(()));
             Ok(None)
         }

@@ -151,6 +151,8 @@ pub(super) async fn run_one_server_session(
                             server,
                             server_udp_socket.as_ref(),
                             context.hello_identity.connect_options,
+                            &context.shared_catalog,
+                            context.hello_identity.tcp_port,
                             request,
                         )
                         .await
@@ -174,6 +176,11 @@ pub(super) async fn run_one_server_session(
                             BackgroundServerSearchRequest::Callback { client_id, .. } => info!(
                                 "queued ED2K background callback request client_id={} endpoint={} trace_id={} awaiting login",
                                 client_id,
+                                session.endpoint,
+                                session.trace_id
+                            ),
+                            BackgroundServerSearchRequest::Publish { .. } => info!(
+                                "queued ED2K background publish refresh endpoint={} trace_id={} awaiting login",
                                 session.endpoint,
                                 session.trace_id
                             ),
@@ -324,6 +331,8 @@ pub(super) async fn run_one_server_session(
                         server,
                         server_udp_socket.as_ref(),
                         context.hello_identity.connect_options,
+                        &context.shared_catalog,
+                        context.hello_identity.tcp_port,
                         request,
                     )
                     .await

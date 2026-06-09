@@ -49,8 +49,8 @@ use background::{
 };
 pub use background::{
     Ed2kServerSearchHandle, Ed2kServerSearchInbox, new_ed2k_server_search_channel,
-    request_callback_via_background_session, search_keyword_via_background_session,
-    search_source_via_background_session,
+    publish_shared_catalog_via_background_session, request_callback_via_background_session,
+    search_keyword_via_background_session, search_source_via_background_session,
 };
 use diagnostics::{dump_ed2k_server_meta, dump_ed2k_server_packet};
 use flags::{format_connect_options, format_server_flags, is_low_id};
