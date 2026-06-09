@@ -131,6 +131,142 @@ async fn shared_files_use_canonical_route_and_envelope() {
     assert_eq!(retired_route.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
+#[tokio::test]
+async fn shared_directories_use_emulebb_contract_and_reload_files() {
+    let runtime_dir = unique_test_dir("shared-directories-contract");
+    let transfer_root = runtime_dir.join("transfers");
+    let shared_root = runtime_dir.join("shared-root");
+    let nested_root = shared_root.join("nested");
+    let top_level_file = shared_root.join("Top.Level.bin");
+    let nested_file = nested_root.join("Nested.bin");
+    std::fs::create_dir_all(&nested_root).unwrap();
+    std::fs::write(&top_level_file, b"top level shared payload").unwrap();
+    std::fs::write(&nested_file, b"nested shared payload").unwrap();
+    let core = Arc::new(
+        EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
+    );
+    let app = router(
+        core,
+        RestConfig {
+            api_key: "secret".to_string(),
+        },
+    );
+
+    let rejected_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/shared-directories")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"roots":["{}"],"confirmReplaceRoots":false}}"#,
+                    shared_root.display().to_string().replace('\\', "\\\\")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected_response.status(), StatusCode::BAD_REQUEST);
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/shared-directories")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"roots":[{{"path":"{}","recursive":true}}],"confirmReplaceRoots":true}}"#,
+                    shared_root.display().to_string().replace('\\', "\\\\")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let body = to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["roots"][0]["recursive"], true);
+    assert_eq!(value["data"]["roots"][0]["accessible"], true);
+    assert_eq!(value["data"]["hashingCount"], 0);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/shared-directories")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let reload_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-directories/operations/reload")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reload_response.status(), StatusCode::OK);
+    let body = to_bytes(reload_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["ok"], true);
+    assert_eq!(value["data"]["count"], 2);
+
+    let alias_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-files/operations/reload")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alias_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/shared-files")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let names = value["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"Top.Level.bin"));
+    assert!(names.contains(&"Nested.bin"));
+}
+
 fn unique_test_dir(name: &str) -> std::path::PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

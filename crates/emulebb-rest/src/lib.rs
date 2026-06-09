@@ -11,7 +11,7 @@ use axum::{
 };
 use emulebb_core::{
     EmulebbCore, LocalShare, LocalShareCreate, SearchCreate, SearchResultDownloadCreate,
-    ServerCreate, ServerUpdate, Transfer, TransferCreate,
+    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, Transfer, TransferCreate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -142,10 +142,22 @@ pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
             "/api/v1/shared-files",
             get(shared_files).post(create_shared_file),
         )
+        .route(
+            "/api/v1/shared-files/operations/reload",
+            post(reload_shared_directories),
+        )
         .route("/api/v1/shared-files/{hash}", get(shared_file))
         .route(
             "/api/v1/shared-files/{hash}/ed2k-link",
             get(shared_file_ed2k_link),
+        )
+        .route(
+            "/api/v1/shared-directories",
+            get(shared_directories).patch(update_shared_directories),
+        )
+        .route(
+            "/api/v1/shared-directories/operations/reload",
+            post(reload_shared_directories),
         )
         .route(
             "/api/v1/searches/{search_id}/results/{hash}/operations/download",
@@ -390,6 +402,36 @@ async fn create_shared_file(
             queued: false,
             file: shared_file_response(&share),
         })
+        .into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn shared_directories(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(state.core.shared_directories().await)
+}
+
+async fn update_shared_directories(
+    State(state): State<RestState>,
+    Json(request): Json<SharedDirectoriesUpdate>,
+) -> impl IntoResponse {
+    match state.core.set_shared_directories(request).await {
+        Ok(directories) => api_ok(directories).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+async fn reload_shared_directories(State(state): State<RestState>) -> impl IntoResponse {
+    match state.core.reload_shared_directories().await {
+        Ok(shares) => api_ok(json!({
+            "ok": true,
+            "sharedFiles": shares.iter().map(shared_file_response).collect::<Vec<_>>(),
+            "count": shares.len()
+        }))
         .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()

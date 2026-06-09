@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fmt,
+    fmt, fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -232,6 +232,43 @@ pub struct LocalShare {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedDirectoryRoot {
+    pub path: String,
+    pub recursive: bool,
+    pub monitor_owned: bool,
+    pub shareable: bool,
+    pub accessible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedDirectories {
+    pub roots: Vec<SharedDirectoryRoot>,
+    pub items: Vec<SharedDirectoryRoot>,
+    pub monitor_owned: Vec<String>,
+    pub hashing_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedDirectoriesUpdate {
+    pub roots: Vec<SharedDirectoryRootUpdate>,
+    pub confirm_replace_roots: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SharedDirectoryRootUpdate {
+    Path(String),
+    Object {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transfer {
     pub hash: String,
     pub name: String,
@@ -308,6 +345,7 @@ struct CoreState {
     servers: HashMap<String, ServerInfo>,
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
+    shared_directories: Vec<SharedDirectoryRoot>,
     kad_running: bool,
 }
 
@@ -358,6 +396,7 @@ impl EmulebbCore {
                 servers: HashMap::new(),
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
+                shared_directories: Vec::new(),
                 kad_running: false,
             })),
         })
@@ -800,6 +839,80 @@ impl EmulebbCore {
             .await
             .into_iter()
             .find(|share| share.hash.eq_ignore_ascii_case(hash))
+    }
+
+    pub async fn shared_directories(&self) -> SharedDirectories {
+        let roots = self
+            .state
+            .lock()
+            .await
+            .shared_directories
+            .iter()
+            .map(refresh_shared_directory_row)
+            .collect::<Vec<_>>();
+        SharedDirectories {
+            roots: roots.clone(),
+            items: roots,
+            monitor_owned: Vec::new(),
+            hashing_count: 0,
+        }
+    }
+
+    pub async fn set_shared_directories(
+        &self,
+        request: SharedDirectoriesUpdate,
+    ) -> Result<SharedDirectories> {
+        ensure!(
+            request.confirm_replace_roots,
+            "confirmReplaceRoots must be true"
+        );
+        let mut seen = HashSet::new();
+        let mut roots = Vec::new();
+        for root in request.roots {
+            let (path, recursive) = shared_directory_update_parts(root);
+            let path = path.trim();
+            ensure!(!path.is_empty(), "path must not be empty");
+            let canonical =
+                fs::canonicalize(path).with_context(|| format!("failed to resolve {path}"))?;
+            let metadata = fs::metadata(&canonical)
+                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
+            ensure!(metadata.is_dir(), "path is not a directory");
+            let canonical_path = canonical.display().to_string();
+            if seen.insert(canonical_path.clone()) {
+                roots.push(SharedDirectoryRoot {
+                    path: canonical_path,
+                    recursive,
+                    monitor_owned: false,
+                    shareable: true,
+                    accessible: true,
+                });
+            }
+        }
+        self.state.lock().await.shared_directories = roots;
+        Ok(self.shared_directories().await)
+    }
+
+    pub async fn reload_shared_directories(&self) -> Result<Vec<LocalShare>> {
+        let roots = self.state.lock().await.shared_directories.clone();
+        let mut file_paths = Vec::new();
+        for root in roots {
+            collect_shared_directory_files(Path::new(&root.path), root.recursive, &mut file_paths)
+                .with_context(|| format!("failed to scan shared directory {}", root.path))?;
+        }
+        file_paths.sort();
+        file_paths.dedup();
+
+        let mut shares = Vec::new();
+        for path in file_paths {
+            shares.push(
+                self.share_local_file(LocalShareCreate {
+                    path: path.display().to_string(),
+                    name: None,
+                })
+                .await?,
+            );
+        }
+        Ok(shares)
     }
 
     pub async fn uploads(&self) -> Vec<Upload> {
@@ -1816,6 +1929,43 @@ fn local_share_from_summary(
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
     }
+}
+
+fn shared_directory_update_parts(root: SharedDirectoryRootUpdate) -> (String, bool) {
+    match root {
+        SharedDirectoryRootUpdate::Path(path) => (path, false),
+        SharedDirectoryRootUpdate::Object { path, recursive } => (path, recursive),
+    }
+}
+
+fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> SharedDirectoryRoot {
+    let path = Path::new(&root.path);
+    let accessible = path.is_dir();
+    SharedDirectoryRoot {
+        path: root.path.clone(),
+        recursive: root.recursive,
+        monitor_owned: root.monitor_owned,
+        shareable: accessible,
+        accessible,
+    }
+}
+
+fn collect_shared_directory_files(
+    root: &Path,
+    recursive: bool,
+    output: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_file() {
+            output.push(path);
+        } else if recursive && file_type.is_dir() {
+            collect_shared_directory_files(&path, recursive, output)?;
+        }
+    }
+    Ok(())
 }
 
 fn ed2k_part_count(size_bytes: u64) -> u32 {
