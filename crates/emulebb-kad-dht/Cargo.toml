@@ -1,0 +1,21 @@
+[package]
+name = "emulebb-kad-dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 DHT operations — bootstrap, lookup, search, publish"
+
+[dependencies]
+emulebb-kad-proto = { path = "../emulebb-kad-proto" }
+emulebb-kad-routing = { path = "../emulebb-kad-routing" }
+emulebb-kad-net = { path = "../emulebb-kad-net" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+binrw = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

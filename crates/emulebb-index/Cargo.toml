@@ -1,0 +1,12 @@
+[package]
+name = "emulebb-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local SQLite and FTS5 index for emulebb-rust"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+

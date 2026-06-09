@@ -1,0 +1,15 @@
+[package]
+name = "emulebb-kad-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 wire codec — packet types, tag system, NodeId"
+
+[dependencies]
+binrw = { workspace = true }
+thiserror = { workspace = true }
+flate2 = "1"
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Globalization"] }

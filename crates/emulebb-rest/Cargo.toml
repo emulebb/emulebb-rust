@@ -1,0 +1,18 @@
+[package]
+name = "emulebb-rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "eMuleBB-compatible REST API for emulebb-rust"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+emulebb-core = { path = "../emulebb-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+emulebb-index = { path = "../emulebb-index" }

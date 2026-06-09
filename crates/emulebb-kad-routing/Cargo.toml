@@ -1,0 +1,11 @@
+[package]
+name = "emulebb-kad-routing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 routing table — zone tree, k-buckets, contacts"
+
+[dependencies]
+emulebb-kad-proto = { path = "../emulebb-kad-proto" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

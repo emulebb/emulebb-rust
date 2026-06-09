@@ -1,0 +1,15 @@
+[package]
+name = "emulebb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local emulebb-rust application state and orchestration"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+emulebb-index = { path = "../emulebb-index" }
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
