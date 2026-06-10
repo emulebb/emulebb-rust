@@ -606,7 +606,10 @@ async fn snapshot(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let limit = snapshot_limit(query.limit);
+    let limit = match snapshot_limit(query.limit) {
+        Ok(limit) => limit,
+        Err(response) => return response,
+    };
     let status = status_response(&state).await;
     let kad = kad_response(&state.core.status().await.kad);
     let shared_files = bounded(
@@ -929,9 +932,10 @@ async fn search(
         Err(response) => return *response,
     };
     match state.core.search(&search_id).await {
-        Some(search) => {
-            api_ok(search_page_response(&search_results_page(search, query))).into_response()
-        }
+        Some(search) => match search_results_page(search, query) {
+            Ok(page) => api_ok(search_page_response(&page)).into_response(),
+            Err(response) => response,
+        },
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response(),
     }
 }
@@ -1821,32 +1825,31 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
     )
 }
 
-fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> (StatusCode, Json<Value>) {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> Response {
+    let (offset, limit) = match resolve_page_bounds(query.offset, query.limit) {
+        Ok(bounds) => bounds,
+        Err(response) => return response,
+    };
     let total = items.len();
     let items = items
         .into_iter()
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    (
-        StatusCode::OK,
-        Json(json!({
-            "data": {
-                "items": items,
-                "total": total,
-                "offset": offset,
-                "limit": limit
-            },
-            "meta": api_meta()
-        })),
-    )
+    api_ok(json!({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit
+    }))
+    .into_response()
 }
 
-fn search_results_page(search: Search, query: SearchResultsQuery) -> SearchResultsPage {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+fn search_results_page(
+    search: Search,
+    query: SearchResultsQuery,
+) -> Result<SearchResultsPage, Response> {
+    let (offset, limit) = resolve_page_bounds(query.offset, query.limit)?;
     let _include_evidence = query.include_evidence.unwrap_or(true);
     let _exact_total = query.exact_total.unwrap_or(true);
     let total = search.results.len();
@@ -1856,7 +1859,7 @@ fn search_results_page(search: Search, query: SearchResultsQuery) -> SearchResul
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    SearchResultsPage {
+    Ok(SearchResultsPage {
         id: search.id,
         query: search.query,
         method: search.method,
@@ -1866,7 +1869,7 @@ fn search_results_page(search: Search, query: SearchResultsQuery) -> SearchResul
         offset,
         limit,
         results,
-    }
+    })
 }
 
 fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {
@@ -1889,8 +1892,8 @@ fn api_meta() -> Value {
     json!({ "apiVersion": "v1" })
 }
 
-fn snapshot_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(100).clamp(1, 1000)
+fn snapshot_limit(limit: Option<usize>) -> Result<usize, Response> {
+    resolve_limit(limit)
 }
 
 fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {
@@ -2271,6 +2274,15 @@ fn api_error(
     code: &'static str,
     message: impl Into<String>,
 ) -> (StatusCode, Json<Value>) {
+    api_error_with_details(status, code, message, json!({}))
+}
+
+fn api_error_with_details(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+    details: Value,
+) -> (StatusCode, Json<Value>) {
     let code = if status == StatusCode::BAD_REQUEST && code == "BAD_REQUEST" {
         "INVALID_ARGUMENT"
     } else {
@@ -2282,10 +2294,58 @@ fn api_error(
             "error": {
                 "code": code,
                 "message": message.into(),
-                "details": {}
+                "details": details
             }
         })),
     )
+}
+
+/// Builds the canonical out-of-range error for a bounded scalar query field.
+/// Kept identical to the emulebb master (`SetBoundedConstraintDetails`) so both
+/// stacks emit the same message and `{field, constraint}` details.
+fn out_of_range_response(field: &str, min: u64, max: u64) -> Response {
+    api_error_with_details(
+        StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        format!("{field} is out of range"),
+        json!({ "field": field, "constraint": format!("{min}..{max}") }),
+    )
+    .into_response()
+}
+
+/// REST pagination bounds, matching the emulebb master: `limit` in 1..=1000,
+/// `offset` in 0..=2147483647. Out-of-range values are rejected (not clamped).
+const PAGE_LIMIT_MIN: usize = 1;
+const PAGE_LIMIT_MAX: usize = 1000;
+const PAGE_OFFSET_MAX: usize = 2_147_483_647;
+
+/// Validates an optional `limit` query value against the published bounds,
+/// returning the effective limit (default 100) or a rejection response.
+fn resolve_limit(limit: Option<usize>) -> Result<usize, Response> {
+    match limit {
+        Some(limit) if !(PAGE_LIMIT_MIN..=PAGE_LIMIT_MAX).contains(&limit) => Err(
+            out_of_range_response("limit", PAGE_LIMIT_MIN as u64, PAGE_LIMIT_MAX as u64),
+        ),
+        Some(limit) => Ok(limit),
+        None => Ok(100),
+    }
+}
+
+/// Validates optional `offset`/`limit` query values, returning the effective
+/// (offset, limit) pair or a rejection response.
+fn resolve_page_bounds(
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<(usize, usize), Response> {
+    let limit = resolve_limit(limit)?;
+    let offset = match offset {
+        Some(offset) if offset > PAGE_OFFSET_MAX => {
+            return Err(out_of_range_response("offset", 0, PAGE_OFFSET_MAX as u64));
+        }
+        Some(offset) => offset,
+        None => 0,
+    };
+    Ok((offset, limit))
 }
 
 fn parse_required_json_body<T>(body: &[u8]) -> Result<T, Box<Response>>
@@ -2565,6 +2625,49 @@ mod tests {
             "HTTP method is not allowed for this API route"
         );
         assert_eq!(value["error"]["details"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_out_of_range_bounds_with_details() {
+        async fn error_value(uri: &str) -> (StatusCode, Value) {
+            let response = test_router()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("X-API-Key", "secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        // limit above the maximum.
+        let (status, value) = error_value("/api/v1/transfers?limit=5000").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], "limit is out of range");
+        assert_eq!(value["error"]["details"]["field"], "limit");
+        assert_eq!(value["error"]["details"]["constraint"], "1..1000");
+
+        // limit below the minimum is rejected, not clamped.
+        let (status, value) = error_value("/api/v1/transfers?limit=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["details"]["constraint"], "1..1000");
+
+        // offset above INT_MAX.
+        let (status, value) = error_value("/api/v1/transfers?offset=2147483648").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["message"], "offset is out of range");
+        assert_eq!(value["error"]["details"]["field"], "offset");
+        assert_eq!(value["error"]["details"]["constraint"], "0..2147483647");
+
+        // Valid pagination succeeds.
+        let (status, _value) = error_value("/api/v1/transfers?limit=10&offset=5").await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3426,7 +3529,9 @@ mod tests {
         assert!(value["data"].get("limit").is_none());
         assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
 
-        let clamped = app
+        // An out-of-range limit is rejected (matching the emulebb master), not
+        // silently clamped, and carries field/constraint details.
+        let rejected = app
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/searches/{search_id}?limit=5000"))
@@ -3436,10 +3541,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(clamped.status(), StatusCode::OK);
-        let body = to_bytes(clamped.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(rejected.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert!(value["data"].get("limit").is_none());
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], "limit is out of range");
+        assert_eq!(value["error"]["details"]["field"], "limit");
+        assert_eq!(value["error"]["details"]["constraint"], "1..1000");
     }
 
     #[tokio::test]
