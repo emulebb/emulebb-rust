@@ -14,6 +14,7 @@ emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 flate2 = "1"
 hex = "0.4"
+if-addrs.workspace = true
 md4 = "0.10"
 md5 = "0.7"
 num-bigint = "0.4"
@@ -26,6 +27,9 @@ tokio-stream = "0.1"
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ipconfig.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

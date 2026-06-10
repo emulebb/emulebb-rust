@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
-use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
+use emulebb_ed2k::{
+    NatConfig, NetworkInterface, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
+    resolve_bind_ip,
+};
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,7 @@ use tracing::info;
 pub struct DaemonConfig {
     pub runtime_dir: PathBuf,
     pub p2p_bind_ip: Option<Ipv4Addr>,
+    pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
     pub kad: KadListenerConfig,
     pub ed2k: Ed2kConfig,
@@ -59,6 +63,7 @@ impl Default for DaemonConfig {
         Self {
             runtime_dir: PathBuf::from("runtime"),
             p2p_bind_ip: None,
+            p2p_bind_interface: None,
             ed2k_user_hash: None,
             kad: KadListenerConfig::default(),
             ed2k: Ed2kConfig::default(),
@@ -164,10 +169,37 @@ impl DaemonConfig {
     }
 
     fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
-        let Some(candidate) = self.p2p_bind_ip else {
-            bail!("p2pBindIp is required when ED2K servers are configured");
+        if let Some(candidate) = self.p2p_bind_ip {
+            return Ok(candidate);
+        }
+
+        let interfaces = detect_interfaces().context("failed to enumerate local interfaces")?;
+        self.resolve_p2p_bind_ip_from_interfaces(&interfaces)
+    }
+
+    fn resolve_p2p_bind_ip_from_interfaces(
+        &self,
+        interfaces: &[NetworkInterface],
+    ) -> Result<Ipv4Addr> {
+        if let Some(candidate) = self.p2p_bind_ip {
+            return Ok(candidate);
+        }
+
+        let Some(bind_interface) = self
+            .p2p_bind_interface
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
         };
-        Ok(candidate)
+        let resolved =
+            resolve_bind_ip(&interfaces, Some(bind_interface), None).with_context(|| {
+                format!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address")
+            })?;
+        resolved.parse::<Ipv4Addr>().with_context(|| {
+            format!("p2pBindInterface {bind_interface:?} resolved to non-IPv4 address {resolved:?}")
+        })
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {
@@ -288,6 +320,7 @@ fn load_or_create_user_hash(path: PathBuf) -> Result<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterfaceAddress};
 
     fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
         let mut ed2k = Ed2kConfig::default();
@@ -313,6 +346,20 @@ mod tests {
                 ..RestListenerConfig::default()
             },
             ..DaemonConfig::default()
+        }
+    }
+
+    fn iface(name: &str, ip: &str) -> NetworkInterface {
+        NetworkInterface {
+            name: name.to_string(),
+            description: None,
+            addresses: vec![NetworkInterfaceAddress {
+                family: InterfaceAddressFamily::Ipv4,
+                address: ip.to_string(),
+            }],
+            is_loopback: false,
+            is_vpn_candidate: false,
+            has_default_route: false,
         }
     }
 
@@ -342,6 +389,7 @@ mod tests {
             r#"
 runtimeDir = "runtime"
 p2pBindIp = "192.0.2.10"
+p2pBindInterface = "Ethernet"
 
 [rest]
 bindAddr = "192.0.2.10:13301"
@@ -389,6 +437,7 @@ externalIpOverride = "203.0.113.10"
         let config = DaemonConfig::load(Some(config_path)).unwrap();
 
         assert_eq!(config.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(config.p2p_bind_interface.as_deref(), Some("Ethernet"));
         assert_eq!(
             config.rest.bind_addr,
             Some("192.0.2.10:13301".parse().unwrap())
@@ -557,7 +606,7 @@ externalIpOverride = "203.0.113.10"
         let config = config_with_server(temp.path().to_path_buf(), None);
 
         let error = config.ed2k_network_config().unwrap_err().to_string();
-        assert!(error.contains("p2pBindIp is required"));
+        assert!(error.contains("p2pBindIp or p2pBindInterface is required"));
     }
 
     #[test]
@@ -621,6 +670,53 @@ externalIpOverride = "203.0.113.10"
         assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
+    }
+
+    #[test]
+    fn p2p_bind_interface_resolves_configured_interface_ipv4() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(temp.path().to_path_buf(), None);
+        config.p2p_bind_interface = Some("hide.me".to_string());
+
+        let bind_ip = config
+            .resolve_p2p_bind_ip_from_interfaces(&[
+                iface("Ethernet", "192.0.2.10"),
+                iface("hide.me", "10.44.55.66"),
+            ])
+            .unwrap();
+
+        assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn p2p_bind_ip_overrides_configured_interface() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.p2p_bind_interface = Some("hide.me".to_string());
+
+        let bind_ip = config
+            .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
+            .unwrap();
+
+        assert_eq!(bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn p2p_bind_interface_requires_matching_ipv4_interface() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(temp.path().to_path_buf(), None);
+        config.p2p_bind_interface = Some("hide.me".to_string());
+
+        let error = config
+            .resolve_p2p_bind_ip_from_interfaces(&[iface("Ethernet", "192.0.2.10")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("p2pBindInterface"));
+        assert!(error.contains("did not resolve"));
     }
 
     #[test]

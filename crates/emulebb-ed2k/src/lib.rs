@@ -7,6 +7,7 @@ pub mod ed2k_tcp;
 pub mod ed2k_transfer;
 pub mod kad_firewall;
 pub mod nat;
+pub mod networking;
 
 pub use nat::{
     MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatCapableAgent,
@@ -14,6 +15,12 @@ pub use nat::{
     NoopReachabilityStrategy, PortMappingProvider, ReachabilityStrategy, SelectedGateway,
     TransportProtocol, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,
     built_in_upnp_port_mapping_providers, default_upnp_backend_order,
+};
+pub use networking::{
+    InterfaceAddressFamily, InterfaceBindingReport, InterfaceBindingSelection,
+    InterfaceSelectionState, NetworkInterface, NetworkInterfaceAddress, NetworkReport,
+    ResolvedInterfaceBindingReport, build_interface_binding_report, detect_interfaces,
+    recommend_interface, resolve_bind_ip,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
