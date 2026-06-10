@@ -585,6 +585,7 @@ const PASSIVE_GENERAL_CRAWL_SECS: u64 = 45;
 const PASSIVE_SOURCE_CRAWL_SECS: u64 = 15;
 const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
 const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
+const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 
 type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
 
@@ -2153,12 +2154,14 @@ impl EmulebbCore {
         }
 
         let cancel = CancellationToken::new();
+        let mut background_search_available = false;
         if let Some(handle) = self.connected_ed2k_search_handle().await {
+            background_search_available = true;
             let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
             match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
                 .await
             {
-                Ok(files) => {
+                Ok(files) if !files.is_empty() => {
                     return Ok(Some(
                         files
                             .into_iter()
@@ -2166,8 +2169,12 @@ impl EmulebbCore {
                             .collect(),
                     ));
                 }
+                Ok(_) => tracing::warn!(
+                    "ED2K background keyword search returned no results query={:?}; falling back to one-shot search",
+                    request.query
+                ),
                 Err(error) => tracing::warn!(
-                    "ED2K background keyword search failed query={:?} error={error}",
+                    "ED2K background keyword search failed query={:?} error={error}; falling back to one-shot search",
                     request.query
                 ),
             }
@@ -2184,19 +2191,18 @@ impl EmulebbCore {
         };
         let shared_catalog = self.ed2k_transfers.shared_catalog();
         let shared_catalog_snapshot = shared_catalog.read().await.clone();
-        let max_attempts = config.keyword_server_attempt_budget.max(1).min(
-            config
-                .server_entries
-                .len()
-                .max(config.server_endpoints.len())
-                .max(1),
-        );
+        let preferred_endpoint = if background_search_available {
+            self.connected_ed2k_server_endpoint().await
+        } else {
+            None
+        };
+        let max_attempts = ed2k_keyword_server_attempts(&config, &request.query);
         let files = search_keyword_servers(Ed2kKeywordSearchOptions {
             bind_ip: network.bind_ip,
             config: &config,
             hello_identity,
             shared_catalog: &shared_catalog_snapshot,
-            preferred_endpoint: None,
+            preferred_endpoint,
             max_attempts,
             query: &request.query,
             cancel: &cancel,
@@ -4358,6 +4364,30 @@ fn configured_server_attempts(config: &Ed2kConfig) -> usize {
         .max(1)
 }
 
+fn exact_ed2k_hash_query_token(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    let candidate = trimmed
+        .strip_prefix(ED2K_HASH_ONLY_QUERY_PREFIX)
+        .unwrap_or(trimmed)
+        .trim();
+    if candidate.len() == 32 && candidate.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(candidate.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn ed2k_keyword_server_attempts(config: &Ed2kConfig, query: &str) -> usize {
+    let requested_budget = if exact_ed2k_hash_query_token(query).is_some() {
+        config.exact_hash_keyword_server_attempt_budget
+    } else {
+        config.keyword_server_attempt_budget
+    };
+    requested_budget
+        .max(1)
+        .min(configured_server_attempts(config))
+}
+
 fn sort_download_sources(sources: &mut [Ed2kFoundSource]) {
     sources.sort_by_key(|source| {
         (
@@ -5464,6 +5494,50 @@ mod tests {
             .unwrap();
         assert_eq!(search.status, "completed");
         assert_eq!(search.results.len(), 1);
+    }
+
+    #[test]
+    fn exact_ed2k_hash_query_token_extracts_hash_only_queries() {
+        let exact_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
+
+        assert_eq!(
+            exact_ed2k_hash_query_token(&format!("ed2k::{exact_hash}")),
+            Some(exact_hash.clone())
+        );
+        assert_eq!(
+            exact_ed2k_hash_query_token(&exact_hash.to_ascii_uppercase()),
+            Some(exact_hash)
+        );
+        assert_eq!(exact_ed2k_hash_query_token("ed2k::torino train"), None);
+    }
+
+    #[test]
+    fn exact_ed2k_hash_queries_use_configured_server_budget() {
+        let mut config = Ed2kConfig {
+            server_endpoints: vec![
+                "192.0.2.1:4661".to_string(),
+                "192.0.2.2:4661".to_string(),
+                "192.0.2.3:4661".to_string(),
+                "192.0.2.4:4661".to_string(),
+                "192.0.2.5:4661".to_string(),
+            ],
+            keyword_server_attempt_budget: 2,
+            exact_hash_keyword_server_attempt_budget: 4,
+            ..Ed2kConfig::default()
+        };
+        let exact_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
+
+        assert_eq!(
+            ed2k_keyword_server_attempts(&config, &format!("ed2k::{exact_hash}")),
+            4
+        );
+        assert_eq!(ed2k_keyword_server_attempts(&config, "ubuntu linux"), 2);
+
+        config.exact_hash_keyword_server_attempt_budget = 99;
+        assert_eq!(
+            ed2k_keyword_server_attempts(&config, &exact_hash.to_ascii_uppercase()),
+            5
+        );
     }
 
     #[tokio::test]
