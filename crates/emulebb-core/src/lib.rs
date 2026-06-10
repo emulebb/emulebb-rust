@@ -15,6 +15,7 @@ use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, TransportProtocol,
+    built_in_upnp_port_mapping_providers,
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
@@ -904,6 +905,7 @@ impl EmulebbCore {
         let nat = Arc::new(
             NatManagerBuilder::new(network.nat_config.clone())
                 .with_mappings(ed2k_nat_mappings(&network))
+                .with_providers(built_in_upnp_port_mapping_providers())
                 .build(),
         );
         nat.start().await?;

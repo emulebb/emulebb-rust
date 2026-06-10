@@ -444,6 +444,7 @@ dependencies = [
  "chrono",
  "emulebb-kad-dht",
  "emulebb-kad-proto",
+ "emulebb-miniupnpc",
  "flate2",
  "hex",
  "md4",
@@ -524,6 +525,23 @@ dependencies = [
  "emulebb-kad-proto",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "emulebb-miniupnpc"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "emulebb-miniupnpc-sys",
+ "tracing",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "emulebb-miniupnpc-sys"
+version = "0.0.3"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

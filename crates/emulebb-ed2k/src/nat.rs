@@ -17,6 +17,11 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+#[path = "nat/miniupnpc.rs"]
+mod miniupnpc;
+
+pub use miniupnpc::MiniupnpcPortMappingProvider;
+
 mod types {
     use std::net::SocketAddr;
 
@@ -235,13 +240,9 @@ pub fn default_upnp_backend_order() -> Vec<String> {
 }
 
 /// Returns compiled-in port mapping providers.
-///
-/// The eMuleBB Rust repository now owns the NAT contract and manager state. The
-/// provider implementations are intentionally imported in later slices because
-/// they carry separate MiniUPnPc and patched `rupnp` dependencies.
 #[must_use]
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
-    Vec::new()
+    vec![Arc::new(MiniupnpcPortMappingProvider)]
 }
 
 /// Builder for one NAT manager instance.
@@ -668,8 +669,13 @@ mod tests {
     }
 
     #[test]
-    fn built_in_providers_are_pending_external_dependency_import() {
-        assert!(built_in_upnp_port_mapping_providers().is_empty());
+    fn built_in_providers_include_miniupnpc_backend() {
+        let provider_names = built_in_upnp_port_mapping_providers()
+            .into_iter()
+            .map(|provider| provider.name().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(provider_names, [UPNP_MINIUPNPC_BACKEND.to_string()]);
     }
 
     #[tokio::test]

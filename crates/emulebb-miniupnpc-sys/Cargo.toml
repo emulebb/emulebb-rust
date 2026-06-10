@@ -1,0 +1,10 @@
+[package]
+name = "emulebb-miniupnpc-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raw FFI bindings to the eMuleBB MiniUPnPc source tree"
+links = "emulebb_miniupnpc"
+
+[build-dependencies]
+cc = "1"

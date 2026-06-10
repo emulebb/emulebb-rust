@@ -8,6 +8,8 @@ members = [
     "crates/emulebb-kad-net",
     "crates/emulebb-kad-proto",
     "crates/emulebb-kad-routing",
+    "crates/emulebb-miniupnpc",
+    "crates/emulebb-miniupnpc-sys",
     "crates/emulebb-rest",
 ]
 resolver = "2"
