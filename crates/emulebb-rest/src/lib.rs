@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{Path, RawQuery, State},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header, HeaderValue},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -473,6 +473,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
         .fallback(fallback)
+        .layer(middleware::map_response(rewrite_method_not_allowed))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -1776,6 +1777,30 @@ async fn fallback() -> impl IntoResponse {
     api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "API route not found")
 }
 
+/// Replaces axum's default 405 body with the standard REST error envelope while
+/// preserving the `Allow` header the method router already set, so the response
+/// matches the emulebb master byte-for-byte (status 405 + `Allow` + envelope).
+async fn rewrite_method_not_allowed(response: Response) -> Response {
+    if response.status() != StatusCode::METHOD_NOT_ALLOWED {
+        return response;
+    }
+    let (mut parts, _body) = response.into_parts();
+    let body = serde_json::to_vec(&json!({
+        "error": {
+            "code": "METHOD_NOT_ALLOWED",
+            "message": "HTTP method is not allowed for this API route",
+            "details": {}
+        }
+    }))
+    .unwrap_or_default();
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(body))
+}
+
 fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
@@ -2505,6 +2530,40 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "UNAUTHORIZED");
+        assert_eq!(value["error"]["details"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn method_not_allowed_sets_allow_header_and_error_envelope() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/app")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // The Allow header must advertise the method registered for this path.
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .expect("405 must carry an Allow header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(allow.contains("GET"), "Allow header was {allow}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "METHOD_NOT_ALLOWED");
+        assert_eq!(
+            value["error"]["message"],
+            "HTTP method is not allowed for this API route"
+        );
         assert_eq!(value["error"]["details"], json!({}));
     }
 
