@@ -13,6 +13,7 @@ emulebb-miniupnpc = { path = "../emulebb-miniupnpc" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 flate2 = "1"
+futures-util.workspace = true
 hex = "0.4"
 if-addrs.workspace = true
 md4 = "0.10"
@@ -20,9 +21,11 @@ md5 = "0.7"
 num-bigint = "0.4"
 rand.workspace = true
 rsa = "0.9"
+rupnp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1 = { version = "0.10", features = ["oid"] }
+socket2.workspace = true
 tokio-stream = "0.1"
 tokio.workspace = true
 tokio-util.workspace = true

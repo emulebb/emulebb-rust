@@ -9,12 +9,15 @@ pub mod kad_firewall;
 pub mod nat;
 pub mod networking;
 
+#[allow(deprecated)]
+pub use nat::RupnpPortMappingProvider;
 pub use nat::{
-    MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatCapableAgent,
-    NatConfig, NatManager, NatManagerBuilder, NatStatus, NatStatusSnapshot,
-    NoopReachabilityStrategy, PortMappingProvider, ReachabilityStrategy, SelectedGateway,
-    TransportProtocol, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,
-    built_in_upnp_port_mapping_providers, default_upnp_backend_order,
+    IgdPortMappingProvider, MappedEndpoint, MappingExposure, MappingSpec,
+    MiniupnpcPortMappingProvider, NatCapableAgent, NatConfig, NatManager, NatManagerBuilder,
+    NatStatus, NatStatusSnapshot, NoopReachabilityStrategy, PortMappingProvider,
+    ReachabilityStrategy, SelectedGateway, TransportProtocol, UPNP_IGD_BACKEND,
+    UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
+    default_upnp_backend_order,
 };
 pub use networking::{
     InterfaceAddressFamily, InterfaceBindingReport, InterfaceBindingSelection,

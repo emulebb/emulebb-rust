@@ -17,10 +17,17 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+#[path = "nat/igd.rs"]
+mod igd;
 #[path = "nat/miniupnpc.rs"]
 mod miniupnpc;
+#[path = "nat/rupnp.rs"]
+mod rupnp;
 
+pub use igd::IgdPortMappingProvider;
 pub use miniupnpc::MiniupnpcPortMappingProvider;
+#[allow(deprecated)]
+pub use rupnp::RupnpPortMappingProvider;
 
 mod types {
     use std::net::SocketAddr;
@@ -241,8 +248,13 @@ pub fn default_upnp_backend_order() -> Vec<String> {
 
 /// Returns compiled-in port mapping providers.
 #[must_use]
+#[allow(deprecated)]
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
-    vec![Arc::new(MiniupnpcPortMappingProvider)]
+    vec![
+        Arc::new(MiniupnpcPortMappingProvider),
+        Arc::new(RupnpPortMappingProvider),
+        Arc::new(IgdPortMappingProvider),
+    ]
 }
 
 /// Builder for one NAT manager instance.
@@ -669,13 +681,20 @@ mod tests {
     }
 
     #[test]
-    fn built_in_providers_include_miniupnpc_backend() {
+    fn built_in_providers_use_explicit_backend_ids() {
         let provider_names = built_in_upnp_port_mapping_providers()
             .into_iter()
             .map(|provider| provider.name().to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(provider_names, [UPNP_MINIUPNPC_BACKEND.to_string()]);
+        assert_eq!(
+            provider_names,
+            [
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+                UPNP_IGD_BACKEND.to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
