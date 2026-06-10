@@ -570,6 +570,8 @@ pub struct Ed2kNetworkConfig {
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub kad_local_store: KadLocalStoreConfig,
     pub kad_snoop_queue: SnoopQueueConfig,
+    pub kad_bootstrap_nodes: Vec<String>,
+    pub kad_bootstrap_min_routing_contacts: usize,
     pub config: Ed2kConfig,
 }
 
@@ -879,9 +881,13 @@ impl EmulebbCore {
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let configured_bootstrap_nodes_text =
+            configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
         let dht = DhtNode::new(DhtConfig {
             bind_addr: Some(network.kad_bind_addr),
             obfuscation_enabled: network.config.obfuscation_enabled,
+            bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
+            nodes_text: configured_bootstrap_nodes_text.clone(),
             ..DhtConfig::default()
         })
         .await
@@ -894,6 +900,12 @@ impl EmulebbCore {
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
+        if configured_bootstrap_nodes_text.is_some() {
+            tasks.push(tokio::spawn(run_configured_kad_bootstrap(
+                dht.clone(),
+                Arc::clone(&shutdown),
+            )));
+        }
         if let (Some(kad_local_store), Some(kad_snoop_queue)) = (
             self.kad_local_store.as_ref().map(Arc::clone),
             self.kad_snoop_queue.as_ref().map(Arc::clone),
@@ -2784,6 +2796,40 @@ impl fmt::Debug for EmulebbCore {
                 &self.kad_snoop_queue.is_some(),
             )
             .finish_non_exhaustive()
+    }
+}
+
+async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
+    if shutdown.load(Ordering::SeqCst) {
+        return;
+    }
+    match dht.bootstrap().await {
+        Ok(()) => tracing::info!(
+            "configured Kad bootstrap completed contacts={}",
+            dht.routing_table_size()
+        ),
+        Err(error) => {
+            if !shutdown.load(Ordering::SeqCst) {
+                tracing::warn!("configured Kad bootstrap failed: {error}");
+            }
+        }
+    }
+}
+
+fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {
+    let valid_nodes = nodes
+        .iter()
+        .filter_map(|node| match node.trim().parse::<SocketAddr>() {
+            Ok(addr) if matches!(addr.ip(), IpAddr::V4(_)) && addr.port() != 0 => {
+                Some(addr.to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if valid_nodes.is_empty() {
+        None
+    } else {
+        Some(valid_nodes.join("\n"))
     }
 }
 
@@ -4874,6 +4920,8 @@ mod tests {
             ),
             kad_local_store,
             kad_snoop_queue,
+            kad_bootstrap_nodes: Vec::new(),
+            kad_bootstrap_min_routing_contacts: 10,
             config: Ed2kConfig::default(),
         }
     }
@@ -4985,6 +5033,26 @@ mod tests {
         assert_eq!(
             notes.logical_key(),
             "notes:0102030405060708090a0b0c0d0e0f10:654321"
+        );
+    }
+
+    #[test]
+    fn configured_kad_bootstrap_nodes_text_keeps_only_valid_ipv4_nodes() {
+        let nodes = vec![
+            "192.0.2.20:4665".to_string(),
+            " ".to_string(),
+            "[2001:db8::1]:4665".to_string(),
+            "not-an-address".to_string(),
+            "192.0.2.21:4666".to_string(),
+        ];
+
+        assert_eq!(
+            configured_kad_bootstrap_nodes_text(&nodes).as_deref(),
+            Some("192.0.2.20:4665\n192.0.2.21:4666")
+        );
+        assert_eq!(
+            configured_kad_bootstrap_nodes_text(&["bad".to_string()]),
+            None
         );
     }
 

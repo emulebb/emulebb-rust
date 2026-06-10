@@ -7,6 +7,8 @@ apiKey = "change-me"
 
 [kad]
 listenPort = 41002
+bootstrapNodes = []
+bootstrapMinRoutingContacts = 10
 localStoreEnabled = true
 localStoreKeywordTtlSecs = 86400
 localStoreSourceTtlSecs = 21600

@@ -29,6 +29,8 @@ pub struct DaemonConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct KadListenerConfig {
     pub listen_port: Option<u16>,
+    pub bootstrap_nodes: Vec<String>,
+    pub bootstrap_min_routing_contacts: usize,
     pub local_store_enabled: bool,
     pub local_store_keyword_ttl_secs: u64,
     pub local_store_source_ttl_secs: u64,
@@ -68,6 +70,8 @@ impl Default for KadListenerConfig {
     fn default() -> Self {
         Self {
             listen_port: None,
+            bootstrap_nodes: Vec::new(),
+            bootstrap_min_routing_contacts: 10,
             local_store_enabled: true,
             local_store_keyword_ttl_secs: 86_400,
             local_store_source_ttl_secs: 21_600,
@@ -142,6 +146,8 @@ impl DaemonConfig {
             secure_ident,
             kad_local_store: self.kad.local_store_config(),
             kad_snoop_queue: self.kad.snoop_queue_config(),
+            kad_bootstrap_nodes: self.kad.bootstrap_nodes.clone(),
+            kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             config: self.ed2k.clone(),
         }))
     }
@@ -334,6 +340,8 @@ apiKey = "secret"
 
 [kad]
 listenPort = 41002
+bootstrapNodes = ["192.0.2.30:41002"]
+bootstrapMinRoutingContacts = 3
 localStoreEnabled = true
 localStoreKeywordTtlSecs = 86400
 localStoreSourceTtlSecs = 21600
@@ -365,6 +373,8 @@ reconnectIntervalSecs = 60
             Some("192.0.2.10:13301".parse().unwrap())
         );
         assert_eq!(config.kad.listen_port, Some(41002));
+        assert_eq!(config.kad.bootstrap_nodes, ["192.0.2.30:41002"]);
+        assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
         assert!(config.kad.local_store_enabled);
         assert_eq!(config.kad.local_store_keyword_ttl_secs, 86_400);
         assert_eq!(config.kad.local_store_source_ttl_secs, 21_600);
@@ -562,6 +572,8 @@ reconnectIntervalSecs = 60
         assert_eq!(network.listen_port, 41001);
         assert_eq!(network.kad_bind_addr, "192.0.2.10:41002".parse().unwrap());
         assert!(network.kad_local_store.enabled);
+        assert_eq!(network.kad_bootstrap_nodes, Vec::<String>::new());
+        assert_eq!(network.kad_bootstrap_min_routing_contacts, 10);
         assert_eq!(
             network.kad_local_store.source_ttl,
             std::time::Duration::from_secs(21_600)
@@ -569,5 +581,21 @@ reconnectIntervalSecs = 60
         assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
+    }
+
+    #[test]
+    fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.kad.bootstrap_nodes = vec!["192.0.2.30:41002".to_string()];
+        config.kad.bootstrap_min_routing_contacts = 0;
+
+        let network = config.ed2k_network_config().unwrap().unwrap();
+
+        assert_eq!(network.kad_bootstrap_nodes, ["192.0.2.30:41002"]);
+        assert_eq!(network.kad_bootstrap_min_routing_contacts, 1);
     }
 }
