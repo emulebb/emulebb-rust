@@ -4,6 +4,14 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+mod snoop_model;
+mod snoop_queue;
+
+pub use snoop_model::{SnoopEntry, SnoopQueueConfig};
+pub use snoop_queue::{
+    ScheduledSnoopRequest, SnoopQueue, SnoopQueueFamilyCounts, SnoopRecordOutcome,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedFile {

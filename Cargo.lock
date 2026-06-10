@@ -465,6 +465,8 @@ name = "emulebb-index"
 version = "0.0.3"
 dependencies = [
  "anyhow",
+ "chrono",
+ "emulebb-kad-proto",
  "rusqlite",
  "serde",
 ]
