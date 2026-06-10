@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
-    NatManager,
+    MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, TransportProtocol,
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
@@ -572,6 +572,7 @@ pub struct Ed2kNetworkConfig {
     pub kad_snoop_queue: SnoopQueueConfig,
     pub kad_bootstrap_nodes: Vec<String>,
     pub kad_bootstrap_min_routing_contacts: usize,
+    pub nat_config: NatConfig,
     pub config: Ed2kConfig,
 }
 
@@ -648,6 +649,7 @@ struct Ed2kRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     dht: DhtNode,
     kad_bootstrap_configured: bool,
+    nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -899,6 +901,12 @@ impl EmulebbCore {
                 format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
             })?);
         let hello_identity = self.ed2k_hello_identity(&network);
+        let nat = Arc::new(
+            NatManagerBuilder::new(network.nat_config.clone())
+                .with_mappings(ed2k_nat_mappings(&network))
+                .build(),
+        );
+        nat.start().await?;
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
         if configured_bootstrap_nodes_text.is_some() {
@@ -946,7 +954,7 @@ impl EmulebbCore {
         })));
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
-            nat: Arc::new(NatManager),
+            nat: Arc::clone(&nat),
             config,
             hello_identity,
             shared_catalog: self.ed2k_transfers.shared_catalog(),
@@ -960,6 +968,7 @@ impl EmulebbCore {
             server_state,
             dht,
             kad_bootstrap_configured: configured_bootstrap_nodes_text.is_some(),
+            nat,
             shutdown,
             tasks,
         });
@@ -970,6 +979,7 @@ impl EmulebbCore {
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
+            let _ = runtime.nat.stop().await;
             for task in runtime.tasks {
                 task.abort();
             }
@@ -3896,6 +3906,25 @@ fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
     Ok(format!("{}:{}", request.address, request.port))
 }
 
+fn ed2k_nat_mappings(network: &Ed2kNetworkConfig) -> Vec<MappingSpec> {
+    vec![
+        MappingSpec {
+            name: "ed2k_tcp".to_string(),
+            local_addr: SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port),
+            protocol: TransportProtocol::Tcp,
+            exposure: MappingExposure::Required,
+            preferred_external_port: Some(network.listen_port),
+        },
+        MappingSpec {
+            name: "kad_udp".to_string(),
+            local_addr: network.kad_bind_addr,
+            protocol: TransportProtocol::Udp,
+            exposure: MappingExposure::Preferred,
+            preferred_external_port: Some(network.kad_bind_addr.port()),
+        },
+    ]
+}
+
 fn parse_server_endpoint(endpoint: &str) -> Result<(String, u16)> {
     let Some((address, port)) = endpoint.rsplit_once(':') else {
         anyhow::bail!("server id must use address:port");
@@ -4952,8 +4981,37 @@ mod tests {
             kad_snoop_queue,
             kad_bootstrap_nodes: Vec::new(),
             kad_bootstrap_min_routing_contacts: 10,
+            nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
         }
+    }
+
+    #[test]
+    fn ed2k_nat_mappings_follow_configured_listener_addresses() {
+        let transfer_root = unique_runtime_dir("emulebb-core-nat-mappings");
+        let network = test_network_config_with_store(
+            &transfer_root,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        );
+
+        let mappings = ed2k_nat_mappings(&network);
+
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].name, "ed2k_tcp");
+        assert_eq!(
+            mappings[0].local_addr,
+            "198.51.100.10:4662".parse().unwrap()
+        );
+        assert_eq!(mappings[0].protocol, TransportProtocol::Tcp);
+        assert_eq!(mappings[0].exposure, MappingExposure::Required);
+        assert_eq!(mappings[1].name, "kad_udp");
+        assert_eq!(
+            mappings[1].local_addr,
+            "198.51.100.10:4665".parse().unwrap()
+        );
+        assert_eq!(mappings[1].protocol, TransportProtocol::Udp);
+        assert_eq!(mappings[1].exposure, MappingExposure::Preferred);
     }
 
     #[tokio::test]
@@ -5039,6 +5097,7 @@ mod tests {
             server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
             dht,
             kad_bootstrap_configured: true,
+            nat: Arc::new(NatManager::default()),
             shutdown: Arc::clone(&shutdown),
             tasks: vec![dht_task],
         });

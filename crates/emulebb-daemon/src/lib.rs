@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
-use emulebb_ed2k::{config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
+use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub struct DaemonConfig {
     pub ed2k_user_hash: Option<String>,
     pub kad: KadListenerConfig,
     pub ed2k: Ed2kConfig,
+    pub nat: NatConfig,
     pub rest: RestListenerConfig,
 }
 
@@ -61,6 +62,7 @@ impl Default for DaemonConfig {
             ed2k_user_hash: None,
             kad: KadListenerConfig::default(),
             ed2k: Ed2kConfig::default(),
+            nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
         }
     }
@@ -148,6 +150,7 @@ impl DaemonConfig {
             kad_snoop_queue: self.kad.snoop_queue_config(),
             kad_bootstrap_nodes: self.kad.bootstrap_nodes.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
+            nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
         }))
     }
@@ -179,6 +182,12 @@ impl DaemonConfig {
             bail!("ed2k.listenPort is required when ED2K servers are configured");
         };
         Ok(listen_port)
+    }
+
+    fn nat_config(&self, bind_ip: Ipv4Addr) -> NatConfig {
+        let mut nat = self.nat.clone();
+        nat.bind_ip.get_or_insert_with(|| bind_ip.to_string());
+        nat
     }
 
     pub fn rest_bind_addr(&self) -> Result<SocketAddr> {
@@ -361,6 +370,18 @@ listenPort = 41001
 serverEndpoints = ["192.0.2.20:4661"]
 connectTimeoutSecs = 1
 reconnectIntervalSecs = 60
+
+[nat]
+enabled = true
+backendOrder = ["upnp_miniupnpc", "upnp_rupnp"]
+bindIp = "192.0.2.11"
+igdIp = "192.0.2.1"
+minissdpdSocket = "/var/run/minissdpd.sock"
+ssdpLocalPort = 1901
+discoveryTimeoutSecs = 7
+leaseDurationSecs = 1200
+renewMarginSecs = 120
+externalIpOverride = "203.0.113.10"
 "#,
         )
         .unwrap();
@@ -392,6 +413,25 @@ reconnectIntervalSecs = 60
         assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
         assert_eq!(config.ed2k.connect_timeout_secs, 1);
         assert_eq!(config.ed2k.reconnect_interval_secs, 60);
+        assert!(config.nat.enabled);
+        assert_eq!(
+            config.nat.backend_order,
+            ["upnp_miniupnpc".to_string(), "upnp_rupnp".to_string()]
+        );
+        assert_eq!(config.nat.bind_ip.as_deref(), Some("192.0.2.11"));
+        assert_eq!(config.nat.igd_ip.as_deref(), Some("192.0.2.1"));
+        assert_eq!(
+            config.nat.minissdpd_socket.as_deref(),
+            Some("/var/run/minissdpd.sock")
+        );
+        assert_eq!(config.nat.ssdp_local_port, Some(1901));
+        assert_eq!(config.nat.discovery_timeout_secs, 7);
+        assert_eq!(config.nat.lease_duration_secs, 1200);
+        assert_eq!(config.nat.renew_margin_secs, 120);
+        assert_eq!(
+            config.nat.external_ip_override.as_deref(),
+            Some("203.0.113.10")
+        );
     }
 
     #[test]
@@ -581,6 +621,35 @@ reconnectIntervalSecs = 60
         assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
+    }
+
+    #[test]
+    fn ed2k_network_config_derives_nat_bind_from_configured_p2p_bind_ip() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.nat.enabled = true;
+
+        let network = config.ed2k_network_config().unwrap().unwrap();
+
+        assert_eq!(network.nat_config.bind_ip.as_deref(), Some("192.0.2.10"));
+        assert!(network.nat_config.enabled);
+    }
+
+    #[test]
+    fn ed2k_network_config_honors_explicit_nat_bind_ip() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.nat.bind_ip = Some("198.51.100.20".to_string());
+
+        let network = config.ed2k_network_config().unwrap().unwrap();
+
+        assert_eq!(network.nat_config.bind_ip.as_deref(), Some("198.51.100.20"));
     }
 
     #[test]

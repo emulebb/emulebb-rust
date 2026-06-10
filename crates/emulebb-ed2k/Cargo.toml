@@ -7,6 +7,7 @@ description = "ED2K transfer runtime extracted for emulebb-rust"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }

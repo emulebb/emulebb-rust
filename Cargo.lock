@@ -440,6 +440,7 @@ name = "emulebb-ed2k"
 version = "0.0.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "emulebb-kad-dht",
  "emulebb-kad-proto",

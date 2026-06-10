@@ -6,6 +6,15 @@ pub mod ed2k_tcp;
 #[allow(dead_code)]
 pub mod ed2k_transfer;
 pub mod kad_firewall;
+pub mod nat;
+
+pub use nat::{
+    MappedEndpoint, MappingExposure, MappingSpec, NatCapableAgent, NatConfig, NatManager,
+    NatManagerBuilder, NatStatus, NatStatusSnapshot, NoopReachabilityStrategy, PortMappingProvider,
+    ReachabilityStrategy, SelectedGateway, TransportProtocol, UPNP_IGD_BACKEND,
+    UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
+    default_upnp_backend_order,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashType {
@@ -18,20 +27,6 @@ pub struct PopularHash {
     pub canonical_name: String,
     pub size: u64,
     pub source_count: u32,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NatStatus {
-    pub observed_external_addresses: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct NatManager;
-
-impl NatManager {
-    pub async fn status(&self) -> NatStatus {
-        NatStatus::default()
-    }
 }
 
 #[cfg(test)]
