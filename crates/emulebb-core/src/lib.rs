@@ -2138,56 +2138,162 @@ impl EmulebbCore {
         if sources.is_empty() {
             return Ok(Some("queued"));
         }
-        sort_download_sources(&mut sources);
         let hello_identity = self.ed2k_hello_identity(network);
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         let max_peers = network.config.max_parallel_download_peers.max(1);
-        let direct_sources = direct_download_candidate_sources(&sources, &HashSet::new());
-        if direct_sources.is_empty() {
-            return Ok(Some("queued"));
+
+        let mut attempted_direct_endpoints = HashSet::new();
+        let mut had_direct_sources = false;
+        let mut accepted_incomplete_peers = 0u32;
+        let mut last_direct_error: Option<anyhow::Error> = None;
+        let mut source_requery_round = 0usize;
+        loop {
+            sort_download_sources(&mut sources);
+            let direct_sources =
+                direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
+            had_direct_sources |= !direct_sources.is_empty();
+            for source in &direct_sources {
+                attempted_direct_endpoints.insert(source_endpoint_key(source));
+            }
+
+            if !direct_sources.is_empty() {
+                let outcome = run_ed2k_direct_downloads(
+                    DirectDownloadOptions {
+                        bind_ip: network.bind_ip,
+                        hello_identity,
+                        secure_ident: Arc::clone(&network.secure_ident),
+                        transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                        file_hash_hex: transfer.hash.clone(),
+                        file_name: transfer.name.clone(),
+                        file_size: transfer.size_bytes,
+                        sources: direct_sources,
+                        connect_timeout: timeout,
+                        max_parallel_download_peers: max_peers,
+                    },
+                    |bind_ip,
+                     source,
+                     hello_identity,
+                     secure_ident,
+                     transfer_runtime,
+                     file_name,
+                     file_size,
+                     connect_timeout| async move {
+                        download_file_from_peer(Ed2kPeerDownloadOptions {
+                            bind_ip,
+                            peer: &source,
+                            hello_identity,
+                            secure_ident: &secure_ident,
+                            transfer_runtime: transfer_runtime.as_ref(),
+                            canonical_name: file_name,
+                            file_size,
+                            timeout: connect_timeout,
+                        })
+                        .await
+                    },
+                )
+                .await?;
+                if outcome.completed {
+                    return Ok(Some("completed"));
+                }
+                accepted_incomplete_peers =
+                    accepted_incomplete_peers.saturating_add(outcome.accepted_incomplete_peers);
+                if let Some(error) = outcome.last_error {
+                    last_direct_error = Some(error);
+                }
+            }
+
+            let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+            if manifest.completed {
+                return Ok(Some("completed"));
+            }
+            if source_requery_round < ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS {
+                let known_new_direct_source_count =
+                    new_direct_ed2k_source_count(&sources, &attempted_direct_endpoints);
+                if should_skip_no_progress_source_requery(
+                    had_direct_sources,
+                    manifest_has_ed2k_transfer_progress(&manifest),
+                    known_new_direct_source_count,
+                    source_requery_round,
+                ) {
+                    tracing::info!(
+                        "ED2K source refresh skipped file_hash={} reason=no_progress_repeated_endpoints attempted_direct_endpoints={} known_new_direct_source_count={}",
+                        transfer.hash,
+                        attempted_direct_endpoints.len(),
+                        known_new_direct_source_count
+                    );
+                    break;
+                }
+
+                source_requery_round += 1;
+                tracing::info!(
+                    "ED2K source refresh starting file_hash={} requery_round={} attempted_direct_endpoints={}",
+                    transfer.hash,
+                    source_requery_round,
+                    attempted_direct_endpoints.len()
+                );
+                if source_requery_round > 1 {
+                    tokio::time::sleep(Duration::from_secs(
+                        ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS,
+                    ))
+                    .await;
+                }
+
+                match self
+                    .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
+                    .await
+                {
+                    Ok(refreshed_sources) => {
+                        let refreshed_source_count = refreshed_sources.len();
+                        let previous_source_count = sources.len();
+                        merge_download_sources(&mut sources, refreshed_sources);
+                        let added_source_count =
+                            sources.len().saturating_sub(previous_source_count);
+                        let new_direct_source_count =
+                            new_direct_ed2k_source_count(&sources, &attempted_direct_endpoints);
+                        tracing::info!(
+                            "ED2K source refresh completed file_hash={} requery_round={} refreshed_source_count={} added_source_count={} aggregated_source_count={} new_direct_source_count={}",
+                            transfer.hash,
+                            source_requery_round,
+                            refreshed_source_count,
+                            added_source_count,
+                            sources.len(),
+                            new_direct_source_count
+                        );
+                        let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+                        if manifest_has_ed2k_transfer_progress(&manifest)
+                            || new_direct_source_count != 0
+                            || (!had_direct_sources
+                                && source_requery_round < ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS)
+                        {
+                            continue;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "ED2K source refresh failed file_hash={} requery_round={}: {error}",
+                            transfer.hash,
+                            source_requery_round
+                        );
+                        if source_requery_round < ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS {
+                            continue;
+                        }
+                    }
+                }
+            }
+            break;
         }
-        let outcome = run_ed2k_direct_downloads(
-            DirectDownloadOptions {
-                bind_ip: network.bind_ip,
-                hello_identity,
-                secure_ident: Arc::clone(&network.secure_ident),
-                transfer_runtime: Arc::clone(&self.ed2k_transfers),
-                file_hash_hex: transfer.hash.clone(),
-                file_name: transfer.name.clone(),
-                file_size: transfer.size_bytes,
-                sources: direct_sources,
-                connect_timeout: timeout,
-                max_parallel_download_peers: max_peers,
-            },
-            |bind_ip,
-             source,
-             hello_identity,
-             secure_ident,
-             transfer_runtime,
-             file_name,
-             file_size,
-             connect_timeout| async move {
-                download_file_from_peer(Ed2kPeerDownloadOptions {
-                    bind_ip,
-                    peer: &source,
-                    hello_identity,
-                    secure_ident: &secure_ident,
-                    transfer_runtime: transfer_runtime.as_ref(),
-                    canonical_name: file_name,
-                    file_size,
-                    timeout: connect_timeout,
-                })
-                .await
-            },
-        )
-        .await?;
-        if outcome.completed {
+
+        let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+        if manifest.completed {
             return Ok(Some("completed"));
         }
-        if outcome.accepted_incomplete_peers != 0 {
+        if manifest_has_ed2k_transfer_progress(&manifest) {
             return Ok(Some("downloading"));
         }
-        if let Some(error) = outcome.last_error {
+        if accepted_incomplete_peers != 0 {
+            return Ok(Some("downloading"));
+        }
+        if let Some(error) = last_direct_error {
             return Err(error).context("ED2K direct download did not complete");
         }
         Ok(Some("queued"))
@@ -3263,6 +3369,32 @@ fn direct_download_candidate_sources(
         .collect()
 }
 
+fn new_direct_ed2k_source_count(
+    sources: &[Ed2kFoundSource],
+    attempted_direct_endpoints: &HashSet<(Ipv4Addr, u16)>,
+) -> usize {
+    direct_download_candidate_sources(sources, attempted_direct_endpoints).len()
+}
+
+fn manifest_has_ed2k_transfer_progress(manifest: &Ed2kResumeManifest) -> bool {
+    manifest.completed
+        || manifest.md4_hashset_acquired
+        || !manifest.verified_ranges.is_empty()
+        || manifest.pieces.iter().any(|piece| piece.bytes_written != 0)
+}
+
+fn should_skip_no_progress_source_requery(
+    had_direct_sources: bool,
+    manifest_has_progress: bool,
+    new_direct_source_count: usize,
+    completed_source_requery_rounds: usize,
+) -> bool {
+    had_direct_sources
+        && !manifest_has_progress
+        && new_direct_source_count == 0
+        && completed_source_requery_rounds != 0
+}
+
 fn plaintext_fallback_for_obfuscated_source(source: &Ed2kFoundSource) -> Option<Ed2kFoundSource> {
     let options = source.obfuscation_options?;
     if options & ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT != 0 {
@@ -3465,6 +3597,8 @@ const PR_NORMAL: u32 = 1;
 const PR_HIGH: u32 = 2;
 const PR_VERYHIGH: u32 = 3;
 const PR_VERYLOW: u32 = 4;
+const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
+const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
 
 fn default_categories() -> BTreeMap<u32, Category> {
@@ -4306,6 +4440,30 @@ mod tests {
         );
 
         assert_eq!(candidates, vec![next_endpoint]);
+    }
+
+    #[test]
+    fn source_requery_skip_waits_for_one_refresh_round_without_progress() {
+        assert!(!should_skip_no_progress_source_requery(true, false, 0, 0));
+        assert!(should_skip_no_progress_source_requery(true, false, 0, 1));
+        assert!(!should_skip_no_progress_source_requery(true, true, 0, 1));
+        assert!(!should_skip_no_progress_source_requery(true, false, 1, 1));
+        assert!(!should_skip_no_progress_source_requery(false, false, 0, 1));
+    }
+
+    #[test]
+    fn manifest_progress_includes_hashset_and_partial_piece_bytes() {
+        let file_hash = Ed2kHash::from_bytes([0x48; 16]);
+        let job = new_transfer_job(file_hash, "partial.bin".to_string(), 4096);
+        let mut manifest = Ed2kResumeManifest::new(&job);
+        assert!(!manifest_has_ed2k_transfer_progress(&manifest));
+
+        manifest.md4_hashset_acquired = true;
+        assert!(manifest_has_ed2k_transfer_progress(&manifest));
+        manifest.md4_hashset_acquired = false;
+
+        manifest.pieces[0].bytes_written = 512;
+        assert!(manifest_has_ed2k_transfer_progress(&manifest));
     }
 
     #[test]
