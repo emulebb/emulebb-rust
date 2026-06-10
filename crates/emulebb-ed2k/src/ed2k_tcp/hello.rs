@@ -78,7 +78,7 @@ pub(super) fn emule_misc_options1() -> u32 {
     let source_exchange_version = 4u32;
     let extended_requests_version = 2u32;
     // Stock v0.72a advertises comment/rating packet acceptance here. The
-    // agent accepts and decodes OP_FILEDESC, while sending local comments still
+    // Rust client accepts and decodes OP_FILEDESC, while sending local comments still
     // depends on a future local metadata surface.
     let comments_version = 1u32;
     // Recent stock eMule no longer advertises peer cache support.
@@ -146,7 +146,7 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
     payload.extend_from_slice(&6u32.to_le_bytes());
     push_ed2k_string_tag(payload, CT_NAME, HELLO_NICKNAME);
     push_ed2k_u32_tag(payload, CT_VERSION, EDONKEY_VERSION);
-    // The agent only exposes one UDP surface today, so advertise the Kad port
+    // The Rust client only exposes one UDP surface today, so advertise the Kad port
     // in both halves until a separate eD2k UDP listener exists.
     push_ed2k_u32_tag(
         payload,

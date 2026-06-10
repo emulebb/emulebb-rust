@@ -65,7 +65,7 @@ pub mod opcode {
     /// Buddy-callback request sent to the chosen relay node.
     ///
     /// The request shape is still part of the Kad2 oracle surface even though
-    /// the current Overlord runtime does not drive the full buddy state
+    /// the current eMuleBB Rust runtime does not drive the full buddy state
     /// machine yet.
     pub const CALLBACK_REQ: u8 = 0x52;
     /// Buddy-discovery response returned by an accepted relay node.

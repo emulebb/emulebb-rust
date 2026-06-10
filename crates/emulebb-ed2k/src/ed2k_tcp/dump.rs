@@ -31,6 +31,8 @@ use super::{
     encode_packet,
 };
 
+const ED2K_TCP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-tcp-dump-";
+
 #[derive(Debug, Serialize)]
 struct Ed2kTcpDumpRecord<'a> {
     schema: &'static str,
@@ -78,7 +80,8 @@ fn ed2k_tcp_dump_file() -> &'static StdMutex<Option<fs::File>> {
             .and_then(|dir| {
                 fs::create_dir_all(&dir).ok()?;
                 let path = dir.join(format!(
-                    "agent-ed2k-tcp-dump-{}.jsonl",
+                    "{}{}.jsonl",
+                    ED2K_TCP_DUMP_FILE_PREFIX,
                     chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
                 ));
                 fs::OpenOptions::new()
@@ -486,4 +489,14 @@ pub(super) fn dump_ed2k_tcp_download_recv(
         phase,
         packet,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ED2K_TCP_DUMP_FILE_PREFIX;
+
+    #[test]
+    fn tcp_dump_prefix_uses_emulebb_rust_name() {
+        assert_eq!(ED2K_TCP_DUMP_FILE_PREFIX, "emulebb-rust-ed2k-tcp-dump-");
+    }
 }

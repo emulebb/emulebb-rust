@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{Ed2kServerSearchInbox, is_low_id};
-/// Live ED2K server session view used by the agent to decide whether TCP is
+/// Live ED2K server session view used by the Rust client to decide whether TCP is
 /// still effectively firewalled from the network's point of view.
 #[derive(Debug, Clone, Default)]
 pub struct Ed2kServerState {

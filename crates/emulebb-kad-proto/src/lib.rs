@@ -1,5 +1,5 @@
 //! Kad2 wire primitives, packet codecs, and protocol constants shared by the
-//! Overlord agent runtime.
+//! eMuleBB Rust runtime.
 //!
 //! This crate owns the byte-level contract with the Kad network. Types here
 //! should describe oracle semantics as well as field widths so higher layers do

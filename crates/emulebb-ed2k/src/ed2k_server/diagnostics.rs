@@ -16,6 +16,8 @@ use super::{
     OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ServerSession,
 };
 
+const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
+
 #[derive(Debug, Serialize)]
 struct Ed2kServerDumpRecord<'a> {
     schema: &'static str,
@@ -124,7 +126,8 @@ fn ed2k_server_dump_file() -> &'static StdMutex<Option<fs::File>> {
             .and_then(|dir| {
                 fs::create_dir_all(&dir).ok()?;
                 let path = dir.join(format!(
-                    "agent-ed2k-server-dump-{}.jsonl",
+                    "{}{}.jsonl",
+                    ED2K_SERVER_DUMP_FILE_PREFIX,
                     chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
                 ));
                 fs::OpenOptions::new()
@@ -172,5 +175,18 @@ fn server_opcode_name(opcode: u8) -> &'static str {
         OP_FOUNDSOURCES_OBFU => "OP_FOUNDSOURCES_OBFU",
         OP_REJECT => "OP_REJECT",
         _ => "UNKNOWN",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ED2K_SERVER_DUMP_FILE_PREFIX;
+
+    #[test]
+    fn server_dump_prefix_uses_emulebb_rust_name() {
+        assert_eq!(
+            ED2K_SERVER_DUMP_FILE_PREFIX,
+            "emulebb-rust-ed2k-server-dump-"
+        );
     }
 }

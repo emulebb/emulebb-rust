@@ -13,10 +13,10 @@ use std::sync::{
 };
 use tracing::warn;
 
-const OVERLORD_TMP_DIR_ENV: &str = "OVERLORD_TMP_DIR";
-const OVERLORD_LOG_DIR_ENV: &str = "OVERLORD_LOG_DIR";
-const DEFAULT_WORKSPACE_TMP_DIR_NAME: &str = "p2p-overlord";
-const DUMP_FILE_PREFIX: &str = "agent-udp-dump-";
+const EMULEBB_RUST_TMP_DIR_ENV: &str = "EMULEBB_RUST_TMP_DIR";
+const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
+const DEFAULT_WORKSPACE_TMP_DIR_NAME: &str = "emulebb-rust";
+const DUMP_FILE_PREFIX: &str = "emulebb-rust-kad-udp-dump-";
 const DUMP_FILE_SUFFIX: &str = ".jsonl";
 
 static UDP_DUMP_WRITER: OnceLock<Option<UdpDumpWriter>> = OnceLock::new();
@@ -190,7 +190,7 @@ fn udp_state_id(direction: &str, summary: &KadUdpDumpSummary) -> String {
     )
 }
 
-/// Append one oracle-shaped Kad UDP packet record to the current agent dump file.
+/// Append one oracle-shaped Kad UDP packet record to the current eMuleBB Rust dump file.
 pub fn dump_kad_udp_packet(
     direction: &'static str,
     peer: SocketAddr,
@@ -204,7 +204,7 @@ pub fn dump_kad_udp_packet(
 
     let record = UdpDumpRecord {
         schema: "udp_packet_v1",
-        source: "agent",
+        source: "emulebb-rust",
         ts: Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
         event_seq: next_udp_dump_event_seq(),
         trace_key: udp_trace_key(peer),
@@ -298,11 +298,11 @@ fn init_udp_dump_writer() -> Option<UdpDumpWriter> {
 }
 
 fn workspace_log_dir() -> PathBuf {
-    read_env_path(OVERLORD_LOG_DIR_ENV).unwrap_or_else(workspace_tmp_dir)
+    read_env_path(EMULEBB_RUST_LOG_DIR_ENV).unwrap_or_else(workspace_tmp_dir)
 }
 
 fn workspace_tmp_dir() -> PathBuf {
-    read_env_path(OVERLORD_TMP_DIR_ENV)
+    read_env_path(EMULEBB_RUST_TMP_DIR_ENV)
         .unwrap_or_else(|| env::temp_dir().join(DEFAULT_WORKSPACE_TMP_DIR_NAME))
 }
 
@@ -330,7 +330,10 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{KadUdpDumpSummary, encode_hex_upper};
+    use super::{
+        DEFAULT_WORKSPACE_TMP_DIR_NAME, DUMP_FILE_PREFIX, EMULEBB_RUST_LOG_DIR_ENV,
+        EMULEBB_RUST_TMP_DIR_ENV, KadUdpDumpSummary, encode_hex_upper,
+    };
 
     #[test]
     fn encode_hex_upper_matches_oracle_style() {
@@ -361,5 +364,13 @@ mod tests {
             summary.summary_string(),
             "protocol=0xE4 opcode=0x21 opcode_name=KADEMLIA2_HELLO_REQ raw_obfuscated=yes transport_mode=receiver_verify_key requested_obfuscation=yes receiver_verify_key=123 sender_verify_key=456 receiver_verify_key_valid=yes tracked_request_opcode=KADEMLIA2_HELLO_REQ drop_reason=tracker_drop tracker_bucket=hello_req tracker_action=drop tracker_observed_packets=4 tracker_max_packets=3"
         );
+    }
+
+    #[test]
+    fn dump_defaults_use_emulebb_rust_names() {
+        assert_eq!(EMULEBB_RUST_TMP_DIR_ENV, "EMULEBB_RUST_TMP_DIR");
+        assert_eq!(EMULEBB_RUST_LOG_DIR_ENV, "EMULEBB_RUST_LOG_DIR");
+        assert_eq!(DEFAULT_WORKSPACE_TMP_DIR_NAME, "emulebb-rust");
+        assert_eq!(DUMP_FILE_PREFIX, "emulebb-rust-kad-udp-dump-");
     }
 }

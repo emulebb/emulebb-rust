@@ -1,5 +1,5 @@
 //! Minimal eD2k server session support used to obtain oracle-style HighID/LowID
-//! feedback and keep the agent visible on the ED2K side of the network.
+//! feedback and keep the Rust client visible on the ED2K side of the network.
 //!
 //! This intentionally does not implement the full server feature set yet. The
 //! current scope mirrors the parts of the oracle's `ServerConnect` and
@@ -124,7 +124,7 @@ const EDONKEY_VERSION: u32 = 0x3C;
 const EMULE_VERSION_MAJOR: u32 = 0;
 const EMULE_VERSION_MINOR: u32 = 72;
 const EMULE_VERSION_UPDATE: u32 = 0;
-// Stock eMule reads the nick from preferences. Until the agent grows an
+// Stock eMule reads the nick from preferences. Until the Rust client grows an
 // operator-configurable nick surface, keep a neutral stock-like default
 // instead of the earlier project URL identity.
 const HELLO_NICKNAME: &str = "eMule";

@@ -51,7 +51,7 @@ impl Rc4KeyStream {
     }
 }
 
-/// Returns whether the agent should start an ED2K server session with TCP
+/// Returns whether the Rust client should start an ED2K server session with TCP
 /// obfuscation.
 ///
 /// The oracle only chooses an obfuscated server TCP connect when the server

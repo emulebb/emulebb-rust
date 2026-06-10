@@ -114,8 +114,9 @@ async fn execute_publish_fanout(
 /// runtime still emits publishes instead of silently disabling them.
 ///
 /// Publish receivers apply a much stricter target-distance gate than Kad
-/// search phase 2. We therefore filter the traversal output here so the agent
-/// only spends publish budget on contacts that the eMule harness would accept.
+/// search phase 2. We therefore filter the traversal output here so the Rust
+/// client only spends publish budget on contacts that the eMule harness would
+/// accept.
 fn select_publish_contacts(
     target: NodeId,
     contacts: &[TraversalContact],

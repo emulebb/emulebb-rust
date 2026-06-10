@@ -1,6 +1,6 @@
 //! Minimal eD2k TCP support required for Kad firewall verification and TCP hello parity.
 //!
-//! The full eD2k peer protocol is still out of scope for the current agent, but
+//! The full eD2k peer protocol is still out of scope for the current Rust client, but
 //! the Kad oracle exposes a real eD2k TCP surface during startup instead of a
 //! one-packet firewall helper stub. To stay wire-compatible with that bootstrap
 //! path, this module now implements a small stateful subset:
@@ -254,7 +254,7 @@ const ED2K_SECURE_IDENT_KEY_BITS: usize = 384;
 const ED2K_SECURE_IDENT_SIGNATURE_NEEDED: u8 = 1;
 const ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED: u8 = 2;
 
-// Stock eMule reads the nick from preferences. Until the agent grows an
+// Stock eMule reads the nick from preferences. Until the Rust client grows an
 // operator-configurable nick surface, keep a neutral stock-like default
 // instead of the earlier project URL identity.
 const HELLO_NICKNAME: &str = "eMule";
@@ -479,7 +479,7 @@ struct EncodedUploadPartPacket {
     packet: Vec<u8>,
 }
 
-/// Result of the agent's active eD2k peer connect path.
+/// Result of the Rust client's active eD2k peer connect path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kPeerConnectMode {
     /// A plaintext eD2k TCP session was opened.
