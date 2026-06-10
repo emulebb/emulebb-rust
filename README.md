@@ -15,7 +15,8 @@ This repository was bootstrapped from the Kad and ED2K work in
   auth.
 - `emulebb-core`: local app state, capabilities, searches, and transfer
   summaries.
-- `emulebb-index`: SQLite + FTS5 local file index.
+- `emulebb-index`: SQLite + FTS5 local file index plus Kad harvest/store
+  scheduling components.
 - `emulebb-kad-*`: copied and renamed Kad protocol/runtime crates.
 
 Indexing is a client capability, not a separate public API. It improves

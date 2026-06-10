@@ -36,7 +36,7 @@ use emulebb_ed2k::{
     },
     kad_firewall::KadFirewallState,
 };
-use emulebb_index::{FileIndex, IndexedFile};
+use emulebb_index::{FileIndex, IndexedFile, KadLocalStoreConfig};
 use emulebb_kad_dht::{DhtConfig, DhtNode, SourceResult};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
@@ -559,6 +559,7 @@ pub struct Ed2kNetworkConfig {
     pub listen_port: u16,
     pub user_hash: [u8; 16],
     pub secure_ident: Arc<Ed2kSecureIdent>,
+    pub kad_local_store: KadLocalStoreConfig,
     pub config: Ed2kConfig,
 }
 

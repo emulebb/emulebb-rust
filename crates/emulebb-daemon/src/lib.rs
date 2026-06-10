@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
 use emulebb_ed2k::{config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
-use emulebb_index::FileIndex;
+use emulebb_index::{FileIndex, KadLocalStoreConfig};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -29,6 +29,13 @@ pub struct DaemonConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct KadListenerConfig {
     pub listen_port: Option<u16>,
+    pub local_store_enabled: bool,
+    pub local_store_keyword_ttl_secs: u64,
+    pub local_store_source_ttl_secs: u64,
+    pub local_store_notes_ttl_secs: u64,
+    pub local_store_keyword_capacity: usize,
+    pub local_store_source_capacity: usize,
+    pub local_store_notes_capacity: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +60,16 @@ impl Default for DaemonConfig {
 
 impl Default for KadListenerConfig {
     fn default() -> Self {
-        Self { listen_port: None }
+        Self {
+            listen_port: None,
+            local_store_enabled: true,
+            local_store_keyword_ttl_secs: 86_400,
+            local_store_source_ttl_secs: 21_600,
+            local_store_notes_ttl_secs: 86_400,
+            local_store_keyword_capacity: 20_000,
+            local_store_source_capacity: 20_000,
+            local_store_notes_capacity: 5_000,
+        }
     }
 }
 
@@ -112,8 +128,13 @@ impl DaemonConfig {
             listen_port,
             user_hash,
             secure_ident,
+            kad_local_store: self.kad.local_store_config(),
             config: self.ed2k.clone(),
         }))
+    }
+
+    pub fn kad_local_store_config(&self) -> KadLocalStoreConfig {
+        self.kad.local_store_config()
     }
 
     fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
@@ -142,6 +163,20 @@ impl DaemonConfig {
             bail!("rest.bindAddr is required");
         };
         Ok(candidate)
+    }
+}
+
+impl KadListenerConfig {
+    pub fn local_store_config(&self) -> KadLocalStoreConfig {
+        KadLocalStoreConfig {
+            enabled: self.local_store_enabled,
+            keyword_ttl: std::time::Duration::from_secs(self.local_store_keyword_ttl_secs.max(1)),
+            source_ttl: std::time::Duration::from_secs(self.local_store_source_ttl_secs.max(1)),
+            notes_ttl: std::time::Duration::from_secs(self.local_store_notes_ttl_secs.max(1)),
+            keyword_capacity: self.local_store_keyword_capacity.max(1),
+            source_capacity: self.local_store_source_capacity.max(1),
+            notes_capacity: self.local_store_notes_capacity.max(1),
+        }
     }
 }
 
@@ -220,6 +255,7 @@ mod tests {
             p2p_bind_ip,
             kad: KadListenerConfig {
                 listen_port: Some(41002),
+                ..KadListenerConfig::default()
             },
             ed2k,
             ..DaemonConfig::default()
@@ -270,6 +306,13 @@ apiKey = "secret"
 
 [kad]
 listenPort = 41002
+localStoreEnabled = true
+localStoreKeywordTtlSecs = 86400
+localStoreSourceTtlSecs = 21600
+localStoreNotesTtlSecs = 86400
+localStoreKeywordCapacity = 20000
+localStoreSourceCapacity = 20000
+localStoreNotesCapacity = 5000
 
 [ed2k]
 listenPort = 41001
@@ -288,10 +331,44 @@ reconnectIntervalSecs = 60
             Some("192.0.2.10:13301".parse().unwrap())
         );
         assert_eq!(config.kad.listen_port, Some(41002));
+        assert!(config.kad.local_store_enabled);
+        assert_eq!(config.kad.local_store_keyword_ttl_secs, 86_400);
+        assert_eq!(config.kad.local_store_source_ttl_secs, 21_600);
+        assert_eq!(config.kad.local_store_notes_ttl_secs, 86_400);
+        assert_eq!(config.kad.local_store_keyword_capacity, 20_000);
+        assert_eq!(config.kad.local_store_source_capacity, 20_000);
+        assert_eq!(config.kad.local_store_notes_capacity, 5_000);
         assert_eq!(config.ed2k.listen_port, Some(41001));
         assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
         assert_eq!(config.ed2k.connect_timeout_secs, 1);
         assert_eq!(config.ed2k.reconnect_interval_secs, 60);
+    }
+
+    #[test]
+    fn kad_local_store_config_is_config_driven_and_clamped() {
+        let config = DaemonConfig {
+            kad: KadListenerConfig {
+                listen_port: Some(41002),
+                local_store_enabled: false,
+                local_store_keyword_ttl_secs: 0,
+                local_store_source_ttl_secs: 0,
+                local_store_notes_ttl_secs: 0,
+                local_store_keyword_capacity: 0,
+                local_store_source_capacity: 0,
+                local_store_notes_capacity: 0,
+            },
+            ..DaemonConfig::default()
+        };
+
+        let local_store = config.kad_local_store_config();
+
+        assert!(!local_store.enabled);
+        assert_eq!(local_store.keyword_ttl, std::time::Duration::from_secs(1));
+        assert_eq!(local_store.source_ttl, std::time::Duration::from_secs(1));
+        assert_eq!(local_store.notes_ttl, std::time::Duration::from_secs(1));
+        assert_eq!(local_store.keyword_capacity, 1);
+        assert_eq!(local_store.source_capacity, 1);
+        assert_eq!(local_store.notes_capacity, 1);
     }
 
     #[test]
@@ -417,6 +494,11 @@ reconnectIntervalSecs = 60
         assert_eq!(network.bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
         assert_eq!(network.listen_port, 41001);
         assert_eq!(network.kad_bind_addr, "192.0.2.10:41002".parse().unwrap());
+        assert!(network.kad_local_store.enabled);
+        assert_eq!(
+            network.kad_local_store.source_ttl,
+            std::time::Duration::from_secs(21_600)
+        );
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
     }
