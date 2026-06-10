@@ -5,10 +5,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 mod kad_search_expr;
+mod kad_store;
 mod snoop_model;
 mod snoop_queue;
 
 pub use kad_search_expr::matches_restrictive_keyword_payload;
+pub use kad_store::{KadLocalStore, KadLocalStoreConfig};
 pub use snoop_model::{SnoopEntry, SnoopQueueConfig};
 pub use snoop_queue::{
     ScheduledSnoopRequest, SnoopQueue, SnoopQueueFamilyCounts, SnoopRecordOutcome,
