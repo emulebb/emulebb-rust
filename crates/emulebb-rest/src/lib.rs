@@ -3,7 +3,7 @@ use std::{path::Path as FsPath, sync::Arc};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{Path, RawQuery, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -113,26 +113,26 @@ struct SharedFileRemoveResult {
     hash: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConfirmQuery {
     confirm: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SnapshotQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageQuery {
     offset: Option<usize>,
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TransfersQuery {
     state: Option<String>,
@@ -141,7 +141,7 @@ struct TransfersQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UploadQueueQuery {
     offset: Option<usize>,
@@ -168,7 +168,7 @@ impl UploadQueueQuery {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SearchResultsQuery {
     offset: Option<usize>,
@@ -599,8 +599,12 @@ async fn stats(State(state): State<RestState>) -> impl IntoResponse {
 
 async fn snapshot(
     State(state): State<RestState>,
-    Query(query): Query<SnapshotQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<SnapshotQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let limit = snapshot_limit(query.limit);
     let status = status_response(&state).await;
     let kad = kad_response(&state.core.status().await.kad);
@@ -626,6 +630,7 @@ async fn snapshot(
         "network": network_response(),
         "logs": Vec::<Value>::new()
     }))
+    .into_response()
 }
 
 async fn kad(State(state): State<RestState>) -> impl IntoResponse {
@@ -916,8 +921,12 @@ async fn create_search(State(state): State<RestState>, body: Bytes) -> impl Into
 async fn search(
     State(state): State<RestState>,
     Path(search_id): Path<String>,
-    Query(query): Query<SearchResultsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<SearchResultsQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     match state.core.search(&search_id).await {
         Some(search) => {
             api_ok(search_page_response(&search_results_page(search, query))).into_response()
@@ -939,8 +948,12 @@ async fn delete_search(
 
 async fn delete_searches(
     State(state): State<RestState>,
-    Query(query): Query<ConfirmQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     if query.confirm != Some(true) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -955,8 +968,12 @@ async fn delete_searches(
 
 async fn shared_files(
     State(state): State<RestState>,
-    Query(query): Query<PageQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<PageQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let items = state
         .core
         .shares()
@@ -964,7 +981,7 @@ async fn shared_files(
         .iter()
         .map(shared_file_response)
         .collect::<Vec<_>>();
-    api_collection_page(items, query)
+    api_collection_page(items, query).into_response()
 }
 
 async fn create_shared_file(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
@@ -1089,8 +1106,12 @@ async fn delete_shared_file(
 async fn delete_shared_file_payload(
     State(state): State<RestState>,
     Path(hash): Path<String>,
-    Query(query): Query<ConfirmQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     if query.confirm != Some(true) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1199,8 +1220,12 @@ async fn download_search_result(
 
 async fn transfers(
     State(state): State<RestState>,
-    Query(query): Query<TransfersQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<TransfersQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let items = state
         .core
         .transfers()
@@ -1218,7 +1243,7 @@ async fn transfers(
                 .is_none_or(|category_id| transfer.category_id == category_id)
         })
         .collect::<Vec<_>>();
-    api_collection_page(items, query.page())
+    api_collection_page(items, query.page()).into_response()
 }
 
 async fn create_transfer(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
@@ -1475,10 +1500,14 @@ async fn upload(
 
 async fn upload_queue(
     State(state): State<RestState>,
-    Query(query): Query<UploadQueueQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<UploadQueueQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let _include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
-    api_collection_page(state.core.upload_queue().await, query.page())
+    api_collection_page(state.core.upload_queue().await, query.page()).into_response()
 }
 
 async fn upload_queue_client(
@@ -1698,8 +1727,12 @@ async fn transfer_delete(
 async fn transfer_delete_files(
     State(state): State<RestState>,
     Path(hash): Path<String>,
-    Query(query): Query<ConfirmQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
+    let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     if query.confirm != Some(true) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -2244,8 +2277,28 @@ where
     })
 }
 
+fn parse_optional_query<T>(query: Option<&str>) -> Result<T, Response>
+where
+    T: DeserializeOwned + Default,
+{
+    match query {
+        Some(query) if !query.is_empty() => serde_urlencoded::from_str(query).map_err(|error| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                structured_error_message(error.to_string()),
+            )
+            .into_response()
+        }),
+        _ => Ok(T::default()),
+    }
+}
+
 fn json_error_message(error: &serde_json::Error) -> String {
-    let message = error.to_string();
+    structured_error_message(error.to_string())
+}
+
+fn structured_error_message(message: String) -> String {
     if let Some(field) = unknown_json_field(&message) {
         return format!("unknown JSON field: {field}");
     }
@@ -2318,6 +2371,28 @@ mod tests {
         assert_eq!(value["error"]["message"], expected_message);
     }
 
+    async fn assert_invalid_query_response(app: Router, method: &str, uri: &str) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            value["error"]["message"],
+            "unknown JSON field: unsupportedQuery"
+        );
+    }
+
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2388,6 +2463,29 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
         assert!(value["error"]["message"].as_str().unwrap().contains("EOF"));
+    }
+
+    #[tokio::test]
+    async fn query_routes_use_canonical_error_envelope() {
+        let cases = [
+            ("GET", "/api/v1/snapshot?unsupportedQuery=true"),
+            ("GET", "/api/v1/searches/search-1?unsupportedQuery=true"),
+            ("DELETE", "/api/v1/searches?unsupportedQuery=true"),
+            ("GET", "/api/v1/shared-files?unsupportedQuery=true"),
+            (
+                "DELETE",
+                "/api/v1/shared-files/00112233445566778899aabbccddeeff/file?unsupportedQuery=true",
+            ),
+            ("GET", "/api/v1/transfers?unsupportedQuery=true"),
+            ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
+            (
+                "DELETE",
+                "/api/v1/transfers/00112233445566778899aabbccddeeff/files?unsupportedQuery=true",
+            ),
+        ];
+        for (method, uri) in cases {
+            assert_invalid_query_response(test_router(), method, uri).await;
+        }
     }
 
     #[tokio::test]

@@ -533,6 +533,7 @@ dependencies = [
  "emulebb-index",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tokio",
  "tower",
 ]
