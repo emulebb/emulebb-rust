@@ -46,9 +46,9 @@ use emulebb_kad_dht::{
     RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
-    Ed2kHash, KAD_VERSION, KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
-    SearchResultEntry, SearchSourceReq, Tag, TagValue, constants::K, packet::ContactEntry,
-    tag_name,
+    Ed2kHash, HelloReq, HelloRes, HelloResAck, KAD_VERSION, KadPacket, NodeId, PublishRes,
+    SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq, Tag, TagValue,
+    constants::K, packet::ContactEntry, tag_name,
 };
 use md4::{Digest, Md4};
 use serde::{Deserialize, Serialize};
@@ -578,6 +578,8 @@ pub struct Ed2kNetworkConfig {
     pub kad_publish_shared_files: bool,
     pub kad_republish_interval_secs: u64,
     pub kad_publish_contact_fanout: usize,
+    pub kad_hello_intro_interval_secs: u64,
+    pub kad_hello_intro_fanout: usize,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
 }
@@ -933,6 +935,16 @@ impl EmulebbCore {
                 Arc::clone(&shutdown),
             )));
         }
+        if network.kad_hello_intro_fanout > 0 {
+            tasks.push(tokio::spawn(run_kad_hello_intro_loop(
+                dht.clone(),
+                Arc::clone(&ed2k_listener),
+                Arc::clone(&server_state),
+                Arc::clone(&kad_firewall),
+                network.clone(),
+                Arc::clone(&shutdown),
+            )));
+        }
         if let (Some(kad_local_store), Some(kad_snoop_queue)) = (
             self.kad_local_store.as_ref().map(Arc::clone),
             self.kad_snoop_queue.as_ref().map(Arc::clone),
@@ -941,6 +953,9 @@ impl EmulebbCore {
                 dht.clone(),
                 kad_local_store,
                 Arc::clone(&kad_snoop_queue),
+                Arc::clone(&ed2k_listener),
+                Arc::clone(&server_state),
+                Arc::clone(&kad_firewall),
                 Arc::clone(&shutdown),
             )));
             tasks.push(tokio::spawn(run_kad_passive_replay_loop(
@@ -3004,6 +3019,84 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
     }
 }
 
+async fn run_kad_hello_intro_loop(
+    dht: DhtNode,
+    ed2k_listener: Arc<TcpListener>,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    network: Ed2kNetworkConfig,
+    shutdown: Arc<AtomicBool>,
+) {
+    let interval = Duration::from_secs(network.kad_hello_intro_interval_secs.max(1));
+    let fanout = network.kad_hello_intro_fanout.max(1);
+    let mut introduced = HashSet::new();
+
+    while !shutdown.load(Ordering::SeqCst) {
+        tokio::time::sleep(interval).await;
+        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
+            continue;
+        }
+
+        let local_ip = match dht.bind_addr() {
+            Ok(bind_addr) => bind_addr.ip(),
+            Err(error) => {
+                tracing::debug!("kad hello intro skipped: failed to resolve bind addr: {error}");
+                continue;
+            }
+        };
+        let contacts = dht
+            .routing_contacts()
+            .await
+            .into_iter()
+            .filter_map(|contact| {
+                let addr = SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port);
+                (contact.udp_port != 0
+                    && contact.kad_version >= 6
+                    && IpAddr::V4(contact.ip) != local_ip
+                    && !introduced.contains(&addr))
+                .then_some((contact, addr))
+            })
+            .take(fanout)
+            .collect::<Vec<_>>();
+
+        for (contact, addr) in contacts {
+            let hello = match build_kad_hello_request(
+                &dht,
+                &ed2k_listener,
+                &server_state,
+                &kad_firewall,
+                false,
+            )
+            .await
+            {
+                Ok(hello) => hello,
+                Err(error) => {
+                    tracing::debug!("failed to build Kad hello request for {addr}: {error}");
+                    continue;
+                }
+            };
+            tracing::debug!(
+                "sending Kad hello request to={} contact_id={} contact_version={} request_ack=false",
+                addr,
+                contact.id,
+                contact.kad_version
+            );
+            if let Err(error) = dht
+                .send_packet_with_class(
+                    addr,
+                    &KadPacket::HelloReq(hello),
+                    RpcWorkClass::Maintenance,
+                )
+                .await
+            {
+                tracing::debug!("failed to send Kad hello request to {addr}: {error}");
+                continue;
+            }
+            introduced.insert(addr);
+        }
+    }
+}
+
 async fn run_kad_shared_file_publish_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
@@ -3161,14 +3254,25 @@ async fn run_kad_local_store_loop(
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
     snoop_queue: Arc<Mutex<SnoopQueue>>,
+    ed2k_listener: Arc<TcpListener>,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut packets = dht.subscribe_packets();
     while !shutdown.load(Ordering::SeqCst) {
         match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
             Ok(Ok(received)) => {
-                if let Err(error) =
-                    handle_kad_local_store_packet(&dht, &local_store, &snoop_queue, received).await
+                if let Err(error) = handle_kad_local_store_packet(
+                    &dht,
+                    &local_store,
+                    &snoop_queue,
+                    &ed2k_listener,
+                    &server_state,
+                    &kad_firewall,
+                    received,
+                )
+                .await
                 {
                     tracing::warn!("failed to handle unsolicited Kad packet: {error:#}");
                 }
@@ -3423,6 +3527,120 @@ async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec
     results
 }
 
+async fn current_tcp_firewalled(
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+) -> bool {
+    if let Some(tcp_firewalled) = server_state.read().await.tcp_firewalled() {
+        return tcp_firewalled;
+    }
+    ed2k_listener
+        .local_addr()
+        .map(|addr| addr.port() == 0)
+        .unwrap_or(true)
+}
+
+fn build_kad_hello_response_tags(
+    kad_udp_port: u16,
+    udp_firewalled: bool,
+    tcp_firewalled: bool,
+    request_ack: bool,
+) -> Vec<Tag> {
+    let mut tags = vec![Tag::new_short(
+        tag_name::SOURCEUPORT,
+        TagValue::U16(kad_udp_port),
+    )];
+    let misc_options =
+        u8::from(udp_firewalled) | (u8::from(tcp_firewalled) << 1) | (u8::from(request_ack) << 2);
+    tags.push(Tag::new_short(
+        tag_name::KADMISCOPTIONS,
+        TagValue::U8(misc_options),
+    ));
+    tags
+}
+
+fn build_kad_hello_request_tags(
+    kad_udp_port: u16,
+    can_advertise_source_udp_port: bool,
+    udp_firewalled: bool,
+    tcp_firewalled: bool,
+    request_ack: bool,
+) -> Vec<Tag> {
+    if request_ack || udp_firewalled || tcp_firewalled {
+        let misc_options = u8::from(udp_firewalled)
+            | (u8::from(tcp_firewalled) << 1)
+            | (u8::from(request_ack) << 2);
+        return vec![Tag::new_short(
+            tag_name::KADMISCOPTIONS,
+            TagValue::U8(misc_options),
+        )];
+    }
+
+    if can_advertise_source_udp_port {
+        return vec![Tag::new_short(
+            tag_name::SOURCEUPORT,
+            TagValue::U16(kad_udp_port),
+        )];
+    }
+
+    Vec::new()
+}
+
+async fn build_kad_hello_request(
+    dht: &DhtNode,
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    request_ack: bool,
+) -> Result<HelloReq> {
+    let bind_addr = dht.bind_addr()?;
+    let tcp_port = ed2k_listener
+        .local_addr()
+        .context("failed to read eD2K listener address while building Kad HELLO request")?
+        .port();
+    let firewall = kad_firewall.lock().await;
+
+    Ok(HelloReq {
+        node_id: dht.own_id(),
+        tcp_port,
+        version: KAD_VERSION,
+        tags: build_kad_hello_request_tags(
+            bind_addr.port(),
+            firewall.udp_verified && firewall.udp_open,
+            firewall.udp_verified && !firewall.udp_open,
+            current_tcp_firewalled(ed2k_listener, server_state).await,
+            request_ack,
+        ),
+    })
+}
+
+async fn build_kad_hello_response(
+    dht: &DhtNode,
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    request_ack: bool,
+) -> Result<HelloRes> {
+    let bind_addr = dht.bind_addr()?;
+    let tcp_port = ed2k_listener
+        .local_addr()
+        .context("failed to read eD2K listener address while building Kad HELLO response")?
+        .port();
+    let firewall = kad_firewall.lock().await;
+
+    Ok(HelloRes {
+        node_id: dht.own_id(),
+        tcp_port,
+        version: KAD_VERSION,
+        tags: build_kad_hello_response_tags(
+            bind_addr.port(),
+            firewall.udp_verified && !firewall.udp_open,
+            current_tcp_firewalled(ed2k_listener, server_state).await,
+            request_ack,
+        ),
+    })
+}
+
 async fn remember_passive_note_results(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     results: &[KadNoteResult],
@@ -3516,10 +3734,49 @@ async fn handle_kad_local_store_packet(
     dht: &DhtNode,
     local_store: &Arc<Mutex<KadLocalStore>>,
     snoop_queue: &Arc<Mutex<SnoopQueue>>,
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
     received: ReceivedKadPacket,
 ) -> Result<()> {
     let ReceivedKadPacket { packet, from, .. } = received;
     match packet {
+        KadPacket::HelloReq(req) => {
+            if let Err(error) = dht
+                .add_contact_from_hello(from, req.node_id, req.tcp_port, req.version, &req.tags)
+                .await
+            {
+                tracing::debug!("failed to record Kad HELLO_REQ contact from {from}: {error:#}");
+            }
+            let response =
+                build_kad_hello_response(dht, ed2k_listener, server_state, kad_firewall, false)
+                    .await?;
+            dht.send_packet(from, &KadPacket::HelloRes(response))
+                .await?;
+        }
+        KadPacket::HelloRes(res) => {
+            match dht
+                .add_contact_from_hello(from, res.node_id, res.tcp_port, res.version, &res.tags)
+                .await
+            {
+                Ok(metadata) if metadata.requests_hello_res_ack => {
+                    dht.send_packet(
+                        from,
+                        &KadPacket::HelloResAck(HelloResAck {
+                            node_id: dht.own_id(),
+                            tags: Vec::new(),
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        "failed to record Kad HELLO_RES contact from {from}: {error:#}"
+                    );
+                }
+            }
+        }
         KadPacket::Ping => {
             dht.send_packet(
                 from,
@@ -5528,6 +5785,8 @@ mod tests {
             kad_publish_shared_files: true,
             kad_republish_interval_secs: 1_800,
             kad_publish_contact_fanout: 4,
+            kad_hello_intro_interval_secs: 300,
+            kad_hello_intro_fanout: 2,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
         }
@@ -5764,6 +6023,39 @@ mod tests {
         assert_eq!(
             tags.last(),
             Some(&Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)))
+        );
+    }
+
+    #[test]
+    fn kad_hello_request_tags_advertise_source_udp_port_when_verified_open() {
+        let tags = build_kad_hello_request_tags(41000, true, false, false, false);
+
+        assert_eq!(
+            tags,
+            vec![Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000))]
+        );
+    }
+
+    #[test]
+    fn kad_hello_request_tags_prefer_misc_bits_for_firewall_or_ack_state() {
+        let tags = build_kad_hello_request_tags(41000, true, true, false, true);
+
+        assert_eq!(
+            tags,
+            vec![Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05))]
+        );
+    }
+
+    #[test]
+    fn kad_hello_response_tags_include_source_udp_port_and_misc_bits() {
+        let tags = build_kad_hello_response_tags(41000, true, true, true);
+
+        assert_eq!(
+            tags,
+            vec![
+                Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
+                Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x07)),
+            ]
         );
     }
 

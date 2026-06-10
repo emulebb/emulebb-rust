@@ -1,9 +1,11 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
-use emulebb_kad_proto::{KadUdpKey, NodeId};
+use crate::types::{HelloPeerMetadata, parse_hello_peer_metadata};
+use emulebb_kad_proto::{KadUdpKey, NodeId, Tag};
 use emulebb_kad_routing::{
     Contact, RoutingError, RoutingSplitDeniedReason, RoutingSubnetLimitScope,
 };
+use std::net::{IpAddr, SocketAddr};
 use tracing::{debug, warn};
 
 impl DhtNode {
@@ -49,6 +51,42 @@ impl DhtNode {
             .lock()
             .await
             .get_closest(target, limit)
+    }
+
+    /// Record a contact learned from a Kad HELLO request or response.
+    pub async fn add_contact_from_hello(
+        &self,
+        from: SocketAddr,
+        node_id: NodeId,
+        tcp_port: u16,
+        version: u8,
+        tags: &[Tag],
+    ) -> Result<HelloPeerMetadata, DhtError> {
+        let mut metadata = parse_hello_peer_metadata(tags);
+        if version < 8 {
+            metadata.requests_hello_res_ack = false;
+        }
+
+        let IpAddr::V4(ip) = from.ip() else {
+            return Ok(metadata);
+        };
+        let mut contact = Contact::new(
+            node_id,
+            ip,
+            metadata.hello_source_udp_port.unwrap_or(from.port()),
+            tcp_port,
+            version,
+        );
+        contact.hello_source_udp_port = metadata.hello_source_udp_port;
+        contact.udp_firewalled = metadata.udp_firewalled;
+        contact.tcp_firewalled = metadata.tcp_firewalled;
+        contact.requests_hello_res_ack = metadata.requests_hello_res_ack;
+        if let Some(known_udp_key) = self.known_peer_key(from) {
+            contact.udp_key = known_udp_key;
+        }
+
+        self.add_contact(contact).await?;
+        Ok(metadata)
     }
 }
 
@@ -106,5 +144,50 @@ fn log_routing_rejection(
                 "routing table rejected contact because the destination bin is full"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DhtConfig;
+    use emulebb_kad_proto::{Tag, TagValue, tag_name};
+
+    #[tokio::test]
+    async fn hello_contact_uses_advertised_source_udp_port_and_metadata() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let node_id = NodeId::from_bytes([0x42; 16]);
+
+        let metadata = dht
+            .add_contact_from_hello(
+                "198.51.100.22:41002".parse().unwrap(),
+                node_id,
+                41001,
+                10,
+                &[
+                    Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(42002)),
+                    Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x06)),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.hello_source_udp_port, Some(42002));
+        assert!(!metadata.udp_firewalled);
+        assert!(metadata.tcp_firewalled);
+        assert!(metadata.requests_hello_res_ack);
+        let contact = dht.routing_contacts().await.pop().unwrap();
+        assert_eq!(contact.id, node_id);
+        assert_eq!(contact.udp_port, 42002);
+        assert_eq!(contact.tcp_port, 41001);
+        assert_eq!(contact.hello_source_udp_port, Some(42002));
+        assert!(!contact.udp_firewalled);
+        assert!(contact.tcp_firewalled);
+        assert!(contact.requests_hello_res_ack);
     }
 }

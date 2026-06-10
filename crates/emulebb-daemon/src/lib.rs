@@ -46,6 +46,8 @@ pub struct KadListenerConfig {
     pub publish_shared_files_enabled: bool,
     pub republish_interval_secs: u64,
     pub publish_contact_fanout: usize,
+    pub hello_intro_interval_secs: u64,
+    pub hello_intro_fanout: usize,
     pub snoop_queue_dedup_window_secs: u64,
     pub snoop_queue_general_max_queries_per_600s: u32,
     pub snoop_queue_general_drain_cooldown_secs: u64,
@@ -92,6 +94,8 @@ impl Default for KadListenerConfig {
             publish_shared_files_enabled: true,
             republish_interval_secs: 1_800,
             publish_contact_fanout: 4,
+            hello_intro_interval_secs: 300,
+            hello_intro_fanout: 2,
             snoop_queue_dedup_window_secs: 28_800,
             snoop_queue_general_max_queries_per_600s: 24,
             snoop_queue_general_drain_cooldown_secs: 900,
@@ -164,6 +168,8 @@ impl DaemonConfig {
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
             kad_republish_interval_secs: self.kad.republish_interval_secs.max(1),
             kad_publish_contact_fanout: self.kad.publish_contact_fanout.max(1),
+            kad_hello_intro_interval_secs: self.kad.hello_intro_interval_secs.max(1),
+            kad_hello_intro_fanout: self.kad.hello_intro_fanout,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
         }))
@@ -447,6 +453,8 @@ localStoreNotesCapacity = 5000
 publishSharedFilesEnabled = true
 republishIntervalSecs = 120
 publishContactFanout = 5
+helloIntroIntervalSecs = 42
+helloIntroFanout = 3
 snoopQueueDedupWindowSecs = 28800
 snoopQueueGeneralMaxQueriesPer600s = 24
 snoopQueueGeneralDrainCooldownSecs = 900
@@ -496,6 +504,8 @@ externalIpOverride = "203.0.113.10"
         assert!(config.kad.publish_shared_files_enabled);
         assert_eq!(config.kad.republish_interval_secs, 120);
         assert_eq!(config.kad.publish_contact_fanout, 5);
+        assert_eq!(config.kad.hello_intro_interval_secs, 42);
+        assert_eq!(config.kad.hello_intro_fanout, 3);
         assert_eq!(config.kad.snoop_queue_dedup_window_secs, 28_800);
         assert_eq!(config.kad.snoop_queue_general_max_queries_per_600s, 24);
         assert_eq!(config.kad.snoop_queue_general_drain_cooldown_secs, 900);
@@ -710,6 +720,8 @@ externalIpOverride = "203.0.113.10"
         assert!(network.kad_publish_shared_files);
         assert_eq!(network.kad_republish_interval_secs, 1_800);
         assert_eq!(network.kad_publish_contact_fanout, 4);
+        assert_eq!(network.kad_hello_intro_interval_secs, 300);
+        assert_eq!(network.kad_hello_intro_fanout, 2);
         assert_eq!(
             network.kad_local_store.source_ttl,
             std::time::Duration::from_secs(21_600)
@@ -864,6 +876,8 @@ externalIpOverride = "203.0.113.10"
         config.kad.bootstrap_min_routing_contacts = 0;
         config.kad.republish_interval_secs = 0;
         config.kad.publish_contact_fanout = 0;
+        config.kad.hello_intro_interval_secs = 0;
+        config.kad.hello_intro_fanout = 0;
 
         let network = config.ed2k_network_config().unwrap().unwrap();
 
@@ -871,5 +885,7 @@ externalIpOverride = "203.0.113.10"
         assert_eq!(network.kad_bootstrap_min_routing_contacts, 1);
         assert_eq!(network.kad_republish_interval_secs, 1);
         assert_eq!(network.kad_publish_contact_fanout, 1);
+        assert_eq!(network.kad_hello_intro_interval_secs, 1);
+        assert_eq!(network.kad_hello_intro_fanout, 0);
     }
 }

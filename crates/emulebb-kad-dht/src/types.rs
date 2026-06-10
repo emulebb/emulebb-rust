@@ -1,6 +1,59 @@
 use emulebb_kad_proto::{Ed2kHash, Tag, TagName, TagValue, tag_name};
 use std::net::Ipv4Addr;
 
+fn read_u16_tag_value(value: &TagValue) -> Option<u16> {
+    match value {
+        TagValue::U16(port) => Some(*port),
+        TagValue::U32(port) => u16::try_from(*port).ok(),
+        TagValue::U8(port) => Some(u16::from(*port)),
+        TagValue::UInt(port) => u16::try_from(*port).ok(),
+        _ => None,
+    }
+}
+
+fn read_u8_tag_value(value: &TagValue) -> Option<u8> {
+    match value {
+        TagValue::U8(bits) => Some(*bits),
+        TagValue::U16(bits) => u8::try_from(*bits).ok(),
+        TagValue::U32(bits) => u8::try_from(*bits).ok(),
+        TagValue::UInt(bits) => u8::try_from(*bits).ok(),
+        _ => None,
+    }
+}
+
+/// Kad HELLO metadata carried in oracle `SOURCEUPORT` and `KADMISCOPTIONS` tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HelloPeerMetadata {
+    pub hello_source_udp_port: Option<u16>,
+    pub udp_firewalled: bool,
+    pub tcp_firewalled: bool,
+    pub requests_hello_res_ack: bool,
+}
+
+pub fn parse_hello_peer_metadata(tags: &[Tag]) -> HelloPeerMetadata {
+    let mut metadata = HelloPeerMetadata::default();
+
+    for tag in tags {
+        match &tag.name {
+            TagName::Short(name) if *name == tag_name::SOURCEUPORT => {
+                metadata.hello_source_udp_port =
+                    read_u16_tag_value(&tag.value).filter(|port| *port != 0);
+            }
+            TagName::Short(name) if *name == tag_name::KADMISCOPTIONS => {
+                let Some(bits) = read_u8_tag_value(&tag.value) else {
+                    continue;
+                };
+                metadata.udp_firewalled = (bits & 0x01) != 0;
+                metadata.tcp_firewalled = (bits & 0x02) != 0;
+                metadata.requests_hello_res_ack = (bits & 0x04) != 0;
+            }
+            _ => {}
+        }
+    }
+
+    metadata
+}
+
 /// A file entry found by keyword search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -212,6 +265,30 @@ impl NoteResult {
 mod tests {
     use super::*;
     use emulebb_kad_proto::{Ed2kHash, Tag};
+
+    #[test]
+    fn hello_metadata_parses_source_udp_port_and_misc_bits() {
+        let metadata = parse_hello_peer_metadata(&[
+            Tag::new_short(tag_name::SOURCEUPORT, TagValue::UInt(41_000)),
+            Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x07)),
+        ]);
+
+        assert_eq!(metadata.hello_source_udp_port, Some(41_000));
+        assert!(metadata.udp_firewalled);
+        assert!(metadata.tcp_firewalled);
+        assert!(metadata.requests_hello_res_ack);
+    }
+
+    #[test]
+    fn hello_metadata_ignores_zero_source_udp_port() {
+        let metadata =
+            parse_hello_peer_metadata(&[Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(0))]);
+
+        assert_eq!(metadata.hello_source_udp_port, None);
+        assert!(!metadata.udp_firewalled);
+        assert!(!metadata.tcp_firewalled);
+        assert!(!metadata.requests_hello_res_ack);
+    }
 
     #[test]
     fn test_search_result_from_tags() {
