@@ -37,10 +37,13 @@ use emulebb_ed2k::{
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{
-    FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, SnoopEntry, SnoopQueue,
-    SnoopQueueConfig,
+    FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
+    SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts,
 };
-use emulebb_kad_dht::{DhtConfig, DhtNode, ReceivedKadPacket, SourceResult};
+use emulebb_kad_dht::{
+    DhtConfig, DhtNode, NoteResult as KadNoteResult, ReceivedKadPacket, RpcWorkClass,
+    SearchResult as KadSearchResult, SourceResult,
+};
 use emulebb_kad_proto::{
     Ed2kHash, KAD_VERSION, KadPacket, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
     SearchResultEntry, SearchSourceReq, constants::K, packet::ContactEntry,
@@ -574,6 +577,10 @@ const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
 const LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES: usize = 1420;
+const PASSIVE_GENERAL_CRAWL_SECS: u64 = 45;
+const PASSIVE_SOURCE_CRAWL_SECS: u64 = 15;
+const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
+const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
 
 type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
 
@@ -894,8 +901,22 @@ impl EmulebbCore {
             tasks.push(tokio::spawn(run_kad_local_store_loop(
                 dht.clone(),
                 kad_local_store,
-                kad_snoop_queue,
+                Arc::clone(&kad_snoop_queue),
                 Arc::clone(&shutdown),
+            )));
+            tasks.push(tokio::spawn(run_kad_passive_replay_loop(
+                dht.clone(),
+                Arc::clone(&kad_snoop_queue),
+                Arc::clone(&self.index),
+                Arc::clone(&shutdown),
+                PassiveReplayWorker::Source,
+            )));
+            tasks.push(tokio::spawn(run_kad_passive_replay_loop(
+                dht.clone(),
+                kad_snoop_queue,
+                Arc::clone(&self.index),
+                Arc::clone(&shutdown),
+                PassiveReplayWorker::General,
             )));
         }
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
@@ -2789,6 +2810,271 @@ async fn run_kad_local_store_loop(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassiveReplayWorker {
+    General,
+    Source,
+}
+
+#[derive(Debug)]
+enum PassiveReplaySelection {
+    Keyword(ScheduledSnoopRequest<SearchKeyReq>),
+    Source(ScheduledSnoopRequest<SearchSourceReq>),
+    Notes(ScheduledSnoopRequest<SearchNotesReq>),
+}
+
+async fn run_kad_passive_replay_loop(
+    dht: DhtNode,
+    snoop_queue: Arc<Mutex<SnoopQueue>>,
+    index: Arc<Mutex<FileIndex>>,
+    shutdown: Arc<AtomicBool>,
+    worker: PassiveReplayWorker,
+) {
+    let interval = match worker {
+        PassiveReplayWorker::General => Duration::from_secs(PASSIVE_GENERAL_CRAWL_SECS),
+        PassiveReplayWorker::Source => Duration::from_secs(PASSIVE_SOURCE_CRAWL_SECS),
+    };
+    while !shutdown.load(Ordering::SeqCst) {
+        tokio::time::sleep(interval).await;
+        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
+            continue;
+        }
+        let selected = match worker {
+            PassiveReplayWorker::General => next_passive_replay_request(&snoop_queue).await,
+            PassiveReplayWorker::Source => next_passive_replay_source_request(&snoop_queue)
+                .await
+                .map(PassiveReplaySelection::Source),
+        };
+        let Some(selected) = selected else {
+            continue;
+        };
+        run_selected_passive_replay(&dht, &snoop_queue, &index, selected).await;
+    }
+}
+
+async fn next_passive_replay_request(
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
+) -> Option<PassiveReplaySelection> {
+    let mut queue = snoop_queue.lock().await;
+    let now = Utc::now();
+    for family in preferred_passive_replay_families(queue.family_counts()) {
+        let selected = match family {
+            PassiveReplayFamily::Keyword => queue
+                .select_next_keyword_request(now)
+                .map(PassiveReplaySelection::Keyword),
+            PassiveReplayFamily::Source => queue
+                .select_next_source_request(now)
+                .map(PassiveReplaySelection::Source),
+            PassiveReplayFamily::Notes => queue
+                .select_next_notes_request(now)
+                .map(PassiveReplaySelection::Notes),
+        };
+        if selected.is_some() {
+            return selected;
+        }
+    }
+    None
+}
+
+async fn next_passive_replay_source_request(
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
+) -> Option<ScheduledSnoopRequest<SearchSourceReq>> {
+    snoop_queue
+        .lock()
+        .await
+        .select_next_source_request(Utc::now())
+}
+
+async fn run_selected_passive_replay(
+    dht: &DhtNode,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
+    index: &Arc<Mutex<FileIndex>>,
+    selected: PassiveReplaySelection,
+) {
+    let (logical_key, result_count) = match selected {
+        PassiveReplaySelection::Keyword(selected) => {
+            let logical_key = selected.logical_key;
+            let result_count = run_passive_keyword_replay(dht, index, selected.request).await;
+            (logical_key, result_count)
+        }
+        PassiveReplaySelection::Source(selected) => {
+            let source_stop_after_results = {
+                snoop_queue
+                    .lock()
+                    .await
+                    .config()
+                    .source_stop_after_results
+                    .max(1)
+            };
+            let logical_key = selected.logical_key;
+            let result_count =
+                run_passive_source_replay(dht, selected.request, source_stop_after_results).await;
+            (logical_key, result_count)
+        }
+        PassiveReplaySelection::Notes(selected) => {
+            let logical_key = selected.logical_key;
+            let result_count = run_passive_notes_replay(dht, selected.request).await;
+            (logical_key, result_count)
+        }
+    };
+    snoop_queue
+        .lock()
+        .await
+        .record_replay_outcome(&logical_key, Utc::now(), result_count);
+}
+
+async fn run_passive_keyword_replay(
+    dht: &DhtNode,
+    index: &Arc<Mutex<FileIndex>>,
+    request: SearchKeyReq,
+) -> usize {
+    let cancel = CancellationToken::new();
+    let mut stream = dht.search_keyword_request_with_cancel_and_class(
+        request.clone(),
+        cancel.clone(),
+        RpcWorkClass::Harvest,
+    );
+    let mut seen_hashes = HashSet::new();
+    let mut result_count = 0usize;
+    while let Some(result) = stream.next().await {
+        if !seen_hashes.insert(result.hash) {
+            continue;
+        }
+        result_count += 1;
+        index_passive_keyword_result(index, &result).await;
+        if result_count >= PASSIVE_KEYWORD_RESULT_TARGET {
+            cancel.cancel();
+            break;
+        }
+    }
+    tracing::debug!(
+        target = %request.target,
+        start_position = request.start_position,
+        result_count,
+        "completed Kad passive keyword replay"
+    );
+    result_count
+}
+
+async fn run_passive_source_replay(
+    dht: &DhtNode,
+    request: SearchSourceReq,
+    source_stop_after_results: usize,
+) -> usize {
+    let cancel = CancellationToken::new();
+    let mut stream = dht.search_source_request_with_cancel_and_class(
+        request.clone(),
+        cancel.clone(),
+        RpcWorkClass::Harvest,
+    );
+    let mut seen_sources = HashSet::new();
+    let mut result_count = 0usize;
+    while let Some(result) = stream.next().await {
+        let source_key = (result.ip, result.tcp_port, result.udp_port);
+        if !seen_sources.insert(source_key) {
+            continue;
+        }
+        result_count += 1;
+        if result_count >= source_stop_after_results {
+            cancel.cancel();
+            break;
+        }
+    }
+    tracing::debug!(
+        target = %request.target,
+        start_position = request.start_position,
+        size = request.size,
+        result_count,
+        "completed Kad passive source replay"
+    );
+    result_count
+}
+
+async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> usize {
+    let cancel = CancellationToken::new();
+    let file_hash = Ed2kHash::from_bytes(request.target.to_be_bytes());
+    let mut stream = dht.search_notes_with_cancel_and_class(
+        file_hash,
+        request.size,
+        cancel.clone(),
+        RpcWorkClass::Harvest,
+    );
+    let mut seen_notes = HashSet::new();
+    let mut result_count = 0usize;
+    while let Some(result) = stream.next().await {
+        if !seen_notes.insert(note_result_key(&result)) {
+            continue;
+        }
+        result_count += 1;
+        if result_count >= PASSIVE_NOTES_RESULT_TARGET {
+            cancel.cancel();
+            break;
+        }
+    }
+    tracing::debug!(
+        target = %request.target,
+        size = request.size,
+        result_count,
+        "completed Kad passive notes replay"
+    );
+    result_count
+}
+
+async fn index_passive_keyword_result(index: &Arc<Mutex<FileIndex>>, result: &KadSearchResult) {
+    let Some(size_bytes) = result.size.filter(|size| *size > 0) else {
+        return;
+    };
+    if result.names.is_empty() {
+        return;
+    }
+    let availability_score = result.source_count.unwrap_or(1).max(1) as i64;
+    let mut index = index.lock().await;
+    for name in &result.names {
+        if name.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) = index.upsert_file(&IndexedFile {
+            ed2k_hash: result.hash.to_string(),
+            name: name.clone(),
+            size_bytes,
+            content_type: "unknown".to_string(),
+            availability_score,
+        }) {
+            tracing::debug!(
+                file_hash = %result.hash,
+                name,
+                "failed to index passive Kad keyword result: {error:#}"
+            );
+        }
+    }
+}
+
+fn note_result_key(result: &KadNoteResult) -> (Ed2kHash, Ed2kHash, Option<u8>, Option<String>) {
+    (
+        result.file_hash,
+        result.source_id,
+        result.rating,
+        result.comment.clone(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassiveReplayFamily {
+    Keyword,
+    Source,
+    Notes,
+}
+
+fn preferred_passive_replay_families(counts: SnoopQueueFamilyCounts) -> [PassiveReplayFamily; 3] {
+    let mut families = [
+        (PassiveReplayFamily::Keyword, counts.keyword, 0u8),
+        (PassiveReplayFamily::Source, counts.source, 1u8),
+        (PassiveReplayFamily::Notes, counts.notes, 2u8),
+    ];
+    families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+    [families[0].0, families[1].0, families[2].0]
+}
+
 async fn handle_kad_local_store_packet(
     dht: &DhtNode,
     local_store: &Arc<Mutex<KadLocalStore>>,
@@ -4633,6 +4919,57 @@ mod tests {
             notes.logical_key(),
             "notes:0102030405060708090a0b0c0d0e0f10:654321"
         );
+    }
+
+    #[test]
+    fn passive_replay_family_preference_follows_deepest_queue_with_stable_tie_breaks() {
+        assert_eq!(
+            preferred_passive_replay_families(SnoopQueueFamilyCounts {
+                keyword: 1,
+                source: 4,
+                notes: 2,
+            }),
+            [
+                PassiveReplayFamily::Source,
+                PassiveReplayFamily::Notes,
+                PassiveReplayFamily::Keyword,
+            ]
+        );
+        assert_eq!(
+            preferred_passive_replay_families(SnoopQueueFamilyCounts {
+                keyword: 2,
+                source: 2,
+                notes: 2,
+            }),
+            [
+                PassiveReplayFamily::Keyword,
+                PassiveReplayFamily::Source,
+                PassiveReplayFamily::Notes,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_keyword_result_indexes_searchable_file_metadata() {
+        let index = Arc::new(Mutex::new(FileIndex::in_memory().unwrap()));
+        index_passive_keyword_result(
+            &index,
+            &KadSearchResult {
+                hash: Ed2kHash::from_bytes([0x31; 16]),
+                names: vec!["Passive Replay Result.iso".to_string(), "   ".to_string()],
+                size: Some(4096),
+                source_count: Some(7),
+                tags: vec![],
+            },
+        )
+        .await;
+
+        let results = index.lock().await.search("passive replay", 10).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].ed2k_hash, "31313131313131313131313131313131");
+        assert_eq!(results[0].size_bytes, 4096);
+        assert_eq!(results[0].availability_score, 7);
     }
 
     #[test]
