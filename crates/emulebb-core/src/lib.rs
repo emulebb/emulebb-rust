@@ -908,6 +908,7 @@ impl EmulebbCore {
                 dht.clone(),
                 Arc::clone(&kad_snoop_queue),
                 Arc::clone(&self.index),
+                Arc::clone(&self.ed2k_transfers),
                 Arc::clone(&shutdown),
                 PassiveReplayWorker::Source,
             )));
@@ -915,6 +916,7 @@ impl EmulebbCore {
                 dht.clone(),
                 kad_snoop_queue,
                 Arc::clone(&self.index),
+                Arc::clone(&self.ed2k_transfers),
                 Arc::clone(&shutdown),
                 PassiveReplayWorker::General,
             )));
@@ -2827,6 +2829,7 @@ async fn run_kad_passive_replay_loop(
     dht: DhtNode,
     snoop_queue: Arc<Mutex<SnoopQueue>>,
     index: Arc<Mutex<FileIndex>>,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
     shutdown: Arc<AtomicBool>,
     worker: PassiveReplayWorker,
 ) {
@@ -2848,7 +2851,7 @@ async fn run_kad_passive_replay_loop(
         let Some(selected) = selected else {
             continue;
         };
-        run_selected_passive_replay(&dht, &snoop_queue, &index, selected).await;
+        run_selected_passive_replay(&dht, &snoop_queue, &index, &transfer_runtime, selected).await;
     }
 }
 
@@ -2889,6 +2892,7 @@ async fn run_selected_passive_replay(
     dht: &DhtNode,
     snoop_queue: &Arc<Mutex<SnoopQueue>>,
     index: &Arc<Mutex<FileIndex>>,
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
     selected: PassiveReplaySelection,
 ) {
     let (logical_key, result_count) = match selected {
@@ -2907,9 +2911,10 @@ async fn run_selected_passive_replay(
                     .max(1)
             };
             let logical_key = selected.logical_key;
-            let result_count =
+            let source_results =
                 run_passive_source_replay(dht, selected.request, source_stop_after_results).await;
-            (logical_key, result_count)
+            remember_passive_source_results(transfer_runtime, &source_results).await;
+            (logical_key, source_results.len())
         }
         PassiveReplaySelection::Notes(selected) => {
             let logical_key = selected.logical_key;
@@ -2960,7 +2965,7 @@ async fn run_passive_source_replay(
     dht: &DhtNode,
     request: SearchSourceReq,
     source_stop_after_results: usize,
-) -> usize {
+) -> Vec<SourceResult> {
     let cancel = CancellationToken::new();
     let mut stream = dht.search_source_request_with_cancel_and_class(
         request.clone(),
@@ -2968,14 +2973,14 @@ async fn run_passive_source_replay(
         RpcWorkClass::Harvest,
     );
     let mut seen_sources = HashSet::new();
-    let mut result_count = 0usize;
+    let mut results = Vec::new();
     while let Some(result) = stream.next().await {
         let source_key = (result.ip, result.tcp_port, result.udp_port);
         if !seen_sources.insert(source_key) {
             continue;
         }
-        result_count += 1;
-        if result_count >= source_stop_after_results {
+        results.push(result);
+        if results.len() >= source_stop_after_results {
             cancel.cancel();
             break;
         }
@@ -2984,10 +2989,37 @@ async fn run_passive_source_replay(
         target = %request.target,
         start_position = request.start_position,
         size = request.size,
-        result_count,
+        result_count = results.len(),
         "completed Kad passive source replay"
     );
-    result_count
+    results
+}
+
+async fn remember_passive_source_results(
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    results: &[SourceResult],
+) {
+    for result in results {
+        let source = kad_source_result_to_ed2k_found_source(result.clone());
+        if !source.is_direct_dialable() {
+            continue;
+        }
+        let hint = Ed2kSourceHint {
+            ip: source.ip.to_string(),
+            tcp_port: source.tcp_port,
+            user_hash: source.user_hash.map(hex::encode),
+        };
+        if let Err(error) = transfer_runtime
+            .remember_source(&result.file_hash.to_string(), hint)
+            .await
+        {
+            tracing::debug!(
+                file_hash = %result.file_hash,
+                source = %SocketAddr::new(IpAddr::V4(result.ip), result.tcp_port),
+                "skipping passive Kad source memory: {error:#}"
+            );
+        }
+    }
 }
 
 async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> usize {
@@ -4970,6 +5002,48 @@ mod tests {
         assert_eq!(results[0].ed2k_hash, "31313131313131313131313131313131");
         assert_eq!(results[0].size_bytes, 4096);
         assert_eq!(results[0].availability_score, 7);
+    }
+
+    #[tokio::test]
+    async fn passive_source_results_are_remembered_for_existing_transfer() {
+        let transfer_root = unique_runtime_dir("emulebb-core-passive-source-memory");
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
+        let file_hash = Ed2kHash::from_bytes([0x41; 16]);
+        transfer_runtime
+            .ensure_job(&new_transfer_job(
+                file_hash,
+                "passive-source-target.bin".to_string(),
+                4096,
+            ))
+            .await
+            .unwrap();
+
+        remember_passive_source_results(
+            &transfer_runtime,
+            &[SourceResult {
+                file_hash,
+                source_id: Ed2kHash::from_bytes([0x52; 16]),
+                ip: Ipv4Addr::new(198, 51, 100, 22),
+                tcp_port: 4662,
+                udp_port: 4672,
+                obfuscation_options: Some(0x03),
+            }],
+        )
+        .await;
+
+        let manifest = transfer_runtime
+            .manifest(&file_hash.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.sources.len(), 1);
+        assert_eq!(manifest.sources[0].ip, "198.51.100.22");
+        assert_eq!(manifest.sources[0].tcp_port, 4662);
+        assert_eq!(
+            manifest.sources[0].user_hash.as_deref(),
+            Some("52525252525252525252525252525252")
+        );
     }
 
     #[test]
