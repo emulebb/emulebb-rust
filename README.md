@@ -8,6 +8,12 @@ This repository was bootstrapped from the Kad and ED2K work in
 `p2p-overlord-agents`, but it is intentionally a local client product. The
 0.0.x line does not expose a coordinator API.
 
+The 0.0.3 scope is core eMule client parity: configured binding, ED2K/Kad
+interoperability, search, sharing, transfers, uploads, queues, persistence,
+local SQLite/FTS indexing, and REST controller visibility. It is not legacy
+HTML WebServer parity, a qBittorrent/Torznab adapter host, a coordinator, or a
+remote indexer fleet.
+
 ## 0.0.x Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
@@ -21,6 +27,11 @@ This repository was bootstrapped from the Kad and ED2K work in
 
 Indexing is a client capability, not a separate public API. It improves
 search results returned through the eMuleBB search resources.
+
+Compatibility proof for this line is local and deterministic first: Rust to
+Rust, Rust to eMuleBB through the common REST contract, and Rust to aMule as a
+short-path compatibility witness. Public hide.me live-wire proof is a future
+nonblocking smoke lane until Rust has first-class configured VPN evidence.
 
 ## Binding Contract
 
