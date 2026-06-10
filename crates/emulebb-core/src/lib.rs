@@ -37,8 +37,11 @@ use emulebb_ed2k::{
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig};
-use emulebb_kad_dht::{DhtConfig, DhtNode, SourceResult};
-use emulebb_kad_proto::Ed2kHash;
+use emulebb_kad_dht::{DhtConfig, DhtNode, ReceivedKadPacket, SourceResult};
+use emulebb_kad_proto::{
+    Ed2kHash, KAD_VERSION, KadPacket, PublishRes, SearchRes, SearchResultEntry, constants::K,
+    packet::ContactEntry,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
@@ -563,6 +566,11 @@ pub struct Ed2kNetworkConfig {
     pub config: Ed2kConfig,
 }
 
+const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
+const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
+const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
+const LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES: usize = 1420;
+
 type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
 
 #[derive(Debug)]
@@ -870,6 +878,13 @@ impl EmulebbCore {
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
+        if let Some(kad_local_store) = self.kad_local_store.as_ref().map(Arc::clone) {
+            tasks.push(tokio::spawn(run_kad_local_store_loop(
+                dht.clone(),
+                kad_local_store,
+                Arc::clone(&shutdown),
+            )));
+        }
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
             listener: ed2k_listener,
             dht: dht.clone(),
@@ -2722,6 +2737,271 @@ impl fmt::Debug for EmulebbCore {
     }
 }
 
+async fn run_kad_local_store_loop(
+    dht: DhtNode,
+    local_store: Arc<Mutex<KadLocalStore>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let mut packets = dht.subscribe_packets();
+    while !shutdown.load(Ordering::SeqCst) {
+        match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
+            Ok(Ok(received)) => {
+                if let Err(error) =
+                    handle_kad_local_store_packet(&dht, &local_store, received).await
+                {
+                    tracing::warn!("failed to handle unsolicited Kad packet: {error:#}");
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                tracing::warn!("Kad local-store packet receiver lagged; skipped {skipped} packets");
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {}
+        }
+    }
+}
+
+async fn handle_kad_local_store_packet(
+    dht: &DhtNode,
+    local_store: &Arc<Mutex<KadLocalStore>>,
+    received: ReceivedKadPacket,
+) -> Result<()> {
+    let ReceivedKadPacket { packet, from, .. } = received;
+    match packet {
+        KadPacket::Ping => {
+            dht.send_packet(
+                from,
+                &KadPacket::Pong(emulebb_kad_proto::Pong {
+                    udp_port: from.port(),
+                }),
+            )
+            .await?;
+        }
+        KadPacket::BootstrapReq => {
+            let bind_addr = dht.bind_addr()?;
+            let contacts = dht
+                .closest_contacts(&dht.own_id(), K)
+                .await
+                .into_iter()
+                .map(|contact| ContactEntry {
+                    node_id: contact.id,
+                    ip: u32::from_be_bytes(contact.ip.octets()),
+                    udp_port: contact.udp_port,
+                    tcp_port: contact.tcp_port,
+                    version: contact.kad_version,
+                })
+                .collect();
+            dht.send_packet(
+                from,
+                &KadPacket::BootstrapRes(emulebb_kad_proto::BootstrapRes {
+                    sender_id: dht.own_id(),
+                    sender_tcp_port: bind_addr.port(),
+                    sender_version: KAD_VERSION,
+                    contacts,
+                }),
+            )
+            .await?;
+        }
+        KadPacket::Req(req) => {
+            let contacts = dht
+                .closest_contacts(&req.target, req.count as usize)
+                .await
+                .into_iter()
+                .map(|contact| ContactEntry {
+                    node_id: contact.id,
+                    ip: u32::from_be_bytes(contact.ip.octets()),
+                    udp_port: contact.udp_port,
+                    tcp_port: contact.tcp_port,
+                    version: contact.kad_version,
+                })
+                .collect();
+            dht.send_packet(
+                from,
+                &KadPacket::Res(emulebb_kad_proto::Res {
+                    target: req.target,
+                    contacts,
+                }),
+            )
+            .await?;
+        }
+        KadPacket::SearchKeyReq(req) => {
+            let response = {
+                let mut store = local_store.lock().await;
+                store.keyword_search_response(
+                    dht.own_id(),
+                    &req,
+                    LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT,
+                    Utc::now(),
+                )
+            };
+            send_local_search_response(dht, from, response).await;
+        }
+        KadPacket::SearchSourceReq(req) => {
+            let response = {
+                let mut store = local_store.lock().await;
+                store.source_search_response(
+                    dht.own_id(),
+                    &req,
+                    LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT,
+                    Utc::now(),
+                )
+            };
+            send_local_search_response(dht, from, response).await;
+        }
+        KadPacket::SearchNotesReq(req) => {
+            let response = {
+                let mut store = local_store.lock().await;
+                store.notes_search_response(
+                    dht.own_id(),
+                    &req,
+                    LOCAL_NOTES_SEARCH_RESPONSE_LIMIT,
+                    Utc::now(),
+                )
+            };
+            send_local_search_response(dht, from, response).await;
+        }
+        KadPacket::PublishKeyReq(req) => {
+            let load = {
+                let mut store = local_store.lock().await;
+                store.record_keyword_publish_batch(req.target, &req.entries, Utc::now())
+            };
+            let _ = dht
+                .send_packet(
+                    from,
+                    &KadPacket::PublishRes(PublishRes {
+                        target: req.target,
+                        load,
+                        options: None,
+                    }),
+                )
+                .await;
+        }
+        KadPacket::PublishSourceReq(req) => {
+            let load = if let IpAddr::V4(source_ip) = from.ip() {
+                let mut store = local_store.lock().await;
+                store.record_source_publish(
+                    req.target,
+                    req.publisher_id,
+                    source_ip,
+                    from.port(),
+                    &req.tags,
+                    Utc::now(),
+                )
+            } else {
+                None
+            };
+            if let Some(load) = load {
+                let _ = dht
+                    .send_packet(
+                        from,
+                        &KadPacket::PublishRes(PublishRes {
+                            target: req.target,
+                            load,
+                            options: None,
+                        }),
+                    )
+                    .await;
+            }
+        }
+        KadPacket::PublishNotesReq(req) => {
+            let load = if let IpAddr::V4(publisher_ip) = from.ip() {
+                let mut store = local_store.lock().await;
+                store.record_notes_publish(
+                    req.target,
+                    req.publisher_id,
+                    publisher_ip,
+                    &req.tags,
+                    Utc::now(),
+                )
+            } else {
+                None
+            };
+            if let Some(load) = load {
+                let _ = dht
+                    .send_packet(
+                        from,
+                        &KadPacket::PublishRes(PublishRes {
+                            target: req.target,
+                            load,
+                            options: None,
+                        }),
+                    )
+                    .await;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn send_local_search_response(dht: &DhtNode, to: SocketAddr, response: Option<SearchRes>) {
+    let Some(response) = response else {
+        return;
+    };
+    for response in split_stock_search_responses(response, LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES) {
+        let _ = dht.send_packet(to, &KadPacket::SearchRes(response)).await;
+    }
+}
+
+fn split_stock_search_responses(response: SearchRes, max_packet_bytes: usize) -> Vec<SearchRes> {
+    if max_packet_bytes == 0 || response.results.len() <= 1 {
+        return vec![response];
+    }
+
+    let SearchRes {
+        sender_id,
+        target,
+        results,
+    } = response;
+    let mut pages = Vec::new();
+    let mut current = Vec::new();
+
+    for result in results {
+        if current.is_empty() {
+            current.push(result);
+            continue;
+        }
+
+        let mut candidate = current.clone();
+        candidate.push(result.clone());
+        if encoded_search_response_len(sender_id, target, &candidate) > max_packet_bytes {
+            pages.push(SearchRes {
+                sender_id,
+                target,
+                results: current,
+            });
+            current = vec![result];
+        } else {
+            current = candidate;
+        }
+    }
+
+    if !current.is_empty() {
+        pages.push(SearchRes {
+            sender_id,
+            target,
+            results: current,
+        });
+    }
+
+    pages
+}
+
+fn encoded_search_response_len(
+    sender_id: emulebb_kad_proto::NodeId,
+    target: emulebb_kad_proto::NodeId,
+    results: &[SearchResultEntry],
+) -> usize {
+    KadPacket::SearchRes(SearchRes {
+        sender_id,
+        target,
+        results: results.to_vec(),
+    })
+    .encode()
+    .map(|packet| packet.len())
+    .unwrap_or(usize::MAX)
+}
+
 fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
     let completed_bytes = manifest
         .pieces
@@ -4110,6 +4390,7 @@ fn unique_runtime_dir(name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use emulebb_index::IndexedFile;
+    use emulebb_kad_proto::{NodeId, Tag};
 
     use super::*;
 
@@ -4153,6 +4434,76 @@ mod tests {
         assert_eq!(
             core.kad_local_store_config_for_tests().await,
             Some(expected)
+        );
+    }
+
+    #[test]
+    fn split_stock_search_responses_keeps_pages_under_fragment_limit() {
+        let sender_id = NodeId::from_bytes([1; 16]);
+        let target = NodeId::from_bytes([2; 16]);
+        let results = (0..12)
+            .map(|index| SearchResultEntry {
+                entry_id: Ed2kHash::from_bytes([index; 16]),
+                tags: vec![Tag::filename(format!(
+                    "ubuntu-linux-parity-result-{index:02}-{}",
+                    "x".repeat(220)
+                ))],
+            })
+            .collect::<Vec<_>>();
+        let response = SearchRes {
+            sender_id,
+            target,
+            results: results.clone(),
+        };
+
+        let pages = split_stock_search_responses(response, 1420);
+
+        assert!(pages.len() > 1);
+        assert_eq!(
+            pages.iter().map(|page| page.results.len()).sum::<usize>(),
+            results.len()
+        );
+        assert!(
+            pages
+                .iter()
+                .all(|page| { KadPacket::SearchRes(page.clone()).encode().unwrap().len() <= 1420 })
+        );
+        assert_eq!(
+            pages
+                .into_iter()
+                .flat_map(|page| page.results)
+                .map(|result| result.entry_id)
+                .collect::<Vec<_>>(),
+            results
+                .into_iter()
+                .map(|result| result.entry_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn split_stock_search_responses_keeps_single_oversized_result_like_stock() {
+        let sender_id = NodeId::from_bytes([1; 16]);
+        let target = NodeId::from_bytes([2; 16]);
+        let response = SearchRes {
+            sender_id,
+            target,
+            results: vec![SearchResultEntry {
+                entry_id: Ed2kHash::from_bytes([3; 16]),
+                tags: vec![Tag::filename("x".repeat(1600))],
+            }],
+        };
+
+        let pages = split_stock_search_responses(response, 1420);
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].results.len(), 1);
+        assert!(
+            KadPacket::SearchRes(pages[0].clone())
+                .encode()
+                .unwrap()
+                .len()
+                > 1420
         );
     }
 
