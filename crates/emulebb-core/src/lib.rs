@@ -1040,8 +1040,7 @@ impl EmulebbCore {
             }
         }
         drop(state);
-        let servers = server_map.into_values().collect::<Vec<_>>();
-        servers
+        server_map.into_values().collect::<Vec<_>>()
     }
 
     pub async fn server(&self, endpoint: &str) -> Option<ServerInfo> {
@@ -2535,7 +2534,14 @@ impl EmulebbCore {
         let attempts = configured_server_attempts(&network.config)
             .min(network.config.source_server_attempt_budget.max(1));
         let mut sources = Vec::new();
-        if let Some(handle) = self.connected_ed2k_search_handle().await {
+        let (preferred_endpoint, background_search) =
+            if let Some(handle) = self.connected_ed2k_search_handle().await {
+                (self.connected_ed2k_server_endpoint().await, Some(handle))
+            } else {
+                (None, None)
+            };
+        let has_background_search = background_search.is_some();
+        if let Some(handle) = background_search {
             let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
             match search_source_via_background_session(
                 &handle, file_hash, file_size, timeout, &cancel,
@@ -2549,7 +2555,15 @@ impl EmulebbCore {
                 ),
             }
         }
-        if !sources.is_empty() {
+        let exclude_preferred_endpoint =
+            should_exclude_background_source_endpoint(has_background_search, sources.len());
+        let excluded_endpoint = if exclude_preferred_endpoint {
+            preferred_endpoint
+        } else {
+            None
+        };
+        if exclude_preferred_endpoint && attempts <= 1 {
+            // The connected background session already queried the only server in budget.
             self.remember_ed2k_sources(file_hash, &sources).await?;
             return Ok(sources);
         }
@@ -2558,8 +2572,8 @@ impl EmulebbCore {
             config: &network.config,
             hello_identity: self.ed2k_hello_identity(network),
             shared_catalog: &shared_catalog_snapshot,
-            preferred_endpoint: None,
-            excluded_endpoint: None,
+            preferred_endpoint,
+            excluded_endpoint,
             max_attempts: attempts,
             file_hash,
             file_size,
@@ -2577,7 +2591,7 @@ impl EmulebbCore {
             match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &network.config,
-                preferred_endpoint: None,
+                preferred_endpoint,
                 excluded_endpoint: None,
                 max_attempts: attempts,
                 file_hash,
@@ -4402,6 +4416,13 @@ fn should_skip_no_progress_source_requery(
         && completed_source_requery_rounds != 0
 }
 
+fn should_exclude_background_source_endpoint(
+    has_background_search: bool,
+    aggregated_source_count: usize,
+) -> bool {
+    has_background_search && aggregated_source_count != 0
+}
+
 fn ed2k_server_callback_route(
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
@@ -6024,6 +6045,13 @@ mod tests {
         assert!(!should_skip_no_progress_source_requery(true, true, 0, 1));
         assert!(!should_skip_no_progress_source_requery(true, false, 1, 1));
         assert!(!should_skip_no_progress_source_requery(false, false, 0, 1));
+    }
+
+    #[test]
+    fn zero_source_background_lookup_keeps_connected_server_eligible() {
+        assert!(!should_exclude_background_source_endpoint(false, 0));
+        assert!(!should_exclude_background_source_endpoint(true, 0));
+        assert!(should_exclude_background_source_endpoint(true, 1));
     }
 
     #[test]

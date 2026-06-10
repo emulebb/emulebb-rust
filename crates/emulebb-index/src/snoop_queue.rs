@@ -101,6 +101,11 @@ impl SnoopQueue {
         self.entries.len()
     }
 
+    /// Returns whether no harvested search shapes are currently tracked.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Records a harvested search request occurrence.
     pub fn record(&mut self, entry: SnoopEntry) -> SnoopRecordOutcome {
         let family = entry_family(&entry);
