@@ -647,6 +647,7 @@ struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
     dht: DhtNode,
+    kad_bootstrap_configured: bool,
     shutdown: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -811,7 +812,7 @@ impl EmulebbCore {
                 state: "running".to_string(),
             },
             uptime_secs: self.started_at.elapsed().as_secs(),
-            kad: kad_status_from_running(kad_running),
+            kad: self.kad_status(kad_running).await,
             ed2k: self.ed2k_status().await,
             indexing: IndexingStatus {
                 enabled: true,
@@ -958,6 +959,7 @@ impl EmulebbCore {
             search_handle,
             server_state,
             dht,
+            kad_bootstrap_configured: configured_bootstrap_nodes_text.is_some(),
             shutdown,
             tasks,
         });
@@ -2775,6 +2777,34 @@ impl EmulebbCore {
             lan_mode: None,
             users: None,
             files: None,
+            operation_queued: None,
+            already_running: None,
+        }
+    }
+
+    async fn kad_status(&self, manual_running: bool) -> NetworkStatus {
+        let runtime_snapshot = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            runtime_guard
+                .as_ref()
+                .map(|runtime| (runtime.dht.clone(), runtime.kad_bootstrap_configured))
+        };
+        let Some((dht, kad_bootstrap_configured)) = runtime_snapshot else {
+            return kad_status_from_running(manual_running);
+        };
+        let contact_count = dht.routing_table_size() as u32;
+        let connected = dht.is_bootstrapped();
+        NetworkStatus {
+            running: true,
+            connected,
+            peer_count: contact_count,
+            firewalled: Some(false),
+            bootstrapping: Some(kad_bootstrap_configured && !connected),
+            bootstrap_progress: Some(if connected { 100 } else { 0 }),
+            contact_count: Some(contact_count),
+            lan_mode: Some(false),
+            users: Some(0),
+            files: Some(0),
             operation_queued: None,
             already_running: None,
         }
@@ -4987,6 +5017,40 @@ mod tests {
             core.kad_snoop_queue_snapshot_for_tests().await,
             Some(vec![])
         );
+    }
+
+    #[tokio::test]
+    async fn status_reports_live_dht_runtime_kad_contacts() {
+        let transfer_root = unique_runtime_dir("emulebb-core-kad-status-runtime");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dht_task = dht.start();
+
+        *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+            search_handle,
+            server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+            dht,
+            kad_bootstrap_configured: true,
+            shutdown: Arc::clone(&shutdown),
+            tasks: vec![dht_task],
+        });
+
+        let status = core.status().await;
+
+        assert!(status.kad.running);
+        assert!(!status.kad.connected);
+        assert_eq!(status.kad.contact_count, Some(0));
+        assert_eq!(status.kad.bootstrapping, Some(true));
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = core.disconnect_ed2k().await;
     }
 
     #[test]
