@@ -359,7 +359,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     assert_eq!(value["data"]["ok"], true);
     assert!(value["data"].get("count").is_none());
 
-    let alias_response = app
+    let shared_files_reload_response = app
         .clone()
         .oneshot(
             Request::builder()
@@ -371,7 +371,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         )
         .await
         .unwrap();
-    assert_eq!(alias_response.status(), StatusCode::OK);
+    assert_eq!(shared_files_reload_response.status(), StatusCode::OK);
 
     let list_response = app
         .oneshot(
