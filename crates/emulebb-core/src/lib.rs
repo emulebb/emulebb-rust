@@ -42,12 +42,13 @@ use emulebb_index::{
     SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts,
 };
 use emulebb_kad_dht::{
-    DhtConfig, DhtNode, NoteResult as KadNoteResult, ReceivedKadPacket, RpcWorkClass,
-    SearchResult as KadSearchResult, SourceResult,
+    DhtConfig, DhtNode, NoteResult as KadNoteResult, PublishAttemptStats, ReceivedKadPacket,
+    RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
     Ed2kHash, KAD_VERSION, KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
-    SearchResultEntry, SearchSourceReq, constants::K, packet::ContactEntry,
+    SearchResultEntry, SearchSourceReq, Tag, TagValue, constants::K, packet::ContactEntry,
+    tag_name,
 };
 use md4::{Digest, Md4};
 use serde::{Deserialize, Serialize};
@@ -574,6 +575,9 @@ pub struct Ed2kNetworkConfig {
     pub kad_snoop_queue: SnoopQueueConfig,
     pub kad_bootstrap_nodes: Vec<String>,
     pub kad_bootstrap_min_routing_contacts: usize,
+    pub kad_publish_shared_files: bool,
+    pub kad_republish_interval_secs: u64,
+    pub kad_publish_contact_fanout: usize,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
 }
@@ -586,6 +590,8 @@ const PASSIVE_GENERAL_CRAWL_SECS: u64 = 45;
 const PASSIVE_SOURCE_CRAWL_SECS: u64 = 15;
 const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
 const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
+const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
+const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 
 type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
@@ -916,6 +922,14 @@ impl EmulebbCore {
         if configured_bootstrap_nodes_text.is_some() {
             tasks.push(tokio::spawn(run_configured_kad_bootstrap(
                 dht.clone(),
+                Arc::clone(&shutdown),
+            )));
+        }
+        if network.kad_publish_shared_files {
+            tasks.push(tokio::spawn(run_kad_shared_file_publish_loop(
+                dht.clone(),
+                Arc::clone(&self.ed2k_transfers),
+                network.clone(),
                 Arc::clone(&shutdown),
             )));
         }
@@ -2988,6 +3002,142 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
             }
         }
     }
+}
+
+async fn run_kad_shared_file_publish_loop(
+    dht: DhtNode,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
+    network: Ed2kNetworkConfig,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::SeqCst) {
+        if !dht.is_bootstrapped() {
+            tokio::time::sleep(Duration::from_secs(KAD_SHARED_FILE_PUBLISH_RETRY_SECS)).await;
+            continue;
+        }
+
+        if let Err(error) = publish_kad_shared_files(&dht, &transfer_runtime, &network).await {
+            tracing::debug!("Kad shared-file publish cycle failed: {error:#}");
+        }
+
+        let republish_secs = network.kad_republish_interval_secs.max(1);
+        for _ in 0..republish_secs {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+async fn publish_kad_shared_files(
+    dht: &DhtNode,
+    transfer_runtime: &Ed2kTransferRuntime,
+    network: &Ed2kNetworkConfig,
+) -> Result<usize> {
+    let manifests = kad_publishable_manifests(transfer_runtime.manifests().await?);
+    if manifests.is_empty() {
+        return Ok(0);
+    }
+
+    let bind_addr = network.kad_bind_addr;
+    let source_publish_identity = source_publish_client_hash(network.user_hash);
+    let source_publish_settings = SourcePublishSettings {
+        tcp_port: network.listen_port,
+        obfuscation_enabled: network.config.obfuscation_enabled,
+    };
+    let mut keyword_totals = PublishAttemptStats::default();
+    let mut source_totals = PublishAttemptStats::default();
+    let item_count = manifests.len();
+
+    for manifest in manifests {
+        let file_hash: Ed2kHash = manifest.file_hash.parse()?;
+        let keyword_hash = keyword_target(&manifest.canonical_name);
+        let mut keyword_tags = vec![
+            Tag::filename(manifest.canonical_name.clone()),
+            Tag::filesize(manifest.file_size),
+            Tag::sources(1),
+        ];
+        if let Some(file_type) = ed2k_file_type_search_term(&manifest.canonical_name) {
+            keyword_tags.push(Tag::filetype(file_type));
+        }
+        let aich_hash = manifest
+            .aich_root
+            .as_deref()
+            .and_then(decode_aich_root_hex_for_publish);
+        match dht
+            .publish_keyword_with_class_and_fanout(
+                keyword_hash,
+                file_hash,
+                keyword_tags,
+                aich_hash,
+                RpcWorkClass::Publish,
+                network.kad_publish_contact_fanout,
+            )
+            .await
+        {
+            Ok(stats) => accumulate_publish_stats(&mut keyword_totals, stats),
+            Err(error) => {
+                tracing::debug!(
+                    file_hash = %manifest.file_hash,
+                    name = manifest.canonical_name,
+                    "Kad keyword publish failed: {error:#}"
+                );
+            }
+        }
+
+        let source_tags =
+            build_source_publish_tags(bind_addr, source_publish_settings, manifest.file_size);
+        match dht
+            .publish_source_with_class_and_fanout(
+                file_hash,
+                source_publish_identity,
+                source_tags,
+                RpcWorkClass::Publish,
+                network.kad_publish_contact_fanout,
+            )
+            .await
+        {
+            Ok(stats) => accumulate_publish_stats(&mut source_totals, stats),
+            Err(error) => {
+                tracing::debug!(
+                    file_hash = %manifest.file_hash,
+                    name = manifest.canonical_name,
+                    "Kad source publish failed: {error:#}"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        "Kad shared-file publish completed items={} keyword_attempted={} keyword_acked={} source_attempted={} source_acked={}",
+        item_count,
+        keyword_totals.attempted_contacts,
+        keyword_totals.acked_contacts,
+        source_totals.attempted_contacts,
+        source_totals.acked_contacts,
+    );
+
+    Ok(item_count)
+}
+
+fn kad_publishable_manifests(manifests: Vec<Ed2kResumeManifest>) -> Vec<Ed2kResumeManifest> {
+    manifests
+        .into_iter()
+        .filter(|manifest| manifest.completed && !manifest.transfer_row_removed)
+        .collect()
+}
+
+fn decode_aich_root_hex_for_publish(value: &str) -> Option<[u8; 20]> {
+    let bytes = hex::decode(value).ok()?;
+    bytes.try_into().ok()
+}
+
+fn accumulate_publish_stats(total: &mut PublishAttemptStats, stats: PublishAttemptStats) {
+    total.closest_contacts_considered += stats.closest_contacts_considered;
+    total.attempted_contacts += stats.attempted_contacts;
+    total.acked_contacts += stats.acked_contacts;
+    total.timed_out_contacts += stats.timed_out_contacts;
 }
 
 fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {
@@ -5234,6 +5384,90 @@ fn source_key(source: &Ed2kFoundSource) -> (Ipv4Addr, u16, Option<[u8; 16]>, Opt
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourcePublishSettings {
+    tcp_port: u16,
+    obfuscation_enabled: bool,
+}
+
+fn emule_high_id_source_type(file_size: u64) -> u32 {
+    if file_size > EMULE_LARGE_FILE_SIZE_THRESHOLD {
+        4
+    } else {
+        1
+    }
+}
+
+fn emule_kad_chunk_order(bytes: [u8; 16]) -> [u8; 16] {
+    let mut ordered = [0u8; 16];
+    for (dst, src) in ordered.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
+        dst.copy_from_slice(&[src[3], src[2], src[1], src[0]]);
+    }
+    ordered
+}
+
+fn source_publish_client_hash(ed2k_user_hash: [u8; 16]) -> NodeId {
+    NodeId::from_bytes(emule_kad_chunk_order(ed2k_user_hash))
+}
+
+fn emule_source_encryption_options(obfuscation_enabled: bool) -> u8 {
+    emule_connect_options(obfuscation_enabled)
+}
+
+fn build_source_publish_tags(
+    bind_addr: SocketAddr,
+    source_publish_settings: SourcePublishSettings,
+    file_size: u64,
+) -> Vec<Tag> {
+    let mut tags = vec![
+        Tag::new_short(
+            tag_name::SOURCETYPE,
+            TagValue::UInt(u64::from(emule_high_id_source_type(file_size))),
+        ),
+        Tag::new_short(
+            tag_name::SOURCEPORT,
+            TagValue::UInt(u64::from(source_publish_settings.tcp_port)),
+        ),
+    ];
+    if let SocketAddr::V4(addr) = bind_addr {
+        tags.push(Tag::new_short(
+            tag_name::SOURCEIP,
+            TagValue::U32(u32::from_be_bytes(addr.ip().octets())),
+        ));
+    }
+    tags.push(Tag::new_short(
+        tag_name::SOURCEUPORT,
+        TagValue::U16(bind_addr.port()),
+    ));
+    tags.push(Tag::filesize(file_size));
+    tags.push(Tag::new_short(
+        tag_name::ENCRYPTION,
+        TagValue::U8(emule_source_encryption_options(
+            source_publish_settings.obfuscation_enabled,
+        )),
+    ));
+    tags
+}
+
+fn ed2k_file_type_search_term(name: &str) -> Option<&'static str> {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "aac" | "aif" | "aiff" | "ape" | "flac" | "m4a" | "mp3" | "ogg" | "opus" | "wav"
+        | "wma" => Some("Audio"),
+        "avi" | "flv" | "m2ts" | "m4v" | "mkv" | "mov" | "mp4" | "mpeg" | "mpg" | "ogm" | "ts"
+        | "vob" | "webm" | "wmv" => Some("Video"),
+        "bmp" | "gif" | "jpeg" | "jpg" | "png" | "svg" | "tif" | "tiff" | "webp" => Some("Image"),
+        "cbz" | "chm" | "doc" | "docx" | "epub" | "mobi" | "pdf" | "rtf" | "txt" => Some("Doc"),
+        "emulecollection" => Some("EmuleCollection"),
+        "7z" | "apk" | "appx" | "bin" | "deb" | "dmg" | "exe" | "iso" | "msi" | "rar" | "rpm"
+        | "tar" | "zip" => Some("Pro"),
+        _ => None,
+    }
+}
+
 fn default_search_method() -> String {
     "automatic".to_string()
 }
@@ -5270,7 +5504,7 @@ fn unique_runtime_dir(name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use emulebb_index::IndexedFile;
-    use emulebb_kad_proto::{NodeId, Tag};
+    use emulebb_kad_proto::{NodeId, Tag, TagValue};
 
     use super::*;
 
@@ -5291,6 +5525,9 @@ mod tests {
             kad_snoop_queue,
             kad_bootstrap_nodes: Vec::new(),
             kad_bootstrap_min_routing_contacts: 10,
+            kad_publish_shared_files: true,
+            kad_republish_interval_secs: 1_800,
+            kad_publish_contact_fanout: 4,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
         }
@@ -5487,6 +5724,109 @@ mod tests {
             configured_kad_bootstrap_nodes_text(&["bad".to_string()]),
             None
         );
+    }
+
+    #[test]
+    fn source_publish_tags_match_oracle_plaintext_shape() {
+        let tags = build_source_publish_tags(
+            "10.54.206.206:41000".parse().unwrap(),
+            SourcePublishSettings {
+                tcp_port: 41001,
+                obfuscation_enabled: false,
+            },
+            2_097_152,
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
+                Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(41001)),
+                Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0x0A36_CECE)),
+                Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
+                Tag::filesize(2_097_152),
+                Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_publish_tags_set_obfuscated_encryption_bits() {
+        let tags = build_source_publish_tags(
+            "10.54.206.206:41000".parse().unwrap(),
+            SourcePublishSettings {
+                tcp_port: 41001,
+                obfuscation_enabled: true,
+            },
+            2_097_152,
+        );
+
+        assert_eq!(
+            tags.last(),
+            Some(&Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)))
+        );
+    }
+
+    #[test]
+    fn source_publish_identity_uses_emule_kad_chunk_order() {
+        let user_hash = [
+            0xB4, 0x22, 0xCF, 0x1A, 0x44, 0x0E, 0x71, 0x6B, 0xD2, 0xE1, 0xDD, 0x6E, 0x77, 0x21,
+            0x6F, 0xE4,
+        ];
+
+        let publisher_id = source_publish_client_hash(user_hash);
+
+        assert_eq!(
+            publisher_id.0,
+            [
+                0x1A, 0xCF, 0x22, 0xB4, 0x6B, 0x71, 0x0E, 0x44, 0x6E, 0xDD, 0xE1, 0xD2, 0xE4, 0x6F,
+                0x21, 0x77,
+            ]
+        );
+        assert_eq!(publisher_id.to_be_bytes(), user_hash);
+    }
+
+    #[test]
+    fn kad_publishable_manifests_skip_incomplete_and_removed_rows() {
+        let mut shared = Ed2kResumeManifest::new(&new_transfer_job(
+            Ed2kHash::from_bytes([0x11; 16]),
+            "shared.bin".to_string(),
+            128,
+        ));
+        shared.completed = true;
+        let incomplete = Ed2kResumeManifest::new(&new_transfer_job(
+            Ed2kHash::from_bytes([0x22; 16]),
+            "incomplete.bin".to_string(),
+            128,
+        ));
+        let mut removed = Ed2kResumeManifest::new(&new_transfer_job(
+            Ed2kHash::from_bytes([0x33; 16]),
+            "removed.bin".to_string(),
+            128,
+        ));
+        removed.completed = true;
+        removed.transfer_row_removed = true;
+
+        let publishable = kad_publishable_manifests(vec![incomplete, removed, shared.clone()]);
+
+        assert_eq!(publishable, vec![shared]);
+    }
+
+    #[test]
+    fn ed2k_file_type_search_term_matches_oracle_families() {
+        assert_eq!(
+            ed2k_file_type_search_term("ubuntu-linux-oracle-sample.iso"),
+            Some("Pro")
+        );
+        assert_eq!(ed2k_file_type_search_term("album.flac"), Some("Audio"));
+        assert_eq!(ed2k_file_type_search_term("movie.mkv"), Some("Video"));
+        assert_eq!(ed2k_file_type_search_term("scan.png"), Some("Image"));
+        assert_eq!(ed2k_file_type_search_term("manual.pdf"), Some("Doc"));
+        assert_eq!(
+            ed2k_file_type_search_term("bundle.emulecollection"),
+            Some("EmuleCollection")
+        );
+        assert_eq!(ed2k_file_type_search_term("README"), None);
     }
 
     #[test]
