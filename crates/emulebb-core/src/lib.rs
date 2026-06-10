@@ -5887,6 +5887,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_download_scheduler_retries_loopback_peer_after_connection_refused() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-loopback-refused-retry");
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(&runtime_dir.join("transfers")).unwrap());
+        let secure_ident = Arc::new(
+            Ed2kSecureIdent::load_or_create(&runtime_dir.join("secure-ident.der")).unwrap(),
+        );
+        let payload = Arc::new(b"captured small file payload".repeat(32));
+        let file_name = "captured.epub".to_string();
+        let payload_path = runtime_dir.join("payload.bin");
+        std::fs::write(&payload_path, payload.as_slice()).unwrap();
+        let hash_runtime =
+            Ed2kTransferRuntime::load_or_create(&runtime_dir.join("hash-transfers")).unwrap();
+        let summary = hash_runtime
+            .ingest_local_file(&payload_path, &file_name)
+            .await
+            .unwrap();
+        let file_hash: Ed2kHash = summary.file_hash.parse().unwrap();
+        let file_hash_hex = summary.file_hash;
+        let file_size = summary.file_size;
+        transfer_runtime
+            .ensure_job(&new_transfer_job(file_hash, file_name.clone(), file_size))
+            .await
+            .unwrap();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let success_after_attempt = 3usize;
+        let outcome = run_ed2k_direct_downloads(
+            direct_download_options(
+                transfer_runtime,
+                secure_ident,
+                file_hash_hex.clone(),
+                file_name,
+                file_size,
+                vec![direct_test_source(file_hash, Ipv4Addr::LOCALHOST, 41001)],
+            ),
+            {
+                let attempts = Arc::clone(&attempts);
+                let payload = Arc::clone(&payload);
+                let file_hash_hex = file_hash_hex.clone();
+                move |_bind_ip,
+                      source,
+                      _hello_identity,
+                      _secure_ident,
+                      transfer_runtime,
+                      _file_name,
+                      _file_size,
+                      _connect_timeout| {
+                    let attempts = Arc::clone(&attempts);
+                    let payload = Arc::clone(&payload);
+                    let file_hash_hex = file_hash_hex.clone();
+                    async move {
+                        attempts.lock().await.push(source.tcp_port);
+                        if attempts.lock().await.len() < success_after_attempt {
+                            return Err(anyhow::Error::new(std::io::Error::from(
+                                std::io::ErrorKind::ConnectionRefused,
+                            )));
+                        }
+                        transfer_runtime
+                            .store_md4_hashset(&file_hash_hex, Vec::new())
+                            .await?;
+                        transfer_runtime
+                            .store_piece_data(&file_hash_hex, 0, payload.as_slice())
+                            .await?;
+                        Ok(Ed2kPeerDownloadOutcome::Completed)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.completed);
+        assert_eq!(outcome.accepted_incomplete_peers, 0);
+        assert!(outcome.last_error.is_some());
+        assert_eq!(*attempts.lock().await, vec![41001, 41001, 41001]);
+    }
+
+    #[tokio::test]
     async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
         let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
             completed_ed2k_transfer_runtime("emulebb-core-direct-download-incomplete").await;
