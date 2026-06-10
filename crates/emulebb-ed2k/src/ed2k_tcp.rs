@@ -23,6 +23,8 @@ use anyhow::{Context, Result};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::ed2k_server::Ed2kServerState;
+#[cfg(test)]
+use crate::ed2k_transfer::ED2K_EMBLOCK_SIZE;
 use crate::ed2k_transfer::{
     Ed2kAichHashset, Ed2kResumeManifest, Ed2kSharedEntry, decode_aich_hash_hex,
 };
@@ -61,17 +63,43 @@ pub(in crate::ed2k_tcp) use codec::{
     encode_set_req_file_id, encode_shared_browse_denied_answer, encode_start_upload_req,
     inflate_compressed_part_fragment, skip_file_status_body, validate_file_status_part_count,
 };
+#[cfg(test)]
+#[allow(unused_imports)]
+use codec::{
+    build_upload_part_packets, decode_file_hash_payload, decode_hashset_request2,
+    decode_request_parts_payload, decode_request_sources_payload, encode_accept_upload_req,
+    encode_aich_file_hash_answer, encode_answer_sources, encode_answer_sources2,
+    encode_compressed_part_fragment, encode_file_req_ans_nofil, encode_file_status_complete,
+    encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
+    encode_multipacket_ext2_answer, encode_packed_packet, encode_queue_ranking,
+    encode_request_filename_answer, encode_request_sources2_subpayload, encode_sending_part,
+    skip_request_filename_ext_info,
+};
 pub(in crate::ed2k_tcp) use download::PendingCompressedPart;
+#[cfg(test)]
+pub(in crate::ed2k_tcp) use download::{DownloadSessionOptions, drive_download_session};
+#[cfg(test)]
+use download::{DownloadWindowLimits, next_download_read_timeout, select_download_window_limits};
 pub use download::{Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, download_file_from_peer};
 pub(crate) use dump::dump_ed2k_tcp_download_meta;
 pub(in crate::ed2k_tcp) use dump::{dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send};
 pub use firewall_helper::emule_connect_options;
 pub use firewall_helper::request_udp_firewall_check;
+#[cfg(test)]
+pub(crate) use firewall_helper::send_kad_firewall_tcp_ack;
 pub(crate) use firewall_helper::{connect_callback_peer, is_connection_shutdown_error};
 pub(in crate::ed2k_tcp) use hello::{
     DecodedEmuleInfoProfile, build_hello_responses, decode_emule_info_profile,
     decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,
     encode_hello_request,
+};
+#[cfg(test)]
+#[allow(unused_imports)]
+use hello::{DecodedHelloIdentity, encode_hello_answer, is_mule_hello};
+#[cfg(test)]
+use hello::{
+    ed2k_string_tag_type, emule_misc_options1, emule_misc_options2, emule_version_tag,
+    encode_emule_info_request,
 };
 pub use identity::Ed2kSecureIdent;
 pub(in crate::ed2k_tcp) use identity::{
@@ -80,10 +108,17 @@ pub(in crate::ed2k_tcp) use identity::{
     try_send_secure_ident_signature,
 };
 pub(crate) use listener::reply_with_firewall_udp;
+#[cfg(test)]
+use listener::{Ed2kConnectionContext, handle_connection};
 pub use listener::{Ed2kListenerOptions, run_ed2k_listener};
 use obfuscation::{
     Rc4KeyStream, accept_incoming_obfuscation_handshake, is_plain_ed2k_protocol_marker,
     negotiate_outgoing_obfuscation_handshake, should_enable_outgoing_obfuscation,
+};
+#[cfg(test)]
+use obfuscation::{
+    decode_incoming_obfuscation_header, derive_obfuscation_key,
+    encode_incoming_obfuscation_response,
 };
 pub use transport::EmuleTcpPacket;
 pub(in crate::ed2k_tcp) use transport::{Ed2kTransport, Ed2kTransportMode};
@@ -494,3 +529,6 @@ pub(crate) async fn enrich_hello_identity(
         && firewall.udp_open;
     identity
 }
+
+#[cfg(test)]
+mod tests;

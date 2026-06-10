@@ -16,3 +16,5 @@ pub(in crate::ed2k_tcp) use window::{
     ActiveDownloadPiece, DownloadRequestWindowState, PendingPartRequest,
     next_download_read_timeout, pump_download_request_window,
 };
+#[cfg(test)]
+pub(in crate::ed2k_tcp) use window::{DownloadWindowLimits, select_download_window_limits};

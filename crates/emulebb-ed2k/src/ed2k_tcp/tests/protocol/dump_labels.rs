@@ -1,0 +1,89 @@
+use super::*;
+
+#[test]
+fn dump_send_phases_follow_oracle_labels() {
+    assert_eq!(
+        super::dump::canonical_ed2k_send_phase(
+            "listener",
+            "hello_reply",
+            Some(OP_EDONKEYPROT),
+            Some(OP_HELLOANSWER),
+        )
+        .as_ref(),
+        "hello_answer"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_send_phase(
+            "listener",
+            "request_filename",
+            Some(OP_EDONKEYPROT),
+            Some(OP_REQFILENAMEANSWER),
+        )
+        .as_ref(),
+        "filename_answer"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_send_phase(
+            "listener",
+            "set_req_file_id",
+            Some(OP_EDONKEYPROT),
+            Some(OP_FILESTATUS),
+        )
+        .as_ref(),
+        "file_status"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_send_phase(
+            "native_download",
+            "hello",
+            Some(OP_EDONKEYPROT),
+            Some(OP_HELLO),
+        )
+        .as_ref(),
+        "hello_request"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_send_phase(
+            "native_download",
+            "request_parts",
+            Some(OP_EDONKEYPROT),
+            Some(OP_REQUESTPARTS),
+        )
+        .as_ref(),
+        "session"
+    );
+}
+
+#[test]
+fn dump_recv_phases_follow_oracle_labels() {
+    assert_eq!(
+        super::dump::canonical_ed2k_recv_phase(
+            "listener",
+            "custom",
+            OP_EDONKEYPROT,
+            OP_HELLOANSWER,
+        )
+        .as_ref(),
+        "session"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_recv_phase(
+            "udp_firewall_check",
+            "session",
+            OP_EDONKEYPROT,
+            OP_HELLO,
+        )
+        .as_ref(),
+        "hello_exchange"
+    );
+    assert_eq!(
+        super::dump::canonical_ed2k_recv_phase(
+            "udp_firewall_check",
+            "session",
+            OP_EMULEPROT,
+            OP_FWCHECKUDPREQ,
+        )
+        .as_ref(),
+        "fwcheck_request"
+    );
+}

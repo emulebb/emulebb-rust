@@ -29,6 +29,8 @@ pub(super) use upload::{
     build_upload_part_packets, decode_compressed_part_fragment, decode_request_parts_payload,
     decode_sending_part_payload, encode_request_parts_batch, inflate_compressed_part_fragment,
 };
+#[cfg(test)]
+pub(super) use upload::{encode_compressed_part_fragment, encode_sending_part};
 
 pub(super) fn decode_peer_payload(protocol: u8, payload: Vec<u8>) -> Result<(u8, Vec<u8>)> {
     if protocol != OP_PACKEDPROT {

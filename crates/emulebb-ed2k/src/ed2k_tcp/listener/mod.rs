@@ -24,6 +24,8 @@ use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
 mod session;
 
 pub(crate) use session::reply_with_firewall_udp;
+#[cfg(test)]
+pub(in crate::ed2k_tcp) use session::{Ed2kConnectionContext, handle_connection};
 
 /// Inputs for the long-lived ED2K TCP listener task.
 pub struct Ed2kListenerOptions {
