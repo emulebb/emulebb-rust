@@ -194,7 +194,7 @@ impl DaemonConfig {
             bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
         };
         let resolved =
-            resolve_bind_ip(&interfaces, Some(bind_interface), None).with_context(|| {
+            resolve_bind_ip(interfaces, Some(bind_interface), None).with_context(|| {
                 format!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address")
             })?;
         resolved.parse::<Ipv4Addr>().with_context(|| {
@@ -294,20 +294,26 @@ fn parse_user_hash(value: &str) -> Result<[u8; 16]> {
     let bytes: [u8; 16] = decoded
         .try_into()
         .map_err(|_| anyhow::anyhow!("ed2kUserHash must be 16 bytes / 32 hex characters"))?;
-    if bytes == [0; 16] {
-        bail!("ed2kUserHash must not be all zeroes");
+    let bytes = normalize_user_hash_markers(bytes);
+    if user_hash_is_bad(&bytes) {
+        bail!("ed2kUserHash must not be an eMule bad hash");
     }
     Ok(bytes)
 }
 
 fn load_or_create_user_hash(path: PathBuf) -> Result<[u8; 16]> {
     if path.exists() {
-        return parse_user_hash(
-            &fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?,
-        );
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let normalized = parse_user_hash(&text)?;
+        let normalized_text = hex::encode(normalized);
+        if text.trim() != normalized_text {
+            fs::write(&path, &normalized_text)
+                .with_context(|| format!("failed to normalize {}", path.display()))?;
+        }
+        return Ok(normalized);
     }
-    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    let bytes = create_user_hash();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -317,15 +323,38 @@ fn load_or_create_user_hash(path: PathBuf) -> Result<[u8; 16]> {
     Ok(bytes)
 }
 
+fn normalize_user_hash_markers(mut bytes: [u8; 16]) -> [u8; 16] {
+    bytes[5] = 0x0E;
+    bytes[14] = 0x6F;
+    bytes
+}
+
+fn user_hash_is_bad(bytes: &[u8; 16]) -> bool {
+    let lo = u64::from_le_bytes(bytes[..8].try_into().expect("slice has 8 bytes"));
+    let hi = u64::from_le_bytes(bytes[8..].try_into().expect("slice has 8 bytes"));
+    (lo & 0xffff_00ff_ffff_ffff) == 0 && (hi & 0xff00_ffff_ffff_ffff) == 0
+}
+
+fn create_user_hash() -> [u8; 16] {
+    loop {
+        let bytes = normalize_user_hash_markers(*uuid::Uuid::new_v4().as_bytes());
+        if !user_hash_is_bad(&bytes) {
+            return bytes;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterfaceAddress};
 
     fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
-        let mut ed2k = Ed2kConfig::default();
-        ed2k.listen_port = Some(41001);
-        ed2k.server_endpoints = vec!["192.0.2.20:4661".to_string()];
+        let ed2k = Ed2kConfig {
+            listen_port: Some(41001),
+            server_endpoints: vec!["192.0.2.20:4661".to_string()],
+            ..Ed2kConfig::default()
+        };
         DaemonConfig {
             runtime_dir,
             p2p_bind_ip,
@@ -670,6 +699,64 @@ externalIpOverride = "203.0.113.10"
         assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
+    }
+
+    #[test]
+    fn ed2k_user_hash_uses_emule_markers() {
+        let hash = parse_user_hash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+
+        assert_eq!(hash[5], 0x0E);
+        assert_eq!(hash[14], 0x6F);
+    }
+
+    #[test]
+    fn ed2k_user_hash_rejects_emule_bad_hash_after_marker_normalization() {
+        let error = parse_user_hash("00000000000000000000000000000000")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("bad hash"));
+    }
+
+    #[test]
+    fn ed2k_network_config_normalizes_configured_user_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_with_server(
+            temp.path().to_path_buf(),
+            Some("192.0.2.10".parse().unwrap()),
+        );
+        config.ed2k_user_hash = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+
+        let network = config.ed2k_network_config().unwrap().unwrap();
+
+        assert_eq!(network.user_hash[5], 0x0E);
+        assert_eq!(network.user_hash[14], 0x6F);
+    }
+
+    #[test]
+    fn load_or_create_user_hash_persists_emule_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ed2k-user-hash.hex");
+
+        let hash = load_or_create_user_hash(path.clone()).unwrap();
+        let persisted = parse_user_hash(&fs::read_to_string(path).unwrap()).unwrap();
+
+        assert_eq!(hash[5], 0x0E);
+        assert_eq!(hash[14], 0x6F);
+        assert_eq!(persisted, hash);
+    }
+
+    #[test]
+    fn load_or_create_user_hash_rewrites_markerless_persisted_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ed2k-user-hash.hex");
+        fs::write(&path, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+
+        let hash = load_or_create_user_hash(path.clone()).unwrap();
+
+        assert_eq!(hash[5], 0x0E);
+        assert_eq!(hash[14], 0x6F);
+        assert_eq!(fs::read_to_string(path).unwrap(), hex::encode(hash));
     }
 
     #[test]

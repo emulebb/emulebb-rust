@@ -65,6 +65,15 @@ pub(super) enum BackgroundServerSearchRequest {
     },
 }
 
+pub(super) struct BackgroundServerSearchContext<'a> {
+    pub(super) server: &'a ResolvedServerEntry,
+    pub(super) server_udp_socket: Option<&'a UdpSocket>,
+    pub(super) connect_options: u8,
+    pub(super) shared_catalog: &'a Ed2kSharedCatalog,
+    pub(super) bind_ip: Ipv4Addr,
+    pub(super) tcp_port: u16,
+}
+
 #[derive(Debug)]
 pub(super) enum PendingBackgroundServerSearch {
     Keyword {
@@ -330,12 +339,7 @@ pub(super) fn fail_pending_background_search(
 
 pub(super) async fn start_background_server_search(
     session: &mut ServerSession,
-    server: &ResolvedServerEntry,
-    server_udp_socket: Option<&UdpSocket>,
-    connect_options: u8,
-    shared_catalog: &Ed2kSharedCatalog,
-    bind_ip: Ipv4Addr,
-    tcp_port: u16,
+    context: BackgroundServerSearchContext<'_>,
     request: BackgroundServerSearchRequest,
 ) -> Result<Option<PendingBackgroundServerSearch>> {
     match request {
@@ -357,13 +361,14 @@ pub(super) async fn start_background_server_search(
             session
                 .send_packet(OP_SEARCHREQUEST, &search_payload)
                 .await?;
-            if let Some(socket) = server_udp_socket
-                && let Err(error) = send_udp_keyword_search(socket, server, &search_payload).await
+            if let Some(socket) = context.server_udp_socket
+                && let Err(error) =
+                    send_udp_keyword_search(socket, context.server, &search_payload).await
             {
                 warn!(
                     "failed to send ED2K background UDP keyword search query={:?} endpoint={}: {error}",
                     query,
-                    server.base_endpoint()
+                    context.server.base_endpoint()
                 );
             }
             info!(
@@ -390,16 +395,16 @@ pub(super) async fn start_background_server_search(
                 format!("dispatching background source search file_hash={file_hash}"),
             );
             let source_request = encode_source_request(file_hash, file_size);
-            let opcode = source_request_opcode(connect_options, session.server_flags);
+            let opcode = source_request_opcode(context.connect_options, session.server_flags);
             session.send_packet(opcode, &source_request).await?;
-            if let Some(socket) = server_udp_socket
+            if let Some(socket) = context.server_udp_socket
                 && let Err(error) =
-                    send_udp_source_search(socket, server, file_hash, file_size).await
+                    send_udp_source_search(socket, context.server, file_hash, file_size).await
             {
                 warn!(
                     "failed to send ED2K background UDP source search file_hash={} endpoint={}: {error}",
                     file_hash,
-                    server.base_endpoint()
+                    context.server.base_endpoint()
                 );
             }
             info!(
@@ -432,7 +437,13 @@ pub(super) async fn start_background_server_search(
             Ok(None)
         }
         BackgroundServerSearchRequest::Publish { response } => {
-            send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
+            send_offer_files_advertisement(
+                session,
+                context.shared_catalog,
+                context.bind_ip,
+                context.tcp_port,
+            )
+            .await?;
             let _ = response.send(Ok(()));
             Ok(None)
         }

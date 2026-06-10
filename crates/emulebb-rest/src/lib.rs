@@ -511,7 +511,7 @@ async fn app(State(state): State<RestState>) -> impl IntoResponse {
 async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<ShutdownRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !request.confirm_shutdown {
         return api_error(
@@ -530,7 +530,7 @@ async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoR
 async fn capture_diagnostic_dump(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<DiagnosticDumpRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !request.confirm_dump {
         return api_error(
@@ -555,7 +555,7 @@ async fn capture_diagnostic_dump(State(state): State<RestState>, body: Bytes) ->
 async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<DiagnosticCrashTestRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !request.confirm_crash {
         return api_error(
@@ -579,7 +579,7 @@ async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
 async fn update_preferences(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<PreferencesUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.update_preferences(request).await {
         Ok(preferences) => api_ok(preferences).into_response(),
@@ -603,7 +603,7 @@ async fn snapshot(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<SnapshotQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let limit = snapshot_limit(query.limit);
     let status = status_response(&state).await;
@@ -650,7 +650,7 @@ async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
 async fn kad_import_nodes_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<UrlImportRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.import_kad_nodes_url(&request.url).await {
         Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
@@ -663,7 +663,7 @@ async fn kad_import_nodes_url(State(state): State<RestState>, body: Bytes) -> im
 async fn kad_bootstrap(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<KadBootstrapRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if request.address.trim().is_empty() {
         return api_error(
@@ -704,7 +704,7 @@ async fn categories(State(state): State<RestState>) -> impl IntoResponse {
 async fn create_category(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<CategoryCreate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.create_category(request).await {
         Ok(category) => api_ok(category).into_response(),
@@ -731,7 +731,7 @@ async fn update_category(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<CategoryUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.update_category(category_id, request).await {
         Ok(Some(category)) => api_ok(category).into_response(),
@@ -766,7 +766,7 @@ async fn friends(State(state): State<RestState>) -> impl IntoResponse {
 async fn create_friend(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<FriendCreate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.add_friend(request).await {
         Ok(friend) => api_ok(friend).into_response(),
@@ -798,7 +798,7 @@ async fn servers(State(state): State<RestState>) -> impl IntoResponse {
 async fn create_server(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<ServerCreate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.add_server(request).await {
         Ok(server) => api_ok(server_response(&server)).into_response(),
@@ -823,7 +823,7 @@ async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse
 async fn servers_import_met_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<UrlImportRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.import_server_met_url(&request.url).await {
         Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
@@ -850,7 +850,7 @@ async fn update_server(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<ServerUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.update_server(&server_id, request).await {
         Ok(Some(server)) => api_ok(server_response(&server)).into_response(),
@@ -908,7 +908,7 @@ async fn searches(State(state): State<RestState>) -> impl IntoResponse {
 async fn create_search(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<SearchCreate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.create_search(request).await {
         Ok(search) => api_ok(search_response(&search)).into_response(),
@@ -925,7 +925,7 @@ async fn search(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<SearchResultsQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.search(&search_id).await {
         Some(search) => {
@@ -952,7 +952,7 @@ async fn delete_searches(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if query.confirm != Some(true) {
         return api_error(
@@ -972,7 +972,7 @@ async fn shared_files(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<PageQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let items = state
         .core
@@ -987,7 +987,7 @@ async fn shared_files(
 async fn create_shared_file(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<SharedFileCreateRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if request.path.trim().is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
@@ -1026,7 +1026,7 @@ async fn update_shared_directories(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<SharedDirectoriesUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.set_shared_directories(request).await {
         Ok(directories) => api_ok(directories).into_response(),
@@ -1064,7 +1064,7 @@ async fn update_shared_file(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<SharedFileUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.update_shared_file(&hash, request).await {
         Ok(Some(share)) => api_ok(shared_file_response(&share)).into_response(),
@@ -1110,7 +1110,7 @@ async fn delete_shared_file_payload(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if query.confirm != Some(true) {
         return api_error(
@@ -1224,7 +1224,7 @@ async fn transfers(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<TransfersQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let items = state
         .core
@@ -1249,7 +1249,7 @@ async fn transfers(
 async fn create_transfer(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<TransferCreate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.create_transfers(request).await {
         Ok(transfers) => api_bulk_operation(
@@ -1271,7 +1271,7 @@ async fn clear_completed_transfers(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<ClearCompletedTransfersRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !request.confirm_clear_completed {
         return api_error(
@@ -1303,7 +1303,7 @@ async fn update_transfer(
 ) -> impl IntoResponse {
     let request = match parse_required_json_body::<TransferUpdate>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match state.core.update_transfer(&hash, request).await {
         Ok(Some(transfer)) => api_ok(transfer).into_response(),
@@ -1504,7 +1504,7 @@ async fn upload_queue(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<UploadQueueQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let _include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
     api_collection_page(state.core.upload_queue().await, query.page()).into_response()
@@ -1731,7 +1731,7 @@ async fn transfer_delete_files(
 ) -> impl IntoResponse {
     let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if query.confirm != Some(true) {
         return api_error(
@@ -1759,7 +1759,7 @@ async fn logs() -> impl IntoResponse {
 async fn clear_logs(body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<LogsClearRequest>(&body) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !request.confirm_clear_logs {
         return api_error(
@@ -2263,7 +2263,7 @@ fn api_error(
     )
 }
 
-fn parse_required_json_body<T>(body: &[u8]) -> Result<T, Response>
+fn parse_required_json_body<T>(body: &[u8]) -> Result<T, Box<Response>>
 where
     T: DeserializeOwned,
 {
@@ -2274,10 +2274,11 @@ where
             json_error_message(&error),
         )
         .into_response()
+        .into()
     })
 }
 
-fn parse_optional_query<T>(query: Option<&str>) -> Result<T, Response>
+fn parse_optional_query<T>(query: Option<&str>) -> Result<T, Box<Response>>
 where
     T: DeserializeOwned + Default,
 {
@@ -2289,6 +2290,7 @@ where
                 structured_error_message(error.to_string()),
             )
             .into_response()
+            .into()
         }),
         _ => Ok(T::default()),
     }

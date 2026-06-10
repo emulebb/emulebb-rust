@@ -43,9 +43,9 @@ pub use active_source::{
     search_source_udp_servers,
 };
 use background::{
-    BackgroundServerSearchRequest, PendingBackgroundServerSearch, fail_background_search_request,
-    fail_pending_background_search, handle_background_udp_packet, log_search_result_page,
-    start_background_server_search,
+    BackgroundServerSearchContext, BackgroundServerSearchRequest, PendingBackgroundServerSearch,
+    fail_background_search_request, fail_pending_background_search, handle_background_udp_packet,
+    log_search_result_page, start_background_server_search,
 };
 pub use background::{
     Ed2kServerSearchHandle, Ed2kServerSearchInbox, new_ed2k_server_search_channel,

@@ -9,11 +9,11 @@ use super::udp_runtime::{
     bind_server_udp_socket, read_server_udp_packet, send_server_udp_status_request,
 };
 use super::{
-    BackgroundServerSearchRequest, Ed2kServerSearchInbox, Ed2kServerState, OP_FOUNDSOURCES,
-    OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_SEARCHRESULT,
-    PendingBackgroundServerSearch, ResolvedServerEntry, ServerSession, ServerSessionPhase,
-    annotate_found_sources_server, decode_found_sources, decode_search_result_page,
-    encode_login_request, encode_packet, fail_background_search_request,
+    BackgroundServerSearchContext, BackgroundServerSearchRequest, Ed2kServerSearchInbox,
+    Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES,
+    OP_QUERY_MORE_RESULT, OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry,
+    ServerSession, ServerSessionPhase, annotate_found_sources_server, decode_found_sources,
+    decode_search_result_page, encode_login_request, encode_packet, fail_background_search_request,
     fail_pending_background_search, format_connect_options, handle_background_udp_packet,
     handle_server_packet, log_search_result_page, login_identity_for_server_transport,
     send_offer_files_advertisement, server_udp_endpoint, should_use_server_obfuscation,
@@ -148,12 +148,14 @@ pub(super) async fn run_one_server_session(
                     if session.login_accepted {
                         match start_background_server_search(
                             &mut session,
-                            server,
-                            server_udp_socket.as_ref(),
-                            context.hello_identity.connect_options,
-                            &context.shared_catalog,
-                            context.bind_ip,
-                            context.hello_identity.tcp_port,
+                            BackgroundServerSearchContext {
+                                server,
+                                server_udp_socket: server_udp_socket.as_ref(),
+                                connect_options: context.hello_identity.connect_options,
+                                shared_catalog: &context.shared_catalog,
+                                bind_ip: context.bind_ip,
+                                tcp_port: context.hello_identity.tcp_port,
+                            },
                             request,
                         )
                         .await
@@ -329,12 +331,14 @@ pub(super) async fn run_one_server_session(
                 {
                     match start_background_server_search(
                         &mut session,
-                        server,
-                        server_udp_socket.as_ref(),
-                        context.hello_identity.connect_options,
-                        &context.shared_catalog,
-                        context.bind_ip,
-                        context.hello_identity.tcp_port,
+                        BackgroundServerSearchContext {
+                            server,
+                            server_udp_socket: server_udp_socket.as_ref(),
+                            connect_options: context.hello_identity.connect_options,
+                            shared_catalog: &context.shared_catalog,
+                            bind_ip: context.bind_ip,
+                            tcp_port: context.hello_identity.tcp_port,
+                        },
                         request,
                     )
                     .await
