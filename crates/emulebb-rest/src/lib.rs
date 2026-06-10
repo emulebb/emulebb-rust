@@ -508,10 +508,11 @@ async fn app(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(app_info_response(state.core.app_info()))
 }
 
-async fn shutdown_app(
-    State(state): State<RestState>,
-    Json(request): Json<ShutdownRequest>,
-) -> impl IntoResponse {
+async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<ShutdownRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !request.confirm_shutdown {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -526,10 +527,11 @@ async fn shutdown_app(
     api_ok(json!({"ok": true})).into_response()
 }
 
-async fn capture_diagnostic_dump(
-    State(state): State<RestState>,
-    Json(request): Json<DiagnosticDumpRequest>,
-) -> impl IntoResponse {
+async fn capture_diagnostic_dump(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<DiagnosticDumpRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !request.confirm_dump {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -550,9 +552,11 @@ async fn capture_diagnostic_dump(
     }
 }
 
-async fn trigger_diagnostic_crash_test(
-    Json(request): Json<DiagnosticCrashTestRequest>,
-) -> impl IntoResponse {
+async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<DiagnosticCrashTestRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !request.confirm_crash {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -718,8 +722,12 @@ async fn category(
 async fn update_category(
     State(state): State<RestState>,
     Path(category_id): Path<u32>,
-    Json(request): Json<CategoryUpdate>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<CategoryUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.update_category(category_id, request).await {
         Ok(Some(category)) => api_ok(category).into_response(),
         Ok(None) => {
@@ -750,10 +758,11 @@ async fn friends(State(state): State<RestState>) -> impl IntoResponse {
     api_collection(state.core.friends().await)
 }
 
-async fn create_friend(
-    State(state): State<RestState>,
-    Json(request): Json<FriendCreate>,
-) -> impl IntoResponse {
+async fn create_friend(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<FriendCreate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.add_friend(request).await {
         Ok(friend) => api_ok(friend).into_response(),
         Err(error) => {
@@ -781,10 +790,11 @@ async fn servers(State(state): State<RestState>) -> impl IntoResponse {
     api_collection(server_responses(state.core.servers().await))
 }
 
-async fn create_server(
-    State(state): State<RestState>,
-    Json(request): Json<ServerCreate>,
-) -> impl IntoResponse {
+async fn create_server(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<ServerCreate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.add_server(request).await {
         Ok(server) => api_ok(server_response(&server)).into_response(),
         Err(error) => {
@@ -831,8 +841,12 @@ async fn server(
 async fn update_server(
     State(state): State<RestState>,
     Path(server_id): Path<String>,
-    Json(request): Json<ServerUpdate>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<ServerUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.update_server(&server_id, request).await {
         Ok(Some(server)) => api_ok(server_response(&server)).into_response(),
         Ok(None) => {
@@ -886,10 +900,11 @@ async fn searches(State(state): State<RestState>) -> impl IntoResponse {
     )
 }
 
-async fn create_search(
-    State(state): State<RestState>,
-    Json(request): Json<SearchCreate>,
-) -> impl IntoResponse {
+async fn create_search(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SearchCreate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.create_search(request).await {
         Ok(search) => api_ok(search_response(&search)).into_response(),
         Err(error) => {
@@ -990,8 +1005,12 @@ async fn shared_directories(State(state): State<RestState>) -> impl IntoResponse
 
 async fn update_shared_directories(
     State(state): State<RestState>,
-    Json(request): Json<SharedDirectoriesUpdate>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedDirectoriesUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.set_shared_directories(request).await {
         Ok(directories) => api_ok(directories).into_response(),
         Err(error) => {
@@ -1024,8 +1043,12 @@ async fn shared_file(
 async fn update_shared_file(
     State(state): State<RestState>,
     Path(hash): Path<String>,
-    Json(request): Json<SharedFileUpdate>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedFileUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.update_shared_file(&hash, request).await {
         Ok(Some(share)) => api_ok(shared_file_response(&share)).into_response(),
         Ok(None) => {
@@ -1198,10 +1221,11 @@ async fn transfers(
     api_collection_page(items, query.page())
 }
 
-async fn create_transfer(
-    State(state): State<RestState>,
-    Json(request): Json<TransferCreate>,
-) -> impl IntoResponse {
+async fn create_transfer(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<TransferCreate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.create_transfers(request).await {
         Ok(transfers) => api_bulk_operation(
             transfers
@@ -1218,8 +1242,12 @@ async fn create_transfer(
 
 async fn clear_completed_transfers(
     State(state): State<RestState>,
-    Json(request): Json<ClearCompletedTransfersRequest>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<ClearCompletedTransfersRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !request.confirm_clear_completed {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1246,8 +1274,12 @@ async fn transfer(State(state): State<RestState>, Path(hash): Path<String>) -> i
 async fn update_transfer(
     State(state): State<RestState>,
     Path(hash): Path<String>,
-    Json(request): Json<TransferUpdate>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let request = match parse_required_json_body::<TransferUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.update_transfer(&hash, request).await {
         Ok(Some(transfer)) => api_ok(transfer).into_response(),
         Ok(None) => {
@@ -1691,7 +1723,11 @@ async fn logs() -> impl IntoResponse {
     api_collection(Vec::<Value>::new())
 }
 
-async fn clear_logs(Json(request): Json<LogsClearRequest>) -> impl IntoResponse {
+async fn clear_logs(body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<LogsClearRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if !request.confirm_clear_logs {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -2256,6 +2292,32 @@ mod tests {
         )
     }
 
+    async fn assert_invalid_json_response(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: &'static str,
+        expected_message: &str,
+    ) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], expected_message);
+    }
+
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2268,6 +2330,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create test dir");
         path
+    }
+
+    #[tokio::test]
+    async fn write_routes_use_canonical_json_error_envelope() {
+        let cases = [
+            ("POST", "/api/v1/app/shutdown"),
+            ("POST", "/api/v1/diagnostics/dumps"),
+            ("POST", "/api/v1/diagnostics/crash-tests"),
+            ("POST", "/api/v1/categories"),
+            ("PATCH", "/api/v1/categories/1"),
+            ("POST", "/api/v1/friends"),
+            ("POST", "/api/v1/servers"),
+            ("PATCH", "/api/v1/servers/local:4661"),
+            ("POST", "/api/v1/searches"),
+            ("PATCH", "/api/v1/shared-directories"),
+            (
+                "PATCH",
+                "/api/v1/shared-files/00112233445566778899aabbccddeeff",
+            ),
+            ("POST", "/api/v1/transfers"),
+            ("POST", "/api/v1/transfers/operations/clear-completed"),
+            (
+                "PATCH",
+                "/api/v1/transfers/00112233445566778899aabbccddeeff",
+            ),
+            ("POST", "/api/v1/logs/operations/clear"),
+        ];
+        for (method, uri) in cases {
+            assert_invalid_json_response(
+                test_router(),
+                method,
+                uri,
+                r#"{"unsupportedJsonField":true}"#,
+                "unknown JSON field: unsupportedJsonField",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_json_uses_canonical_error_envelope() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/transfers")
+                    .header("X-API-Key", "secret")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert!(value["error"]["message"].as_str().unwrap().contains("EOF"));
     }
 
     #[tokio::test]
