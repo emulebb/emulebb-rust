@@ -11,6 +11,7 @@ members = [
     "crates/emulebb-miniupnpc",
     "crates/emulebb-miniupnpc-sys",
     "crates/emulebb-rest",
+    "crates/emulebb-tools",
 ]
 resolver = "2"
 

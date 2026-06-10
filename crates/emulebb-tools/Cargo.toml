@@ -1,0 +1,15 @@
+[package]
+name = "emulebb-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Developer and live-diagnostic tooling for eMuleBB Rust"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+emulebb-ed2k = { path = "../emulebb-ed2k" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

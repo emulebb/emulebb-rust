@@ -565,6 +565,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulebb-tools"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "clap",
+ "emulebb-ed2k",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
