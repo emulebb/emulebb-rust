@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
 use emulebb_ed2k::{config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
-use emulebb_index::{FileIndex, KadLocalStoreConfig};
+use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -36,6 +36,12 @@ pub struct KadListenerConfig {
     pub local_store_keyword_capacity: usize,
     pub local_store_source_capacity: usize,
     pub local_store_notes_capacity: usize,
+    pub snoop_queue_dedup_window_secs: u64,
+    pub snoop_queue_general_max_queries_per_600s: u32,
+    pub snoop_queue_general_drain_cooldown_secs: u64,
+    pub snoop_queue_source_max_queries_per_600s: u32,
+    pub snoop_queue_source_drain_cooldown_secs: u64,
+    pub snoop_queue_source_stop_after_results: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +75,12 @@ impl Default for KadListenerConfig {
             local_store_keyword_capacity: 20_000,
             local_store_source_capacity: 20_000,
             local_store_notes_capacity: 5_000,
+            snoop_queue_dedup_window_secs: 28_800,
+            snoop_queue_general_max_queries_per_600s: 24,
+            snoop_queue_general_drain_cooldown_secs: 900,
+            snoop_queue_source_max_queries_per_600s: 60,
+            snoop_queue_source_drain_cooldown_secs: 300,
+            snoop_queue_source_stop_after_results: 2,
         }
     }
 }
@@ -129,12 +141,17 @@ impl DaemonConfig {
             user_hash,
             secure_ident,
             kad_local_store: self.kad.local_store_config(),
+            kad_snoop_queue: self.kad.snoop_queue_config(),
             config: self.ed2k.clone(),
         }))
     }
 
     pub fn kad_local_store_config(&self) -> KadLocalStoreConfig {
         self.kad.local_store_config()
+    }
+
+    pub fn kad_snoop_queue_config(&self) -> SnoopQueueConfig {
+        self.kad.snoop_queue_config()
     }
 
     fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
@@ -176,6 +193,17 @@ impl KadListenerConfig {
             keyword_capacity: self.local_store_keyword_capacity.max(1),
             source_capacity: self.local_store_source_capacity.max(1),
             notes_capacity: self.local_store_notes_capacity.max(1),
+        }
+    }
+
+    pub fn snoop_queue_config(&self) -> SnoopQueueConfig {
+        SnoopQueueConfig {
+            dedup_window_secs: self.snoop_queue_dedup_window_secs.max(1),
+            general_max_queries_per_600s: self.snoop_queue_general_max_queries_per_600s.max(1),
+            general_drain_cooldown_secs: self.snoop_queue_general_drain_cooldown_secs.max(1),
+            source_max_queries_per_600s: self.snoop_queue_source_max_queries_per_600s.max(1),
+            source_drain_cooldown_secs: self.snoop_queue_source_drain_cooldown_secs.max(1),
+            source_stop_after_results: self.snoop_queue_source_stop_after_results.max(1),
         }
     }
 }
@@ -313,6 +341,12 @@ localStoreNotesTtlSecs = 86400
 localStoreKeywordCapacity = 20000
 localStoreSourceCapacity = 20000
 localStoreNotesCapacity = 5000
+snoopQueueDedupWindowSecs = 28800
+snoopQueueGeneralMaxQueriesPer600s = 24
+snoopQueueGeneralDrainCooldownSecs = 900
+snoopQueueSourceMaxQueriesPer600s = 60
+snoopQueueSourceDrainCooldownSecs = 300
+snoopQueueSourceStopAfterResults = 2
 
 [ed2k]
 listenPort = 41001
@@ -338,6 +372,12 @@ reconnectIntervalSecs = 60
         assert_eq!(config.kad.local_store_keyword_capacity, 20_000);
         assert_eq!(config.kad.local_store_source_capacity, 20_000);
         assert_eq!(config.kad.local_store_notes_capacity, 5_000);
+        assert_eq!(config.kad.snoop_queue_dedup_window_secs, 28_800);
+        assert_eq!(config.kad.snoop_queue_general_max_queries_per_600s, 24);
+        assert_eq!(config.kad.snoop_queue_general_drain_cooldown_secs, 900);
+        assert_eq!(config.kad.snoop_queue_source_max_queries_per_600s, 60);
+        assert_eq!(config.kad.snoop_queue_source_drain_cooldown_secs, 300);
+        assert_eq!(config.kad.snoop_queue_source_stop_after_results, 2);
         assert_eq!(config.ed2k.listen_port, Some(41001));
         assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
         assert_eq!(config.ed2k.connect_timeout_secs, 1);
@@ -356,6 +396,7 @@ reconnectIntervalSecs = 60
                 local_store_keyword_capacity: 0,
                 local_store_source_capacity: 0,
                 local_store_notes_capacity: 0,
+                ..KadListenerConfig::default()
             },
             ..DaemonConfig::default()
         };
@@ -369,6 +410,32 @@ reconnectIntervalSecs = 60
         assert_eq!(local_store.keyword_capacity, 1);
         assert_eq!(local_store.source_capacity, 1);
         assert_eq!(local_store.notes_capacity, 1);
+    }
+
+    #[test]
+    fn kad_snoop_queue_config_is_config_driven_and_clamped() {
+        let config = DaemonConfig {
+            kad: KadListenerConfig {
+                listen_port: Some(41002),
+                snoop_queue_dedup_window_secs: 0,
+                snoop_queue_general_max_queries_per_600s: 0,
+                snoop_queue_general_drain_cooldown_secs: 0,
+                snoop_queue_source_max_queries_per_600s: 0,
+                snoop_queue_source_drain_cooldown_secs: 0,
+                snoop_queue_source_stop_after_results: 0,
+                ..KadListenerConfig::default()
+            },
+            ..DaemonConfig::default()
+        };
+
+        let queue = config.kad_snoop_queue_config();
+
+        assert_eq!(queue.dedup_window_secs, 1);
+        assert_eq!(queue.general_max_queries_per_600s, 1);
+        assert_eq!(queue.general_drain_cooldown_secs, 1);
+        assert_eq!(queue.source_max_queries_per_600s, 1);
+        assert_eq!(queue.source_drain_cooldown_secs, 1);
+        assert_eq!(queue.source_stop_after_results, 1);
     }
 
     #[test]
@@ -499,6 +566,7 @@ reconnectIntervalSecs = 60
             network.kad_local_store.source_ttl,
             std::time::Duration::from_secs(21_600)
         );
+        assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
         assert!(config.ed2k_user_hash_path().is_file());
         assert!(config.ed2k_secure_ident_path().is_file());
     }

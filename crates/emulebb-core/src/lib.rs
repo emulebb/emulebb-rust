@@ -36,11 +36,14 @@ use emulebb_ed2k::{
     },
     kad_firewall::KadFirewallState,
 };
-use emulebb_index::{FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig};
+use emulebb_index::{
+    FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, SnoopEntry, SnoopQueue,
+    SnoopQueueConfig,
+};
 use emulebb_kad_dht::{DhtConfig, DhtNode, ReceivedKadPacket, SourceResult};
 use emulebb_kad_proto::{
-    Ed2kHash, KAD_VERSION, KadPacket, PublishRes, SearchRes, SearchResultEntry, constants::K,
-    packet::ContactEntry,
+    Ed2kHash, KAD_VERSION, KadPacket, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
+    SearchResultEntry, SearchSourceReq, constants::K, packet::ContactEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -563,6 +566,7 @@ pub struct Ed2kNetworkConfig {
     pub user_hash: [u8; 16],
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub kad_local_store: KadLocalStoreConfig,
+    pub kad_snoop_queue: SnoopQueueConfig,
     pub config: Ed2kConfig,
 }
 
@@ -647,6 +651,7 @@ pub struct EmulebbCore {
     transfer_root: PathBuf,
     ed2k_network: Option<Ed2kNetworkConfig>,
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
+    kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
     state: Arc<Mutex<CoreState>>,
 }
@@ -671,6 +676,9 @@ impl EmulebbCore {
         let kad_local_store = ed2k_network
             .as_ref()
             .map(|network| Arc::new(Mutex::new(KadLocalStore::new(network.kad_local_store))));
+        let kad_snoop_queue = ed2k_network
+            .as_ref()
+            .map(|network| Arc::new(Mutex::new(SnoopQueue::new(network.kad_snoop_queue.clone()))));
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
@@ -679,6 +687,7 @@ impl EmulebbCore {
             transfer_root,
             ed2k_network,
             kad_local_store,
+            kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
@@ -878,10 +887,14 @@ impl EmulebbCore {
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
-        if let Some(kad_local_store) = self.kad_local_store.as_ref().map(Arc::clone) {
+        if let (Some(kad_local_store), Some(kad_snoop_queue)) = (
+            self.kad_local_store.as_ref().map(Arc::clone),
+            self.kad_snoop_queue.as_ref().map(Arc::clone),
+        ) {
             tasks.push(tokio::spawn(run_kad_local_store_loop(
                 dht.clone(),
                 kad_local_store,
+                kad_snoop_queue,
                 Arc::clone(&shutdown),
             )));
         }
@@ -2652,6 +2665,16 @@ impl EmulebbCore {
         Some(self.kad_local_store.as_ref()?.lock().await.config())
     }
 
+    #[cfg(test)]
+    async fn kad_snoop_queue_config_for_tests(&self) -> Option<SnoopQueueConfig> {
+        Some(self.kad_snoop_queue.as_ref()?.lock().await.config().clone())
+    }
+
+    #[cfg(test)]
+    async fn kad_snoop_queue_snapshot_for_tests(&self) -> Option<Vec<SnoopEntry>> {
+        Some(self.kad_snoop_queue.as_ref()?.lock().await.snapshot())
+    }
+
     async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
         let server_state = {
             let runtime_guard = self.ed2k_runtime.lock().await;
@@ -2733,6 +2756,10 @@ impl fmt::Debug for EmulebbCore {
                 "kad_local_store_configured",
                 &self.kad_local_store.is_some(),
             )
+            .field(
+                "kad_snoop_queue_configured",
+                &self.kad_snoop_queue.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -2740,6 +2767,7 @@ impl fmt::Debug for EmulebbCore {
 async fn run_kad_local_store_loop(
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
+    snoop_queue: Arc<Mutex<SnoopQueue>>,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut packets = dht.subscribe_packets();
@@ -2747,7 +2775,7 @@ async fn run_kad_local_store_loop(
         match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
             Ok(Ok(received)) => {
                 if let Err(error) =
-                    handle_kad_local_store_packet(&dht, &local_store, received).await
+                    handle_kad_local_store_packet(&dht, &local_store, &snoop_queue, received).await
                 {
                     tracing::warn!("failed to handle unsolicited Kad packet: {error:#}");
                 }
@@ -2764,6 +2792,7 @@ async fn run_kad_local_store_loop(
 async fn handle_kad_local_store_packet(
     dht: &DhtNode,
     local_store: &Arc<Mutex<KadLocalStore>>,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
     received: ReceivedKadPacket,
 ) -> Result<()> {
     let ReceivedKadPacket { packet, from, .. } = received;
@@ -2825,37 +2854,43 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::SearchKeyReq(req) => {
+            let now = Utc::now();
+            record_kad_snoop_entry(snoop_queue, build_keyword_snoop_entry(&req, now)).await;
             let response = {
                 let mut store = local_store.lock().await;
                 store.keyword_search_response(
                     dht.own_id(),
                     &req,
                     LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT,
-                    Utc::now(),
+                    now,
                 )
             };
             send_local_search_response(dht, from, response).await;
         }
         KadPacket::SearchSourceReq(req) => {
+            let now = Utc::now();
+            record_kad_snoop_entry(snoop_queue, build_source_snoop_entry(&req, now)).await;
             let response = {
                 let mut store = local_store.lock().await;
                 store.source_search_response(
                     dht.own_id(),
                     &req,
                     LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT,
-                    Utc::now(),
+                    now,
                 )
             };
             send_local_search_response(dht, from, response).await;
         }
         KadPacket::SearchNotesReq(req) => {
+            let now = Utc::now();
+            record_kad_snoop_entry(snoop_queue, build_notes_snoop_entry(&req, now)).await;
             let response = {
                 let mut store = local_store.lock().await;
                 store.notes_search_response(
                     dht.own_id(),
                     &req,
                     LOCAL_NOTES_SEARCH_RESPONSE_LIMIT,
-                    Utc::now(),
+                    now,
                 )
             };
             send_local_search_response(dht, from, response).await;
@@ -2932,6 +2967,83 @@ async fn handle_kad_local_store_packet(
         _ => {}
     }
     Ok(())
+}
+
+async fn record_kad_snoop_entry(snoop_queue: &Arc<Mutex<SnoopQueue>>, entry: SnoopEntry) {
+    let logical_key = entry.logical_key().to_string();
+    let outcome = snoop_queue.lock().await.record(entry);
+    if outcome.is_new || outcome.hit_count <= 3 || outcome.hit_count % 10 == 0 {
+        tracing::debug!(
+            logical_key,
+            hit_count = outcome.hit_count,
+            queue_depth = outcome.queue_depth,
+            family_queue_depth = outcome.family_queue_depth,
+            "recorded Kad search demand"
+        );
+    }
+}
+
+fn build_keyword_snoop_entry(req: &SearchKeyReq, now: DateTime<Utc>) -> SnoopEntry {
+    let restrictive_payload_hex =
+        (!req.restrictive_payload.is_empty()).then(|| hex::encode(&req.restrictive_payload));
+    SnoopEntry::Keyword {
+        logical_key: keyword_logical_key(req),
+        target: req.target.to_string(),
+        start_position: req.start_position,
+        restrictive_payload_hex,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
+}
+
+fn build_source_snoop_entry(req: &SearchSourceReq, now: DateTime<Utc>) -> SnoopEntry {
+    SnoopEntry::Source {
+        logical_key: source_logical_key(req),
+        target: req.target.to_string(),
+        start_position: req.start_position,
+        size: req.size,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
+}
+
+fn build_notes_snoop_entry(req: &SearchNotesReq, now: DateTime<Utc>) -> SnoopEntry {
+    SnoopEntry::Notes {
+        logical_key: notes_logical_key(req),
+        target: req.target.to_string(),
+        size: req.size,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
+}
+
+fn keyword_logical_key(req: &SearchKeyReq) -> String {
+    let payload_hex = if req.restrictive_payload.is_empty() {
+        String::new()
+    } else {
+        hex::encode(&req.restrictive_payload)
+    };
+    format!(
+        "keyword:{}:{:04x}:{}",
+        req.target, req.start_position, payload_hex
+    )
+}
+
+fn source_logical_key(req: &SearchSourceReq) -> String {
+    format!(
+        "source:{}:{:04x}:{}",
+        req.target, req.start_position, req.size
+    )
+}
+
+fn notes_logical_key(req: &SearchNotesReq) -> String {
+    format!("notes:{}:{}", req.target, req.size)
 }
 
 async fn send_local_search_response(dht: &DhtNode, to: SocketAddr, response: Option<SearchRes>) {
@@ -4397,6 +4509,7 @@ mod tests {
     fn test_network_config_with_store(
         transfer_root: &Path,
         kad_local_store: KadLocalStoreConfig,
+        kad_snoop_queue: SnoopQueueConfig,
     ) -> Ed2kNetworkConfig {
         Ed2kNetworkConfig {
             bind_ip: Ipv4Addr::new(198, 51, 100, 10),
@@ -4407,6 +4520,7 @@ mod tests {
                 Ed2kSecureIdent::load_or_create(&transfer_root.join("secure-ident.der")).unwrap(),
             ),
             kad_local_store,
+            kad_snoop_queue,
             config: Ed2kConfig::default(),
         }
     }
@@ -4427,13 +4541,97 @@ mod tests {
             "test",
             FileIndex::in_memory().unwrap(),
             &transfer_root,
-            Some(test_network_config_with_store(&transfer_root, expected)),
+            Some(test_network_config_with_store(
+                &transfer_root,
+                expected,
+                SnoopQueueConfig::default(),
+            )),
         )
         .unwrap();
 
         assert_eq!(
             core.kad_local_store_config_for_tests().await,
             Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn network_config_initializes_kad_snoop_queue() {
+        let transfer_root = unique_runtime_dir("emulebb-core-kad-snoop-queue-config");
+        let expected = SnoopQueueConfig {
+            dedup_window_secs: 7,
+            general_max_queries_per_600s: 8,
+            general_drain_cooldown_secs: 9,
+            source_max_queries_per_600s: 10,
+            source_drain_cooldown_secs: 11,
+            source_stop_after_results: 12,
+        };
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &transfer_root,
+            Some(test_network_config_with_store(
+                &transfer_root,
+                KadLocalStoreConfig::default(),
+                expected.clone(),
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(
+            core.kad_snoop_queue_config_for_tests().await,
+            Some(expected)
+        );
+        assert_eq!(
+            core.kad_snoop_queue_snapshot_for_tests().await,
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn kad_snoop_entry_builders_preserve_passive_search_shapes() {
+        let target = NodeId::from_bytes([
+            0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05, 0x0c, 0x0b, 0x0a, 0x09, 0x10, 0x0f,
+            0x0e, 0x0d,
+        ]);
+        let now = Utc::now();
+
+        let keyword = build_keyword_snoop_entry(
+            &SearchKeyReq {
+                target,
+                start_position: 0x8002,
+                restrictive_payload: vec![0xaa, 0xbb],
+            },
+            now,
+        );
+        let source = build_source_snoop_entry(
+            &SearchSourceReq {
+                target,
+                start_position: 0x0011,
+                size: 123_456,
+            },
+            now,
+        );
+        let notes = build_notes_snoop_entry(
+            &SearchNotesReq {
+                target,
+                size: 654_321,
+            },
+            now,
+        );
+
+        assert_eq!(
+            keyword.logical_key(),
+            "keyword:0102030405060708090a0b0c0d0e0f10:8002:aabb"
+        );
+        assert_eq!(keyword.restrictive_payload_hex(), Some("aabb"));
+        assert_eq!(
+            source.logical_key(),
+            "source:0102030405060708090a0b0c0d0e0f10:0011:123456"
+        );
+        assert_eq!(
+            notes.logical_key(),
+            "notes:0102030405060708090a0b0c0d0e0f10:654321"
         );
     }
 

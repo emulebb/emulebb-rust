@@ -74,6 +74,11 @@ impl SnoopQueue {
         }
     }
 
+    #[must_use]
+    pub fn config(&self) -> &SnoopQueueConfig {
+        &self.config
+    }
+
     /// Restores persisted entries into the in-memory queue.
     pub fn merge_snapshot(&mut self, entries: Vec<SnoopEntry>) {
         for entry in entries {

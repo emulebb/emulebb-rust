@@ -14,6 +14,12 @@ localStoreNotesTtlSecs = 86400
 localStoreKeywordCapacity = 20000
 localStoreSourceCapacity = 20000
 localStoreNotesCapacity = 5000
+snoopQueueDedupWindowSecs = 28800
+snoopQueueGeneralMaxQueriesPer600s = 24
+snoopQueueGeneralDrainCooldownSecs = 900
+snoopQueueSourceMaxQueriesPer600s = 60
+snoopQueueSourceDrainCooldownSecs = 300
+snoopQueueSourceStopAfterResults = 2
 
 [ed2k]
 listenPort = 41001
