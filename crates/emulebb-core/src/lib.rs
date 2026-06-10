@@ -46,9 +46,10 @@ use emulebb_kad_dht::{
     SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
-    Ed2kHash, KAD_VERSION, KadPacket, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
+    Ed2kHash, KAD_VERSION, KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes,
     SearchResultEntry, SearchSourceReq, constants::K, packet::ContactEntry,
 };
+use md4::{Digest, Md4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
@@ -2223,14 +2224,36 @@ impl EmulebbCore {
         if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
             return Ok(Some("queued"));
         }
-        if transfer.size_bytes == 0 {
-            return Ok(Some("queued"));
-        }
-
         let file_hash: Ed2kHash = transfer
             .hash
             .parse()
             .with_context(|| format!("invalid ED2K transfer hash {}", transfer.hash))?;
+        let mut transfer = transfer.clone();
+        if transfer.size_bytes == 0 {
+            if let Some(metadata) = self
+                .resolve_hash_only_ed2k_metadata(network, file_hash)
+                .await?
+            {
+                let learned_name = should_adopt_hash_only_metadata_name(&transfer)
+                    .then_some(metadata.canonical_name.as_deref())
+                    .flatten();
+                let manifest = self
+                    .ed2k_transfers
+                    .reconcile_job_metadata(&transfer.hash, learned_name, metadata.file_size)
+                    .await?;
+                let mut updated = transfer_from_manifest(&manifest, &transfer.state);
+                preserve_transfer_public_metadata(&mut updated, &transfer);
+                self.state
+                    .lock()
+                    .await
+                    .transfers
+                    .insert(updated.hash.clone(), updated.clone());
+                transfer = updated;
+            }
+            if transfer.size_bytes == 0 {
+                return Ok(Some("queued"));
+            }
+        }
         let mut sources = self
             .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
             .await?;
@@ -2526,6 +2549,95 @@ impl EmulebbCore {
                 .active_download_attempts
                 .remove(&hash);
         });
+    }
+
+    async fn resolve_hash_only_ed2k_metadata(
+        &self,
+        network: &Ed2kNetworkConfig,
+        file_hash: Ed2kHash,
+    ) -> Result<Option<LearnedEd2kMetadata>> {
+        let cancel = CancellationToken::new();
+        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+        let query = hash_only_ed2k_search_query(file_hash);
+        let shared_catalog = self.ed2k_transfers.shared_catalog();
+        let shared_catalog_snapshot = shared_catalog.read().await.clone();
+        let mut learned = LearnedEd2kMetadata::default();
+        let (preferred_endpoint, background_search) =
+            if let Some(handle) = self.connected_ed2k_search_handle().await {
+                (self.connected_ed2k_server_endpoint().await, Some(handle))
+            } else {
+                (None, None)
+            };
+        let has_background_search = background_search.is_some();
+
+        if let Some(handle) = background_search {
+            match search_keyword_via_background_session(&handle, &query, timeout, &cancel).await {
+                Ok(results) => {
+                    if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
+                        learned.merge_missing_from(candidate);
+                        tracing::info!(
+                            "ED2K hash-only metadata learned from background search file_hash={} file_name={} file_size={}",
+                            file_hash,
+                            learned.canonical_name.as_deref().unwrap_or("-"),
+                            learned.file_size.unwrap_or_default()
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    "ED2K background metadata search failed file_hash={} error={error}",
+                    file_hash
+                ),
+            }
+        }
+
+        if !learned.is_complete() {
+            match search_keyword_servers(Ed2kKeywordSearchOptions {
+                bind_ip: network.bind_ip,
+                config: &network.config,
+                hello_identity: self.ed2k_hello_identity(network),
+                shared_catalog: &shared_catalog_snapshot,
+                preferred_endpoint: (!has_background_search)
+                    .then_some(preferred_endpoint)
+                    .flatten(),
+                max_attempts: ed2k_keyword_server_attempts(&network.config, &query),
+                query: &query,
+                cancel: &cancel,
+            })
+            .await
+            {
+                Ok(results) => {
+                    if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
+                        learned.merge_missing_from(candidate);
+                        tracing::info!(
+                            "ED2K hash-only metadata learned from active search file_hash={} file_name={} file_size={}",
+                            file_hash,
+                            learned.canonical_name.as_deref().unwrap_or("-"),
+                            learned.file_size.unwrap_or_default()
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    "ED2K active metadata search failed file_hash={} error={error}",
+                    file_hash
+                ),
+            }
+        }
+
+        if !learned.is_complete()
+            && let Some(dht) = self.ed2k_dht_node().await
+            && let Some(candidate) =
+                collect_kad_ed2k_metadata(&dht, &query, file_hash, timeout).await
+        {
+            learned.merge_missing_from(candidate);
+            tracing::info!(
+                "ED2K hash-only metadata learned from Kad search file_hash={} file_name={} file_size={}",
+                file_hash,
+                learned.canonical_name.as_deref().unwrap_or("-"),
+                learned.file_size.unwrap_or_default()
+            );
+        }
+
+        Ok((!learned.is_empty()).then_some(learned))
     }
 
     async fn acquire_ed2k_sources(
@@ -4388,6 +4500,109 @@ fn ed2k_keyword_server_attempts(config: &Ed2kConfig, query: &str) -> usize {
         .min(configured_server_attempts(config))
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LearnedEd2kMetadata {
+    canonical_name: Option<String>,
+    file_size: Option<u64>,
+}
+
+impl LearnedEd2kMetadata {
+    fn merge_missing_from(&mut self, other: Self) {
+        if self.canonical_name.is_none() {
+            self.canonical_name = other.canonical_name;
+        }
+        if self.file_size.is_none() {
+            self.file_size = other.file_size;
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.canonical_name.is_some() && self.file_size.is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.canonical_name.is_none() && self.file_size.is_none()
+    }
+}
+
+fn normalized_optional_canonical_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn hash_only_ed2k_search_query(file_hash: Ed2kHash) -> String {
+    format!("{ED2K_HASH_ONLY_QUERY_PREFIX}{file_hash}")
+}
+
+fn select_ed2k_keyword_metadata(
+    results: &[Ed2kSearchFile],
+    file_hash: Ed2kHash,
+) -> Option<LearnedEd2kMetadata> {
+    results
+        .iter()
+        .filter(|result| result.file_hash == file_hash)
+        .filter_map(|result| {
+            let metadata = LearnedEd2kMetadata {
+                canonical_name: normalized_optional_canonical_name(result.file_name.as_deref()),
+                file_size: result.file_size.filter(|file_size| *file_size != 0),
+            };
+            (!metadata.is_empty()).then_some((
+                metadata.file_size.is_some(),
+                metadata.canonical_name.is_some(),
+                result.source_count.unwrap_or_default(),
+                metadata,
+            ))
+        })
+        .max_by_key(|(has_size, has_name, source_count, _)| (*has_size, *has_name, *source_count))
+        .map(|(_, _, _, metadata)| metadata)
+}
+
+fn select_kad_keyword_metadata(
+    result: &KadSearchResult,
+    file_hash: Ed2kHash,
+) -> Option<LearnedEd2kMetadata> {
+    if result.hash != file_hash {
+        return None;
+    }
+    let metadata = LearnedEd2kMetadata {
+        canonical_name: result
+            .names
+            .iter()
+            .find_map(|name| normalized_optional_canonical_name(Some(name))),
+        file_size: result.size.filter(|file_size| *file_size != 0),
+    };
+    (!metadata.is_empty()).then_some(metadata)
+}
+
+fn significant_keyword_words(query: &str) -> Vec<String> {
+    let words = query
+        .split(|char: char| !char.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_lowercase())
+        .filter(|word| word.len() >= 3)
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        vec![query.to_lowercase()]
+    } else {
+        words
+    }
+}
+
+fn keyword_target(query: &str) -> NodeId {
+    let first_word = exact_ed2k_hash_query_token(query).unwrap_or_else(|| {
+        significant_keyword_words(query)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| query.to_lowercase())
+    });
+    let mut hasher = Md4::new();
+    hasher.update(first_word.as_bytes());
+    let digest: [u8; 16] = hasher.finalize().into();
+    NodeId::from_be_bytes(digest)
+}
+
 fn sort_download_sources(sources: &mut [Ed2kFoundSource]) {
     sources.sort_by_key(|source| {
         (
@@ -4453,6 +4668,11 @@ fn should_exclude_background_source_endpoint(
     has_background_search && aggregated_source_count != 0
 }
 
+fn should_adopt_hash_only_metadata_name(transfer: &Transfer) -> bool {
+    let name = transfer.name.trim();
+    name.is_empty() || name.eq_ignore_ascii_case(&transfer.hash)
+}
+
 fn ed2k_server_callback_route(
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
@@ -4485,6 +4705,43 @@ fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed2kFoundSour
         user_hash: Some(result.source_id.0),
         source_server: None,
     }
+}
+
+async fn collect_kad_ed2k_metadata(
+    dht: &DhtNode,
+    query: &str,
+    file_hash: Ed2kHash,
+    timeout: Duration,
+) -> Option<LearnedEd2kMetadata> {
+    let cancel = CancellationToken::new();
+    let mut stream = dht.search_keywords_with_cancel_and_class(
+        keyword_target(query),
+        cancel.clone(),
+        RpcWorkClass::Interactive,
+    );
+    let sleep = tokio::time::sleep(timeout);
+    tokio::pin!(sleep);
+    let mut learned = LearnedEd2kMetadata::default();
+
+    loop {
+        tokio::select! {
+            _ = &mut sleep => break,
+            result = stream.next() => {
+                let Some(result) = result else {
+                    break;
+                };
+                if let Some(candidate) = select_kad_keyword_metadata(&result, file_hash) {
+                    learned.merge_missing_from(candidate);
+                    if learned.is_complete() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    cancel.cancel();
+    (!learned.is_empty()).then_some(learned)
 }
 
 async fn collect_kad_ed2k_sources(
@@ -5512,6 +5769,32 @@ mod tests {
     }
 
     #[test]
+    fn significant_words_ignore_short_tokens() {
+        assert_eq!(
+            significant_keyword_words("A torino x train"),
+            vec!["torino".to_string(), "train".to_string()]
+        );
+    }
+
+    #[test]
+    fn keyword_target_is_stable() {
+        assert_eq!(
+            hex::encode(keyword_target("Torino Train").0),
+            "b2bc3aa39f375069e7c27eb83ce6baf3"
+        );
+    }
+
+    #[test]
+    fn keyword_target_uses_hash_token_for_exact_ed2k_hash_queries() {
+        let exact_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
+
+        assert_eq!(
+            keyword_target(&format!("ed2k::{exact_hash}")),
+            keyword_target(&exact_hash.to_ascii_uppercase())
+        );
+    }
+
+    #[test]
     fn exact_ed2k_hash_queries_use_configured_server_budget() {
         let mut config = Ed2kConfig {
             server_endpoints: vec![
@@ -5538,6 +5821,61 @@ mod tests {
             ed2k_keyword_server_attempts(&config, &exact_hash.to_ascii_uppercase()),
             5
         );
+    }
+
+    #[test]
+    fn select_ed2k_keyword_metadata_prefers_exact_hash_with_size_and_name() {
+        let exact_hash = Ed2kHash::from_bytes([0x44; 16]);
+        let other_hash = Ed2kHash::from_bytes([0xAA; 16]);
+        let metadata = select_ed2k_keyword_metadata(
+            &[
+                Ed2kSearchFile {
+                    file_hash: exact_hash,
+                    file_name: Some(String::new()),
+                    file_size: Some(0),
+                    file_type: None,
+                    source_count: Some(100),
+                },
+                Ed2kSearchFile {
+                    file_hash: other_hash,
+                    file_name: Some("wrong.bin".to_string()),
+                    file_size: Some(123),
+                    file_type: None,
+                    source_count: Some(5),
+                },
+                Ed2kSearchFile {
+                    file_hash: exact_hash,
+                    file_name: Some("resolved.bin".to_string()),
+                    file_size: Some(4_294_967_299),
+                    file_type: Some("Pro".to_string()),
+                    source_count: Some(12),
+                },
+            ],
+            exact_hash,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.canonical_name.as_deref(), Some("resolved.bin"));
+        assert_eq!(metadata.file_size, Some(4_294_967_299));
+    }
+
+    #[test]
+    fn kad_search_result_exposes_exact_hash_metadata() {
+        let exact_hash = Ed2kHash::from_bytes([0x44; 16]);
+        let metadata = select_kad_keyword_metadata(
+            &KadSearchResult {
+                hash: exact_hash,
+                names: vec!["resolved.bin".to_string()],
+                size: Some(5_000),
+                source_count: Some(3),
+                tags: Vec::new(),
+            },
+            exact_hash,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.canonical_name.as_deref(), Some("resolved.bin"));
+        assert_eq!(metadata.file_size, Some(5_000));
     }
 
     #[tokio::test]

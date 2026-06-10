@@ -13,6 +13,7 @@ emulebb-index = { path = "../emulebb-index" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 hex = "0.4"
+md4 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

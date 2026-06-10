@@ -405,6 +405,7 @@ dependencies = [
  "emulebb-kad-dht",
  "emulebb-kad-proto",
  "hex",
+ "md4",
  "serde",
  "serde_json",
  "tokio",
