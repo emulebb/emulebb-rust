@@ -570,6 +570,7 @@ struct CoreState {
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
     banned_source_clients: HashSet<String>,
+    active_download_attempts: HashSet<String>,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
     kad_running: bool,
@@ -630,6 +631,7 @@ impl EmulebbCore {
                 server_overrides: HashMap::new(),
                 disabled_servers: HashSet::new(),
                 banned_source_clients: HashSet::new(),
+                active_download_attempts: HashSet::new(),
                 shared_directories: Vec::new(),
                 unshared_hashes: HashSet::new(),
                 kad_running: false,
@@ -1811,17 +1813,10 @@ impl EmulebbCore {
             "stopped transfer cannot be resumed"
         );
         self.ed2k_transfers.set_control_state(hash, None).await?;
-        let Some(mut transfer) = self.set_transfer_state(hash, "downloading").await else {
+        let Some(transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
         };
-        if let Some(next_state) = self.run_ed2k_download_attempt(&transfer).await? {
-            if let Some(updated) = self
-                .refresh_transfer_from_manifest(hash, next_state)
-                .await?
-            {
-                transfer = updated;
-            }
-        }
+        self.queue_ed2k_download_attempt(transfer.clone()).await;
         Ok(Some(transfer))
     }
 
@@ -2148,6 +2143,49 @@ impl EmulebbCore {
             return Err(error).context("ED2K direct download did not complete");
         }
         Ok(Some("queued"))
+    }
+
+    async fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
+        let hash = transfer.hash.clone();
+        {
+            let mut state = self.state.lock().await;
+            // WHY: REST resume returns before the peer transfer finishes, so repeated
+            // resume requests must not start duplicate writers for the same part file.
+            if !state.active_download_attempts.insert(hash.clone()) {
+                return;
+            }
+        }
+
+        let core = self.clone();
+        tokio::spawn(async move {
+            let result = core.run_ed2k_download_attempt(&transfer).await;
+            match result {
+                Ok(Some(next_state)) => {
+                    if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await
+                    {
+                        tracing::warn!(
+                            "failed to refresh ED2K transfer {hash} after download attempt: {error}"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("ED2K background download attempt failed for {hash}: {error:#}");
+                    if let Err(refresh_error) =
+                        core.refresh_transfer_from_manifest(&hash, "queued").await
+                    {
+                        tracing::warn!(
+                            "failed to refresh ED2K transfer {hash} after failed download attempt: {refresh_error}"
+                        );
+                    }
+                }
+            }
+            core.state
+                .lock()
+                .await
+                .active_download_attempts
+                .remove(&hash);
+        });
     }
 
     async fn acquire_ed2k_sources(
