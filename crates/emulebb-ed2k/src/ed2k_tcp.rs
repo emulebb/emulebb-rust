@@ -85,8 +85,7 @@ pub(crate) use dump::dump_ed2k_tcp_download_meta;
 pub(in crate::ed2k_tcp) use dump::{dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send};
 pub use firewall_helper::emule_connect_options;
 pub use firewall_helper::request_udp_firewall_check;
-#[cfg(test)]
-pub(crate) use firewall_helper::send_kad_firewall_tcp_ack;
+pub use firewall_helper::send_kad_firewall_tcp_ack;
 pub(crate) use firewall_helper::{connect_callback_peer, is_connection_shutdown_error};
 pub(in crate::ed2k_tcp) use hello::{
     DecodedEmuleInfoProfile, build_hello_responses, decode_emule_info_profile,
@@ -481,7 +480,7 @@ struct EncodedUploadPartPacket {
 
 /// Result of the Rust client's active eD2k peer connect path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ed2kPeerConnectMode {
+pub enum Ed2kPeerConnectMode {
     /// A plaintext eD2k TCP session was opened.
     Plaintext,
     /// An obfuscated eD2k TCP session was opened.
@@ -489,7 +488,7 @@ pub(crate) enum Ed2kPeerConnectMode {
 }
 
 impl Ed2kPeerConnectMode {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Plaintext => "plaintext",
             Self::Obfuscated => "obfuscated",
@@ -513,7 +512,7 @@ pub(crate) fn apply_server_state(
 
 /// Apply the current ED2K server and Kad firewall runtime state to an
 /// outbound or listener hello identity.
-pub(crate) async fn enrich_hello_identity(
+pub async fn enrich_hello_identity(
     identity: Ed2kHelloIdentity,
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,

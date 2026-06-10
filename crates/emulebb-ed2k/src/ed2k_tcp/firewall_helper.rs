@@ -461,7 +461,7 @@ pub(crate) async fn connect_callback_peer(
 /// Mirror the modern Kad TCP firewall-check result path. Stock eMule opens an
 /// eD2k client connection, sends its normal `OP_HELLO`, then reports TCP reachability
 /// with `OP_KAD_FWTCPCHECK_ACK` on that same connection.
-pub(crate) async fn send_kad_firewall_tcp_ack(
+pub async fn send_kad_firewall_tcp_ack(
     bind_ip: Ipv4Addr,
     peer_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,

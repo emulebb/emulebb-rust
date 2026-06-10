@@ -28,14 +28,15 @@ use emulebb_ed2k::{
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-        Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
+        Ed2kSecureIdent, download_file_from_peer, emule_connect_options, enrich_hello_identity,
+        run_ed2k_listener, send_kad_firewall_tcp_ack,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
         Ed2kTransferRuntime, Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot,
         new_transfer_job,
     },
-    kad_firewall::KadFirewallState,
+    kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
 };
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
@@ -46,15 +47,15 @@ use emulebb_kad_dht::{
     RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
-    Ed2kHash, HelloReq, HelloRes, HelloResAck, KAD_VERSION, KadPacket, NodeId, PublishRes,
-    SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq, Tag, TagValue,
-    constants::K, packet::ContactEntry, tag_name,
+    Ed2kHash, Firewalled2Req, FirewalledRes, HelloReq, HelloRes, HelloResAck, KAD_VERSION,
+    KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry,
+    SearchSourceReq, Tag, TagValue, constants::K, packet::ContactEntry, tag_name,
 };
 use md4::{Digest, Md4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, TcpSocket},
     sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
@@ -593,6 +594,7 @@ const PASSIVE_SOURCE_CRAWL_SECS: u64 = 15;
 const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
 const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
+const KAD_FIREWALLED_TCP_PROBE_TIMEOUT_SECS: u64 = 20;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 
@@ -950,12 +952,15 @@ impl EmulebbCore {
             self.kad_snoop_queue.as_ref().map(Arc::clone),
         ) {
             tasks.push(tokio::spawn(run_kad_local_store_loop(
-                dht.clone(),
-                kad_local_store,
-                Arc::clone(&kad_snoop_queue),
-                Arc::clone(&ed2k_listener),
-                Arc::clone(&server_state),
-                Arc::clone(&kad_firewall),
+                KadLocalStoreRuntime {
+                    dht: dht.clone(),
+                    local_store: kad_local_store,
+                    snoop_queue: Arc::clone(&kad_snoop_queue),
+                    ed2k_listener: Arc::clone(&ed2k_listener),
+                    server_state: Arc::clone(&server_state),
+                    kad_firewall: Arc::clone(&kad_firewall),
+                    network: network.clone(),
+                },
                 Arc::clone(&shutdown),
             )));
             tasks.push(tokio::spawn(run_kad_passive_replay_loop(
@@ -3250,30 +3255,22 @@ fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {
     }
 }
 
-async fn run_kad_local_store_loop(
+struct KadLocalStoreRuntime {
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
     snoop_queue: Arc<Mutex<SnoopQueue>>,
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
-    shutdown: Arc<AtomicBool>,
-) {
-    let mut packets = dht.subscribe_packets();
+    network: Ed2kNetworkConfig,
+}
+
+async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<AtomicBool>) {
+    let mut packets = runtime.dht.subscribe_packets();
     while !shutdown.load(Ordering::SeqCst) {
         match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
             Ok(Ok(received)) => {
-                if let Err(error) = handle_kad_local_store_packet(
-                    &dht,
-                    &local_store,
-                    &snoop_queue,
-                    &ed2k_listener,
-                    &server_state,
-                    &kad_firewall,
-                    received,
-                )
-                .await
-                {
+                if let Err(error) = handle_kad_local_store_packet(&runtime, received).await {
                     tracing::warn!("failed to handle unsolicited Kad packet: {error:#}");
                 }
             }
@@ -3641,6 +3638,154 @@ async fn build_kad_hello_response(
     })
 }
 
+fn firewalled_response_ip_for_sender(from: SocketAddr) -> Option<u32> {
+    match from.ip() {
+        IpAddr::V4(ip) => Some(u32::from_be_bytes(ip.octets())),
+        IpAddr::V6(_) => None,
+    }
+}
+
+async fn send_kad_firewalled_response(dht: &DhtNode, from: SocketAddr) -> Result<()> {
+    let Some(ip) = firewalled_response_ip_for_sender(from) else {
+        tracing::debug!("ignoring Kad FIREWALLED request from non-IPv4 peer {from}");
+        return Ok(());
+    };
+
+    dht.send_packet(from, &KadPacket::FirewalledRes(FirewalledRes { ip }))
+        .await
+        .with_context(|| format!("failed to send Kad FIREWALLED_RES to {from}"))?;
+    Ok(())
+}
+
+async fn probe_kad_firewalled_tcp(
+    bind_ip: Ipv4Addr,
+    peer_addr: SocketAddr,
+    timeout: Duration,
+) -> Result<()> {
+    let socket = match peer_addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => {
+            anyhow::bail!("cannot probe IPv6 Kad TCP peer from IPv4 bind address {bind_ip}");
+        }
+    }
+    .context("failed to create Kad TCP firewall probe socket")?;
+    socket
+        .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+        .with_context(|| format!("failed to bind Kad TCP firewall probe socket to {bind_ip}"))?;
+    tokio::time::timeout(timeout, socket.connect(peer_addr))
+        .await
+        .with_context(|| format!("timed out probing Kad TCP firewall peer {peer_addr}"))?
+        .with_context(|| format!("failed to connect Kad TCP firewall probe to {peer_addr}"))?;
+    Ok(())
+}
+
+fn spawn_kad_firewalled_response(dht: DhtNode, bind_ip: Ipv4Addr, from: SocketAddr, tcp_port: u16) {
+    tokio::spawn(async move {
+        if let Err(error) = send_kad_firewalled_response(&dht, from).await {
+            tracing::debug!("Kad FIREWALLED_RES failed for {from}: {error:#}");
+            return;
+        }
+        if tcp_port == 0 {
+            return;
+        }
+
+        let peer_addr = SocketAddr::new(from.ip(), tcp_port);
+        let timeout = Duration::from_secs(KAD_FIREWALLED_TCP_PROBE_TIMEOUT_SECS);
+        match probe_kad_firewalled_tcp(bind_ip, peer_addr, timeout).await {
+            Ok(()) => {
+                if let Err(error) = dht.send_packet(from, &KadPacket::FirewalledAckRes).await {
+                    tracing::debug!("Kad FIREWALLED_ACK_RES failed for {from}: {error:#}");
+                }
+            }
+            Err(error) => {
+                tracing::debug!("Kad TCP firewall probe failed for {peer_addr}: {error:#}");
+            }
+        }
+    });
+}
+
+async fn kad_firewall_ack_hello_identity(
+    dht: &DhtNode,
+    listener_addr: SocketAddr,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    network: &Ed2kNetworkConfig,
+) -> Result<Ed2kHelloIdentity> {
+    let identity = Ed2kHelloIdentity {
+        user_hash: network.user_hash,
+        client_id: 0,
+        tcp_port: listener_addr.port(),
+        udp_port: dht
+            .bind_addr()
+            .context("failed to resolve Kad bind address for firewall ACK hello")?
+            .port(),
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(network.config.obfuscation_enabled),
+        direct_udp_callback: false,
+    };
+    Ok(enrich_hello_identity(identity, server_state, kad_firewall).await)
+}
+
+fn spawn_modern_kad_firewalled_response(
+    dht: DhtNode,
+    listener_addr: SocketAddr,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    network: Ed2kNetworkConfig,
+    from: SocketAddr,
+    req: Firewalled2Req,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = send_kad_firewalled_response(&dht, from).await {
+            tracing::debug!("Kad FIREWALLED_RES failed for modern request from {from}: {error:#}");
+            return;
+        }
+        if req.tcp_port == 0 {
+            return;
+        }
+
+        let peer_addr = SocketAddr::new(from.ip(), req.tcp_port);
+        let timeout = Duration::from_secs(KAD_FIREWALLED_TCP_PROBE_TIMEOUT_SECS);
+        let hello_identity = match kad_firewall_ack_hello_identity(
+            &dht,
+            listener_addr,
+            &server_state,
+            &kad_firewall,
+            &network,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::debug!(
+                    "failed to build Kad firewall ACK hello for {peer_addr}: {error:#}"
+                );
+                return;
+            }
+        };
+
+        match send_kad_firewall_tcp_ack(
+            network.bind_ip,
+            peer_addr,
+            hello_identity,
+            req.user_hash.0,
+            req.connect_options,
+            timeout,
+        )
+        .await
+        {
+            Ok(mode) => tracing::debug!(
+                transport = mode.as_str(),
+                "sent Kad TCP firewall ACK to {peer_addr}"
+            ),
+            Err(error) => {
+                tracing::debug!("Kad modern TCP firewall ACK failed for {peer_addr}: {error:#}");
+            }
+        }
+    });
+}
+
 async fn remember_passive_note_results(
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     results: &[KadNoteResult],
@@ -3731,14 +3876,16 @@ fn preferred_passive_replay_families(counts: SnoopQueueFamilyCounts) -> [Passive
 }
 
 async fn handle_kad_local_store_packet(
-    dht: &DhtNode,
-    local_store: &Arc<Mutex<KadLocalStore>>,
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-    ed2k_listener: &TcpListener,
-    server_state: &Arc<RwLock<Ed2kServerState>>,
-    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    runtime: &KadLocalStoreRuntime,
     received: ReceivedKadPacket,
 ) -> Result<()> {
+    let dht = &runtime.dht;
+    let local_store = &runtime.local_store;
+    let snoop_queue = &runtime.snoop_queue;
+    let ed2k_listener = &runtime.ed2k_listener;
+    let server_state = &runtime.server_state;
+    let kad_firewall = &runtime.kad_firewall;
+    let network = &runtime.network;
     let ReceivedKadPacket { packet, from, .. } = received;
     match packet {
         KadPacket::HelloReq(req) => {
@@ -3785,6 +3932,48 @@ async fn handle_kad_local_store_packet(
                 }),
             )
             .await?;
+        }
+        KadPacket::FirewalledReq(req) => {
+            spawn_kad_firewalled_response(dht.clone(), network.bind_ip, from, req.tcp_port);
+        }
+        KadPacket::Firewalled2Req(req) => {
+            spawn_modern_kad_firewalled_response(
+                dht.clone(),
+                ed2k_listener.local_addr().context(
+                    "failed to read eD2K listener address while handling Kad FIREWALLED2_REQ",
+                )?,
+                Arc::clone(server_state),
+                Arc::clone(kad_firewall),
+                network.clone(),
+                from,
+                req,
+            );
+        }
+        KadPacket::FirewallUdp(packet) => {
+            let outcome = kad_firewall.lock().await.record_firewall_udp_packet(
+                from.ip(),
+                packet.error_code,
+                packet.udp_port,
+                Utc::now(),
+            );
+            match outcome {
+                FirewallUdpPacketOutcome::Open(summary) => tracing::info!(
+                    helpers_selected = summary.helpers_selected,
+                    helpers_requested = summary.helpers_requested,
+                    helpers_succeeded = summary.helpers_succeeded,
+                    "Kad UDP firewall check completed from {from}"
+                ),
+                FirewallUdpPacketOutcome::Recorded => tracing::debug!(
+                    error_code = packet.error_code,
+                    udp_port = packet.udp_port,
+                    "recorded Kad UDP firewall packet from {from}"
+                ),
+                FirewallUdpPacketOutcome::Ignored => tracing::debug!(
+                    error_code = packet.error_code,
+                    udp_port = packet.udp_port,
+                    "ignored unrelated Kad UDP firewall packet from {from}"
+                ),
+            }
         }
         KadPacket::BootstrapReq => {
             let bind_addr = dht.bind_addr()?;
@@ -5818,6 +6007,16 @@ mod tests {
         );
         assert_eq!(mappings[1].protocol, TransportProtocol::Udp);
         assert_eq!(mappings[1].exposure, MappingExposure::Preferred);
+    }
+
+    #[test]
+    fn kad_firewalled_response_ip_uses_sender_ipv4_bytes() {
+        let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 4672);
+
+        assert_eq!(
+            firewalled_response_ip_for_sender(from),
+            Some(u32::from_be_bytes([203, 0, 113, 9]))
+        );
     }
 
     #[tokio::test]
