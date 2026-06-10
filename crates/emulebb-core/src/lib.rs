@@ -1,6 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt, fs,
+    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
@@ -41,7 +42,7 @@ use serde_json::json;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -556,6 +557,41 @@ pub struct Ed2kNetworkConfig {
     pub user_hash: [u8; 16],
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub config: Ed2kConfig,
+}
+
+type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
+
+#[derive(Debug)]
+struct DirectDownloadOutcome {
+    completed: bool,
+    accepted_incomplete_peers: u32,
+    last_error: Option<anyhow::Error>,
+}
+
+struct DirectDownloadOptions {
+    bind_ip: Ipv4Addr,
+    hello_identity: Ed2kHelloIdentity,
+    secure_ident: Arc<Ed2kSecureIdent>,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
+    file_hash_hex: String,
+    file_name: String,
+    file_size: u64,
+    sources: Vec<Ed2kFoundSource>,
+    connect_timeout: Duration,
+    max_parallel_download_peers: usize,
+}
+
+struct DirectDownloadSpawnContext<'a, DownloadFn> {
+    bind_ip: Ipv4Addr,
+    hello_identity: Ed2kHelloIdentity,
+    secure_ident: &'a Arc<Ed2kSecureIdent>,
+    transfer_runtime: &'a Arc<Ed2kTransferRuntime>,
+    file_hash_hex: &'a str,
+    file_name: &'a str,
+    file_size: u64,
+    connect_timeout: Duration,
+    retry_round: u32,
+    download_peer: &'a DownloadFn,
 }
 
 #[derive(Debug)]
@@ -2103,43 +2139,55 @@ impl EmulebbCore {
             return Ok(Some("queued"));
         }
         sort_download_sources(&mut sources);
-        let mut accepted_incomplete = false;
-        let mut last_error = None;
         let hello_identity = self.ed2k_hello_identity(network);
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         let max_peers = network.config.max_parallel_download_peers.max(1);
-        for source in sources
-            .iter()
-            .filter(|source| source.is_direct_dialable())
-            .take(max_peers)
-        {
-            match download_file_from_peer(Ed2kPeerDownloadOptions {
-                bind_ip: network.bind_ip,
-                peer: source,
-                hello_identity,
-                secure_ident: &network.secure_ident,
-                transfer_runtime: self.ed2k_transfers.as_ref(),
-                canonical_name: transfer.name.clone(),
-                file_size: transfer.size_bytes,
-                timeout,
-            })
-            .await
-            {
-                Ok(Ed2kPeerDownloadOutcome::Completed) => {
-                    return Ok(Some("completed"));
-                }
-                Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete) => {
-                    accepted_incomplete = true;
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                }
-            }
+        let direct_sources = direct_download_candidate_sources(&sources, &HashSet::new());
+        if direct_sources.is_empty() {
+            return Ok(Some("queued"));
         }
-        if accepted_incomplete {
+        let outcome = run_ed2k_direct_downloads(
+            DirectDownloadOptions {
+                bind_ip: network.bind_ip,
+                hello_identity,
+                secure_ident: Arc::clone(&network.secure_ident),
+                transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                file_hash_hex: transfer.hash.clone(),
+                file_name: transfer.name.clone(),
+                file_size: transfer.size_bytes,
+                sources: direct_sources,
+                connect_timeout: timeout,
+                max_parallel_download_peers: max_peers,
+            },
+            |bind_ip,
+             source,
+             hello_identity,
+             secure_ident,
+             transfer_runtime,
+             file_name,
+             file_size,
+             connect_timeout| async move {
+                download_file_from_peer(Ed2kPeerDownloadOptions {
+                    bind_ip,
+                    peer: &source,
+                    hello_identity,
+                    secure_ident: &secure_ident,
+                    transfer_runtime: transfer_runtime.as_ref(),
+                    canonical_name: file_name,
+                    file_size,
+                    timeout: connect_timeout,
+                })
+                .await
+            },
+        )
+        .await?;
+        if outcome.completed {
+            return Ok(Some("completed"));
+        }
+        if outcome.accepted_incomplete_peers != 0 {
             return Ok(Some("downloading"));
         }
-        if let Some(error) = last_error {
+        if let Some(error) = outcome.last_error {
             return Err(error).context("ED2K direct download did not complete");
         }
         Ok(Some("queued"))
@@ -2872,6 +2920,236 @@ fn is_low_id_client_id(client_id: u32) -> bool {
     client_id != 0 && client_id < 0x0100_0000
 }
 
+fn is_retryable_direct_download_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|inner| inner.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
+}
+
+async fn run_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
+    options: DirectDownloadOptions,
+    download_peer: DownloadFn,
+) -> Result<DirectDownloadOutcome>
+where
+    DownloadFn: Fn(
+            Ipv4Addr,
+            Ed2kFoundSource,
+            Ed2kHelloIdentity,
+            Arc<Ed2kSecureIdent>,
+            Arc<Ed2kTransferRuntime>,
+            String,
+            u64,
+            Duration,
+        ) -> DownloadFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadOutcome>> + Send + 'static,
+{
+    let DirectDownloadOptions {
+        bind_ip,
+        hello_identity,
+        secure_ident,
+        transfer_runtime,
+        file_hash_hex,
+        file_name,
+        file_size,
+        sources,
+        connect_timeout,
+        max_parallel_download_peers,
+    } = options;
+    let max_parallel_download_peers = max_parallel_download_peers.max(1);
+    let retry_deadline =
+        if !sources.is_empty() && sources.iter().all(|source| source.ip.is_loopback()) {
+            Some(tokio::time::Instant::now() + Duration::from_secs(360))
+        } else {
+            None
+        };
+    let retry_sources = sources;
+    let mut retry_round = 0u32;
+    let mut last_error: Option<anyhow::Error> = None;
+
+    loop {
+        let mut accepted_incomplete_peers = 0u32;
+        let mut retryable_error_seen = false;
+        let mut pending_sources = VecDeque::from(retry_sources.clone());
+        let mut active_downloads = JoinSet::new();
+        let spawn_context = DirectDownloadSpawnContext {
+            bind_ip,
+            hello_identity,
+            secure_ident: &secure_ident,
+            transfer_runtime: &transfer_runtime,
+            file_hash_hex: &file_hash_hex,
+            file_name: &file_name,
+            file_size,
+            connect_timeout,
+            retry_round,
+            download_peer: &download_peer,
+        };
+
+        spawn_pending_ed2k_direct_downloads(
+            &mut active_downloads,
+            &mut pending_sources,
+            &spawn_context,
+            max_parallel_download_peers,
+        );
+
+        while let Some(joined) = active_downloads.join_next().await {
+            let (peer_addr, source, result) =
+                joined.context("ED2K direct download worker panicked")?;
+            match result {
+                Ok(Ed2kPeerDownloadOutcome::Completed) => {
+                    let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
+                    tracing::info!(
+                        "ED2K direct download peer completed file_hash={} peer={} manifest_completed={} verified_ranges={} file_size={}",
+                        file_hash_hex,
+                        peer_addr,
+                        manifest.completed,
+                        manifest.verified_ranges.len(),
+                        manifest.file_size
+                    );
+                    if manifest.completed {
+                        active_downloads.abort_all();
+                        while active_downloads.join_next().await.is_some() {}
+                        return Ok(DirectDownloadOutcome {
+                            completed: true,
+                            accepted_incomplete_peers,
+                            last_error: last_error
+                                .as_ref()
+                                .map(|error| anyhow::anyhow!(error.to_string())),
+                        });
+                    }
+                }
+                Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete) => {
+                    accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
+                    tracing::info!(
+                        "ED2K direct download peer accepted incomplete file_hash={} peer={}",
+                        file_hash_hex,
+                        peer_addr
+                    );
+                }
+                Err(error) => {
+                    retryable_error_seen |= is_retryable_direct_download_error(&error);
+                    tracing::warn!(
+                        "ED2K direct download peer failed file_hash={} peer={}: {error}",
+                        file_hash_hex,
+                        peer_addr
+                    );
+                    last_error = Some(error);
+                    if let Some(fallback_source) = plaintext_fallback_for_obfuscated_source(&source)
+                    {
+                        tracing::info!(
+                            "ED2K direct download scheduling plaintext fallback file_hash={} peer={}:{}",
+                            file_hash_hex,
+                            source.ip,
+                            source.tcp_port
+                        );
+                        pending_sources.push_front(fallback_source);
+                    }
+                }
+            }
+
+            spawn_pending_ed2k_direct_downloads(
+                &mut active_downloads,
+                &mut pending_sources,
+                &spawn_context,
+                max_parallel_download_peers,
+            );
+        }
+
+        let outcome = DirectDownloadOutcome {
+            completed: transfer_runtime.manifest(&file_hash_hex).await?.completed,
+            accepted_incomplete_peers,
+            last_error: last_error
+                .as_ref()
+                .map(|error| anyhow::anyhow!(error.to_string())),
+        };
+        if outcome.completed || outcome.accepted_incomplete_peers != 0 {
+            return Ok(outcome);
+        }
+
+        let Some(deadline) = retry_deadline else {
+            return Ok(outcome);
+        };
+        if !retryable_error_seen || tokio::time::Instant::now() >= deadline {
+            return Ok(outcome);
+        }
+
+        retry_round = retry_round.saturating_add(1);
+        tracing::info!(
+            "ED2K direct download retrying loopback sources file_hash={} retry_round={}",
+            file_hash_hex,
+            retry_round
+        );
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
+    active_downloads: &mut JoinSet<DirectDownloadJoin>,
+    pending_sources: &mut VecDeque<Ed2kFoundSource>,
+    context: &DirectDownloadSpawnContext<'_, DownloadFn>,
+    max_parallel_download_peers: usize,
+) where
+    DownloadFn: Fn(
+            Ipv4Addr,
+            Ed2kFoundSource,
+            Ed2kHelloIdentity,
+            Arc<Ed2kSecureIdent>,
+            Arc<Ed2kTransferRuntime>,
+            String,
+            u64,
+            Duration,
+        ) -> DownloadFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    DownloadFuture: Future<Output = Result<Ed2kPeerDownloadOutcome>> + Send + 'static,
+{
+    while active_downloads.len() < max_parallel_download_peers {
+        let Some(source) = pending_sources.pop_front() else {
+            break;
+        };
+        let transfer_runtime = Arc::clone(context.transfer_runtime);
+        let secure_ident = Arc::clone(context.secure_ident);
+        let download_peer = context.download_peer.clone();
+        let file_name = context.file_name.to_string();
+        let file_hash_hex = context.file_hash_hex.to_string();
+        let peer_addr = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
+        tracing::info!(
+            "ED2K direct download attempt file_hash={} peer={} client_id={} obfuscated={} has_user_hash={} retry_round={}",
+            file_hash_hex,
+            peer_addr,
+            source.client_id,
+            source.obfuscated,
+            source.user_hash.is_some(),
+            context.retry_round
+        );
+        let bind_ip = context.bind_ip;
+        let hello_identity = context.hello_identity;
+        let file_size = context.file_size;
+        let connect_timeout = context.connect_timeout;
+        active_downloads.spawn(async move {
+            let result = download_peer(
+                bind_ip,
+                source.clone(),
+                hello_identity,
+                secure_ident,
+                transfer_runtime,
+                file_name,
+                file_size,
+                connect_timeout,
+            )
+            .await;
+            (peer_addr, source, result)
+        });
+    }
+}
+
 fn found_source_from_hint(file_hash: Ed2kHash, hint: &Ed2kSourceHint) -> Result<Ed2kFoundSource> {
     let ip = hint
         .ip
@@ -2963,6 +3241,40 @@ fn sort_download_sources(sources: &mut [Ed2kFoundSource]) {
     });
 }
 
+fn source_endpoint_key(source: &Ed2kFoundSource) -> (Ipv4Addr, u16) {
+    (source.ip, source.tcp_port)
+}
+
+fn direct_download_candidate_sources(
+    sources: &[Ed2kFoundSource],
+    attempted_direct_endpoints: &HashSet<(Ipv4Addr, u16)>,
+) -> Vec<Ed2kFoundSource> {
+    let mut seen_endpoints = HashSet::new();
+    sources
+        .iter()
+        .filter(|source| {
+            if !source.is_direct_dialable() {
+                return false;
+            }
+            let endpoint = source_endpoint_key(source);
+            !attempted_direct_endpoints.contains(&endpoint) && seen_endpoints.insert(endpoint)
+        })
+        .cloned()
+        .collect()
+}
+
+fn plaintext_fallback_for_obfuscated_source(source: &Ed2kFoundSource) -> Option<Ed2kFoundSource> {
+    let options = source.obfuscation_options?;
+    if options & ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT != 0 {
+        return None;
+    }
+    let mut fallback = source.clone();
+    fallback.obfuscated = false;
+    fallback.obfuscation_options = None;
+    fallback.user_hash = None;
+    Some(fallback)
+}
+
 fn merge_download_sources(target: &mut Vec<Ed2kFoundSource>, incoming: Vec<Ed2kFoundSource>) {
     let mut seen =
         target
@@ -2972,6 +3284,13 @@ fn merge_download_sources(target: &mut Vec<Ed2kFoundSource>, incoming: Vec<Ed2kF
     for source in incoming {
         if seen.insert(source_key(&source)) {
             target.push(source);
+        } else if let Some(existing) = target
+            .iter_mut()
+            .find(|existing| source_key(existing) == source_key(&source))
+            && existing.source_server.is_none()
+            && source.source_server.is_some()
+        {
+            existing.source_server = source.source_server;
         }
     }
 }
@@ -3146,6 +3465,7 @@ const PR_NORMAL: u32 = 1;
 const PR_HIGH: u32 = 2;
 const PR_VERYHIGH: u32 = 3;
 const PR_VERYLOW: u32 = 4;
+const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
 
 fn default_categories() -> BTreeMap<u32, Category> {
     BTreeMap::from([(
@@ -3710,6 +4030,300 @@ mod tests {
         assert_eq!(transfers[0].state, "completed");
         assert_eq!(transfers[0].completed_bytes, payload.len() as u64);
         assert_eq!(transfers[0].progress, 1.0);
+    }
+
+    async fn completed_ed2k_transfer_runtime(
+        test_name: &str,
+    ) -> (
+        Arc<Ed2kTransferRuntime>,
+        Arc<Ed2kSecureIdent>,
+        String,
+        String,
+        u64,
+    ) {
+        let runtime_dir = unique_runtime_dir(test_name);
+        let payload_path = runtime_dir.join("fixture.bin");
+        let payload = b"completed direct download scheduler payload".repeat(64);
+        std::fs::write(&payload_path, &payload).unwrap();
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(&runtime_dir.join("transfers")).unwrap());
+        let summary = transfer_runtime
+            .ingest_local_file(&payload_path, "fixture.bin")
+            .await
+            .unwrap();
+        let secure_ident = Arc::new(
+            Ed2kSecureIdent::load_or_create(&runtime_dir.join("secure-ident.der")).unwrap(),
+        );
+        (
+            transfer_runtime,
+            secure_ident,
+            summary.file_hash,
+            summary.canonical_name,
+            summary.file_size,
+        )
+    }
+
+    fn direct_test_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundSource {
+        Ed2kFoundSource {
+            file_hash,
+            ip,
+            tcp_port,
+            client_id: u32::from_be_bytes(ip.octets()),
+            low_id: false,
+            obfuscated: false,
+            obfuscation_options: None,
+            user_hash: None,
+            source_server: None,
+        }
+    }
+
+    fn direct_download_options(
+        transfer_runtime: Arc<Ed2kTransferRuntime>,
+        secure_ident: Arc<Ed2kSecureIdent>,
+        file_hash_hex: String,
+        file_name: String,
+        file_size: u64,
+        sources: Vec<Ed2kFoundSource>,
+    ) -> DirectDownloadOptions {
+        DirectDownloadOptions {
+            bind_ip: Ipv4Addr::new(192, 0, 2, 10),
+            hello_identity: Ed2kHelloIdentity {
+                user_hash: [0x11; 16],
+                client_id: 0,
+                tcp_port: 41001,
+                udp_port: 41000,
+                server_ip: 0,
+                server_port: 0,
+                connect_options: emule_connect_options(false),
+                direct_udp_callback: false,
+            },
+            secure_ident,
+            transfer_runtime,
+            file_hash_hex,
+            file_name,
+            file_size,
+            sources,
+            connect_timeout: Duration::from_secs(1),
+            max_parallel_download_peers: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_download_scheduler_retries_other_peer_after_failure() {
+        let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+            completed_ed2k_transfer_runtime("emulebb-core-direct-download-retry").await;
+        let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let outcome = run_ed2k_direct_downloads(
+            direct_download_options(
+                transfer_runtime,
+                secure_ident,
+                file_hash_hex,
+                file_name,
+                file_size,
+                vec![
+                    direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001),
+                    direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 11), 41002),
+                ],
+            ),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_bind_ip,
+                      source,
+                      _hello_identity,
+                      _secure_ident,
+                      _transfer_runtime,
+                      _file_name,
+                      _file_size,
+                      _connect_timeout| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.lock().await.push(source.tcp_port);
+                        if source.tcp_port == 41001 {
+                            anyhow::bail!("simulated first peer failure");
+                        }
+                        Ok(Ed2kPeerDownloadOutcome::Completed)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.completed);
+        assert_eq!(outcome.accepted_incomplete_peers, 0);
+        assert!(outcome.last_error.is_some());
+        assert_eq!(*attempts.lock().await, vec![41001, 41002]);
+    }
+
+    #[tokio::test]
+    async fn direct_download_scheduler_tracks_accepted_incomplete_peer() {
+        let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+            completed_ed2k_transfer_runtime("emulebb-core-direct-download-incomplete").await;
+        let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let outcome = run_ed2k_direct_downloads(
+            direct_download_options(
+                transfer_runtime,
+                secure_ident,
+                file_hash_hex,
+                file_name,
+                file_size,
+                vec![
+                    direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001),
+                    direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 11), 41002),
+                ],
+            ),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_bind_ip,
+                      source,
+                      _hello_identity,
+                      _secure_ident,
+                      _transfer_runtime,
+                      _file_name,
+                      _file_size,
+                      _connect_timeout| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.lock().await.push(source.tcp_port);
+                        if source.tcp_port == 41001 {
+                            return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                        }
+                        Ok(Ed2kPeerDownloadOutcome::Completed)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.completed);
+        assert_eq!(outcome.accepted_incomplete_peers, 1);
+        assert!(outcome.last_error.is_none());
+        assert_eq!(*attempts.lock().await, vec![41001, 41002]);
+    }
+
+    #[tokio::test]
+    async fn direct_download_scheduler_tries_plaintext_after_optional_obfuscated_failure() {
+        let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+            completed_ed2k_transfer_runtime("emulebb-core-direct-download-plaintext-fallback")
+                .await;
+        let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let mut source = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+        source.obfuscated = true;
+        source.obfuscation_options = Some(0x03);
+        source.user_hash = Some([0x22; 16]);
+        let outcome = run_ed2k_direct_downloads(
+            direct_download_options(
+                transfer_runtime,
+                secure_ident,
+                file_hash_hex,
+                file_name,
+                file_size,
+                vec![source],
+            ),
+            {
+                let attempts = Arc::clone(&attempts);
+                move |_bind_ip,
+                      source,
+                      _hello_identity,
+                      _secure_ident,
+                      _transfer_runtime,
+                      _file_name,
+                      _file_size,
+                      _connect_timeout| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.lock().await.push((
+                            source.tcp_port,
+                            source.obfuscated,
+                            source.user_hash.is_some(),
+                        ));
+                        if source.obfuscated {
+                            anyhow::bail!("simulated obfuscated peer close");
+                        }
+                        Ok(Ed2kPeerDownloadOutcome::Completed)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.completed);
+        assert_eq!(
+            *attempts.lock().await,
+            vec![(41001, true, true), (41001, false, false)]
+        );
+    }
+
+    #[test]
+    fn plaintext_fallback_preserves_crypt_required_sources() {
+        let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+        let mut source = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+        source.obfuscated = true;
+        source.obfuscation_options = Some(0x07);
+        source.user_hash = Some([0x22; 16]);
+
+        assert!(plaintext_fallback_for_obfuscated_source(&source).is_none());
+    }
+
+    #[test]
+    fn direct_download_candidates_deduplicate_same_endpoint_in_one_round() {
+        let file_hash = Ed2kHash::from_bytes([0x45; 16]);
+        let mut obfuscated = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+        obfuscated.obfuscated = true;
+        obfuscated.obfuscation_options = Some(0x03);
+        obfuscated.user_hash = Some([0x11; 16]);
+        let plaintext = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+
+        let candidates =
+            direct_download_candidate_sources(&[obfuscated.clone(), plaintext], &HashSet::new());
+
+        assert_eq!(candidates, vec![obfuscated]);
+    }
+
+    #[test]
+    fn direct_download_candidates_skip_attempted_endpoint_family() {
+        let file_hash = Ed2kHash::from_bytes([0x47; 16]);
+        let mut attempted_endpoints = HashSet::new();
+        attempted_endpoints.insert((Ipv4Addr::new(192, 0, 2, 10), 41001));
+        let mut obfuscated = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+        obfuscated.obfuscated = true;
+        obfuscated.obfuscation_options = Some(0x03);
+        obfuscated.user_hash = Some([0x11; 16]);
+        let next_endpoint = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 11), 41002);
+
+        let candidates = direct_download_candidate_sources(
+            &[
+                obfuscated,
+                direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001),
+                next_endpoint.clone(),
+            ],
+            &attempted_endpoints,
+        );
+
+        assert_eq!(candidates, vec![next_endpoint]);
+    }
+
+    #[test]
+    fn merge_download_sources_preserves_later_server_provenance() {
+        let file_hash = Ed2kHash::from_bytes([0x46; 16]);
+        let source_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+        let mut sources = vec![direct_test_source(
+            file_hash,
+            Ipv4Addr::new(192, 0, 2, 10),
+            41001,
+        )];
+        let mut sourced = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+        sourced.source_server = Some(source_server);
+
+        merge_download_sources(&mut sources, vec![sourced]);
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_server, Some(source_server));
     }
 
     #[test]
