@@ -572,10 +572,11 @@ async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.preferences().await)
 }
 
-async fn update_preferences(
-    State(state): State<RestState>,
-    Json(request): Json<PreferencesUpdate>,
-) -> impl IntoResponse {
+async fn update_preferences(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<PreferencesUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.update_preferences(request).await {
         Ok(preferences) => api_ok(preferences).into_response(),
         Err(error) => {
@@ -2198,8 +2199,27 @@ where
     T: DeserializeOwned,
 {
     serde_json::from_slice(body).map_err(|error| {
-        api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            json_error_message(&error),
+        )
+        .into_response()
     })
+}
+
+fn json_error_message(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    if let Some(field) = unknown_json_field(&message) {
+        return format!("unknown JSON field: {field}");
+    }
+    message
+}
+
+fn unknown_json_field(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once("unknown field `")?;
+    let (field, _) = rest.split_once('`')?;
+    Some(field)
 }
 
 fn optional_json_body<T>(body: &[u8]) -> Result<T, serde_json::Error>
@@ -2477,12 +2497,19 @@ mod tests {
                     .uri("/api/v1/app/preferences")
                     .header("X-API-Key", "secret")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"notARealPreference":true}"#))
+                    .body(Body::from(r#"{"unsupportedPreference":true}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(unknown_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(unknown_key.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(unknown_key.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            value["error"]["message"],
+            "unknown JSON field: unsupportedPreference"
+        );
 
         let invalid_range = app
             .oneshot(
