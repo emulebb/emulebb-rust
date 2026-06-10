@@ -10,10 +10,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use emulebb_core::{
-    CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare, LocalShareCreate,
-    PreferencesUpdate, Search, SearchCreate, SearchResult, SearchResultDownloadCreate,
-    ServerCreate, ServerUpdate, SharedDirectoriesUpdate, SharedFileUpdate, Transfer,
-    TransferCreate, TransferUpdate,
+    AppInfo, AppLifecycle, CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare,
+    LocalShareCreate, NetworkStatus, PreferencesUpdate, Search, SearchCreate, SearchResult,
+    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedDirectoriesUpdate,
+    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -266,7 +266,7 @@ pub fn router_with_shutdown(
             get(preferences).patch(update_preferences),
         )
         .route("/api/v1/status", get(status))
-        .route("/api/v1/stats", get(status))
+        .route("/api/v1/stats", get(stats))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/categories", get(categories).post(create_category))
         .route(
@@ -505,7 +505,7 @@ async fn require_api_key(
 }
 
 async fn app(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.app_info())
+    api_ok(app_info_response(state.core.app_info()))
 }
 
 async fn shutdown_app(
@@ -585,7 +585,11 @@ async fn update_preferences(
 }
 
 async fn status(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.status().await)
+    api_ok(status_response(&state).await)
+}
+
+async fn stats(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(stats_response(&state.core.status().await))
 }
 
 async fn snapshot(
@@ -593,7 +597,8 @@ async fn snapshot(
     Query(query): Query<SnapshotQuery>,
 ) -> impl IntoResponse {
     let limit = snapshot_limit(query.limit);
-    let status = state.core.status().await;
+    let status = status_response(&state).await;
+    let kad = kad_response(&state.core.status().await.kad);
     let shared_files = bounded(
         state
             .core
@@ -605,40 +610,38 @@ async fn snapshot(
         limit,
     );
     api_ok(json!({
-        "app": state.core.app_info(),
+        "app": app_info_response(state.core.app_info()),
         "status": status,
         "transfers": bounded(state.core.transfers().await, limit),
         "sharedFiles": shared_files,
         "uploads": bounded(state.core.uploads().await, limit),
         "uploadQueue": bounded(state.core.upload_queue().await, limit),
-        "servers": bounded(state.core.servers().await, limit),
-        "kad": status.kad,
-        "network": {
-            "ed2k": status.ed2k,
-            "kad": status.kad
-        },
+        "servers": bounded(server_responses(state.core.servers().await), limit),
+        "kad": kad,
+        "network": network_response(),
         "logs": Vec::<Value>::new()
     }))
 }
 
 async fn kad(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.status().await.kad)
+    api_ok(kad_response(&state.core.status().await.kad))
 }
 
 async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(true).await;
-    api_ok(state.core.status().await.kad)
+    api_ok(kad_response(&state.core.status().await.kad))
 }
 
 async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(false).await;
-    api_ok(state.core.status().await.kad)
+    api_ok(kad_response(&state.core.status().await.kad))
 }
 
-async fn kad_import_nodes_url(
-    State(state): State<RestState>,
-    Json(request): Json<UrlImportRequest>,
-) -> impl IntoResponse {
+async fn kad_import_nodes_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<UrlImportRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.import_kad_nodes_url(&request.url).await {
         Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
         Err(error) => {
@@ -647,10 +650,11 @@ async fn kad_import_nodes_url(
     }
 }
 
-async fn kad_bootstrap(
-    State(state): State<RestState>,
-    Json(request): Json<KadBootstrapRequest>,
-) -> impl IntoResponse {
+async fn kad_bootstrap(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<KadBootstrapRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if request.address.trim().is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -672,7 +676,7 @@ async fn kad_bootstrap(
         .bootstrap_kad(&request.address, request.port)
         .await
     {
-        Ok(status) => api_ok(status).into_response(),
+        Ok(status) => api_ok(kad_response(&status)).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -680,17 +684,18 @@ async fn kad_bootstrap(
 }
 
 async fn kad_recheck_firewall(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.recheck_kad_firewall().await)
+    api_ok(kad_response(&state.core.recheck_kad_firewall().await))
 }
 
 async fn categories(State(state): State<RestState>) -> impl IntoResponse {
     api_collection(state.core.categories().await)
 }
 
-async fn create_category(
-    State(state): State<RestState>,
-    Json(request): Json<CategoryCreate>,
-) -> impl IntoResponse {
+async fn create_category(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<CategoryCreate>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.create_category(request).await {
         Ok(category) => api_ok(category).into_response(),
         Err(error) => {
@@ -772,7 +777,7 @@ async fn delete_friend(
 }
 
 async fn servers(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(state.core.servers().await)
+    api_collection(server_responses(state.core.servers().await))
 }
 
 async fn create_server(
@@ -780,7 +785,7 @@ async fn create_server(
     Json(request): Json<ServerCreate>,
 ) -> impl IntoResponse {
     match state.core.add_server(request).await {
-        Ok(server) => api_ok(server).into_response(),
+        Ok(server) => api_ok(server_response(&server)).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -789,21 +794,21 @@ async fn create_server(
 
 async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.connect_ed2k().await {
-        Ok(status) => api_ok(status).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
+        Ok(_status) => api_ok(server_status_response(&state).await).into_response(),
+        Err(_error) => api_ok(server_status_response(&state).await).into_response(),
     }
 }
 
 async fn servers_disconnect(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.disconnect_ed2k().await)
+    state.core.disconnect_ed2k().await;
+    api_ok(server_status_response(&state).await)
 }
 
-async fn servers_import_met_url(
-    State(state): State<RestState>,
-    Json(request): Json<UrlImportRequest>,
-) -> impl IntoResponse {
+async fn servers_import_met_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<UrlImportRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     match state.core.import_server_met_url(&request.url).await {
         Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
         Err(error) => {
@@ -817,7 +822,7 @@ async fn server(
     Path(server_id): Path<String>,
 ) -> impl IntoResponse {
     match state.core.server(&server_id).await {
-        Some(server) => api_ok(server).into_response(),
+        Some(server) => api_ok(server_response(&server)).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response(),
     }
 }
@@ -828,7 +833,7 @@ async fn update_server(
     Json(request): Json<ServerUpdate>,
 ) -> impl IntoResponse {
     match state.core.update_server(&server_id, request).await {
-        Ok(Some(server)) => api_ok(server).into_response(),
+        Ok(Some(server)) => api_ok(server_response(&server)).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
@@ -843,7 +848,7 @@ async fn delete_server(
     Path(server_id): Path<String>,
 ) -> impl IntoResponse {
     match state.core.remove_server(&server_id).await {
-        Ok(Some(server)) => api_ok(server).into_response(),
+        Ok(Some(server)) => api_ok(server_response(&server)).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
@@ -858,7 +863,7 @@ async fn connect_server(
     Path(server_id): Path<String>,
 ) -> impl IntoResponse {
     match state.core.connect_ed2k_server(&server_id).await {
-        Ok(Some(status)) => api_ok(status).into_response(),
+        Ok(Some(_status)) => api_ok(server_status_response(&state).await).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
@@ -869,7 +874,15 @@ async fn connect_server(
 }
 
 async fn searches(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(state.core.searches().await)
+    api_collection(
+        state
+            .core
+            .searches()
+            .await
+            .iter()
+            .map(search_session_response)
+            .collect::<Vec<_>>(),
+    )
 }
 
 async fn create_search(
@@ -877,7 +890,7 @@ async fn create_search(
     Json(request): Json<SearchCreate>,
 ) -> impl IntoResponse {
     match state.core.create_search(request).await {
-        Ok(search) => api_ok(search).into_response(),
+        Ok(search) => api_ok(search_response(&search)).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -890,7 +903,9 @@ async fn search(
     Query(query): Query<SearchResultsQuery>,
 ) -> impl IntoResponse {
     match state.core.search(&search_id).await {
-        Some(search) => api_ok(search_results_page(search, query)).into_response(),
+        Some(search) => {
+            api_ok(search_page_response(&search_results_page(search, query))).into_response()
+        }
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response(),
     }
 }
@@ -936,10 +951,11 @@ async fn shared_files(
     api_collection_page(items, query)
 }
 
-async fn create_shared_file(
-    State(state): State<RestState>,
-    Json(request): Json<SharedFileCreateRequest>,
-) -> impl IntoResponse {
+async fn create_shared_file(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedFileCreateRequest>(&body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     if request.path.trim().is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
             .into_response();
@@ -985,12 +1001,7 @@ async fn update_shared_directories(
 
 async fn reload_shared_directories(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.reload_shared_directories().await {
-        Ok(shares) => api_ok(json!({
-            "ok": true,
-            "sharedFiles": shares.iter().map(shared_file_response).collect::<Vec<_>>(),
-            "count": shares.len()
-        }))
-        .into_response(),
+        Ok(_shares) => api_ok(json!({ "ok": true })).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1569,9 +1580,7 @@ async fn transfer_pause(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
-        }
+        Ok(None) => api_bulk_operation(vec![bulk_result_from_hash(&hash)]).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1586,9 +1595,7 @@ async fn transfer_resume(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
-        }
+        Ok(None) => api_bulk_operation(vec![bulk_result_from_hash(&hash)]).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1603,9 +1610,7 @@ async fn transfer_stop(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
-        }
+        Ok(None) => api_bulk_operation(vec![bulk_result_from_hash(&hash)]).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1650,9 +1655,7 @@ async fn transfer_delete(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
-        }
+        Ok(None) => api_bulk_operation(vec![bulk_result_from_hash(&hash)]).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1676,9 +1679,7 @@ async fn transfer_delete_files(
         Ok(Some(transfer)) => {
             api_bulk_operation(vec![bulk_result_from_transfer(&transfer)]).into_response()
         }
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
-        }
+        Ok(None) => api_bulk_operation(vec![bulk_result_from_hash(&hash)]).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -1702,11 +1703,7 @@ async fn clear_logs(Json(request): Json<LogsClearRequest>) -> impl IntoResponse 
 }
 
 async fn fallback() -> impl IntoResponse {
-    api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "route is outside the current emulebb-rust REST subset",
-    )
+    api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "API route not found")
 }
 
 fn api_ok<T: Serialize>(data: T) -> (StatusCode, Json<Value>) {
@@ -1805,6 +1802,310 @@ fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {
     items.into_iter().take(limit).collect()
 }
 
+fn lifecycle_response(lifecycle: &AppLifecycle) -> Value {
+    let shutdown = lifecycle.state == "shuttingdown" || lifecycle.state == "done";
+    json!({
+        "state": lifecycle.state,
+        "startupComplete": lifecycle.state == "running",
+        "coreReady": lifecycle.state == "running",
+        "sharedFilesReady": lifecycle.state == "running",
+        "acceptingRest": !shutdown,
+        "acceptingMutations": lifecycle.state == "running",
+        "shutdownInProgress": shutdown
+    })
+}
+
+fn app_info_response(app: AppInfo) -> Value {
+    let capabilities = app
+        .capabilities
+        .into_iter()
+        .map(|capability| (capability, Value::Bool(true)))
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+        "name": app.name,
+        "version": app.version,
+        "apiVersion": app.api_version,
+        "lifecycle": lifecycle_response(&app.lifecycle),
+        "capabilities": capabilities
+    })
+}
+
+fn stats_response(status: &Status) -> Value {
+    let ed2k_connected = status.ed2k.connected;
+    let kad_connected = status.kad.connected;
+    json!({
+        "connected": ed2k_connected || kad_connected,
+        "downloadSpeedKiBps": 0.0,
+        "uploadSpeedKiBps": 0.0,
+        "sessionDownloadedBytes": 0,
+        "sessionUploadedBytes": 0,
+        "totalDownloadedBytes": 0,
+        "totalUploadedBytes": 0,
+        "activeDownloads": status.transfers.active,
+        "activeUploads": 0,
+        "waitingUploads": 0,
+        "downloadCount": status.transfers.active + status.transfers.completed,
+        "sharedHashingActive": false,
+        "sharedHashingCount": 0,
+        "sharedFilesReady": status.lifecycle.state == "running",
+        "ed2kConnected": ed2k_connected,
+        "ed2kHighId": ed2k_connected,
+        "kadRunning": status.kad.running,
+        "kadConnected": kad_connected,
+        "kadFirewalled": status.kad.firewalled
+    })
+}
+
+async fn status_response(state: &RestState) -> Value {
+    let status = state.core.status().await;
+    let shared_file_count = state.core.shares().await.len();
+    let download_file_count = status.transfers.active + status.transfers.completed;
+    json!({
+        "lifecycle": lifecycle_response(&status.lifecycle),
+        "stats": stats_response(&status),
+        "servers": server_status_response(state).await,
+        "kad": kad_response(&status.kad),
+        "network": network_response(),
+        "sharedStartupCache": {
+            "available": false,
+            "ready": true,
+            "filePresent": false,
+            "loaded": false,
+            "rejected": false,
+            "removed": false,
+            "rejectCode": null,
+            "recordsLoaded": 0,
+            "volumesLoaded": 0,
+            "hashingCount": 0,
+            "deferredHashingActive": false,
+            "interruptedHashingInvalidatedCache": false
+        },
+        "runtimeDiagnostics": {
+            "processId": std::process::id(),
+            "knownFileCount": shared_file_count,
+            "sharedFileCount": shared_file_count,
+            "sharedHashingCount": 0,
+            "downloadFileCount": download_file_count,
+            "activeUploads": 0,
+            "waitingUploads": 0,
+            "geolocation": null
+        }
+    })
+}
+
+fn network_response() -> Value {
+    json!({
+        "ports": {
+            "tcp": 0,
+            "udp": 0,
+            "serverUdp": 0
+        },
+        "binding": {
+            "configuredAddress": "",
+            "configuredInterfaceId": "",
+            "configuredInterfaceName": "",
+            "activeConfiguredAddress": "",
+            "activeInterfaceId": "",
+            "activeInterfaceName": "",
+            "activeInterfaceIndex": 0,
+            "resolveResult": "default"
+        },
+        "vpnGuard": {
+            "enabled": false,
+            "mode": "off",
+            "allowedPublicIpCidrs": "",
+            "startupBlocked": false,
+            "startupBlockReason": ""
+        }
+    })
+}
+
+fn kad_response(kad: &NetworkStatus) -> Value {
+    let contact_count = kad.contact_count.unwrap_or(kad.peer_count);
+    json!({
+        "running": kad.running,
+        "connected": kad.connected,
+        "firewalled": kad.firewalled,
+        "bootstrapping": kad.bootstrapping.unwrap_or(false),
+        "bootstrapProgress": kad.bootstrap_progress.unwrap_or(0),
+        "contactCount": contact_count,
+        "lanMode": kad.lan_mode.unwrap_or(false),
+        "users": kad.users,
+        "files": kad.files,
+        "nodes": contact_count,
+        "indexedSources": 0,
+        "indexedKeywords": 0,
+        "operationQueued": kad.operation_queued.unwrap_or(false),
+        "alreadyRunning": kad.already_running.unwrap_or(false),
+        "blockedByVpnGuard": false,
+        "network": network_response()
+    })
+}
+
+fn server_response(server: &ServerInfo) -> Value {
+    json!({
+        "address": server.address,
+        "port": server.port,
+        "name": server.name,
+        "priority": server.priority,
+        "static": server.static_server,
+        "connected": server.connected,
+        "connecting": server.connecting,
+        "current": server.current,
+        "description": server.description,
+        "dynIp": server.dyn_ip,
+        "failedCount": server.failed_count,
+        "hardFiles": server.hard_files,
+        "ip": server.ip,
+        "ping": server.ping,
+        "softFiles": server.soft_files,
+        "version": server.version,
+        "users": server.users,
+        "files": server.files
+    })
+}
+
+fn server_responses(servers: Vec<ServerInfo>) -> Vec<Value> {
+    servers.iter().map(server_response).collect()
+}
+
+async fn server_status_response(state: &RestState) -> Value {
+    let status = state.core.status().await;
+    let servers = state.core.servers().await;
+    let current_server = servers
+        .iter()
+        .find(|server| server.current)
+        .map(server_response);
+    json!({
+        "connected": status.ed2k.connected,
+        "connecting": false,
+        "currentServer": current_server,
+        "lowId": if status.ed2k.connected { Some(false) } else { None },
+        "serverCount": servers.len()
+    })
+}
+
+fn search_status_token(status: &str) -> &str {
+    if status == "completed" {
+        "complete"
+    } else {
+        status
+    }
+}
+
+fn search_result_response(result: &SearchResult) -> Value {
+    let extension = FsPath::new(&result.name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    json!({
+        "searchId": result.search_id,
+        "method": result.method,
+        "type": result.r#type,
+        "hash": result.hash,
+        "name": result.name,
+        "sizeBytes": result.size_bytes,
+        "sources": result.sources,
+        "completeSources": result.complete_sources,
+        "fileType": result.file_type,
+        "extension": extension,
+        "complete": result.complete,
+        "knownType": result.known_type,
+        "directory": result.directory,
+        "clientIp": "",
+        "clientPort": 0,
+        "serverIp": "",
+        "serverPort": 0,
+        "clientCount": 0,
+        "serverCount": 0,
+        "kadPublishInfo": 0,
+        "rating": 0,
+        "hasComment": false,
+        "spam": false,
+        "evidence": {
+            "riskEvidence": {
+                "band": "ok",
+                "bucket": 0,
+                "score": 0,
+                "severity": "none",
+                "spam": false,
+                "reasons": []
+            },
+            "availabilityEvidence": {
+                "sources": result.sources,
+                "completeSources": result.complete_sources,
+                "complete": result.complete,
+                "clientCount": 0,
+                "serverCount": 0,
+                "kadPublishers": 0
+            },
+            "nameEvidence": {
+                "observedNames": [result.name],
+                "observedExtensions": if extension.is_empty() { json!([]) } else { json!([extension]) },
+                "canonicalNames": [result.name],
+                "ignoredNameTokens": [],
+                "divergenceGroups": [],
+                "divergent": false
+            },
+            "kadPublisherEvidence": {
+                "available": false,
+                "band": "unknown",
+                "publishers": 0,
+                "differentNames": 0,
+                "rawTrustValueCent": 0,
+                "rawTrustValue": 0.0,
+                "source": "not_kad"
+            },
+            "integrityEvidence": {
+                "hasAichHash": false,
+                "multipleAich": false,
+                "pendingHeaderCheck": false,
+                "cachedHeaderEvidence": false,
+                "claimedType": null,
+                "extensionType": null,
+                "detectedHeaderType": null
+            }
+        }
+    })
+}
+
+fn search_results_response(results: &[SearchResult]) -> Vec<Value> {
+    results.iter().map(search_result_response).collect()
+}
+
+fn search_session_response(search: &Search) -> Value {
+    json!({
+        "id": search.id,
+        "query": search.query,
+        "method": search.method,
+        "type": search.r#type,
+        "status": search_status_token(&search.status),
+        "resultCount": search.results.len()
+    })
+}
+
+fn search_response(search: &Search) -> Value {
+    json!({
+        "id": search.id,
+        "query": search.query,
+        "method": search.method,
+        "type": search.r#type,
+        "status": search_status_token(&search.status),
+        "results": search_results_response(&search.results)
+    })
+}
+
+fn search_page_response(search: &SearchResultsPage) -> Value {
+    json!({
+        "id": search.id,
+        "query": search.query,
+        "method": search.method,
+        "type": search.file_type,
+        "status": search_status_token(&search.status),
+        "results": search_results_response(&search.results)
+    })
+}
+
 fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
     let path = managed_shared_file_path(share);
     SharedFileResponse {
@@ -1860,21 +2161,45 @@ fn bulk_result_from_transfer(transfer: &Transfer) -> BulkOperationResult {
     }
 }
 
+fn bulk_result_from_hash(hash: &str) -> BulkOperationResult {
+    BulkOperationResult {
+        ok: true,
+        id: None,
+        hash: Some(hash.to_string()),
+        name: None,
+        error: None,
+    }
+}
+
 fn api_error(
     status: StatusCode,
     code: &'static str,
     message: impl Into<String>,
 ) -> (StatusCode, Json<Value>) {
+    let code = if status == StatusCode::BAD_REQUEST && code == "BAD_REQUEST" {
+        "INVALID_ARGUMENT"
+    } else {
+        code
+    };
     (
         status,
         Json(json!({
             "error": {
                 "code": code,
-                "message": message.into()
-            },
-            "meta": api_meta()
+                "message": message.into(),
+                "details": {}
+            }
         })),
     )
+}
+
+fn parse_required_json_body<T>(body: &[u8]) -> Result<T, Response>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(body).map_err(|error| {
+        api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+    })
 }
 
 fn optional_json_body<T>(body: &[u8]) -> Result<T, serde_json::Error>
@@ -1939,7 +2264,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["meta"]["apiVersion"], "v1");
+        assert_eq!(value["error"]["code"], "UNAUTHORIZED");
+        assert_eq!(value["error"]["details"], json!({}));
     }
 
     #[tokio::test]
@@ -1959,13 +2285,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["meta"]["apiVersion"], "v1");
         assert_eq!(value["data"]["name"], "eMuleBB Rust");
-        assert!(
-            value["data"]["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry == "rest.emulebb.v1")
-        );
+        assert_eq!(value["data"]["capabilities"]["rest.emulebb.v1"], true);
     }
 
     #[tokio::test]
@@ -2241,7 +2561,9 @@ mod tests {
         assert_eq!(data["uploads"].as_array().unwrap().len(), 0);
         assert_eq!(data["uploadQueue"].as_array().unwrap().len(), 0);
         assert!(data["kad"].is_object());
-        assert!(data["network"]["ed2k"].is_object());
+        assert!(data["network"]["ports"].is_object());
+        assert!(data["network"]["binding"].is_object());
+        assert!(data["network"]["vpnGuard"].is_object());
         assert_eq!(data["logs"].as_array().unwrap().len(), 0);
     }
 
@@ -2385,7 +2707,9 @@ mod tests {
         assert_eq!(create.status(), StatusCode::OK);
         let body = to_bytes(create.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["endpoint"], "192.0.2.20:4661");
+        assert!(value["data"].get("endpoint").is_none());
+        assert_eq!(value["data"]["address"], "192.0.2.20");
+        assert_eq!(value["data"]["port"], 4661);
         assert_eq!(value["data"]["priority"], "low");
         assert_eq!(value["data"]["static"], true);
 
@@ -2791,9 +3115,9 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["data"]["id"], search_id);
-        assert_eq!(value["data"]["total"], 2);
-        assert_eq!(value["data"]["offset"], 1);
-        assert_eq!(value["data"]["limit"], 1);
+        assert!(value["data"].get("total").is_none());
+        assert!(value["data"].get("offset").is_none());
+        assert!(value["data"].get("limit").is_none());
         assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
 
         let clamped = app
@@ -2809,7 +3133,7 @@ mod tests {
         assert_eq!(clamped.status(), StatusCode::OK);
         let body = to_bytes(clamped.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["limit"], 1000);
+        assert!(value["data"].get("limit").is_none());
     }
 
     #[tokio::test]

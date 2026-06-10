@@ -259,7 +259,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         )
         .await
         .unwrap();
-    assert_eq!(retired_route.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(retired_route.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -357,7 +357,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["count"], 2);
+    assert!(value["data"].get("count").is_none());
 
     let alias_response = app
         .clone()
