@@ -36,7 +36,7 @@ use emulebb_ed2k::{
     },
     kad_firewall::KadFirewallState,
 };
-use emulebb_index::{FileIndex, IndexedFile, KadLocalStoreConfig};
+use emulebb_index::{FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig};
 use emulebb_kad_dht::{DhtConfig, DhtNode, SourceResult};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
@@ -638,6 +638,7 @@ pub struct EmulebbCore {
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     transfer_root: PathBuf,
     ed2k_network: Option<Ed2kNetworkConfig>,
+    kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
     state: Arc<Mutex<CoreState>>,
 }
@@ -659,6 +660,9 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let ed2k_transfers = Ed2kTransferRuntime::load_or_create(&transfer_root)?;
+        let kad_local_store = ed2k_network
+            .as_ref()
+            .map(|network| Arc::new(Mutex::new(KadLocalStore::new(network.kad_local_store))));
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
@@ -666,6 +670,7 @@ impl EmulebbCore {
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
             ed2k_network,
+            kad_local_store,
             ed2k_runtime: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(CoreState {
                 searches: HashMap::new(),
@@ -2627,6 +2632,11 @@ impl EmulebbCore {
             .map(|runtime| runtime.dht.clone())
     }
 
+    #[cfg(test)]
+    async fn kad_local_store_config_for_tests(&self) -> Option<KadLocalStoreConfig> {
+        Some(self.kad_local_store.as_ref()?.lock().await.config())
+    }
+
     async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
         let server_state = {
             let runtime_guard = self.ed2k_runtime.lock().await;
@@ -2704,6 +2714,10 @@ impl fmt::Debug for EmulebbCore {
             .field("started_at", &self.started_at)
             .field("version", &self.version)
             .field("ed2k_network_configured", &self.ed2k_network.is_some())
+            .field(
+                "kad_local_store_configured",
+                &self.kad_local_store.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -4098,6 +4112,49 @@ mod tests {
     use emulebb_index::IndexedFile;
 
     use super::*;
+
+    fn test_network_config_with_store(
+        transfer_root: &Path,
+        kad_local_store: KadLocalStoreConfig,
+    ) -> Ed2kNetworkConfig {
+        Ed2kNetworkConfig {
+            bind_ip: Ipv4Addr::new(198, 51, 100, 10),
+            kad_bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 4665),
+            listen_port: 4662,
+            user_hash: [0x44; 16],
+            secure_ident: Arc::new(
+                Ed2kSecureIdent::load_or_create(&transfer_root.join("secure-ident.der")).unwrap(),
+            ),
+            kad_local_store,
+            config: Ed2kConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn network_config_initializes_kad_local_store() {
+        let transfer_root = unique_runtime_dir("emulebb-core-kad-local-store-config");
+        let expected = KadLocalStoreConfig {
+            enabled: true,
+            keyword_ttl: Duration::from_secs(11),
+            source_ttl: Duration::from_secs(22),
+            notes_ttl: Duration::from_secs(33),
+            keyword_capacity: 44,
+            source_capacity: 55,
+            notes_capacity: 66,
+        };
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &transfer_root,
+            Some(test_network_config_with_store(&transfer_root, expected)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            core.kad_local_store_config_for_tests().await,
+            Some(expected)
+        );
+    }
 
     #[tokio::test]
     async fn search_uses_local_index() {

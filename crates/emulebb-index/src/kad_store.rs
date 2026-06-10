@@ -97,6 +97,11 @@ impl KadLocalStore {
         }
     }
 
+    #[must_use]
+    pub fn config(&self) -> KadLocalStoreConfig {
+        self.config
+    }
+
     pub fn record_keyword_publish_batch(
         &mut self,
         target: NodeId,
