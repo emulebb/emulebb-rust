@@ -17,20 +17,22 @@ use emulebb_ed2k::{
     NatManager,
     config::Ed2kConfig,
     ed2k_server::{
-        Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile, Ed2kServerLoopOptions,
-        Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
+        Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
+        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
         Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel,
-        publish_shared_catalog_via_background_session, run_ed2k_server_loop,
-        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
-        search_source_udp_servers, search_source_via_background_session,
+        publish_shared_catalog_via_background_session, request_callback_on_server,
+        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
+        search_keyword_via_background_session, search_source_servers, search_source_udp_servers,
+        search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, run_ed2k_listener,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime,
-        Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
+        Ed2kTransferRuntime, Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot,
+        new_transfer_job,
     },
     kad_firewall::KadFirewallState,
 };
@@ -592,6 +594,12 @@ struct DirectDownloadSpawnContext<'a, DownloadFn> {
     connect_timeout: Duration,
     retry_round: u32,
     download_peer: &'a DownloadFn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ed2kServerCallbackRoute {
+    BackgroundSession,
+    SourceServer(SocketAddr),
 }
 
 #[derive(Debug)]
@@ -2140,15 +2148,99 @@ impl EmulebbCore {
         }
         let hello_identity = self.ed2k_hello_identity(network);
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
+        let callback_timeout = Duration::from_secs(network.config.connect_timeout_secs.max(30));
         let max_peers = network.config.max_parallel_download_peers.max(1);
+        let shared_catalog = self.ed2k_transfers.shared_catalog();
+        let shared_catalog_snapshot = shared_catalog.read().await.clone();
+        let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
+        let connected_search_handle = self.connected_ed2k_search_handle().await;
 
         let mut attempted_direct_endpoints = HashSet::new();
+        let mut requested_callback_sources = HashSet::new();
         let mut had_direct_sources = false;
         let mut accepted_incomplete_peers = 0u32;
         let mut last_direct_error: Option<anyhow::Error> = None;
         let mut source_requery_round = 0usize;
         loop {
             sort_download_sources(&mut sources);
+            let callback_only_sources = sources
+                .iter()
+                .filter(|source| source.low_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let callback_cancel = CancellationToken::new();
+            for source in callback_only_sources {
+                if !requested_callback_sources.insert(source_key(&source)) {
+                    continue;
+                }
+                self.ed2k_transfers
+                    .register_callback_intent(Ed2kCallbackIntent {
+                        client_id: source.client_id,
+                        file_hash: transfer.hash.clone(),
+                        canonical_name: transfer.name.clone(),
+                        file_size: transfer.size_bytes,
+                        source: Ed2kSourceHint {
+                            ip: source.ip.to_string(),
+                            tcp_port: source.tcp_port,
+                            user_hash: source.user_hash.map(hex::encode),
+                        },
+                    })
+                    .await;
+                tracing::info!(
+                    "ED2K callback requested file_hash={} client_id={} tcp_port={} source_server={} requery_round={}",
+                    transfer.hash,
+                    source.client_id,
+                    source.tcp_port,
+                    source
+                        .source_server
+                        .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
+                    source_requery_round
+                );
+                let callback_result = match ed2k_server_callback_route(
+                    source.source_server,
+                    connected_server_endpoint,
+                ) {
+                    Ed2kServerCallbackRoute::BackgroundSession => {
+                        if let Some(handle) = connected_search_handle.as_ref() {
+                            request_callback_via_background_session(
+                                handle,
+                                source.client_id,
+                                callback_timeout,
+                                &callback_cancel,
+                            )
+                            .await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "ED2K callback needs a connected background server session"
+                            ))
+                        }
+                    }
+                    Ed2kServerCallbackRoute::SourceServer(source_server) => {
+                        request_callback_on_server(Ed2kCallbackRequestOptions {
+                            bind_ip: network.bind_ip,
+                            config: &network.config,
+                            hello_identity,
+                            shared_catalog: &shared_catalog_snapshot,
+                            server_endpoint: source_server,
+                            client_id: source.client_id,
+                            timeout: callback_timeout,
+                            cancel: &callback_cancel,
+                        })
+                        .await
+                    }
+                };
+                if let Err(error) = callback_result {
+                    tracing::warn!(
+                        "ED2K callback request failed file_hash={} client_id={} source_server={}: {error}",
+                        transfer.hash,
+                        source.client_id,
+                        source
+                            .source_server
+                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
+                    );
+                }
+            }
+
             let direct_sources =
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
             had_direct_sources |= !direct_sources.is_empty();
@@ -2288,6 +2380,9 @@ impl EmulebbCore {
             return Ok(Some("completed"));
         }
         if manifest_has_ed2k_transfer_progress(&manifest) {
+            return Ok(Some("downloading"));
+        }
+        if !requested_callback_sources.is_empty() {
             return Ok(Some("downloading"));
         }
         if accepted_incomplete_peers != 0 {
@@ -2493,6 +2588,15 @@ impl EmulebbCore {
             )
         };
         server_state.read().await.connected.then_some(handle)
+    }
+
+    async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
+        let server_state = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            Arc::clone(&runtime_guard.as_ref()?.server_state)
+        };
+        let state = server_state.read().await;
+        state.connected.then_some(state.endpoint).flatten()
     }
 
     async fn publish_ed2k_shared_catalog(&self) -> Result<()> {
@@ -3393,6 +3497,19 @@ fn should_skip_no_progress_source_requery(
         && !manifest_has_progress
         && new_direct_source_count == 0
         && completed_source_requery_rounds != 0
+}
+
+fn ed2k_server_callback_route(
+    source_server: Option<SocketAddr>,
+    connected_server: Option<SocketAddr>,
+) -> Ed2kServerCallbackRoute {
+    match (source_server, connected_server) {
+        (Some(source_server), Some(connected_server)) if source_server == connected_server => {
+            Ed2kServerCallbackRoute::BackgroundSession
+        }
+        (Some(source_server), _) => Ed2kServerCallbackRoute::SourceServer(source_server),
+        (None, _) => Ed2kServerCallbackRoute::BackgroundSession,
+    }
 }
 
 fn plaintext_fallback_for_obfuscated_source(source: &Ed2kFoundSource) -> Option<Ed2kFoundSource> {
@@ -4449,6 +4566,25 @@ mod tests {
         assert!(!should_skip_no_progress_source_requery(true, true, 0, 1));
         assert!(!should_skip_no_progress_source_requery(true, false, 1, 1));
         assert!(!should_skip_no_progress_source_requery(false, false, 0, 1));
+    }
+
+    #[test]
+    fn callback_route_reuses_background_session_for_connected_server() {
+        let connected_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+        let other_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 4661));
+
+        assert_eq!(
+            ed2k_server_callback_route(Some(connected_server), Some(connected_server)),
+            Ed2kServerCallbackRoute::BackgroundSession
+        );
+        assert_eq!(
+            ed2k_server_callback_route(Some(other_server), Some(connected_server)),
+            Ed2kServerCallbackRoute::SourceServer(other_server)
+        );
+        assert_eq!(
+            ed2k_server_callback_route(None, Some(connected_server)),
+            Ed2kServerCallbackRoute::BackgroundSession
+        );
     }
 
     #[test]
