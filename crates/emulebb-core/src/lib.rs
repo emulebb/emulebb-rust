@@ -2918,8 +2918,9 @@ async fn run_selected_passive_replay(
         }
         PassiveReplaySelection::Notes(selected) => {
             let logical_key = selected.logical_key;
-            let result_count = run_passive_notes_replay(dht, selected.request).await;
-            (logical_key, result_count)
+            let note_results = run_passive_notes_replay(dht, selected.request).await;
+            remember_passive_note_results(transfer_runtime, &note_results).await;
+            (logical_key, note_results.len())
         }
     };
     snoop_queue
@@ -3022,7 +3023,7 @@ async fn remember_passive_source_results(
     }
 }
 
-async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> usize {
+async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec<KadNoteResult> {
     let cancel = CancellationToken::new();
     let file_hash = Ed2kHash::from_bytes(request.target.to_be_bytes());
     let mut stream = dht.search_notes_with_cancel_and_class(
@@ -3032,13 +3033,13 @@ async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> usi
         RpcWorkClass::Harvest,
     );
     let mut seen_notes = HashSet::new();
-    let mut result_count = 0usize;
+    let mut results = Vec::new();
     while let Some(result) = stream.next().await {
         if !seen_notes.insert(note_result_key(&result)) {
             continue;
         }
-        result_count += 1;
-        if result_count >= PASSIVE_NOTES_RESULT_TARGET {
+        results.push(result);
+        if results.len() >= PASSIVE_NOTES_RESULT_TARGET {
             cancel.cancel();
             break;
         }
@@ -3046,10 +3047,44 @@ async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> usi
     tracing::debug!(
         target = %request.target,
         size = request.size,
-        result_count,
+        result_count = results.len(),
         "completed Kad passive notes replay"
     );
-    result_count
+    results
+}
+
+async fn remember_passive_note_results(
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    results: &[KadNoteResult],
+) {
+    for result in results {
+        let file_hash = result.file_hash.to_string();
+        let Ok(manifest) = transfer_runtime.manifest(&file_hash).await else {
+            tracing::debug!(
+                file_hash,
+                "skipping passive Kad note memory for unknown transfer"
+            );
+            continue;
+        };
+        if !manifest.comment.is_empty() || manifest.rating != 0 {
+            continue;
+        }
+        let comment = result.comment.clone().unwrap_or_default();
+        let rating = result.rating.unwrap_or(0).min(5);
+        if comment.is_empty() && rating == 0 {
+            continue;
+        }
+        if let Err(error) = transfer_runtime
+            .update_shared_file_metadata(&file_hash, None, Some((&comment, rating)))
+            .await
+        {
+            tracing::debug!(
+                file_hash,
+                source_id = %result.source_id,
+                "skipping passive Kad note memory: {error:#}"
+            );
+        }
+    }
 }
 
 async fn index_passive_keyword_result(index: &Arc<Mutex<FileIndex>>, result: &KadSearchResult) {
@@ -5044,6 +5079,82 @@ mod tests {
             manifest.sources[0].user_hash.as_deref(),
             Some("52525252525252525252525252525252")
         );
+    }
+
+    #[tokio::test]
+    async fn passive_note_results_update_empty_existing_transfer_metadata() {
+        let transfer_root = unique_runtime_dir("emulebb-core-passive-note-memory");
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
+        let file_hash = Ed2kHash::from_bytes([0x42; 16]);
+        transfer_runtime
+            .ensure_job(&new_transfer_job(
+                file_hash,
+                "passive-note-target.bin".to_string(),
+                4096,
+            ))
+            .await
+            .unwrap();
+
+        remember_passive_note_results(
+            &transfer_runtime,
+            &[KadNoteResult {
+                file_hash,
+                source_id: Ed2kHash::from_bytes([0x53; 16]),
+                rating: Some(4),
+                comment: Some("clean release".to_string()),
+                source_tags: vec![],
+            }],
+        )
+        .await;
+
+        let manifest = transfer_runtime
+            .manifest(&file_hash.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.comment, "clean release");
+        assert_eq!(manifest.rating, 4);
+    }
+
+    #[tokio::test]
+    async fn passive_note_results_do_not_replace_local_transfer_metadata() {
+        let transfer_root = unique_runtime_dir("emulebb-core-passive-note-preserve");
+        let transfer_runtime =
+            Arc::new(Ed2kTransferRuntime::load_or_create(&transfer_root).unwrap());
+        let file_hash = Ed2kHash::from_bytes([0x43; 16]);
+        transfer_runtime
+            .ensure_job(&new_transfer_job(
+                file_hash,
+                "passive-note-preserve.bin".to_string(),
+                4096,
+            ))
+            .await
+            .unwrap();
+        transfer_runtime
+            .update_shared_file_metadata(&file_hash.to_string(), None, Some(("local note", 2)))
+            .await
+            .unwrap();
+
+        remember_passive_note_results(
+            &transfer_runtime,
+            &[KadNoteResult {
+                file_hash,
+                source_id: Ed2kHash::from_bytes([0x54; 16]),
+                rating: Some(5),
+                comment: Some("remote note".to_string()),
+                source_tags: vec![],
+            }],
+        )
+        .await;
+
+        let manifest = transfer_runtime
+            .manifest(&file_hash.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.comment, "local note");
+        assert_eq!(manifest.rating, 2);
     }
 
     #[test]
