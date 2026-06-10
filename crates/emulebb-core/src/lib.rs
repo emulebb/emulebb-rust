@@ -37,7 +37,7 @@ use emulebb_ed2k::{
     kad_firewall::KadFirewallState,
 };
 use emulebb_index::{FileIndex, IndexedFile};
-use emulebb_kad_dht::{DhtConfig, DhtNode};
+use emulebb_kad_dht::{DhtConfig, DhtNode, SourceResult};
 use emulebb_kad_proto::Ed2kHash;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -46,6 +46,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -623,6 +624,7 @@ struct CoreState {
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
+    dht: DhtNode,
     shutdown: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -861,10 +863,10 @@ impl EmulebbCore {
             })?);
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
-        tasks.push(dht.start());
+        tasks.push(dht.clone().start());
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
             listener: ed2k_listener,
-            dht,
+            dht: dht.clone(),
             server_state: Arc::clone(&server_state),
             kad_firewall: Arc::clone(&kad_firewall),
             secure_ident: Arc::clone(&network.secure_ident),
@@ -886,6 +888,7 @@ impl EmulebbCore {
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
+            dht,
             shutdown,
             tasks,
         });
@@ -2508,6 +2511,31 @@ impl EmulebbCore {
                 ),
             }
         }
+        if file_size != 0
+            && should_query_kad_source_supplement(
+                sources.len(),
+                network.config.kad_source_supplement_max_existing_sources,
+            )
+            && let Some(dht) = self.ed2k_dht_node().await
+        {
+            let timeout = Duration::from_secs(
+                network
+                    .config
+                    .connect_timeout_secs
+                    .max(ED2K_DOWNLOAD_KAD_SOURCE_TIMEOUT_FLOOR_SECS),
+            );
+            let existing_source_count = sources.len();
+            let kad_sources = collect_kad_ed2k_sources(&dht, file_hash, file_size, timeout).await;
+            let kad_source_count = kad_sources.len();
+            merge_download_sources(&mut sources, kad_sources);
+            tracing::info!(
+                "ED2K Kad source supplement completed file_hash={} existing_source_count={} kad_source_count={} aggregated_source_count={}",
+                file_hash,
+                existing_source_count,
+                kad_source_count,
+                sources.len()
+            );
+        }
         if sources.is_empty() {
             merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
         }
@@ -2588,6 +2616,14 @@ impl EmulebbCore {
             )
         };
         server_state.read().await.connected.then_some(handle)
+    }
+
+    async fn ed2k_dht_node(&self) -> Option<DhtNode> {
+        self.ed2k_runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.dht.clone())
     }
 
     async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
@@ -3512,6 +3548,103 @@ fn ed2k_server_callback_route(
     }
 }
 
+fn should_query_kad_source_supplement(
+    existing_source_count: usize,
+    supplement_threshold: usize,
+) -> bool {
+    existing_source_count == 0 || existing_source_count <= supplement_threshold
+}
+
+fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed2kFoundSource {
+    Ed2kFoundSource {
+        file_hash: result.file_hash,
+        ip: result.ip,
+        tcp_port: result.tcp_port,
+        client_id: u32::from(result.ip),
+        low_id: false,
+        obfuscated: result.obfuscation_options.is_some(),
+        obfuscation_options: result.obfuscation_options,
+        user_hash: Some(result.source_id.0),
+        source_server: None,
+    }
+}
+
+async fn collect_kad_ed2k_sources(
+    dht: &DhtNode,
+    file_hash: Ed2kHash,
+    file_size: u64,
+    timeout: Duration,
+) -> Vec<Ed2kFoundSource> {
+    let mut sources = Vec::new();
+    let deadline = Instant::now() + timeout;
+    let retry_delay = Duration::from_millis(ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS);
+    let mut attempts = 0usize;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        attempts += 1;
+        let cancel = CancellationToken::new();
+        let mut stream = dht.search_sources_with_cancel(file_hash, file_size, cancel.clone());
+        let sleep = tokio::time::sleep(remaining);
+        tokio::pin!(sleep);
+
+        loop {
+            tokio::select! {
+                _ = &mut sleep => {
+                    cancel.cancel();
+                    break;
+                }
+                result = stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    merge_download_sources(
+                        &mut sources,
+                        vec![kad_source_result_to_ed2k_found_source(result)],
+                    );
+                    if sources.len() >= ED2K_DOWNLOAD_KAD_SOURCE_CAP {
+                        cancel.cancel();
+                        tracing::info!(
+                            "ED2K Kad source lookup reached cap file_hash={} attempts={} source_count={}",
+                            file_hash,
+                            attempts,
+                            sources.len()
+                        );
+                        return sources;
+                    }
+                }
+            }
+        }
+
+        cancel.cancel();
+        if !sources.is_empty() {
+            tracing::info!(
+                "ED2K Kad source lookup produced file_hash={} attempts={} source_count={}",
+                file_hash,
+                attempts,
+                sources.len()
+            );
+            return sources;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining <= retry_delay {
+            break;
+        }
+        tokio::time::sleep(retry_delay).await;
+    }
+
+    tracing::info!(
+        "ED2K Kad source lookup exhausted file_hash={} attempts={} source_count=0",
+        file_hash,
+        attempts
+    );
+    sources
+}
+
 fn plaintext_fallback_for_obfuscated_source(source: &Ed2kFoundSource) -> Option<Ed2kFoundSource> {
     let options = source.obfuscation_options?;
     if options & ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT != 0 {
@@ -3714,6 +3847,9 @@ const PR_NORMAL: u32 = 1;
 const PR_HIGH: u32 = 2;
 const PR_VERYHIGH: u32 = 3;
 const PR_VERYLOW: u32 = 4;
+const ED2K_DOWNLOAD_KAD_SOURCE_CAP: usize = 64;
+const ED2K_DOWNLOAD_KAD_SOURCE_TIMEOUT_FLOOR_SECS: u64 = 45;
+const ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS: u64 = 500;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
@@ -4600,6 +4736,38 @@ mod tests {
 
         manifest.pieces[0].bytes_written = 512;
         assert!(manifest_has_ed2k_transfer_progress(&manifest));
+    }
+
+    #[test]
+    fn kad_source_supplement_runs_for_empty_or_scarce_server_sources() {
+        assert!(should_query_kad_source_supplement(0, 2));
+        assert!(should_query_kad_source_supplement(1, 2));
+        assert!(should_query_kad_source_supplement(2, 2));
+        assert!(!should_query_kad_source_supplement(3, 2));
+    }
+
+    #[test]
+    fn kad_source_result_maps_to_direct_ed2k_source() {
+        let file_hash = Ed2kHash::from_bytes([0x49; 16]);
+        let source_id = Ed2kHash::from_bytes([0x4a; 16]);
+        let source = kad_source_result_to_ed2k_found_source(SourceResult {
+            file_hash,
+            source_id,
+            ip: Ipv4Addr::new(192, 0, 2, 55),
+            tcp_port: 4662,
+            udp_port: 4672,
+            obfuscation_options: Some(0x03),
+        });
+
+        assert_eq!(source.file_hash, file_hash);
+        assert_eq!(source.ip, Ipv4Addr::new(192, 0, 2, 55));
+        assert_eq!(source.tcp_port, 4662);
+        assert_eq!(source.client_id, u32::from(Ipv4Addr::new(192, 0, 2, 55)));
+        assert!(!source.low_id);
+        assert!(source.obfuscated);
+        assert_eq!(source.obfuscation_options, Some(0x03));
+        assert_eq!(source.user_hash, Some(source_id.0));
+        assert_eq!(source.source_server, None);
     }
 
     #[test]
