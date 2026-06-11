@@ -2121,12 +2121,14 @@ fn search_result_response(result: &SearchResult) -> Value {
         "hasComment": false,
         "spam": false,
         "evidence": {
-            "riskEvidence": {
-                "band": "ok",
-                "bucket": 0,
-                "score": 0,
+            "confidence": {
+                "band": "looks_good",
+                "score": 70,
+                "fakeScore": 0,
                 "severity": "none",
                 "spam": false,
+                "userRating": 0,
+                "kadBand": "unknown",
                 "reasons": []
             },
             "availabilityEvidence": {
@@ -2144,15 +2146,6 @@ fn search_result_response(result: &SearchResult) -> Value {
                 "ignoredNameTokens": [],
                 "divergenceGroups": [],
                 "divergent": false
-            },
-            "kadPublisherEvidence": {
-                "available": false,
-                "band": "unknown",
-                "publishers": 0,
-                "differentNames": 0,
-                "rawTrustValueCent": 0,
-                "rawTrustValue": 0.0,
-                "source": "not_kad"
             },
             "integrityEvidence": {
                 "hasAichHash": false,
