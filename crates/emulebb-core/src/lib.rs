@@ -1017,10 +1017,12 @@ impl EmulebbCore {
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
-            let _ = runtime.nat.stop().await;
             for task in runtime.tasks {
                 task.abort();
             }
+            // WHY: REST disconnect must not hang behind network cleanup after a failed
+            // server dial; the runtime has already been removed and tasks aborted.
+            let _ = tokio::time::timeout(Duration::from_secs(2), runtime.nat.stop()).await;
         }
         self.ed2k_status().await
     }

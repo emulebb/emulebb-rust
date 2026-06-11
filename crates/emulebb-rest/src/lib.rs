@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{Path, RawQuery, State},
-    http::{Request, StatusCode, header, HeaderValue},
+    http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -608,7 +608,7 @@ async fn snapshot(
     };
     let limit = match snapshot_limit(query.limit) {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let status = status_response(&state).await;
     let kad = kad_response(&state.core.status().await.kad);
@@ -934,7 +934,7 @@ async fn search(
     match state.core.search(&search_id).await {
         Some(search) => match search_results_page(search, query) {
             Ok(page) => api_ok(search_page_response(&page)).into_response(),
-            Err(response) => response,
+            Err(response) => *response,
         },
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response(),
     }
@@ -1828,7 +1828,7 @@ fn api_collection<T: Serialize>(items: Vec<T>) -> (StatusCode, Json<Value>) {
 fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> Response {
     let (offset, limit) = match resolve_page_bounds(query.offset, query.limit) {
         Ok(bounds) => bounds,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let total = items.len();
     let items = items
@@ -1848,7 +1848,7 @@ fn api_collection_page<T: Serialize>(items: Vec<T>, query: PageQuery) -> Respons
 fn search_results_page(
     search: Search,
     query: SearchResultsQuery,
-) -> Result<SearchResultsPage, Response> {
+) -> Result<SearchResultsPage, Box<Response>> {
     let (offset, limit) = resolve_page_bounds(query.offset, query.limit)?;
     let _include_evidence = query.include_evidence.unwrap_or(true);
     let _exact_total = query.exact_total.unwrap_or(true);
@@ -1892,7 +1892,7 @@ fn api_meta() -> Value {
     json!({ "apiVersion": "v1" })
 }
 
-fn snapshot_limit(limit: Option<usize>) -> Result<usize, Response> {
+fn snapshot_limit(limit: Option<usize>) -> Result<usize, Box<Response>> {
     resolve_limit(limit)
 }
 
@@ -2321,11 +2321,11 @@ const PAGE_OFFSET_MAX: usize = 2_147_483_647;
 
 /// Validates an optional `limit` query value against the published bounds,
 /// returning the effective limit (default 100) or a rejection response.
-fn resolve_limit(limit: Option<usize>) -> Result<usize, Response> {
+fn resolve_limit(limit: Option<usize>) -> Result<usize, Box<Response>> {
     match limit {
-        Some(limit) if !(PAGE_LIMIT_MIN..=PAGE_LIMIT_MAX).contains(&limit) => Err(
-            out_of_range_response("limit", PAGE_LIMIT_MIN as u64, PAGE_LIMIT_MAX as u64),
-        ),
+        Some(limit) if !(PAGE_LIMIT_MIN..=PAGE_LIMIT_MAX).contains(&limit) => {
+            Err(out_of_range_response("limit", PAGE_LIMIT_MIN as u64, PAGE_LIMIT_MAX as u64).into())
+        }
         Some(limit) => Ok(limit),
         None => Ok(100),
     }
@@ -2336,11 +2336,11 @@ fn resolve_limit(limit: Option<usize>) -> Result<usize, Response> {
 fn resolve_page_bounds(
     offset: Option<usize>,
     limit: Option<usize>,
-) -> Result<(usize, usize), Response> {
+) -> Result<(usize, usize), Box<Response>> {
     let limit = resolve_limit(limit)?;
     let offset = match offset {
         Some(offset) if offset > PAGE_OFFSET_MAX => {
-            return Err(out_of_range_response("offset", 0, PAGE_OFFSET_MAX as u64));
+            return Err(out_of_range_response("offset", 0, PAGE_OFFSET_MAX as u64).into());
         }
         Some(offset) => offset,
         None => 0,
