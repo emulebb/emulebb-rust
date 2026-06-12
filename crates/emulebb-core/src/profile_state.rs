@@ -53,7 +53,7 @@ pub(crate) fn load_core_state(
     }
 
     Ok(CoreState {
-        searches: HashMap::new(),
+        searches: crate::search_state::load_searches(metadata)?,
         transfers: HashMap::new(),
         preferences,
         categories,

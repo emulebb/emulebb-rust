@@ -65,6 +65,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod profile_state;
+mod search_state;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1172,6 +1173,7 @@ impl EmulebbCore {
             updated_at: now,
             results,
         };
+        search_state::persist_search(&self.metadata_store, &search)?;
         self.state
             .lock()
             .await
@@ -1188,12 +1190,16 @@ impl EmulebbCore {
         self.state.lock().await.searches.get(search_id).cloned()
     }
 
-    pub async fn delete_search(&self, search_id: &str) -> bool {
-        self.state.lock().await.searches.remove(search_id).is_some()
+    pub async fn delete_search(&self, search_id: &str) -> Result<bool> {
+        let persisted = self.metadata_store.delete_search(search_id)?;
+        let cached = self.state.lock().await.searches.remove(search_id).is_some();
+        Ok(persisted || cached)
     }
 
-    pub async fn clear_searches(&self) {
+    pub async fn clear_searches(&self) -> Result<()> {
+        self.metadata_store.clear_searches()?;
         self.state.lock().await.searches.clear();
+        Ok(())
     }
 
     pub async fn categories(&self) -> Vec<Category> {

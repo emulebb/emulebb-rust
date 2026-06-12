@@ -944,10 +944,17 @@ async fn delete_search(
     State(state): State<RestState>,
     Path(search_id): Path<String>,
 ) -> impl IntoResponse {
-    if state.core.delete_search(&search_id).await {
-        api_ok(json!({ "deleted": true })).into_response()
-    } else {
-        api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
+    match state.core.delete_search(&search_id).await {
+        Ok(true) => api_ok(json!({ "deleted": true })).into_response(),
+        Ok(false) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
+        }
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            &error.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -967,8 +974,15 @@ async fn delete_searches(
         )
         .into_response();
     }
-    state.core.clear_searches().await;
-    api_ok(json!({ "ok": true })).into_response()
+    match state.core.clear_searches().await {
+        Ok(()) => api_ok(json!({ "ok": true })).into_response(),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            &error.to_string(),
+        )
+        .into_response(),
+    }
 }
 
 async fn shared_files(
