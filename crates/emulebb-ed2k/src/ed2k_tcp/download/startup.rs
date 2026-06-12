@@ -126,6 +126,7 @@ pub async fn download_file_from_peer(
             source_exchange_allowed,
             initial_hello_complete: false,
             initial_secure_ident_started: false,
+            peer_user_hash: peer.user_hash,
         })
         .await;
         match &session_result {

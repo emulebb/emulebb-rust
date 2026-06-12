@@ -117,6 +117,30 @@ impl Ed2kTransferRuntime {
         })
     }
 
+    pub(crate) fn add_peer_credit_delta(
+        &self,
+        user_hash: [u8; 16],
+        uploaded_delta: u64,
+        downloaded_delta: u64,
+    ) -> anyhow::Result<()> {
+        if uploaded_delta == 0 && downloaded_delta == 0 {
+            return Ok(());
+        }
+        self.metadata.add_peer_credit_delta(
+            &hex::encode(user_hash),
+            uploaded_delta,
+            downloaded_delta,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peer_credit_by_hash(
+        &self,
+        user_hash: [u8; 16],
+    ) -> anyhow::Result<Option<MetadataPeerCredit>> {
+        self.metadata.peer_credit_by_hash(&hex::encode(user_hash))
+    }
+
     fn file_priority_score(&self, file_hash: &Ed2kHash) -> i128 {
         self.metadata
             .transfer_manifest_by_hash(&file_hash.to_string())

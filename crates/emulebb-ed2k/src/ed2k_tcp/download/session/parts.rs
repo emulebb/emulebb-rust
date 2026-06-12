@@ -280,6 +280,7 @@ async fn flush_download_blocks(blocks: FlushDownloadBlocks<'_>) -> Result<()> {
         completed_block_count: &mut session_state.completed_block_count,
         session_payload_down: &mut session_state.session_payload_down,
         part_response_deadline: &mut session_state.part_response_deadline,
+        peer_user_hash: session_state.peer_user_hash,
     })
     .await
 }

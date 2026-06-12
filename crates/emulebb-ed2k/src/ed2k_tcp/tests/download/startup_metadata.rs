@@ -100,6 +100,13 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
         tcp_port: 4662,
         user_hash: Some(hex::encode([0x77; 16])),
     }));
+    assert_eq!(
+        transfer_runtime
+            .peer_credit_by_hash([0x42; 16])
+            .unwrap()
+            .map(|credit| credit.downloaded_bytes),
+        Some(payload.len() as u64)
+    );
     server.await.unwrap();
 }
 

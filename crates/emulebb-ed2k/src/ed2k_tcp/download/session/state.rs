@@ -30,6 +30,7 @@ pub(super) struct DownloadSessionState {
     pub(super) active_piece_request: Option<ActiveDownloadPiece>,
     pub(super) completed_block_count: usize,
     pub(super) session_payload_down: u64,
+    pub(super) peer_user_hash: Option<[u8; 16]>,
 }
 
 impl DownloadSessionState {
@@ -37,6 +38,7 @@ impl DownloadSessionState {
         initial_hello_complete: bool,
         initial_secure_ident_started: bool,
         source_exchange_allowed: bool,
+        peer_user_hash: Option<[u8; 16]>,
     ) -> Self {
         Self {
             peer_secure_ident: Ed2kPeerSecureIdentState::default(),
@@ -69,6 +71,7 @@ impl DownloadSessionState {
             active_piece_request: None,
             completed_block_count: 0,
             session_payload_down: 0,
+            peer_user_hash,
         }
     }
 
@@ -88,7 +91,7 @@ mod tests {
 
     #[test]
     fn secure_ident_wait_allows_peer_signature_without_peer_challenge() {
-        let mut state = DownloadSessionState::new(false, true, false);
+        let mut state = DownloadSessionState::new(false, true, false, None);
         state.peer_secure_ident.requested_peer_key = true;
         state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
         state.peer_secure_ident.challenge_for = Some(1234);
@@ -99,7 +102,7 @@ mod tests {
 
     #[test]
     fn secure_ident_wait_blocks_while_local_signature_is_pending() {
-        let mut state = DownloadSessionState::new(false, true, false);
+        let mut state = DownloadSessionState::new(false, true, false, None);
         state.peer_secure_ident.requested_peer_key = true;
         state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
         state.peer_secure_ident.challenge_for = Some(1234);

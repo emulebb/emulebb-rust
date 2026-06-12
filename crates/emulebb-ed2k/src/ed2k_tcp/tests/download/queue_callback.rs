@@ -116,6 +116,7 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
         source_exchange_allowed: true,
         initial_hello_complete: true,
         initial_secure_ident_started: true,
+        peer_user_hash: None,
     })
     .await
     .unwrap();

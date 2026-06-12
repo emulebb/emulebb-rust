@@ -89,6 +89,7 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) source_exchange_allowed: bool,
     pub(in crate::ed2k_tcp) initial_hello_complete: bool,
     pub(in crate::ed2k_tcp) initial_secure_ident_started: bool,
+    pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
 }
 
 pub(in crate::ed2k_tcp) async fn drive_download_session(
@@ -107,6 +108,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         source_exchange_allowed,
         initial_hello_complete,
         initial_secure_ident_started,
+        peer_user_hash,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(20);
     const PART_RESPONSE_GRACE: Duration = Duration::from_secs(20);
@@ -121,6 +123,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         initial_hello_complete,
         initial_secure_ident_started,
         source_exchange_allowed,
+        peer_user_hash,
     );
 
     let session_result = async {
@@ -255,6 +258,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         })?;
                     }
                     session_state.hello_complete = true;
+                    session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;
@@ -288,6 +292,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
                     session_state.hello_complete = true;
+                    session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;
@@ -1058,6 +1063,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             &mut manifest,
             peer_addr,
             transport.mode,
+            session_state.peer_user_hash,
         )
         .await?;
     }

@@ -149,6 +149,13 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
     assert_eq!(reconstructed, payload);
     drop(stream);
     server.await.unwrap();
+    assert_eq!(
+        transfer_runtime
+            .peer_credit_by_hash(peer_hello_identity().user_hash)
+            .unwrap()
+            .map(|credit| credit.uploaded_bytes),
+        Some(payload.len() as u64)
+    );
 }
 
 #[tokio::test]
@@ -213,4 +220,12 @@ async fn listener_obfuscated_upload_session_serves_verified_file_via_compressed_
     assert_eq!(reconstructed, file.payload);
     drop(transport);
     server.await.unwrap();
+    assert_eq!(
+        runtime
+            .transfer_runtime
+            .peer_credit_by_hash(peer_hello_identity().user_hash)
+            .unwrap()
+            .map(|credit| credit.uploaded_bytes),
+        Some(file.payload.len() as u64)
+    );
 }

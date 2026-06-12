@@ -45,6 +45,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     } = request;
     let is_i64 = opcode == OP_REQUESTPARTS_I64;
     let (requested, ranges) = decode_request_parts_payload(payload, is_i64)?;
+    let peer_user_hash = peer_upload_identity.user_hash;
     let Some(shared) = transfer_runtime.local_entry(&requested).await? else {
         let reply = encode_file_req_ans_nofil(&requested);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "request_parts_nofil", &reply);
@@ -99,6 +100,13 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 .write_all(&reply.packet)
                 .await
                 .with_context(|| format!("failed to send ED2K upload payload to {peer_addr}"))?;
+        }
+        if let Some(user_hash) = peer_user_hash {
+            transfer_runtime.add_peer_credit_delta(
+                user_hash,
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                0,
+            )?;
         }
     }
 

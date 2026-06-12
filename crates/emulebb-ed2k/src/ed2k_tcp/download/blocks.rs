@@ -35,6 +35,7 @@ pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {
     pub(in crate::ed2k_tcp) completed_block_count: &'a mut usize,
     pub(in crate::ed2k_tcp) session_payload_down: &'a mut u64,
     pub(in crate::ed2k_tcp) part_response_deadline: &'a mut Option<tokio::time::Instant>,
+    pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
 }
 
 pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
@@ -51,6 +52,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         completed_block_count,
         session_payload_down,
         part_response_deadline,
+        peer_user_hash,
     } = blocks;
     while pending_part_requests
         .first()
@@ -80,8 +82,11 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             ),
         );
         *completed_block_count = completed_block_count.saturating_add(1);
-        *session_payload_down =
-            session_payload_down.saturating_add(request.end.saturating_sub(request.start));
+        let downloaded_bytes = request.end.saturating_sub(request.start);
+        *session_payload_down = session_payload_down.saturating_add(downloaded_bytes);
+        if let Some(user_hash) = peer_user_hash {
+            transfer_runtime.add_peer_credit_delta(user_hash, 0, downloaded_bytes)?;
+        }
     }
     if !pending_part_requests.iter().any(|request| request.queued) {
         *part_response_deadline = None;
@@ -97,6 +102,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     manifest: &mut Ed2kResumeManifest,
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
+    peer_user_hash: Option<[u8; 16]>,
 ) -> Result<()> {
     loop {
         let Some(first_request) = pending_part_requests.first() else {
@@ -127,6 +133,9 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         *manifest = refreshed_manifest;
         if piece_completed {
             *active_piece_request = None;
+        }
+        if let Some(user_hash) = peer_user_hash {
+            transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;
         }
         dump_ed2k_tcp_download_meta(
             peer_addr,
