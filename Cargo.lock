@@ -476,6 +476,7 @@ name = "emulebb-index"
 version = "0.0.3"
 dependencies = [
  "anyhow",
+ "binrw",
  "chrono",
  "emulebb-kad-proto",
  "emulebb-metadata",

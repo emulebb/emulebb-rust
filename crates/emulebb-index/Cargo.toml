@@ -7,6 +7,7 @@ description = "Local SQLite and FTS5 index for emulebb-rust"
 
 [dependencies]
 anyhow.workspace = true
+binrw.workspace = true
 chrono.workspace = true
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }

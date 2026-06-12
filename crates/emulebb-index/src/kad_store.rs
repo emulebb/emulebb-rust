@@ -12,7 +12,10 @@ use emulebb_kad_proto::{
     SearchSourceReq, Tag, TagName, TagValue, tag_name,
 };
 
-use crate::matches_restrictive_keyword_payload;
+use crate::{
+    KadKeywordPublishSnapshot, KadNotePublishSnapshot, KadPublishCacheSnapshot,
+    KadSourcePublishSnapshot, matches_restrictive_keyword_payload,
+};
 
 const STOCK_MAX_SOURCES_PER_FILE: usize = 1000;
 const STOCK_MAX_NOTES_PER_FILE: usize = 150;
@@ -313,6 +316,136 @@ impl KadLocalStore {
             })
             .collect::<Vec<_>>();
         search_response(sender_id, request.target, results)
+    }
+
+    pub fn publish_snapshot(&mut self, now: DateTime<Utc>) -> KadPublishCacheSnapshot {
+        if !self.config.enabled {
+            return KadPublishCacheSnapshot::default();
+        }
+        purge_expired(&mut self.keyword_entries, self.config.keyword_ttl, now);
+        purge_expired(&mut self.source_entries, self.config.source_ttl, now);
+        purge_expired(&mut self.notes_entries, self.config.notes_ttl, now);
+        KadPublishCacheSnapshot {
+            keyword_publishes: self
+                .keyword_entries
+                .iter()
+                .map(|entry| KadKeywordPublishSnapshot {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    file_hash: entry.file_hash,
+                    tags: entry.tags.clone(),
+                    load: None,
+                })
+                .collect(),
+            source_publishes: self
+                .source_entries
+                .iter()
+                .map(|entry| KadSourcePublishSnapshot {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    publisher_id: entry.publisher_id,
+                    source_ip: entry.source_ip,
+                    source_tcp_port: entry.source_tcp_port,
+                    source_udp_port: entry.source_udp_port,
+                    tags: entry.tags.clone(),
+                    load: None,
+                })
+                .collect(),
+            note_publishes: self
+                .notes_entries
+                .iter()
+                .map(|entry| KadNotePublishSnapshot {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    publisher_id: entry.publisher_id,
+                    publisher_ip: entry.publisher_ip,
+                    tags: entry.tags.clone(),
+                    load: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn merge_publish_snapshot(
+        &mut self,
+        snapshot: KadPublishCacheSnapshot,
+        now: DateTime<Utc>,
+    ) {
+        if !self.config.enabled {
+            return;
+        }
+        for entry in snapshot.keyword_publishes {
+            if entry.observed_at + self.config.keyword_ttl <= now {
+                continue;
+            }
+            let Some(size) = stock_keyword_file_size(&entry.tags) else {
+                continue;
+            };
+            let dedup_key = keyword_dedup_key(entry.target, entry.file_hash, size);
+            upsert_entry(
+                &mut self.keyword_entries,
+                self.config.keyword_capacity,
+                dedup_key.clone(),
+                StoredKeywordPublish {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    file_hash: entry.file_hash,
+                    tags: entry.tags,
+                    dedup_key,
+                },
+            );
+        }
+        for entry in snapshot.source_publishes {
+            if entry.observed_at + self.config.source_ttl <= now
+                || entry.source_ip.octets() == [0, 0, 0, 0]
+                || entry.source_tcp_port == 0
+                || entry.source_udp_port == 0
+            {
+                continue;
+            }
+            upsert_source_entry(
+                &mut self.source_entries,
+                self.config.source_capacity,
+                StoredSourcePublish {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    publisher_id: entry.publisher_id,
+                    source_ip: entry.source_ip,
+                    source_tcp_port: entry.source_tcp_port,
+                    source_udp_port: entry.source_udp_port,
+                    tags: entry.tags,
+                    dedup_key: source_dedup_key(
+                        entry.target,
+                        entry.source_ip,
+                        entry.source_tcp_port,
+                        entry.source_udp_port,
+                    ),
+                },
+            );
+        }
+        for entry in snapshot.note_publishes {
+            if entry.observed_at + self.config.notes_ttl <= now
+                || entry.publisher_ip.octets() == [0, 0, 0, 0]
+            {
+                continue;
+            }
+            upsert_notes_entry(
+                &mut self.notes_entries,
+                self.config.notes_capacity,
+                StoredNotesPublish {
+                    observed_at: entry.observed_at,
+                    target: entry.target,
+                    publisher_id: entry.publisher_id,
+                    publisher_ip: entry.publisher_ip,
+                    tags: entry.tags,
+                    dedup_key: notes_dedup_key(
+                        entry.target,
+                        entry.publisher_id,
+                        entry.publisher_ip,
+                    ),
+                },
+            );
+        }
     }
 
     #[cfg(test)]

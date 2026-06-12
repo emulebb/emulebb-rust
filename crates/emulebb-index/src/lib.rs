@@ -6,11 +6,16 @@ use emulebb_metadata::{
 };
 use serde::{Deserialize, Serialize};
 
+mod kad_publish_snapshot;
 mod kad_search_expr;
 mod kad_store;
 mod snoop_model;
 mod snoop_queue;
 
+pub use kad_publish_snapshot::{
+    KadKeywordPublishSnapshot, KadNotePublishSnapshot, KadPublishCacheSnapshot,
+    KadSourcePublishSnapshot, metadata_from_publish_snapshot, publish_snapshot_from_metadata,
+};
 pub use kad_search_expr::matches_restrictive_keyword_payload;
 pub use kad_store::{KadLocalStore, KadLocalStoreConfig};
 pub use snoop_model::{SnoopEntry, SnoopQueueConfig};
