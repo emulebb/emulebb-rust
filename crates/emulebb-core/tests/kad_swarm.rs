@@ -2,8 +2,12 @@ mod kad_swarm_support;
 
 use std::time::Duration;
 
+use emulebb_core::{LocalShareCreate, TransferCreate};
 use emulebb_kad_proto::{Ed2kHash, Tag, TagValue, tag_name};
-use kad_swarm_support::{LocalKadSwarm, file_hash, node_id};
+use kad_swarm_support::{
+    LocalKadSwarm, deterministic_payload, file_hash, free_lan_tcp_port, node_id, open_network_core,
+    unique_test_dir, wait_for_completed_transfer, wait_for_kad_connected,
+};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -163,4 +167,69 @@ async fn local_kad_swarm_publishes_and_searches_notes() {
     );
     assert_eq!(found.rating, Some(4));
     assert_eq!(found.comment.as_deref(), Some("useful sample"));
+}
+
+#[tokio::test]
+async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
+    let swarm = LocalKadSwarm::with_star_topology(4).await;
+    let bootstrap = swarm.nodes[0].addr;
+    let bind_ip = swarm.bind_ip();
+    let runtime_dir = unique_test_dir("kad-source-ed2k-transfer");
+    let payload_name = "Kad Unicode Transfer äöü 漢.bin";
+    let payload = deterministic_payload(2 * 1024 * 1024 + 17);
+    let shared_root = runtime_dir.join("shared");
+    std::fs::create_dir_all(&shared_root).expect("create shared root");
+    let payload_path = shared_root.join(payload_name);
+    std::fs::write(&payload_path, &payload).expect("write shared payload");
+
+    let seed_core = open_network_core(
+        &runtime_dir.join("seed"),
+        bind_ip,
+        bootstrap,
+        free_lan_tcp_port(bind_ip),
+        [0x31; 16],
+        true,
+    );
+    let share = seed_core
+        .share_local_file(LocalShareCreate {
+            path: payload_path.display().to_string(),
+            name: Some(payload_name.to_string()),
+        })
+        .await
+        .expect("share seed payload");
+    seed_core.connect_ed2k().await.expect("start seed network");
+    wait_for_kad_connected(&seed_core).await;
+
+    let download_core = open_network_core(
+        &runtime_dir.join("download"),
+        bind_ip,
+        bootstrap,
+        free_lan_tcp_port(bind_ip),
+        [0x32; 16],
+        false,
+    );
+    download_core
+        .connect_ed2k()
+        .await
+        .expect("start downloader network");
+    wait_for_kad_connected(&download_core).await;
+
+    let transfer = download_core
+        .create_transfer(TransferCreate {
+            link: Some(share.ed2k_link.clone()),
+            links: None,
+            paused: Some(true),
+            category_id: None,
+            category_name: None,
+        })
+        .await
+        .expect("queue Kad-discovered transfer");
+    download_core
+        .resume_transfer(&transfer.hash)
+        .await
+        .expect("resume Kad-discovered transfer");
+
+    let completed = wait_for_completed_transfer(&download_core, &transfer.hash).await;
+    assert_eq!(completed.size_bytes, payload.len() as u64);
+    assert_eq!(completed.completed_bytes, payload.len() as u64);
 }
