@@ -56,6 +56,14 @@ impl FileIndex {
         })
     }
 
+    pub fn from_metadata_store(store: MetadataStore) -> Self {
+        Self { store }
+    }
+
+    pub fn metadata_store(&self) -> MetadataStore {
+        self.store.clone()
+    }
+
     pub fn upsert_file(&mut self, file: &IndexedFile) -> Result<()> {
         self.store.upsert_indexed_file(&MetadataIndexedFile {
             ed2k_hash: file.ed2k_hash.clone(),

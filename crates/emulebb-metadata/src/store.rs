@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,9 +14,9 @@ use crate::{
     text::{normalize_path_key, normalize_search_text},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetadataStore {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl MetadataStore {
@@ -31,9 +32,17 @@ impl MetadataStore {
     pub fn from_connection(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
         store.ensure_schema()?;
         Ok(store)
+    }
+
+    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("metadata database mutex poisoned"))
     }
 
     fn ensure_schema(&mut self) -> Result<()> {
@@ -50,7 +59,7 @@ impl MetadataStore {
     }
 
     fn table_exists(&self, table: &str) -> Result<bool> {
-        self.conn
+        self.connection()?
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1 LIMIT 1",
                 params![table],
@@ -62,7 +71,7 @@ impl MetadataStore {
     }
 
     fn has_user_tables(&self) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
+        let count: i64 = self.connection()?.query_row(
             r#"
             SELECT count(*)
             FROM sqlite_master
@@ -77,7 +86,7 @@ impl MetadataStore {
 
     fn verify_schema_marker(&self) -> Result<()> {
         let marker = self
-            .conn
+            .connection()?
             .query_row(
                 "SELECT schema_version FROM metadata_schema WHERE schema_id = ?1",
                 params![SCHEMA_ID],
@@ -95,7 +104,8 @@ impl MetadataStore {
     fn create_schema(&mut self) -> Result<()> {
         let now = unix_ms();
         let profile_uuid = Uuid::new_v4().to_string();
-        let tx = self.conn.transaction()?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA_SQL)?;
         tx.execute(
             "INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms) VALUES (?1, ?2, ?3)",
@@ -116,7 +126,8 @@ impl MetadataStore {
         let hash = decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?;
         let normalized = normalize_search_text(&file.name);
         let now = unix_ms();
-        let tx = self.conn.transaction()?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
 
         tx.execute(
             r#"
@@ -194,7 +205,8 @@ impl MetadataStore {
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), file_names.name, known_files.size_bytes,
                    known_files.content_type, known_files.availability_score
@@ -224,7 +236,7 @@ impl MetadataStore {
         ed2k_hash: &str,
     ) -> Result<Option<MetadataIndexedFile>> {
         let hash = decode_fixed_hex(ed2k_hash, 16, "ED2K hash")?;
-        self.conn
+        self.connection()?
             .query_row(
                 r#"
                 SELECT lower(hex(known_files.ed2k_hash)), file_names.name, known_files.size_bytes,
@@ -255,7 +267,8 @@ impl MetadataStore {
         roots: &[MetadataSharedDirectoryRoot],
     ) -> Result<()> {
         let now = unix_ms();
-        let tx = self.conn.transaction()?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
         tx.execute(
             "UPDATE shared_directory_roots SET deleted_at_ms = ?1 WHERE deleted_at_ms IS NULL",
             params![now],
@@ -292,7 +305,8 @@ impl MetadataStore {
     }
 
     pub fn shared_directory_roots(&self) -> Result<Vec<MetadataSharedDirectoryRoot>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
             r#"
             SELECT local_paths.display_path,
                    shared_directory_roots.recursive,
@@ -326,7 +340,7 @@ impl MetadataStore {
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
             "invalid table name"
         );
-        self.conn
+        self.connection()?
             .query_row(&format!("SELECT count(*) FROM {table_name}"), [], |row| {
                 row.get(0)
             })
@@ -334,7 +348,11 @@ impl MetadataStore {
     }
 }
 
-fn upsert_local_path(tx: &rusqlite::Transaction<'_>, display_path: &str, now: i64) -> Result<i64> {
+pub(crate) fn upsert_local_path(
+    tx: &rusqlite::Transaction<'_>,
+    display_path: &str,
+    now: i64,
+) -> Result<i64> {
     let normalized_key = normalize_path_key(display_path);
     let platform = current_platform();
     tx.execute(
@@ -366,7 +384,7 @@ fn upsert_local_path(tx: &rusqlite::Transaction<'_>, display_path: &str, now: i6
     .map_err(Into::into)
 }
 
-fn current_platform() -> &'static str {
+pub(crate) fn current_platform() -> &'static str {
     if cfg!(windows) {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -376,11 +394,11 @@ fn current_platform() -> &'static str {
     }
 }
 
-fn bool_to_i64(value: bool) -> i64 {
+pub(crate) fn bool_to_i64(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
 
-fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Result<Vec<u8>> {
+pub(crate) fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Result<Vec<u8>> {
     let clean = value.trim();
     ensure!(
         clean.len() == byte_len * 2,
@@ -394,7 +412,7 @@ fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Result<Vec<u8>
     Ok(out)
 }
 
-fn unix_ms() -> i64 {
+pub(crate) fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -423,7 +441,7 @@ mod tests {
         let error = MetadataStore::from_connection(conn)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("not emulebb.metadata.clean-v1"));
+        assert!(error.contains("not emulebb.metadata.clean-v2"));
     }
 
     #[test]

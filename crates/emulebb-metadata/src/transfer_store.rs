@@ -1,0 +1,595 @@
+use anyhow::Result;
+use rusqlite::{OptionalExtension, params};
+
+use crate::{
+    store::{bool_to_i64, decode_fixed_hex, unix_ms},
+    transfer_model::{
+        MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange,
+        MetadataTransferSource,
+    },
+};
+
+impl super::MetadataStore {
+    pub fn upsert_transfer_manifest(&self, manifest: &MetadataTransferManifest) -> Result<()> {
+        let hash = decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?;
+        let aich_root = optional_fixed_hex(manifest.aich_root.as_deref(), 20, "AICH root")?;
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            r#"
+            INSERT INTO content_objects(
+                kind, primary_hash_kind, primary_hash, display_name, size_bytes,
+                first_seen_ms, last_seen_ms, updated_at_ms
+            )
+            VALUES ('ed2k_file', 'ed2k', ?1, ?2, ?3, ?4, ?4, ?4)
+            ON CONFLICT(kind, primary_hash_kind, primary_hash) DO UPDATE SET
+                display_name = excluded.display_name,
+                size_bytes = excluded.size_bytes,
+                last_seen_ms = excluded.last_seen_ms,
+                updated_at_ms = excluded.updated_at_ms,
+                deleted_at_ms = NULL
+            "#,
+            params![
+                hash,
+                manifest.canonical_name,
+                manifest.file_size as i64,
+                now
+            ],
+        )?;
+        let content_object_id: i64 = tx.query_row(
+            r#"
+            SELECT id FROM content_objects
+            WHERE kind = 'ed2k_file' AND primary_hash_kind = 'ed2k' AND primary_hash = ?1
+            "#,
+            params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
+            |row| row.get(0),
+        )?;
+
+        tx.execute(
+            r#"
+            INSERT INTO known_files(
+                content_object_id, ed2k_hash, size_bytes, canonical_name,
+                part_size, part_count, completed, md4_hashset_acquired,
+                aich_hashset_acquired, aich_root, upload_priority,
+                auto_upload_priority, comment, rating,
+                first_seen_ms, last_seen_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)
+            ON CONFLICT(ed2k_hash) DO UPDATE SET
+                content_object_id = excluded.content_object_id,
+                size_bytes = excluded.size_bytes,
+                canonical_name = excluded.canonical_name,
+                part_size = excluded.part_size,
+                part_count = excluded.part_count,
+                completed = excluded.completed,
+                md4_hashset_acquired = excluded.md4_hashset_acquired,
+                aich_hashset_acquired = excluded.aich_hashset_acquired,
+                aich_root = excluded.aich_root,
+                upload_priority = excluded.upload_priority,
+                auto_upload_priority = excluded.auto_upload_priority,
+                comment = excluded.comment,
+                rating = excluded.rating,
+                last_seen_ms = excluded.last_seen_ms,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                content_object_id,
+                decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?,
+                manifest.file_size as i64,
+                manifest.canonical_name,
+                manifest.piece_size as i64,
+                manifest.pieces.len() as i64,
+                bool_to_i64(manifest.completed),
+                bool_to_i64(manifest.md4_hashset_acquired),
+                bool_to_i64(manifest.aich_hashset_acquired),
+                aich_root,
+                manifest.upload_priority,
+                bool_to_i64(manifest.auto_upload_priority),
+                manifest.comment,
+                i64::from(manifest.rating),
+                now,
+            ],
+        )?;
+        let known_file_id: i64 = tx.query_row(
+            "SELECT id FROM known_files WHERE ed2k_hash = ?1",
+            params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
+            |row| row.get(0),
+        )?;
+
+        tx.execute(
+            r#"
+            INSERT INTO transfers(
+                known_file_id, visible_state, control_state, priority,
+                payload_directory, created_at_ms, updated_at_ms, completed_at_ms, removed_at_ms
+            )
+            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?5, ?6, ?7)
+            ON CONFLICT(known_file_id) DO UPDATE SET
+                visible_state = excluded.visible_state,
+                control_state = excluded.control_state,
+                payload_directory = excluded.payload_directory,
+                updated_at_ms = excluded.updated_at_ms,
+                completed_at_ms = excluded.completed_at_ms,
+                removed_at_ms = excluded.removed_at_ms
+            "#,
+            params![
+                known_file_id,
+                visible_state(manifest),
+                manifest.control_state,
+                manifest.file_hash,
+                now,
+                if manifest.completed { Some(now) } else { None },
+                if manifest.transfer_row_removed {
+                    Some(now)
+                } else {
+                    None
+                },
+            ],
+        )?;
+        let transfer_id: i64 = tx.query_row(
+            "SELECT id FROM transfers WHERE known_file_id = ?1",
+            params![known_file_id],
+            |row| row.get(0),
+        )?;
+
+        replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn transfer_manifest_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<MetadataTransferManifest>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT known_files.id, transfers.id,
+                       lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                       known_files.size_bytes, coalesce(known_files.part_size, 0),
+                       known_files.completed, known_files.md4_hashset_acquired,
+                       known_files.aich_hashset_acquired,
+                       CASE
+                           WHEN known_files.aich_root IS NULL THEN NULL
+                           ELSE lower(hex(known_files.aich_root))
+                       END,
+                       known_files.upload_priority, known_files.auto_upload_priority,
+                       known_files.comment, known_files.rating,
+                       transfers.control_state, transfers.removed_at_ms
+                FROM known_files
+                JOIN transfers ON transfers.known_file_id = known_files.id
+                WHERE known_files.ed2k_hash = ?1
+                "#,
+                params![hash],
+                |row| {
+                    Ok(TransferRow {
+                        known_file_id: row.get(0)?,
+                        transfer_id: row.get(1)?,
+                        file_hash: row.get(2)?,
+                        canonical_name: row.get(3)?,
+                        file_size: row.get::<_, i64>(4)? as u64,
+                        piece_size: row.get::<_, i64>(5)? as u64,
+                        completed: row.get::<_, i64>(6)? != 0,
+                        md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                        aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
+                        aich_root: row.get(9)?,
+                        upload_priority: row.get(10)?,
+                        auto_upload_priority: row.get::<_, i64>(11)? != 0,
+                        comment: row.get(12)?,
+                        rating: row.get::<_, i64>(13)? as u8,
+                        control_state: row.get(14)?,
+                        transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                    })
+                },
+            )
+            .optional()?;
+        row.map(|row| manifest_from_row(&conn, row)).transpose()
+    }
+
+    pub fn transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT known_files.id, transfers.id,
+                   lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                   known_files.size_bytes, coalesce(known_files.part_size, 0),
+                   known_files.completed, known_files.md4_hashset_acquired,
+                   known_files.aich_hashset_acquired,
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.comment, known_files.rating,
+                   transfers.control_state, transfers.removed_at_ms
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TransferRow {
+                known_file_id: row.get(0)?,
+                transfer_id: row.get(1)?,
+                file_hash: row.get(2)?,
+                canonical_name: row.get(3)?,
+                file_size: row.get::<_, i64>(4)? as u64,
+                piece_size: row.get::<_, i64>(5)? as u64,
+                completed: row.get::<_, i64>(6)? != 0,
+                md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
+                aich_root: row.get(9)?,
+                upload_priority: row.get(10)?,
+                auto_upload_priority: row.get::<_, i64>(11)? != 0,
+                comment: row.get(12)?,
+                rating: row.get::<_, i64>(13)? as u8,
+                control_state: row.get(14)?,
+                transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+            })
+        })?;
+        rows.map(|row| manifest_from_row(&conn, row?))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM known_files WHERE ed2k_hash = ?1",
+            params![hash],
+        )?;
+        tx.commit()?;
+        Ok(changed != 0)
+    }
+}
+
+#[derive(Debug)]
+struct TransferRow {
+    known_file_id: i64,
+    transfer_id: i64,
+    file_hash: String,
+    canonical_name: String,
+    file_size: u64,
+    piece_size: u64,
+    completed: bool,
+    md4_hashset_acquired: bool,
+    aich_hashset_acquired: bool,
+    aich_root: Option<String>,
+    upload_priority: String,
+    auto_upload_priority: bool,
+    comment: String,
+    rating: u8,
+    control_state: Option<String>,
+    transfer_row_removed: bool,
+}
+
+fn replace_transfer_children(
+    tx: &rusqlite::Transaction<'_>,
+    known_file_id: i64,
+    transfer_id: i64,
+    manifest: &MetadataTransferManifest,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM transfer_pieces WHERE transfer_id = ?1",
+        params![transfer_id],
+    )?;
+    tx.execute(
+        "DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1",
+        params![known_file_id],
+    )?;
+    tx.execute(
+        "DELETE FROM aich_part_hashes WHERE known_file_id = ?1",
+        params![known_file_id],
+    )?;
+    tx.execute(
+        "DELETE FROM verified_ranges WHERE known_file_id = ?1",
+        params![known_file_id],
+    )?;
+    tx.execute(
+        "DELETE FROM transfer_sources WHERE transfer_id = ?1",
+        params![transfer_id],
+    )?;
+
+    for piece in &manifest.pieces {
+        tx.execute(
+            r#"
+            INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                transfer_id,
+                i64::from(piece.piece_index),
+                piece.state,
+                piece.bytes_written as i64,
+                now,
+            ],
+        )?;
+    }
+    for (index, hash) in manifest.md4_hashset.iter().enumerate() {
+        tx.execute(
+            r#"
+            INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                known_file_id,
+                index as i64,
+                decode_fixed_hex(hash, 16, "MD4 part hash")?,
+            ],
+        )?;
+    }
+    for (index, hash) in manifest.aich_hashset.iter().enumerate() {
+        tx.execute(
+            r#"
+            INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                known_file_id,
+                index as i64,
+                decode_fixed_hex(hash, 20, "AICH part hash")?,
+            ],
+        )?;
+    }
+    for range in &manifest.verified_ranges {
+        tx.execute(
+            r#"
+            INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, source_kind, created_at_ms)
+            VALUES (?1, ?2, ?3, 'ed2k_transfer', ?4)
+            "#,
+            params![known_file_id, range.start as i64, range.end as i64, now],
+        )?;
+    }
+    for source in &manifest.sources {
+        tx.execute(
+            r#"
+            INSERT INTO transfer_sources(
+                transfer_id, ip, tcp_port, user_hash, first_seen_ms, last_seen_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "#,
+            params![
+                transfer_id,
+                source.ip,
+                i64::from(source.tcp_port),
+                optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
+                now,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn manifest_from_row(
+    conn: &rusqlite::Connection,
+    row: TransferRow,
+) -> Result<MetadataTransferManifest> {
+    Ok(MetadataTransferManifest {
+        file_hash: row.file_hash,
+        canonical_name: row.canonical_name,
+        file_size: row.file_size,
+        piece_size: row.piece_size,
+        completed: row.completed,
+        md4_hashset_acquired: row.md4_hashset_acquired,
+        md4_hashset: read_hex_list(
+            conn,
+            "SELECT lower(hex(md4_hash)) FROM ed2k_part_hashes WHERE known_file_id = ?1 ORDER BY part_index",
+            row.known_file_id,
+        )?,
+        aich_hashset_acquired: row.aich_hashset_acquired,
+        aich_root: row.aich_root,
+        aich_hashset: read_hex_list(
+            conn,
+            "SELECT lower(hex(aich_hash)) FROM aich_part_hashes WHERE known_file_id = ?1 ORDER BY part_index",
+            row.known_file_id,
+        )?,
+        verified_ranges: read_ranges(conn, row.known_file_id)?,
+        pieces: read_pieces(conn, row.transfer_id)?,
+        sources: read_sources(conn, row.transfer_id)?,
+        upload_priority: row.upload_priority,
+        auto_upload_priority: row.auto_upload_priority,
+        comment: row.comment,
+        rating: row.rating,
+        control_state: row.control_state,
+        transfer_row_removed: row.transfer_row_removed,
+    })
+}
+
+fn read_hex_list(conn: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![id], |row| row.get(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_pieces(
+    conn: &rusqlite::Connection,
+    transfer_id: i64,
+) -> Result<Vec<MetadataTransferPiece>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT piece_index, state, bytes_written
+        FROM transfer_pieces
+        WHERE transfer_id = ?1
+        ORDER BY piece_index
+        "#,
+    )?;
+    let rows = stmt.query_map(params![transfer_id], |row| {
+        Ok(MetadataTransferPiece {
+            piece_index: row.get::<_, i64>(0)? as u32,
+            state: row.get(1)?,
+            bytes_written: row.get::<_, i64>(2)? as u64,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_ranges(
+    conn: &rusqlite::Connection,
+    known_file_id: i64,
+) -> Result<Vec<MetadataTransferRange>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT start_offset, end_offset
+        FROM verified_ranges
+        WHERE known_file_id = ?1
+        ORDER BY start_offset, end_offset
+        "#,
+    )?;
+    let rows = stmt.query_map(params![known_file_id], |row| {
+        Ok(MetadataTransferRange {
+            start: row.get::<_, i64>(0)? as u64,
+            end: row.get::<_, i64>(1)? as u64,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_sources(
+    conn: &rusqlite::Connection,
+    transfer_id: i64,
+) -> Result<Vec<MetadataTransferSource>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT ip, tcp_port,
+               CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END
+        FROM transfer_sources
+        WHERE transfer_id = ?1
+        ORDER BY id
+        "#,
+    )?;
+    let rows = stmt.query_map(params![transfer_id], |row| {
+        Ok(MetadataTransferSource {
+            ip: row.get(0)?,
+            tcp_port: row.get::<_, i64>(1)? as u16,
+            user_hash: row.get(2)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn optional_fixed_hex(
+    value: Option<&str>,
+    byte_len: usize,
+    label: &str,
+) -> Result<Option<Vec<u8>>> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| decode_fixed_hex(value, byte_len, label))
+        .transpose()
+}
+
+fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
+    if manifest.completed {
+        "completed"
+    } else if manifest.control_state.is_some() {
+        "controlled"
+    } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
+        "downloading"
+    } else {
+        "queued"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MetadataStore;
+
+    #[test]
+    fn transfer_manifest_roundtrips_sql_tables() {
+        let store = MetadataStore::in_memory().unwrap();
+        let manifest = MetadataTransferManifest {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            canonical_name: "Sample.Transfer.bin".to_string(),
+            file_size: 1024,
+            piece_size: 1024,
+            completed: true,
+            md4_hashset_acquired: true,
+            md4_hashset: Vec::new(),
+            aich_hashset_acquired: true,
+            aich_root: Some("1111111111111111111111111111111111111111".to_string()),
+            aich_hashset: vec!["2222222222222222222222222222222222222222".to_string()],
+            verified_ranges: vec![MetadataTransferRange {
+                start: 0,
+                end: 1024,
+            }],
+            pieces: vec![MetadataTransferPiece {
+                piece_index: 0,
+                state: "Verified".to_string(),
+                bytes_written: 1024,
+            }],
+            sources: vec![MetadataTransferSource {
+                ip: "192.0.2.10".to_string(),
+                tcp_port: 4662,
+                user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            }],
+            upload_priority: "high".to_string(),
+            auto_upload_priority: true,
+            comment: "synthetic comment".to_string(),
+            rating: 4,
+            control_state: Some("paused".to_string()),
+            transfer_row_removed: false,
+        };
+
+        store.upsert_transfer_manifest(&manifest).unwrap();
+        let restored = store
+            .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(restored, manifest);
+        assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
+    }
+
+    #[test]
+    fn delete_transfer_manifest_removes_transfer_rows() {
+        let store = MetadataStore::in_memory().unwrap();
+        let manifest = MetadataTransferManifest {
+            file_hash: "00112233445566778899aabbccddeeff".to_string(),
+            canonical_name: "Sample.Transfer.bin".to_string(),
+            file_size: 1,
+            piece_size: 1,
+            completed: false,
+            md4_hashset_acquired: false,
+            md4_hashset: Vec::new(),
+            aich_hashset_acquired: false,
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            verified_ranges: Vec::new(),
+            pieces: vec![MetadataTransferPiece {
+                piece_index: 0,
+                state: "Missing".to_string(),
+                bytes_written: 0,
+            }],
+            sources: Vec::new(),
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            control_state: None,
+            transfer_row_removed: false,
+        };
+        store.upsert_transfer_manifest(&manifest).unwrap();
+
+        assert!(
+            store
+                .delete_transfer_manifest("00112233445566778899aabbccddeeff")
+                .unwrap()
+        );
+        assert!(
+            store
+                .transfer_manifest_by_hash("00112233445566778899aabbccddeeff")
+                .unwrap()
+                .is_none()
+        );
+    }
+}

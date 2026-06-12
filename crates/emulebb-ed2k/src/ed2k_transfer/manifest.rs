@@ -1,18 +1,11 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::Path,
-    str::FromStr,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{str::FromStr, time::Instant};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use md4::{Digest as Md4Digest, Md4};
 
 use super::{
-    ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kTransferJob,
-    Ed2kTransferState, MANIFEST_FILE_NAME,
+    ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob, Ed2kTransferState,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -27,70 +20,6 @@ pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {
         .iter()
         .map(|piece| piece.bytes_written)
         .sum::<u64>()
-}
-
-pub(super) fn load_catalog_from_manifests(root_dir: &Path) -> Result<Vec<Ed2kSharedEntry>> {
-    if !root_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut entries = Vec::new();
-    for child in fs::read_dir(root_dir)
-        .with_context(|| format!("failed to enumerate {}", root_dir.display()))?
-    {
-        let child = child?;
-        let manifest_path = child.path().join(MANIFEST_FILE_NAME);
-        if !manifest_path.exists() {
-            continue;
-        }
-        let bytes = fs::read(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        let manifest: Ed2kResumeManifest = match serde_json::from_slice(&bytes) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                tracing::warn!(
-                    "skipping malformed ED2K manifest {} during catalog load: {error}",
-                    manifest_path.display()
-                );
-                continue;
-            }
-        };
-        if manifest.completed {
-            entries.push(Ed2kSharedEntry::from_manifest(&manifest));
-        }
-    }
-    Ok(dedupe_entries(entries))
-}
-
-pub(super) fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::with_capacity(entries.len());
-    for entry in entries.into_iter().rev() {
-        if seen.insert((entry.file_hash.clone(), entry.compatibility_hint)) {
-            deduped.push(entry);
-        }
-    }
-    deduped.reverse();
-    deduped
-}
-
-pub(super) async fn quarantine_corrupt_manifest(path: &Path) -> Result<()> {
-    if !tokio::fs::try_exists(path).await? {
-        return Ok(());
-    }
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let quarantine_path = path.with_extension(format!("json.corrupt-{suffix}"));
-    tokio::fs::rename(path, &quarantine_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to quarantine corrupt ED2K manifest {} -> {}",
-                path.display(),
-                quarantine_path.display()
-            )
-        })
 }
 
 pub(super) fn piece_count(file_size: u64, piece_size: u64) -> u32 {

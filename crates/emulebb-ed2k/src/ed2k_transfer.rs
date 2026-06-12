@@ -20,6 +20,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use emulebb_metadata::MetadataStore;
 use tokio::sync::{Mutex, RwLock};
 
 mod callback;
@@ -32,6 +33,7 @@ mod model;
 mod piece_store;
 mod shared_catalog;
 mod store;
+mod transfer_sql;
 mod upload;
 mod upload_queue;
 
@@ -39,9 +41,9 @@ pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
+use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
-use manifest::{Ed2kManifestCheckpointState, load_catalog_from_manifests};
 pub(crate) use model::{Ed2kAichHashset, Ed2kClaimedPart};
 pub use model::{
     Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kSourceHint,
@@ -57,7 +59,6 @@ pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnaps
 pub const ED2K_PART_SIZE: u64 = 9_728_000;
 /// Canonical eMule upload block size used inside one ED2K part request.
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
-const MANIFEST_FILE_NAME: &str = "resume-manifest.json";
 const PAYLOAD_FILE_NAME: &str = "pieces.bin";
 const SOURCE_EXCHANGE_REASK_INTERVAL: Duration = Duration::from_secs(40 * 60);
 
@@ -73,6 +74,7 @@ struct SourceExchangeRequestKey {
 #[derive(Debug)]
 pub struct Ed2kTransferRuntime {
     root_dir: PathBuf,
+    metadata: MetadataStore,
     shared_catalog: Ed2kSharedCatalog,
     callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
     manifest_io: Arc<Mutex<()>>,
@@ -88,7 +90,19 @@ impl Ed2kTransferRuntime {
     /// does not exist yet.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn load_or_create(root_dir: &Path) -> Result<Self> {
-        Self::load_or_create_with_upload_queue(root_dir, Ed2kUploadQueueConfig::default())
+        fs::create_dir_all(root_dir).with_context(|| {
+            format!("failed to create ED2K transfer root {}", root_dir.display())
+        })?;
+        let metadata = MetadataStore::open(root_dir.join("metadata.sqlite"))?;
+        Self::load_or_create_with_metadata(root_dir, metadata)
+    }
+
+    pub fn load_or_create_with_metadata(root_dir: &Path, metadata: MetadataStore) -> Result<Self> {
+        Self::load_or_create_with_metadata_and_upload_queue(
+            root_dir,
+            metadata,
+            Ed2kUploadQueueConfig::default(),
+        )
     }
 
     /// Load any persisted transfer manifests with an explicit inbound upload
@@ -100,9 +114,24 @@ impl Ed2kTransferRuntime {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
-        let shared_catalog = Arc::new(RwLock::new(load_catalog_from_manifests(root_dir)?));
+        let metadata = MetadataStore::open(root_dir.join("metadata.sqlite"))?;
+        Self::load_or_create_with_metadata_and_upload_queue(root_dir, metadata, upload_queue_config)
+    }
+
+    pub(crate) fn load_or_create_with_metadata_and_upload_queue(
+        root_dir: &Path,
+        metadata: MetadataStore,
+        upload_queue_config: Ed2kUploadQueueConfig,
+    ) -> Result<Self> {
+        fs::create_dir_all(root_dir).with_context(|| {
+            format!("failed to create ED2K transfer root {}", root_dir.display())
+        })?;
+        let shared_catalog = Arc::new(RwLock::new(transfer_sql::completed_catalog_from_metadata(
+            metadata.transfer_manifests()?,
+        )?));
         Ok(Self {
             root_dir: root_dir.to_path_buf(),
+            metadata,
             shared_catalog,
             callback_intents: Arc::new(RwLock::new(Vec::new())),
             manifest_io: Arc::new(Mutex::new(())),

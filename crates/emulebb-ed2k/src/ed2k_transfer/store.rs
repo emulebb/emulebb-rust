@@ -7,10 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use super::manifest::{manifest_progress_bytes, quarantine_corrupt_manifest};
+use super::manifest::manifest_progress_bytes;
+use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata};
 use super::{
     ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
-    Ed2kTransferRuntime, MANIFEST_FILE_NAME, PAYLOAD_FILE_NAME,
+    Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
@@ -21,37 +22,36 @@ impl Ed2kTransferRuntime {
         &self,
         job: &Ed2kTransferJob,
     ) -> Result<Ed2kResumeManifest> {
-        match self.load_manifest_unlocked(&job.file_hash).await {
-            Ok(manifest) => Ok(manifest),
-            Err(error) => {
-                let manifest_path = self.transfer_dir(&job.file_hash).join(MANIFEST_FILE_NAME);
-                quarantine_corrupt_manifest(&manifest_path).await?;
-                let manifest = Ed2kResumeManifest::new(job);
-                self.store_manifest_unlocked(&manifest).await?;
-                tracing::warn!(
-                    "rebuilt ED2K manifest after corrupt state for {}: {error}",
-                    job.file_hash
-                );
-                Ok(manifest)
-            }
+        if let Some(manifest) = self.load_manifest_optional_unlocked(&job.file_hash).await? {
+            return Ok(manifest);
         }
+        let manifest = Ed2kResumeManifest::new(job);
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
+    pub(super) async fn load_manifest_optional_unlocked(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<Ed2kResumeManifest>> {
+        if let Some(manifest) = self.manifest_cache.lock().await.get(file_hash).cloned() {
+            return Ok(Some(manifest));
+        }
+        let Some(manifest) = self.metadata.transfer_manifest_by_hash(file_hash)? else {
+            return Ok(None);
+        };
+        let manifest = manifest_from_metadata(manifest)?;
+        self.mark_manifest_persisted_unlocked(&manifest).await;
+        Ok(Some(manifest))
     }
 
     pub(super) async fn load_manifest_unlocked(
         &self,
         file_hash: &str,
     ) -> Result<Ed2kResumeManifest> {
-        if let Some(manifest) = self.manifest_cache.lock().await.get(file_hash).cloned() {
-            return Ok(manifest);
-        }
-        let path = self.transfer_dir(file_hash).join(MANIFEST_FILE_NAME);
-        let bytes = tokio::fs::read(&path)
-            .await
-            .with_context(|| format!("failed to read ED2K manifest {}", path.display()))?;
-        let manifest = serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed to decode ED2K manifest {}", path.display()))?;
-        self.mark_manifest_persisted_unlocked(&manifest).await;
-        Ok(manifest)
+        self.load_manifest_optional_unlocked(file_hash)
+            .await?
+            .with_context(|| format!("missing ED2K transfer metadata for {file_hash}"))
     }
 
     pub(super) async fn store_manifest_unlocked(
@@ -67,11 +67,8 @@ impl Ed2kTransferRuntime {
                     transfer_dir.display()
                 )
             })?;
-        let path = transfer_dir.join(MANIFEST_FILE_NAME);
-        let encoded = serde_json::to_vec_pretty(manifest)?;
-        tokio::fs::write(&path, encoded)
-            .await
-            .with_context(|| format!("failed to write ED2K manifest {}", path.display()))?;
+        self.metadata
+            .upsert_transfer_manifest(&manifest_to_metadata(manifest))?;
         self.mark_manifest_persisted_unlocked(manifest).await;
         Ok(())
     }

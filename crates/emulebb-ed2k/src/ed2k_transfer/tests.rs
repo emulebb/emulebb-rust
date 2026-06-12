@@ -1,6 +1,6 @@
 use super::{
     ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint, Ed2kTransferRuntime,
-    Ed2kTransferState, MANIFEST_FILE_NAME, PAYLOAD_FILE_NAME, new_transfer_job,
+    Ed2kTransferState, PAYLOAD_FILE_NAME, new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 use crate::{HashType, PopularHash};
@@ -27,11 +27,6 @@ fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
     }
     let mut file = fs::File::create(path).unwrap();
     file.write_all(&payload).unwrap();
-}
-
-fn read_manifest_from_disk(root: &Path, file_hash: &str) -> Ed2kResumeManifest {
-    serde_json::from_slice(&fs::read(root.join(file_hash).join(MANIFEST_FILE_NAME)).unwrap())
-        .unwrap()
 }
 
 #[tokio::test]
@@ -352,13 +347,13 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
 }
 
 #[tokio::test]
-async fn ensure_job_rebuilds_legacy_manifest_missing_aich_fields() {
-    let root = unique_test_dir("ed2k-transfer-legacy-aich-manifest");
+async fn ensure_job_ignores_legacy_json_manifest_for_fresh_sql_profiles() {
+    let root = unique_test_dir("ed2k-transfer-legacy-json-ignored");
     let file_hash = hex::encode([0x41; 16]);
     let transfer_dir = Path::new(&root).join(&file_hash);
     fs::create_dir_all(&transfer_dir).unwrap();
     fs::write(
-            transfer_dir.join(MANIFEST_FILE_NAME),
+            transfer_dir.join("resume-manifest.json"),
             format!(
                 "{{\"file_hash\":\"{}\",\"canonical_name\":\"legacy.iso\",\"file_size\":{},\"piece_size\":{},\"completed\":false,\"md4_hashset_acquired\":false,\"md4_hashset\":[],\"verified_ranges\":[],\"pieces\":[],\"sources\":[]}}",
                 file_hash,
@@ -377,17 +372,10 @@ async fn ensure_job_rebuilds_legacy_manifest_missing_aich_fields() {
         ))
         .await
         .unwrap();
+    assert_eq!(rebuilt.pieces.len(), 2);
     assert!(!rebuilt.aich_hashset_acquired);
     assert!(rebuilt.aich_root.is_none());
     assert!(rebuilt.aich_hashset.is_empty());
-
-    let quarantined = fs::read_dir(&transfer_dir)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("resume-manifest.json.corrupt-"))
-        .collect::<Vec<_>>();
-    assert_eq!(quarantined.len(), 1);
 }
 
 #[tokio::test]
@@ -522,7 +510,8 @@ async fn append_piece_block_keeps_partial_progress_in_memory_until_checkpoint() 
     );
     assert_eq!(cached_manifest.pieces[0].bytes_written, split as u64);
 
-    let persisted_manifest = read_manifest_from_disk(&root, &job.file_hash);
+    let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
+    let persisted_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(
         persisted_manifest.pieces[0].state,
         Ed2kTransferState::Requested
@@ -603,7 +592,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         .unwrap();
     assert!(final_completed);
 
-    let persisted_manifest = read_manifest_from_disk(&root, &job.file_hash);
+    let persisted_manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert!(persisted_manifest.completed);
     assert_eq!(
         persisted_manifest.pieces[0].state,

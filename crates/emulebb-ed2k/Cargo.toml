@@ -10,6 +10,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 emulebb-miniupnpc = { path = "../emulebb-miniupnpc" }
+emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 flate2 = "1"

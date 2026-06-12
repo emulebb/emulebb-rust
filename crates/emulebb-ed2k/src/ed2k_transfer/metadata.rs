@@ -8,9 +8,10 @@ use super::hashset::{
     validate_aich_hashset, validate_md4_hashset,
 };
 use super::manifest::{manifest_has_structural_progress, piece_count};
+use super::transfer_sql::manifest_from_metadata;
 use super::{
     Ed2kAichHashset, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
-    Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState, MANIFEST_FILE_NAME,
+    Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
 };
 
 impl Ed2kTransferRuntime {
@@ -26,13 +27,7 @@ impl Ed2kTransferRuntime {
                     transfer_dir.display()
                 )
             })?;
-        let manifest_path = transfer_dir.join(MANIFEST_FILE_NAME);
-        if tokio::fs::try_exists(&manifest_path).await? {
-            return self.load_manifest_or_rebuild_unlocked(job).await;
-        }
-        let manifest = Ed2kResumeManifest::new(job);
-        self.store_manifest_unlocked(&manifest).await?;
-        Ok(manifest)
+        self.load_manifest_or_rebuild_unlocked(job).await
     }
 
     /// Reconcile canonical metadata for an existing transfer after a peer
@@ -274,17 +269,25 @@ impl Ed2kTransferRuntime {
         let file_hash = parsed_hash.to_string();
         let _guard = self.manifest_io.lock().await;
         let transfer_dir = self.transfer_dir(&file_hash);
-        if !tokio::fs::try_exists(&transfer_dir).await? {
+        if self
+            .load_manifest_optional_unlocked(&file_hash)
+            .await?
+            .is_none()
+            && !tokio::fs::try_exists(&transfer_dir).await?
+        {
             return Ok(false);
         }
-        tokio::fs::remove_dir_all(&transfer_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to delete ED2K transfer directory {}",
-                    transfer_dir.display()
-                )
-            })?;
+        if tokio::fs::try_exists(&transfer_dir).await? {
+            tokio::fs::remove_dir_all(&transfer_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to delete ED2K transfer directory {}",
+                        transfer_dir.display()
+                    )
+                })?;
+        }
+        self.metadata.delete_transfer_manifest(&file_hash)?;
         self.manifest_cache.lock().await.remove(&file_hash);
         self.manifest_checkpoint_state
             .lock()
@@ -301,24 +304,20 @@ impl Ed2kTransferRuntime {
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
         let hash_hex = file_hash.to_string();
-        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
-        if !tokio::fs::try_exists(&path).await? {
-            return Ok(None);
-        }
         let _guard = self.manifest_io.lock().await;
-        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
-        Ok(Some(Ed2kSharedEntry::from_manifest(&manifest)))
+        Ok(self
+            .load_manifest_optional_unlocked(&hash_hex)
+            .await?
+            .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
     }
 
     /// Return the canonical MD4 hashset for this file when known.
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();
-        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
-        if !tokio::fs::try_exists(&path).await? {
-            return Ok(None);
-        }
         let _guard = self.manifest_io.lock().await;
-        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+        let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+            return Ok(None);
+        };
         if !manifest.md4_hashset_acquired {
             return Ok(None);
         }
@@ -344,12 +343,10 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<Ed2kAichHashset>> {
         let hash_hex = file_hash.to_string();
-        let path = self.transfer_dir(&hash_hex).join(MANIFEST_FILE_NAME);
-        if !tokio::fs::try_exists(&path).await? {
-            return Ok(None);
-        }
         let _guard = self.manifest_io.lock().await;
-        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+        let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+            return Ok(None);
+        };
         if !manifest.aich_hashset_acquired || manifest.aich_root.is_none() {
             return Ok(None);
         }
@@ -367,37 +364,8 @@ impl Ed2kTransferRuntime {
     pub async fn manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
         let _guard = self.manifest_io.lock().await;
         let mut manifests = Vec::new();
-        let mut entries = tokio::fs::read_dir(&self.root_dir).await.with_context(|| {
-            format!(
-                "failed to enumerate ED2K transfer root {}",
-                self.root_dir.display()
-            )
-        })?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path().join(MANIFEST_FILE_NAME);
-            if !tokio::fs::try_exists(&path).await? {
-                continue;
-            }
-            let bytes = match tokio::fs::read(&path).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(
-                        "skipping unreadable ED2K manifest {} during transfer load: {error}",
-                        path.display()
-                    );
-                    continue;
-                }
-            };
-            let manifest: Ed2kResumeManifest = match serde_json::from_slice(&bytes) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    tracing::warn!(
-                        "skipping malformed ED2K manifest {} during transfer load: {error}",
-                        path.display()
-                    );
-                    continue;
-                }
-            };
+        for manifest in self.metadata.transfer_manifests()? {
+            let manifest = manifest_from_metadata(manifest)?;
             self.mark_manifest_persisted_unlocked(&manifest).await;
             manifests.push(manifest);
         }

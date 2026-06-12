@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::PopularHash;
 
-use super::manifest::dedupe_entries;
 use super::{Ed2kResumeManifest, Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kTransferRuntime};
 
 impl Ed2kTransferRuntime {
@@ -39,4 +38,16 @@ impl Ed2kTransferRuntime {
         }
         *entries = dedupe_entries(entries.clone());
     }
+}
+
+fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(entries.len());
+    for entry in entries.into_iter().rev() {
+        if seen.insert((entry.file_hash.clone(), entry.compatibility_hint)) {
+            deduped.push(entry);
+        }
+    }
+    deduped.reverse();
+    deduped
 }

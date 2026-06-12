@@ -697,7 +697,9 @@ impl EmulebbCore {
         ed2k_network: Option<Ed2kNetworkConfig>,
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
-        let ed2k_transfers = Ed2kTransferRuntime::load_or_create(&transfer_root)?;
+        let metadata_store = index.metadata_store();
+        let ed2k_transfers =
+            Ed2kTransferRuntime::load_or_create_with_metadata(&transfer_root, metadata_store)?;
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
@@ -6794,8 +6796,13 @@ mod tests {
     async fn create_transfer_uses_canonical_link_and_paused_state() {
         let runtime_dir = unique_runtime_dir("emulebb-core-paused-transfer-create");
         let transfer_root = runtime_dir.join("transfers");
-        let core =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let metadata_path = runtime_dir.join("metadata.sqlite");
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
 
         let transfer = core
             .create_transfer(TransferCreate {
@@ -6812,8 +6819,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(transfer.state, "paused");
-        let reloaded =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let reloaded = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         assert_eq!(
             reloaded
                 .transfer("00112233445566778899aabbccddeeff")
@@ -6871,10 +6882,15 @@ mod tests {
     async fn delete_completed_transfer_row_preserves_files_and_survives_restart() {
         let runtime_dir = unique_runtime_dir("emulebb-core-delete-completed-transfer-row");
         let transfer_root = runtime_dir.join("transfers");
+        let metadata_path = runtime_dir.join("metadata.sqlite");
         let payload_path = runtime_dir.join("Completed.Row.bin");
         std::fs::write(&payload_path, b"completed row removal payload").unwrap();
-        let core =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         let share = core
             .share_local_file(LocalShareCreate {
                 path: payload_path.display().to_string(),
@@ -6902,8 +6918,12 @@ mod tests {
                 .any(|entry| entry.hash == share.hash)
         );
 
-        let reloaded =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let reloaded = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         assert!(reloaded.transfer(&share.hash).await.is_none());
         assert!(reloaded.transfers().await.is_empty());
         assert!(
@@ -6995,8 +7015,13 @@ mod tests {
     async fn stopped_transfer_state_survives_restart() {
         let runtime_dir = unique_runtime_dir("emulebb-core-stopped-transfer");
         let transfer_root = runtime_dir.join("transfers");
-        let core =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let metadata_path = runtime_dir.join("metadata.sqlite");
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         let transfer = core
             .create_transfer(TransferCreate {
                 link: Some(
@@ -7012,8 +7037,12 @@ mod tests {
             .unwrap();
         core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
 
-        let reloaded =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let reloaded = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap();
 
         assert_eq!(reloaded_transfer.state, "stopped");
@@ -7029,11 +7058,16 @@ mod tests {
     async fn transfers_reload_from_persisted_manifests() {
         let runtime_dir = unique_runtime_dir("emulebb-core-persisted-manifests");
         let transfer_root = runtime_dir.join("transfers");
+        let metadata_path = runtime_dir.join("metadata.sqlite");
         let payload_path = runtime_dir.join("Shared.Payload.bin");
         let payload = b"persisted transfer payload";
         std::fs::write(&payload_path, payload).unwrap();
-        let core =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         let share = core
             .share_local_file(LocalShareCreate {
                 path: payload_path.display().to_string(),
@@ -7042,8 +7076,12 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded =
-            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        let reloaded = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
         let transfers = reloaded.transfers().await;
 
         assert_eq!(transfers.len(), 1);

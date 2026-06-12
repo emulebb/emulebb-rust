@@ -445,6 +445,7 @@ dependencies = [
  "chrono",
  "emulebb-kad-dht",
  "emulebb-kad-proto",
+ "emulebb-metadata",
  "emulebb-miniupnpc",
  "flate2",
  "futures-util",
