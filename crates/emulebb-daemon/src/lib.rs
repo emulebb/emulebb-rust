@@ -12,6 +12,7 @@ use emulebb_ed2k::{
     resolve_bind_ip,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
+use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -134,27 +135,24 @@ impl DaemonConfig {
         self.runtime_dir.join("transfers")
     }
 
-    pub fn ed2k_user_hash_path(&self) -> PathBuf {
-        self.runtime_dir.join("ed2k-user-hash.hex")
-    }
-
-    pub fn ed2k_secure_ident_path(&self) -> PathBuf {
-        self.runtime_dir.join("ed2k-secure-ident.pk8")
-    }
-
-    pub fn ed2k_network_config(&self) -> Result<Option<Ed2kNetworkConfig>> {
+    pub fn ed2k_network_config(
+        &self,
+        metadata: &MetadataStore,
+    ) -> Result<Option<Ed2kNetworkConfig>> {
         if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
             return Ok(None);
         }
         let bind_ip = self.resolve_p2p_bind_ip()?;
         let listen_port = self.resolve_ed2k_listen_port()?;
         let user_hash = match self.ed2k_user_hash.as_deref() {
-            Some(value) => parse_user_hash(value)?,
-            None => load_or_create_user_hash(self.ed2k_user_hash_path())?,
+            Some(value) => {
+                let user_hash = parse_user_hash(value)?;
+                store_user_hash(metadata, user_hash)?;
+                user_hash
+            }
+            None => load_or_create_user_hash(metadata)?,
         };
-        let secure_ident = Arc::new(Ed2kSecureIdent::load_or_create(
-            &self.ed2k_secure_ident_path(),
-        )?);
+        let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
@@ -274,7 +272,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     fs::create_dir_all(&config.runtime_dir)
         .with_context(|| format!("failed to create {}", config.runtime_dir.display()))?;
     let index = FileIndex::open(config.metadata_path())?;
-    let ed2k_network = config.ed2k_network_config()?;
+    let metadata_store = index.metadata_store();
+    let ed2k_network = config.ed2k_network_config(&metadata_store)?;
     let core = Arc::new(EmulebbCore::new_with_network(
         env!("CARGO_PKG_VERSION"),
         index,
@@ -316,25 +315,57 @@ fn parse_user_hash(value: &str) -> Result<[u8; 16]> {
     Ok(bytes)
 }
 
-fn load_or_create_user_hash(path: PathBuf) -> Result<[u8; 16]> {
-    if path.exists() {
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let normalized = parse_user_hash(&text)?;
-        let normalized_text = hex::encode(normalized);
-        if text.trim() != normalized_text {
-            fs::write(&path, &normalized_text)
-                .with_context(|| format!("failed to normalize {}", path.display()))?;
+const ED2K_USER_HASH_IDENTITY_KIND: &str = "ed2k-user-hash";
+const ED2K_SECURE_IDENT_IDENTITY_KIND: &str = "ed2k-secure-ident";
+
+fn load_or_create_user_hash(metadata: &MetadataStore) -> Result<[u8; 16]> {
+    if let Some(identity) = metadata.load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)? {
+        let Some(bytes) = identity.public_identity else {
+            anyhow::bail!("stored ED2K user hash identity has no public identity");
+        };
+        let normalized = parse_user_hash_bytes(&bytes)?;
+        if bytes.as_slice() != normalized {
+            store_user_hash(metadata, normalized)?;
         }
         return Ok(normalized);
     }
     let bytes = create_user_hash();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+    store_user_hash(metadata, bytes)?;
+    Ok(bytes)
+}
+
+fn store_user_hash(metadata: &MetadataStore, user_hash: [u8; 16]) -> Result<()> {
+    metadata.upsert_local_identity(&MetadataLocalIdentity {
+        kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
+        public_identity: Some(user_hash.to_vec()),
+        private_secret: None,
+    })
+}
+
+fn load_or_create_secure_ident(metadata: &MetadataStore) -> Result<Ed2kSecureIdent> {
+    if let Some(identity) = metadata.load_local_identity(ED2K_SECURE_IDENT_IDENTITY_KIND)? {
+        let Some(secret) = identity.private_secret else {
+            anyhow::bail!("stored ED2K secure-ident identity has no private secret");
+        };
+        return Ed2kSecureIdent::from_pkcs8_der(&secret);
     }
-    fs::write(&path, hex::encode(bytes))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let secure_ident = Ed2kSecureIdent::generate()?;
+    metadata.upsert_local_identity(&MetadataLocalIdentity {
+        kind: ED2K_SECURE_IDENT_IDENTITY_KIND.to_string(),
+        public_identity: None,
+        private_secret: Some(secure_ident.to_pkcs8_der()?),
+    })?;
+    Ok(secure_ident)
+}
+
+fn parse_user_hash_bytes(value: &[u8]) -> Result<[u8; 16]> {
+    let bytes: [u8; 16] = value
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("stored ED2K user hash must be 16 bytes"))?;
+    let bytes = normalize_user_hash_markers(bytes);
+    if user_hash_is_bad(&bytes) {
+        anyhow::bail!("stored ED2K user hash must not be an eMule bad hash");
+    }
     Ok(bytes)
 }
 
@@ -363,6 +394,10 @@ fn create_user_hash() -> [u8; 16] {
 mod tests {
     use super::*;
     use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterfaceAddress};
+
+    fn metadata_store(config: &DaemonConfig) -> MetadataStore {
+        MetadataStore::open(config.metadata_path()).unwrap()
+    }
 
     fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
         let ed2k = Ed2kConfig {
@@ -707,7 +742,12 @@ obfuscationPortUdp = 4665
             ..DaemonConfig::default()
         };
 
-        assert!(config.ed2k_network_config().unwrap().is_none());
+        assert!(
+            config
+                .ed2k_network_config(&metadata_store(&config))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -715,7 +755,10 @@ obfuscationPortUdp = 4665
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_server(temp.path().to_path_buf(), None);
 
-        let error = config.ed2k_network_config().unwrap_err().to_string();
+        let error = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("p2pBindIp or p2pBindInterface is required"));
     }
 
@@ -728,7 +771,10 @@ obfuscationPortUdp = 4665
         );
         config.kad.listen_port = None;
 
-        let error = config.ed2k_network_config().unwrap_err().to_string();
+        let error = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("kad.listenPort is required"));
     }
 
@@ -741,7 +787,10 @@ obfuscationPortUdp = 4665
         );
         config.ed2k.listen_port = None;
 
-        let error = config.ed2k_network_config().unwrap_err().to_string();
+        let error = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("ed2k.listenPort is required"));
     }
 
@@ -750,7 +799,10 @@ obfuscationPortUdp = 4665
         let temp = tempfile::tempdir().unwrap();
         let config = config_with_server(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.bind_ip, Ipv4Addr::LOCALHOST);
         assert_eq!(network.listen_port, 41001);
@@ -765,7 +817,10 @@ obfuscationPortUdp = 4665
             Some("192.0.2.10".parse().unwrap()),
         );
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
         assert_eq!(network.listen_port, 41001);
@@ -783,8 +838,25 @@ obfuscationPortUdp = 4665
             std::time::Duration::from_secs(21_600)
         );
         assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
-        assert!(config.ed2k_user_hash_path().is_file());
-        assert!(config.ed2k_secure_ident_path().is_file());
+        let store = metadata_store(&config);
+        assert!(
+            store
+                .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .public_identity
+                .is_some()
+        );
+        assert!(
+            store
+                .load_local_identity(ED2K_SECURE_IDENT_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .private_secret
+                .is_some()
+        );
+        assert!(!config.runtime_dir.join("ed2k-user-hash.hex").exists());
+        assert!(!config.runtime_dir.join("ed2k-secure-ident.pk8").exists());
     }
 
     #[test]
@@ -813,19 +885,39 @@ obfuscationPortUdp = 4665
         );
         config.ed2k_user_hash = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.user_hash[5], 0x0E);
         assert_eq!(network.user_hash[14], 0x6F);
+        assert_eq!(
+            metadata_store(&config)
+                .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .public_identity
+                .unwrap(),
+            network.user_hash.to_vec()
+        );
     }
 
     #[test]
     fn load_or_create_user_hash_persists_emule_markers() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("ed2k-user-hash.hex");
+        let store = MetadataStore::open(temp.path().join("metadata.sqlite")).unwrap();
 
-        let hash = load_or_create_user_hash(path.clone()).unwrap();
-        let persisted = parse_user_hash(&fs::read_to_string(path).unwrap()).unwrap();
+        let hash = load_or_create_user_hash(&store).unwrap();
+        let persisted = parse_user_hash_bytes(
+            &store
+                .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .public_identity
+                .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(hash[5], 0x0E);
         assert_eq!(hash[14], 0x6F);
@@ -833,16 +925,54 @@ obfuscationPortUdp = 4665
     }
 
     #[test]
-    fn load_or_create_user_hash_rewrites_markerless_persisted_hash() {
+    fn load_or_create_user_hash_rewrites_markerless_sql_hash() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("ed2k-user-hash.hex");
-        fs::write(&path, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let store = MetadataStore::open(temp.path().join("metadata.sqlite")).unwrap();
+        store
+            .upsert_local_identity(&MetadataLocalIdentity {
+                kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
+                public_identity: Some(vec![0xaa; 16]),
+                private_secret: None,
+            })
+            .unwrap();
 
-        let hash = load_or_create_user_hash(path.clone()).unwrap();
+        let hash = load_or_create_user_hash(&store).unwrap();
 
         assert_eq!(hash[5], 0x0E);
         assert_eq!(hash[14], 0x6F);
-        assert_eq!(fs::read_to_string(path).unwrap(), hex::encode(hash));
+        assert_eq!(
+            store
+                .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .public_identity
+                .unwrap(),
+            hash.to_vec()
+        );
+    }
+
+    #[test]
+    fn load_or_create_secure_ident_reuses_sql_private_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = MetadataStore::open(temp.path().join("metadata.sqlite")).unwrap();
+
+        let first = load_or_create_secure_ident(&store).unwrap();
+        let second = load_or_create_secure_ident(&store).unwrap();
+
+        assert_eq!(
+            first.to_pkcs8_der().unwrap(),
+            second.to_pkcs8_der().unwrap()
+        );
+        assert!(
+            store
+                .load_local_identity(ED2K_SECURE_IDENT_IDENTITY_KIND)
+                .unwrap()
+                .unwrap()
+                .private_secret
+                .unwrap()
+                .len()
+                > 0
+        );
     }
 
     #[test]
@@ -901,7 +1031,10 @@ obfuscationPortUdp = 4665
         );
         config.nat.enabled = true;
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.nat_config.bind_ip.as_deref(), Some("192.0.2.10"));
         assert!(network.nat_config.enabled);
@@ -916,7 +1049,10 @@ obfuscationPortUdp = 4665
         );
         config.nat.bind_ip = Some("198.51.100.20".to_string());
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.nat_config.bind_ip.as_deref(), Some("198.51.100.20"));
     }
@@ -935,7 +1071,10 @@ obfuscationPortUdp = 4665
         config.kad.hello_intro_interval_secs = 0;
         config.kad.hello_intro_fanout = 0;
 
-        let network = config.ed2k_network_config().unwrap().unwrap();
+        let network = config
+            .ed2k_network_config(&metadata_store(&config))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(network.kad_bootstrap_nodes, ["192.0.2.30:41002"]);
         assert_eq!(network.kad_bootstrap_min_routing_contacts, 1);

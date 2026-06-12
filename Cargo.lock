@@ -426,6 +426,7 @@ dependencies = [
  "emulebb-core",
  "emulebb-ed2k",
  "emulebb-index",
+ "emulebb-metadata",
  "emulebb-rest",
  "hex",
  "serde",

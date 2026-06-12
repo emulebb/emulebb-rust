@@ -28,10 +28,9 @@ impl Ed2kSecureIdent {
         if path.exists() {
             let bytes =
                 fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-            let private_key = RsaPrivateKey::from_pkcs8_der(&bytes).with_context(|| {
+            return Self::from_pkcs8_der(&bytes).with_context(|| {
                 format!("invalid PKCS#8 ED2K secure-ident key at {}", path.display())
-            })?;
-            return Self::from_private_key(private_key);
+            });
         }
 
         if let Some(parent) = path.parent() {
@@ -39,14 +38,31 @@ impl Ed2kSecureIdent {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
+        let identity = Self::generate()?;
+        let encoded = identity.to_pkcs8_der()?;
+        fs::write(path, &encoded).with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(identity)
+    }
+
+    pub fn generate() -> Result<Self> {
         let private_key = RsaPrivateKey::new(&mut OsRng, ED2K_SECURE_IDENT_KEY_BITS)
             .context("failed to generate ED2K secure-ident RSA keypair")?;
-        let encoded = private_key
-            .to_pkcs8_der()
-            .context("failed to encode ED2K secure-ident private key")?;
-        fs::write(path, encoded.as_bytes())
-            .with_context(|| format!("failed to write {}", path.display()))?;
         Self::from_private_key(private_key)
+    }
+
+    pub fn from_pkcs8_der(bytes: &[u8]) -> Result<Self> {
+        let private_key = RsaPrivateKey::from_pkcs8_der(bytes)
+            .context("invalid PKCS#8 ED2K secure-ident private key")?;
+        Self::from_private_key(private_key)
+    }
+
+    pub fn to_pkcs8_der(&self) -> Result<Vec<u8>> {
+        Ok(self
+            .private_key
+            .to_pkcs8_der()
+            .context("failed to encode ED2K secure-ident private key")?
+            .as_bytes()
+            .to_vec())
     }
 
     pub(super) fn from_private_key(private_key: RsaPrivateKey) -> Result<Self> {

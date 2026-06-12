@@ -16,6 +16,7 @@ clap.workspace = true
 emulebb-core = { path = "../emulebb-core" }
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
+emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-rest = { path = "../emulebb-rest" }
 hex = "0.4"
 serde.workspace = true
