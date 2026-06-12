@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, TransportProtocol,
     built_in_upnp_port_mapping_providers,
-    config::Ed2kConfig,
+    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
@@ -677,24 +677,39 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
-        let ed2k_transfers = if let Some(network) = ed2k_network.as_ref() {
-            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
-                &transfer_root,
-                metadata_store.clone(),
-                &network.config,
-            )?
-        } else {
-            Ed2kTransferRuntime::load_or_create_with_metadata(
-                &transfer_root,
-                metadata_store.clone(),
-            )?
-        };
+        let has_persisted_preferences = profile_state::has_persisted_preferences(&metadata_store)?;
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
             .map(shared_directory_from_index)
             .collect::<Vec<_>>();
         let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
+        let upload_queue_policy = initial_ed2k_upload_queue_policy(
+            ed2k_network
+                .as_ref()
+                .map(|network| &network.config.upload_queue),
+            has_persisted_preferences,
+            &core_state.preferences,
+        );
+        let ed2k_transfers = if ed2k_network.is_some() {
+            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+                &transfer_root,
+                metadata_store.clone(),
+                &Ed2kConfig {
+                    upload_queue: upload_queue_policy,
+                    ..Ed2kConfig::default()
+                },
+            )?
+        } else {
+            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+                &transfer_root,
+                metadata_store.clone(),
+                &Ed2kConfig {
+                    upload_queue: upload_queue_policy,
+                    ..Ed2kConfig::default()
+                },
+            )?
+        };
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);
             match metadata_store
@@ -796,12 +811,23 @@ impl EmulebbCore {
             !preferences_update_is_empty(&request),
             "preferences PATCH requires at least one preference"
         );
-        let mut state = self.state.lock().await;
-        let mut preferences = state.preferences.clone();
-        apply_preferences_update(&mut preferences, request)?;
-        profile_state::persist_preferences(&self.metadata_store, &preferences)?;
-        state.preferences = preferences;
-        Ok(state.preferences.clone())
+        let preferences = {
+            let mut state = self.state.lock().await;
+            let mut preferences = state.preferences.clone();
+            apply_preferences_update(&mut preferences, request)?;
+            profile_state::persist_preferences(&self.metadata_store, &preferences)?;
+            state.preferences = preferences.clone();
+            preferences
+        };
+        self.ed2k_transfers
+            .apply_upload_queue_policy(&ed2k_upload_queue_policy_from_preferences(
+                self.ed2k_network
+                    .as_ref()
+                    .map(|network| &network.config.upload_queue),
+                &preferences,
+            ))
+            .await;
+        Ok(preferences)
     }
 
     pub async fn status(&self) -> Status {
@@ -5762,6 +5788,28 @@ fn apply_preferences_update(
     Ok(())
 }
 
+fn ed2k_upload_queue_policy_from_preferences(
+    base: Option<&Ed2kUploadQueuePolicyConfig>,
+    preferences: &Preferences,
+) -> Ed2kUploadQueuePolicyConfig {
+    let mut policy = base.cloned().unwrap_or_default();
+    policy.active_slots = preferences.max_upload_slots as usize;
+    policy.waiting_capacity = preferences.queue_size as usize;
+    policy
+}
+
+fn initial_ed2k_upload_queue_policy(
+    base: Option<&Ed2kUploadQueuePolicyConfig>,
+    has_persisted_preferences: bool,
+    preferences: &Preferences,
+) -> Ed2kUploadQueuePolicyConfig {
+    if has_persisted_preferences || base.is_none() {
+        ed2k_upload_queue_policy_from_preferences(base, preferences)
+    } else {
+        base.cloned().unwrap_or_default()
+    }
+}
+
 fn ensure_finite_kibps(value: u32, name: &str) -> Result<()> {
     ensure!(
         value > 0 && value < u32::MAX,
@@ -6122,6 +6170,81 @@ mod tests {
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
         }
+    }
+
+    #[test]
+    fn upload_queue_policy_uses_preferences_for_slot_and_queue_limits() {
+        let mut preferences = default_preferences();
+        preferences.max_upload_slots = 11;
+        preferences.queue_size = 6_000;
+        let base = Ed2kUploadQueuePolicyConfig {
+            active_slots: 3,
+            waiting_capacity: 512,
+            waiting_timeout_secs: 44,
+            granted_timeout_secs: 22,
+            upload_timeout_secs: 88,
+        };
+
+        let policy = ed2k_upload_queue_policy_from_preferences(Some(&base), &preferences);
+
+        assert_eq!(policy.active_slots, 11);
+        assert_eq!(policy.waiting_capacity, 6_000);
+        assert_eq!(policy.waiting_timeout_secs, 44);
+        assert_eq!(policy.granted_timeout_secs, 22);
+        assert_eq!(policy.upload_timeout_secs, 88);
+    }
+
+    #[test]
+    fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
+        let preferences = default_preferences();
+        let base = Ed2kUploadQueuePolicyConfig {
+            active_slots: 3,
+            waiting_capacity: 512,
+            waiting_timeout_secs: 44,
+            granted_timeout_secs: 22,
+            upload_timeout_secs: 88,
+        };
+
+        let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &preferences);
+
+        assert_eq!(policy, base);
+    }
+
+    #[tokio::test]
+    async fn persisted_preferences_configure_upload_queue_on_startup() {
+        let transfer_root = unique_runtime_dir("emulebb-core-upload-queue-startup-preferences");
+        let metadata = MetadataStore::open(transfer_root.join("metadata.sqlite")).unwrap();
+        let mut preferences = default_preferences();
+        preferences.max_upload_slots = 2;
+        preferences.queue_size = 3_000;
+        profile_state::persist_preferences(&metadata, &preferences).unwrap();
+        let index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
+
+        let core = EmulebbCore::new("test", index, transfer_root.join("transfers")).unwrap();
+        let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
+
+        assert_eq!(policy.active_slots, 2);
+        assert_eq!(policy.waiting_capacity, 3_000);
+    }
+
+    #[tokio::test]
+    async fn preferences_update_reconfigures_live_upload_queue() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+
+        let preferences = core
+            .update_preferences(PreferencesUpdate {
+                max_upload_slots: Some(4),
+                queue_size: Some(4_000),
+                ..PreferencesUpdate::default()
+            })
+            .await
+            .unwrap();
+        let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
+
+        assert_eq!(preferences.max_upload_slots, 4);
+        assert_eq!(preferences.queue_size, 4_000);
+        assert_eq!(policy.active_slots, 4);
+        assert_eq!(policy.waiting_capacity, 4_000);
     }
 
     #[test]

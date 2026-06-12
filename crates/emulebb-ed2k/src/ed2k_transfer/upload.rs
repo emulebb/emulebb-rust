@@ -5,13 +5,29 @@ use std::{sync::atomic::Ordering, time::Instant};
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::MetadataPeerCredit;
 
+use crate::config::Ed2kUploadQueuePolicyConfig;
+
 use super::{
     Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueSnapshotEntry,
     Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
     upload_queue::{DEFAULT_CREDIT_SCORE_PERMILLE, credit_score_permille, upload_priority_score},
+    upload_queue_config_from_policy, upload_queue_policy_from_config,
 };
 
 impl Ed2kTransferRuntime {
+    /// Apply inbound uploader queue policy to the live runtime.
+    pub async fn apply_upload_queue_policy(&self, policy: &Ed2kUploadQueuePolicyConfig) {
+        self.upload_queue
+            .lock()
+            .await
+            .configure(upload_queue_config_from_policy(policy));
+    }
+
+    /// Return the currently active inbound uploader queue policy.
+    pub async fn upload_queue_policy_snapshot(&self) -> Ed2kUploadQueuePolicyConfig {
+        upload_queue_policy_from_config(self.upload_queue.lock().await.config())
+    }
+
     /// Override inbound uploader queue policy for controlled scenarios and tests.
     #[cfg(test)]
     pub(crate) async fn configure_upload_queue(&self, config: super::Ed2kUploadQueueConfig) {

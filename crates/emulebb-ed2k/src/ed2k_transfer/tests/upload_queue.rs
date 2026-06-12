@@ -46,6 +46,38 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
 }
 
 #[tokio::test]
+async fn upload_queue_reconfigures_active_slot_limit_live() {
+    let root = unique_test_dir("ed2k-upload-queue-live-slots");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x32; 16]);
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x24, 0x0A00_0024), &file_hash)
+        .await;
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x25, 0x0A00_0025), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    runtime
+        .apply_upload_queue_policy(&Ed2kUploadQueuePolicyConfig {
+            active_slots: 2,
+            waiting_capacity: 8,
+            waiting_timeout_secs: 180,
+            granted_timeout_secs: 30,
+            upload_timeout_secs: 90,
+        })
+        .await;
+
+    assert_eq!(
+        runtime.poll_upload_session(&waiting_handle, true).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[tokio::test]
 async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
     let root = unique_test_dir("ed2k-upload-queue-snapshot");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

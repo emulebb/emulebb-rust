@@ -71,6 +71,12 @@ pub(crate) fn load_core_state(
     })
 }
 
+pub(crate) fn has_persisted_preferences(metadata: &MetadataStore) -> Result<bool> {
+    Ok(metadata
+        .load_preference_json(CORE_PREFERENCES_KEY)?
+        .is_some())
+}
+
 pub(crate) fn persist_preferences(
     metadata: &MetadataStore,
     preferences: &Preferences,

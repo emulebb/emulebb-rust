@@ -185,13 +185,27 @@ impl Ed2kTransferRuntime {
     }
 }
 
-fn upload_queue_config_from_policy(policy: &Ed2kUploadQueuePolicyConfig) -> Ed2kUploadQueueConfig {
+pub(super) fn upload_queue_config_from_policy(
+    policy: &Ed2kUploadQueuePolicyConfig,
+) -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
         active_slots: policy.active_slots.max(1),
         waiting_capacity: policy.waiting_capacity,
         waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
         granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
         upload_timeout: Duration::from_secs(policy.upload_timeout_secs.max(1)),
+    }
+}
+
+pub(super) fn upload_queue_policy_from_config(
+    config: Ed2kUploadQueueConfig,
+) -> Ed2kUploadQueuePolicyConfig {
+    Ed2kUploadQueuePolicyConfig {
+        active_slots: config.active_slots,
+        waiting_capacity: config.waiting_capacity,
+        waiting_timeout_secs: config.waiting_timeout.as_secs(),
+        granted_timeout_secs: config.granted_timeout.as_secs(),
+        upload_timeout_secs: config.upload_timeout.as_secs(),
     }
 }
 

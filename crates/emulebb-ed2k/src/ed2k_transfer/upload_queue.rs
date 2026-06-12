@@ -193,13 +193,16 @@ impl Ed2kUploadQueueState {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn configure(&mut self, config: Ed2kUploadQueueConfig) {
         self.config = config;
         let now = Instant::now();
         self.reap_expired_sessions(now);
         self.trim_waiting_queue(now);
         self.promote_waiters(now);
+    }
+
+    pub(super) const fn config(&self) -> Ed2kUploadQueueConfig {
+        self.config
     }
 
     pub(super) fn begin_session(
