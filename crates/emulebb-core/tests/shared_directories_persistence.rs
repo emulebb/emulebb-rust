@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_core::{EmulebbCore, LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
 use emulebb_index::FileIndex;
 
 #[tokio::test]
@@ -94,6 +94,76 @@ async fn shared_directory_reload_honors_recursive_flag() {
     assert_eq!(recursive_names, vec!["nested.bin", "top.bin"]);
 }
 
+#[tokio::test]
+async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
+    let runtime_dir = unique_test_dir("shared-directory-tree-restart");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let shared_root = runtime_dir.join("shared-root");
+    let nested_root = shared_root.join("nested").join("unicode");
+    fs::create_dir_all(&nested_root).unwrap();
+    let first_payload = b"first recursive shared payload";
+    let second_payload = b"second recursive shared payload";
+    fs::write(nested_root.join("Persisted Unicode äöü.bin"), first_payload).unwrap();
+
+    let first_hash = {
+        let core = EmulebbCore::new(
+            "test",
+            FileIndex::open(&metadata_path).unwrap(),
+            &transfer_root,
+        )
+        .unwrap();
+        core.set_shared_directories(SharedDirectoriesUpdate {
+            roots: vec![SharedDirectoryRootUpdate::Object {
+                path: shared_root.display().to_string(),
+                recursive: true,
+            }],
+            confirm_replace_roots: true,
+        })
+        .await
+        .unwrap();
+        let shares = core.reload_shared_directories().await.unwrap();
+        let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
+        assert_eq!(
+            fs::read(share_payload_path(&first_share)).unwrap(),
+            first_payload
+        );
+        first_share.hash
+    };
+
+    fs::write(
+        shared_root.join("Reloaded Tree Payload.bin"),
+        second_payload,
+    )
+    .unwrap();
+
+    let reloaded = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    let existing_shares = reloaded.shares().await;
+    assert_eq!(
+        require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin").hash,
+        first_hash
+    );
+
+    let reloaded_shares = reloaded.reload_shared_directories().await.unwrap();
+    assert_eq!(
+        shared_file_names(reloaded_shares.clone()),
+        vec!["Persisted Unicode äöü.bin", "Reloaded Tree Payload.bin"]
+    );
+    assert_eq!(
+        fs::read(share_payload_path(&require_share_by_name(
+            &reloaded_shares,
+            "Reloaded Tree Payload.bin"
+        )))
+        .unwrap(),
+        second_payload
+    );
+}
+
 fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {
     let mut names = shares
         .into_iter()
@@ -101,6 +171,23 @@ fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
+    shares
+        .iter()
+        .find(|share| share.name == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("shared directory reload did not publish {name}"))
+}
+
+fn share_payload_path(share: &LocalShare) -> PathBuf {
+    let path = PathBuf::from(&share.transfer_dir);
+    if path.is_dir() {
+        path.join("pieces.bin")
+    } else {
+        path
+    }
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
