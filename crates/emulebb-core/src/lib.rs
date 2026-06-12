@@ -1391,6 +1391,15 @@ impl EmulebbCore {
             .await
             .unshared_hashes
             .remove(&summary.file_hash);
+        self.index.lock().await.upsert_file(&IndexedFile {
+            ed2k_hash: summary.file_hash.clone(),
+            name: summary.canonical_name.clone(),
+            size_bytes: summary.file_size,
+            content_type: ed2k_file_type_search_term(&summary.canonical_name)
+                .unwrap_or("unknown")
+                .to_string(),
+            availability_score: 1,
+        })?;
         self.refresh_transfer_from_manifest(&summary.file_hash, "completed")
             .await?;
         if let Err(error) = self.publish_ed2k_shared_catalog().await {

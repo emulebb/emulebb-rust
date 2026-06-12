@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use emulebb_core::{EmulebbCore, SearchCreate, SearchResultDownloadCreate};
+use emulebb_core::{EmulebbCore, LocalShareCreate, SearchCreate, SearchResultDownloadCreate};
 use emulebb_index::{FileIndex, IndexedFile};
 
 #[tokio::test]
@@ -110,6 +110,49 @@ async fn search_delete_and_clear_survive_core_restart() {
     reloaded.clear_searches().await.unwrap();
     let reloaded_again = open_core(&metadata_path, &transfer_root);
     assert!(reloaded_again.searches().await.is_empty());
+}
+
+#[tokio::test]
+async fn shared_local_file_is_searchable_after_core_restart() {
+    let runtime_dir = unique_test_dir("shared-file-search-index");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let payload_path = runtime_dir.join("Local.Searchable.Payload.bin");
+    fs::write(&payload_path, b"shared searchable payload").unwrap();
+
+    let share_hash = {
+        let core = open_core(&metadata_path, &transfer_root);
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: payload_path.display().to_string(),
+                name: Some("Local.Searchable.Payload.bin".to_string()),
+            })
+            .await
+            .unwrap();
+        let search = core
+            .create_search(SearchCreate {
+                query: "searchable payload".to_string(),
+                method: "automatic".to_string(),
+                r#type: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(search.results.len(), 1);
+        assert_eq!(search.results[0].hash, share.hash);
+        share.hash
+    };
+
+    let reloaded = open_core(&metadata_path, &transfer_root);
+    let search = reloaded
+        .create_search(SearchCreate {
+            query: "searchable payload".to_string(),
+            method: "automatic".to_string(),
+            r#type: String::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(search.results.len(), 1);
+    assert_eq!(search.results[0].hash, share_hash);
 }
 
 fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {
