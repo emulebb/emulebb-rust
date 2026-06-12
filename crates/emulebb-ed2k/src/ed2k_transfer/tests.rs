@@ -78,6 +78,26 @@ async fn source_exchange_reask_throttles_same_peer_and_file() {
 }
 
 #[tokio::test]
+async fn download_activity_reports_average_speed_until_stale() {
+    let root = unique_test_dir("ed2k-transfer-download-activity");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let file_hash = "00112233445566778899aabbccddeeff";
+
+    runtime.note_download_payload_bytes_at(file_hash, 65_536, now + Duration::from_secs(1));
+    runtime.note_download_payload_bytes_at(file_hash, 32_768, now + Duration::from_secs(3));
+
+    assert_eq!(
+        runtime.download_speed_bytes_per_sec_at(file_hash, now + Duration::from_secs(3)),
+        49_152
+    );
+    assert_eq!(
+        runtime.download_speed_bytes_per_sec_at(file_hash, now + Duration::from_secs(34)),
+        0
+    );
+}
+
+#[tokio::test]
 async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
     let root = unique_test_dir("ed2k-transfer-runtime");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

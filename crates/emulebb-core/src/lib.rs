@@ -1985,6 +1985,8 @@ impl EmulebbCore {
                 .payload_path(&manifest.file_hash)
                 .display()
                 .to_string(),
+            self.ed2k_transfers
+                .download_speed_bytes_per_sec(&manifest.file_hash),
         )
     }
 
@@ -4433,6 +4435,7 @@ fn transfer_from_manifest(
     manifest: &Ed2kResumeManifest,
     state_name: &str,
     payload_path: String,
+    download_speed_bytes_per_sec: u64,
 ) -> Transfer {
     let completed_bytes = manifest
         .pieces
@@ -4458,7 +4461,7 @@ fn transfer_from_manifest(
         state: state_name.to_string(),
         progress,
         sources: manifest.sources.len() as u32,
-        download_speed_bytes_per_sec: 0,
+        download_speed_bytes_per_sec,
         priority: "normal".to_string(),
         category_id: 0,
         category_name: default_transfer_category_name().to_string(),

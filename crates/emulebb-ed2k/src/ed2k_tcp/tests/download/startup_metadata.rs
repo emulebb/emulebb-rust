@@ -107,6 +107,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
             .map(|credit| credit.downloaded_bytes),
         Some(payload.len() as u64)
     );
+    assert!(transfer_runtime.download_speed_bytes_per_sec(&file_hash_hex) > 0);
     server.await.unwrap();
 }
 

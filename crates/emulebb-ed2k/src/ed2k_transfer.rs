@@ -15,7 +15,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 
@@ -25,6 +25,7 @@ use tokio::sync::{Mutex, RwLock};
 
 mod callback;
 mod catalog;
+mod download_activity;
 mod hashset;
 mod ingest;
 mod manifest;
@@ -38,6 +39,7 @@ mod upload;
 mod upload_queue;
 
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
+use download_activity::Ed2kDownloadActivity;
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
@@ -81,6 +83,7 @@ pub struct Ed2kTransferRuntime {
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
     source_exchange_requests: Arc<Mutex<HashMap<SourceExchangeRequestKey, Instant>>>,
+    download_activity: Arc<StdMutex<HashMap<String, Ed2kDownloadActivity>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     next_upload_connection_id: AtomicU64,
 }
@@ -138,6 +141,7 @@ impl Ed2kTransferRuntime {
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             source_exchange_requests: Arc::new(Mutex::new(HashMap::new())),
+            download_activity: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
             next_upload_connection_id: AtomicU64::new(1),
         })
