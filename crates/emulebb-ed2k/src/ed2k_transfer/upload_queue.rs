@@ -11,6 +11,7 @@ const LOW_FILE_PRIORITY_SCORE: i128 = 6;
 const HIGH_FILE_PRIORITY_SCORE: i128 = 9;
 const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
+pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
 
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,7 @@ struct Ed2kUploadSessionEntry {
     last_activity: Instant,
     waiting_sequence: u64,
     file_priority_score: i128,
+    credit_score_permille: i128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +157,7 @@ struct UploadScoreInputs {
     waiting_seconds: i128,
     friend_slot: bool,
     file_priority_score: i128,
+    credit_score_permille: i128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +165,9 @@ struct UploadScorePolicy;
 
 impl UploadScorePolicy {
     fn waiting_score(inputs: UploadScoreInputs) -> i128 {
-        inputs.waiting_seconds * inputs.file_priority_score + friend_slot_score(inputs.friend_slot)
+        inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
+            / DEFAULT_CREDIT_SCORE_PERMILLE
+            + friend_slot_score(inputs.friend_slot)
     }
 }
 
@@ -199,6 +204,7 @@ impl Ed2kUploadQueueState {
         connection_id: u64,
         now: Instant,
         file_priority_score: i128,
+        credit_score_permille: i128,
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
@@ -211,6 +217,7 @@ impl Ed2kUploadQueueState {
             session.connection_id = connection_id;
             session.last_activity = now;
             session.file_priority_score = file_priority_score;
+            session.credit_score_permille = credit_score_permille;
             self.sessions.insert(key.clone(), session);
             return self.status_for_key(&key, now);
         }
@@ -231,6 +238,7 @@ impl Ed2kUploadQueueState {
                 last_activity: now,
                 waiting_sequence,
                 file_priority_score,
+                credit_score_permille,
             },
         );
         self.trim_waiting_queue(now);
@@ -518,6 +526,7 @@ impl Ed2kUploadQueueState {
             friend_slot: key.peer.friend_slot
                 && !key.peer.client_id.is_some_and(is_low_id_client_id),
             file_priority_score: session.file_priority_score,
+            credit_score_permille: session.credit_score_permille,
         })
     }
 
@@ -545,6 +554,32 @@ pub(super) fn upload_priority_score(priority: &str) -> i128 {
         "normal" | "auto" => DEFAULT_FILE_PRIORITY_SCORE,
         _ => DEFAULT_FILE_PRIORITY_SCORE,
     }
+}
+
+pub(super) fn credit_score_permille(uploaded_bytes: u64, downloaded_bytes: u64) -> i128 {
+    const CREDIT_THRESHOLD_BYTES: u64 = 1_048_576;
+    const CREDIT_LINEAR_CAP_BYTES: u64 = 9_646_899;
+    if downloaded_bytes < CREDIT_THRESHOLD_BYTES {
+        return DEFAULT_CREDIT_SCORE_PERMILLE;
+    }
+    let uploaded = uploaded_bytes as f64;
+    let downloaded = downloaded_bytes as f64;
+    let ratio_by_transfer = if uploaded > 0.0 {
+        downloaded * 2.0 / uploaded
+    } else {
+        10.0
+    };
+    let exponential_cap = (downloaded / CREDIT_THRESHOLD_BYTES as f64 + 2.0).sqrt();
+    let linear_cap = if downloaded_bytes < CREDIT_LINEAR_CAP_BYTES {
+        (downloaded - CREDIT_THRESHOLD_BYTES as f64) / 8_598_323.0 * 2.34 + 1.0
+    } else {
+        10.0
+    };
+    let ratio = ratio_by_transfer
+        .min(exponential_cap)
+        .min(linear_cap)
+        .clamp(1.0, 10.0);
+    (ratio * DEFAULT_CREDIT_SCORE_PERMILLE as f64).round() as i128
 }
 
 fn is_low_id_client_id(client_id: u32) -> bool {

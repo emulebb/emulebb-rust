@@ -3,10 +3,12 @@
 use std::{sync::atomic::Ordering, time::Instant};
 
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataPeerCredit;
 
 use super::{
     Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueSnapshotEntry,
-    Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, upload_queue::upload_priority_score,
+    Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
+    upload_queue::{DEFAULT_CREDIT_SCORE_PERMILLE, credit_score_permille, upload_priority_score},
 };
 
 impl Ed2kTransferRuntime {
@@ -35,6 +37,7 @@ impl Ed2kTransferRuntime {
         let connection_id = self
             .next_upload_connection_id
             .fetch_add(1, Ordering::Relaxed);
+        let credit_score_permille = self.peer_credit_score_permille(&peer);
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let file_priority_score = self.file_priority_score(file_hash);
         let status = self.upload_queue.lock().await.begin_session(
@@ -42,6 +45,7 @@ impl Ed2kTransferRuntime {
             connection_id,
             now,
             file_priority_score,
+            credit_score_permille,
         );
         (handle, status)
     }
@@ -100,6 +104,19 @@ impl Ed2kTransferRuntime {
         self.upload_queue.lock().await.snapshot(Instant::now())
     }
 
+    pub(crate) fn record_peer_credit_totals(
+        &self,
+        user_hash: [u8; 16],
+        uploaded_bytes: u64,
+        downloaded_bytes: u64,
+    ) -> anyhow::Result<()> {
+        self.metadata.upsert_peer_credit(&MetadataPeerCredit {
+            user_hash: hex::encode(user_hash),
+            uploaded_bytes,
+            downloaded_bytes,
+        })
+    }
+
     fn file_priority_score(&self, file_hash: &Ed2kHash) -> i128 {
         self.metadata
             .transfer_manifest_by_hash(&file_hash.to_string())
@@ -107,5 +124,13 @@ impl Ed2kTransferRuntime {
             .flatten()
             .map(|manifest| upload_priority_score(&manifest.upload_priority))
             .unwrap_or_else(|| upload_priority_score("normal"))
+    }
+
+    fn peer_credit_score_permille(&self, peer: &Ed2kUploadPeerIdentity) -> i128 {
+        peer.user_hash
+            .map(hex::encode)
+            .and_then(|user_hash| self.metadata.peer_credit_by_hash(&user_hash).ok().flatten())
+            .map(|credit| credit_score_permille(credit.uploaded_bytes, credit.downloaded_bytes))
+            .unwrap_or(DEFAULT_CREDIT_SCORE_PERMILLE)
     }
 }

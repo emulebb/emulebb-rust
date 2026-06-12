@@ -5,6 +5,8 @@ mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
 mod model;
+mod peer_model;
+mod peer_store;
 mod profile_model;
 mod profile_store;
 mod schema;
@@ -21,6 +23,7 @@ pub use kad_publish_model::{
     MetadataKadSourcePublish,
 };
 pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
+pub use peer_model::MetadataPeerCredit;
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{MetadataSearch, MetadataSearchResult};

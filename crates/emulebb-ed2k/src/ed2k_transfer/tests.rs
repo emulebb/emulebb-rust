@@ -16,6 +16,7 @@ use std::{
 };
 
 mod upload_queue;
+mod upload_queue_credit;
 mod upload_queue_priority;
 mod upload_queue_support;
 

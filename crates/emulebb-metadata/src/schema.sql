@@ -279,6 +279,8 @@ CREATE TABLE peers (
     secure_ident_state TEXT NOT NULL DEFAULT '',
     friend INTEGER NOT NULL DEFAULT 0 CHECK(friend IN (0, 1)),
     banned INTEGER NOT NULL DEFAULT 0 CHECK(banned IN (0, 1)),
+    uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
     first_seen_ms INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL,
     UNIQUE(user_hash)
