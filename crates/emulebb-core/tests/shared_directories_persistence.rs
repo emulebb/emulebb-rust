@@ -50,6 +50,59 @@ async fn shared_directory_roots_survive_core_restart() {
     assert!(directories.roots[0].recursive);
 }
 
+#[tokio::test]
+async fn shared_directory_reload_honors_recursive_flag() {
+    let runtime_dir = unique_test_dir("shared-directory-recursive");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let shared_root = runtime_dir.join("shared-root");
+    let nested_root = shared_root.join("nested");
+    fs::create_dir_all(&nested_root).unwrap();
+    fs::write(shared_root.join("top.bin"), b"top-level payload").unwrap();
+    fs::write(nested_root.join("nested.bin"), b"nested payload").unwrap();
+
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    core.set_shared_directories(SharedDirectoriesUpdate {
+        roots: vec![SharedDirectoryRootUpdate::Object {
+            path: shared_root.display().to_string(),
+            recursive: false,
+        }],
+        confirm_replace_roots: true,
+    })
+    .await
+    .unwrap();
+
+    let flat_names = shared_file_names(core.reload_shared_directories().await.unwrap());
+    assert_eq!(flat_names, vec!["top.bin"]);
+
+    core.set_shared_directories(SharedDirectoriesUpdate {
+        roots: vec![SharedDirectoryRootUpdate::Object {
+            path: shared_root.display().to_string(),
+            recursive: true,
+        }],
+        confirm_replace_roots: true,
+    })
+    .await
+    .unwrap();
+
+    let recursive_names = shared_file_names(core.reload_shared_directories().await.unwrap());
+    assert_eq!(recursive_names, vec!["nested.bin", "top.bin"]);
+}
+
+fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {
+    let mut names = shares
+        .into_iter()
+        .map(|share| share.name)
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 fn unique_test_dir(name: &str) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
