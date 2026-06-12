@@ -15,6 +15,7 @@ use super::{
     log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
 };
 
+#[allow(clippy::cognitive_complexity)]
 pub(super) async fn handle_server_packet(
     session: &mut ServerSession,
     packet: Ed2kPacket,

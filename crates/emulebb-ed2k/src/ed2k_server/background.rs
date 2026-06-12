@@ -337,6 +337,7 @@ pub(super) fn fail_pending_background_search(
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 pub(super) async fn start_background_server_search(
     session: &mut ServerSession,
     context: BackgroundServerSearchContext<'_>,

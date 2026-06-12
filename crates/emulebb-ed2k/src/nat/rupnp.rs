@@ -158,6 +158,7 @@ impl PortMappingProvider for RupnpPortMappingProvider {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn reconcile_gateway(
     backend_name: &str,
     gateway: &GatewayHandle,
@@ -340,6 +341,7 @@ impl GatewayHandle {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     let bind_ip = config
         .bind_ip
@@ -654,6 +656,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn discover_root_devices_via_bind_ip(
     bind_ip: IpAddr,
     timeout: Duration,
@@ -687,67 +690,8 @@ async fn discover_root_devices_via_bind_ip(
     );
 
     let multicast_addr: SocketAddr = "239.255.255.250:1900".parse().unwrap();
-    let locations = task::spawn_blocking(move || -> Result<Vec<String>> {
-        for target in ssdp_search_targets() {
-            let search = format!(
-                "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nST: {}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n\r\n",
-                target
-            );
-            debug!(
-                "UPnP bind-ip discovery sending M-SEARCH st={} bytes={} from {} to {}",
-                target,
-                search.len(),
-                socket
-                    .local_addr()
-                    .context("failed to read SSDP socket local_addr before send")?,
-                multicast_addr
-            );
-            socket
-                .send_to(search.as_bytes(), multicast_addr)
-                .with_context(|| format!("failed to send SSDP discovery packet for {target}"))?;
-        }
-
-        let started = std::time::Instant::now();
-        let mut locations = HashSet::new();
-        while started.elapsed() < timeout {
-            let remaining = timeout.saturating_sub(started.elapsed());
-            socket
-                .set_read_timeout(Some(remaining))
-                .context("failed to set SSDP read timeout")?;
-            let mut buffer = [0u8; 4096];
-            match socket.recv_from(&mut buffer) {
-                Ok((read, from)) => {
-                    debug!("UPnP bind-ip discovery received {read} bytes from {from}");
-                    let text = std::str::from_utf8(&buffer[..read])
-                        .context("invalid SSDP response payload")?;
-                    debug!("UPnP bind-ip discovery raw response from {from}: {text}");
-                    if let Some(location) = extract_location_header(text) {
-                        debug!("UPnP bind-ip discovery extracted location {location}");
-                        if !locations.insert(location.clone()) {
-                            debug!(
-                                "UPnP bind-ip discovery ignored duplicate location {location}"
-                            );
-                        }
-                    } else {
-                        debug!(
-                            "UPnP bind-ip discovery response from {from} had no LOCATION header"
-                        );
-                    }
-                }
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
-                {
-                    debug!(
-                        "UPnP bind-ip discovery timed out after {}s with no more packets",
-                        timeout.as_secs_f32()
-                    );
-                    break;
-                }
-                Err(error) => return Err(error).context("failed to receive SSDP response"),
-            }
-        }
-
-        Ok(locations.into_iter().collect())
+    let locations = task::spawn_blocking(move || {
+        discover_location_headers_via_socket(socket, multicast_addr, timeout)
     })
     .await
     .context("UPnP bind-ip discovery task failed")??;
@@ -773,6 +717,78 @@ async fn discover_root_devices_via_bind_ip(
         }
     }
     Ok(devices)
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn discover_location_headers_via_socket(
+    socket: std::net::UdpSocket,
+    multicast_addr: SocketAddr,
+    timeout: Duration,
+) -> Result<Vec<String>> {
+    for target in ssdp_search_targets() {
+        let search = format!(
+            "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nST: {}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n\r\n",
+            target
+        );
+        debug!(
+            "UPnP bind-ip discovery sending M-SEARCH st={} bytes={} from {} to {}",
+            target,
+            search.len(),
+            socket
+                .local_addr()
+                .context("failed to read SSDP socket local_addr before send")?,
+            multicast_addr
+        );
+        socket
+            .send_to(search.as_bytes(), multicast_addr)
+            .with_context(|| format!("failed to send SSDP discovery packet for {target}"))?;
+    }
+
+    let started = std::time::Instant::now();
+    let mut locations = HashSet::new();
+    while started.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        socket
+            .set_read_timeout(Some(remaining))
+            .context("failed to set SSDP read timeout")?;
+        let mut buffer = [0u8; 4096];
+        match socket.recv_from(&mut buffer) {
+            Ok((read, from)) => collect_location_header(&mut locations, &buffer[..read], from)?,
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                debug!(
+                    "UPnP bind-ip discovery timed out after {}s with no more packets",
+                    timeout.as_secs_f32()
+                );
+                break;
+            }
+            Err(error) => return Err(error).context("failed to receive SSDP response"),
+        }
+    }
+
+    Ok(locations.into_iter().collect())
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn collect_location_header(
+    locations: &mut HashSet<String>,
+    payload: &[u8],
+    from: SocketAddr,
+) -> Result<()> {
+    debug!(
+        "UPnP bind-ip discovery received {} bytes from {from}",
+        payload.len()
+    );
+    let text = std::str::from_utf8(payload).context("invalid SSDP response payload")?;
+    debug!("UPnP bind-ip discovery raw response from {from}: {text}");
+    if let Some(location) = extract_location_header(text) {
+        debug!("UPnP bind-ip discovery extracted location {location}");
+        if !locations.insert(location.clone()) {
+            debug!("UPnP bind-ip discovery ignored duplicate location {location}");
+        }
+    } else {
+        debug!("UPnP bind-ip discovery response from {from} had no LOCATION header");
+    }
+    Ok(())
 }
 
 fn ssdp_search_targets() -> Vec<SearchTarget> {

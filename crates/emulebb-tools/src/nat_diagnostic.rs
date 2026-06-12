@@ -98,6 +98,7 @@ fn init_tracing() {
         .try_init();
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn run_map(args: MapArgs) -> Result<()> {
     apply_ssdp_bind_override(args.shared.ssdp_bind_ip.as_deref());
 

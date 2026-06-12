@@ -335,6 +335,7 @@ pub(super) async fn wait_for_offer_files_settle(session: &ServerSession) {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use super::super::tag_codec::{DecodedTagValue, decode_tag_value};
     use crate::ed2k_transfer::Ed2kSharedEntry;
 
     use super::*;
@@ -393,6 +394,39 @@ mod tests {
         assert_eq!(
             u16::from_le_bytes(payload[24..26].try_into().unwrap()),
             OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT
+        );
+    }
+
+    #[test]
+    fn offer_files_preserves_unicode_filename_tag() {
+        let mut entry = one_entry();
+        entry.canonical_name = "unicode-\u{00e9}-\u{6f22}.bin".to_string();
+        let payload = encode_offer_files_payload(
+            &[entry],
+            Some(u32::from_le_bytes([192, 168, 1, 210])),
+            Ipv4Addr::new(192, 168, 1, 210),
+            4662,
+            None,
+        );
+
+        let tag_count_offset = 26;
+        assert_eq!(
+            u32::from_le_bytes(
+                payload[tag_count_offset..tag_count_offset + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            3
+        );
+        let (tag_name, tag_value, _rest) =
+            decode_tag_value(&payload[tag_count_offset + 4..]).unwrap();
+
+        assert_eq!(tag_name, Some(FT_FILENAME));
+        assert_eq!(
+            tag_value,
+            Some(DecodedTagValue::String(
+                "unicode-\u{00e9}-\u{6f22}.bin".to_string()
+            ))
         );
     }
 }

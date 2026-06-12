@@ -425,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn load_parses_camel_case_ed2k_config() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("emulebb-rust.toml");
@@ -535,6 +536,61 @@ externalIpOverride = "203.0.113.10"
             config.nat.external_ip_override.as_deref(),
             Some("203.0.113.10")
         );
+    }
+
+    #[test]
+    fn load_parses_ed2k_server_entry_obfuscation_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("emulebb-rust-server-entry.toml");
+        fs::write(
+            &config_path,
+            r#"
+runtimeDir = "runtime"
+p2pBindIp = "192.0.2.10"
+
+[rest]
+bindAddr = "192.0.2.10:13301"
+apiKey = "secret"
+
+[kad]
+listenPort = 41002
+
+[ed2k]
+listenPort = 41001
+obfuscationEnabled = false
+
+[[ed2k.serverEntries]]
+host = "192.0.2.20"
+port = 4661
+name = "emulebb-local-e2e"
+description = "local deterministic server"
+udpFlags = 1827
+udpKey = 287454020
+udpKeyIp = 0
+obfuscationPortTcp = 4661
+obfuscationPortUdp = 4665
+"#,
+        )
+        .unwrap();
+
+        let config = DaemonConfig::load(Some(config_path)).unwrap();
+
+        assert!(!config.ed2k.obfuscation_enabled);
+        assert!(config.ed2k.server_endpoints.is_empty());
+        assert_eq!(config.ed2k.server_entries.len(), 1);
+        let entry = &config.ed2k.server_entries[0];
+        assert_eq!(entry.host, "192.0.2.20");
+        assert_eq!(entry.port, 4661);
+        assert_eq!(entry.name.as_deref(), Some("emulebb-local-e2e"));
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("local deterministic server")
+        );
+        assert_eq!(entry.udp_flags, 1827);
+        assert_eq!(entry.udp_key, 287454020);
+        assert_eq!(entry.udp_key_ip, 0);
+        assert_eq!(entry.obfuscation_port_tcp, 4661);
+        assert_eq!(entry.obfuscation_port_udp, 4665);
     }
 
     #[test]

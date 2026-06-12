@@ -95,3 +95,20 @@ impl Default for Ed2kUploadQueuePolicyConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ed2k_config_limits_active_download_fanout() {
+        let config = Ed2kConfig::default();
+
+        assert_eq!(config.max_concurrent_downloads, 1);
+        assert_eq!(config.max_parallel_download_peers, 2);
+        assert_eq!(config.keyword_server_attempt_budget, 3);
+        assert_eq!(config.exact_hash_keyword_server_attempt_budget, 4);
+        assert_eq!(config.source_server_attempt_budget, 3);
+        assert_eq!(config.kad_source_supplement_max_existing_sources, 2);
+    }
+}

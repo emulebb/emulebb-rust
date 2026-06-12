@@ -86,6 +86,7 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
 }
 
+#[allow(clippy::cognitive_complexity)]
 pub(in crate::ed2k_tcp) async fn handle_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,

@@ -123,6 +123,7 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn reconcile_blocking(
     backend_name: &str,
     config: &NatConfig,

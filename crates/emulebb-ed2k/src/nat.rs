@@ -412,6 +412,7 @@ impl NatManager {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn run_manager_loop(
     config: NatConfig,
     mappings: Vec<MappingSpec>,

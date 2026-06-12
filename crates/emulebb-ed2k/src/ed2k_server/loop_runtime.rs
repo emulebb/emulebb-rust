@@ -11,6 +11,7 @@ use super::{
     resolve_server_entry, run_one_server_session,
 };
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
+#[allow(clippy::cognitive_complexity)]
 pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     let Ed2kServerLoopOptions {
         bind_ip,

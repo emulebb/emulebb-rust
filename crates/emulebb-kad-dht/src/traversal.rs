@@ -136,6 +136,23 @@ struct SearchPhaseConfig<'a> {
     result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
 }
 
+struct LookupPhaseConfig<'a> {
+    target: NodeId,
+    search_kind: &'a TraversalKind,
+    deadline: Instant,
+    query_timeout: Duration,
+    closest_limit: usize,
+    req_count: u8,
+    work_class: RpcWorkClass,
+    cancel: &'a CancellationToken,
+}
+
+struct LookupPhaseResult {
+    responded: Vec<TraversalContact>,
+    closest: Vec<TraversalContact>,
+    last_lookup_response_at: Option<Instant>,
+}
+
 /// eMule checks stalled searches once per second.
 const SEARCH_JUMPSTART_TICK: Duration = Duration::from_secs(1);
 /// eMule only jump-starts once the last lookup response is at least 3 seconds old.
@@ -160,215 +177,27 @@ pub async fn run_traversal(
     let deadline = Instant::now() + timeout;
     let closest_limit = traversal_closest_limit(&search_kind, phase2_fanout);
 
-    // Determine the count byte for Req based on search kind.
-    let req_count = match search_kind {
-        TraversalKind::FindNode => KADEMLIA_FIND_NODE,
-        TraversalKind::Store => KADEMLIA_STORE,
-        _ => KADEMLIA_FIND_VALUE,
-    };
-
     // ── Phase 1: Req/Res traversal to find K closest nodes ──────────────────
 
-    let mut candidates: Vec<TraversalCandidate> = initial_candidates
-        .into_iter()
-        .map(|c| {
-            let distance = target.distance(&c.id);
-            TraversalCandidate {
-                contact: c,
-                state: CandidateState::Pending,
-                distance,
-            }
-        })
-        .collect();
-    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
-    candidates.dedup_by(|a, b| a.contact.id == b.contact.id);
-
-    let mut seen: HashSet<NodeId> = candidates.iter().map(|c| c.contact.id).collect();
-
-    let mut join_set: JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)> =
-        JoinSet::new();
-    let mut last_lookup_response_at = None;
-
-    loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let remaining = deadline - now;
-
-        // Launch ALPHA Req queries for closest pending candidates
-        let inflight_count = candidates
-            .iter()
-            .filter(|c| c.state == CandidateState::Inflight)
-            .count();
-        let to_launch = ALPHA.saturating_sub(inflight_count);
-
-        let pending_closest: Vec<usize> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.state == CandidateState::Pending)
-            .take(to_launch)
-            .map(|(i, _)| i)
-            .collect();
-
-        for idx in pending_closest {
-            candidates[idx].state = CandidateState::Inflight;
-            let contact = candidates[idx].contact.clone();
-            register_traversal_identity(rpc, &contact);
-            let rpc = rpc.clone();
-            let query_timeout = query_timeout.min(remaining);
-
-            join_set.spawn(async move {
-                let packet = KadPacket::Req(Req {
-                    count: req_count,
-                    target,
-                    recipient_id: contact.id,
-                });
-                let result = rpc
-                    .request_with_class(
-                        contact.addr,
-                        &packet,
-                        opcode::RES,
-                        query_timeout,
-                        work_class,
-                    )
-                    .await;
-                (contact.id, result)
-            });
-        }
-
-        if join_set.is_empty() {
-            break;
-        }
-
-        let next = tokio::select! {
-            _ = cancel.cancelled() => break,
-            next = tokio::time::timeout(remaining, join_set.join_next()) => next,
-        };
-
-        let result = match next {
-            Ok(Some(Ok(r))) => r,
-            Ok(Some(Err(e))) => {
-                warn!("traversal task panicked: {}", e);
-                continue;
-            }
-            Ok(None) | Err(_) => break,
-        };
-
-        let (contact_id, query_result) = result;
-
-        let candidate_idx = candidates.iter().position(|c| c.contact.id == contact_id);
-
-        match query_result {
-            Err(e) => {
-                trace!("query failed for {}: {}", contact_id, e);
-                if let Some(idx) = candidate_idx {
-                    candidates[idx].state = CandidateState::Failed;
-                }
-            }
-            Ok(KadPacket::Res(res)) => {
-                last_lookup_response_at = Some(Instant::now());
-                if let Some(idx) = candidate_idx {
-                    candidates[idx].state = CandidateState::Responded;
-                }
-                let sanitized = match sanitize_res_contacts(
-                    &res.contacts,
-                    candidates
-                        .get(candidate_idx.unwrap_or(usize::MAX))
-                        .map(|c| c.contact.addr)
-                        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()),
-                    req_count as usize,
-                ) {
-                    Some(contacts) => contacts,
-                    None => {
-                        trace!(
-                            "dropping RES from {} because it exceeds requested contact count",
-                            contact_id
-                        );
-                        continue;
-                    }
-                };
-                for entry in sanitized {
-                    if seen.contains(&entry.node_id) {
-                        continue;
-                    }
-                    if entry.ip == 0 || entry.udp_port == 0 {
-                        continue;
-                    }
-                    seen.insert(entry.node_id);
-                    let addr = SocketAddr::new(IpAddr::V4(entry.ip_addr()), entry.udp_port);
-                    let distance = target.distance(&entry.node_id);
-                    let c = TraversalCandidate {
-                        contact: TraversalContact {
-                            id: entry.node_id,
-                            addr,
-                            version: entry.version,
-                        },
-                        state: CandidateState::Pending,
-                        distance,
-                    };
-                    let pos = candidates.partition_point(|x| x.distance < distance);
-                    candidates.insert(pos, c);
-                }
-            }
-            Ok(other) => {
-                trace!(
-                    "unexpected packet during traversal from {}: {:?}",
-                    contact_id,
-                    other.opcode()
-                );
-                if let Some(idx) = candidate_idx {
-                    candidates[idx].state = CandidateState::Failed;
-                }
-            }
-        }
-
-        if matches!(search_kind, TraversalKind::FindNode) && find_node_lookup_converged(&candidates)
-        {
-            break;
-        }
-
-        // Termination: the responder window this traversal cares about is done.
-        let closest_goal_done = candidates
-            .iter()
-            .take(closest_limit)
-            .all(|c| matches!(c.state, CandidateState::Responded | CandidateState::Failed));
-        let any_inflight = candidates
-            .iter()
-            .any(|c| c.state == CandidateState::Inflight);
-
-        if closest_goal_done && !any_inflight {
-            break;
-        }
-    }
-
-    join_set.abort_all();
-
-    let responded: Vec<TraversalContact> = candidates
-        .iter()
-        .filter(|c| c.state == CandidateState::Responded)
-        .map(|c| c.contact.clone())
-        .collect();
-    let closest: Vec<TraversalContact> = responded.iter().take(closest_limit).cloned().collect();
-
-    let responded_count = candidates
-        .iter()
-        .filter(|c| c.state == CandidateState::Responded)
-        .count();
-    let failed_count = candidates
-        .iter()
-        .filter(|c| c.state == CandidateState::Failed)
-        .count();
-    info!(
-        "traversal phase1 done: {} responded, {} failed, {} total candidates, {} in closest set",
-        responded_count,
-        failed_count,
-        candidates.len(),
-        closest.len()
-    );
+    let LookupPhaseResult {
+        responded,
+        closest,
+        last_lookup_response_at,
+    } = run_lookup_phase(
+        rpc,
+        initial_candidates,
+        LookupPhaseConfig {
+            target,
+            search_kind: &search_kind,
+            deadline,
+            query_timeout,
+            closest_limit,
+            req_count: req_count_for_kind(&search_kind),
+            work_class,
+            cancel: &cancel,
+        },
+    )
+    .await;
 
     // ── Phase 2: Send search packets to close nodes ──────────────────────────
 
@@ -401,6 +230,321 @@ pub async fn run_traversal(
         closest,
         search_entries,
     }
+}
+
+fn req_count_for_kind(search_kind: &TraversalKind) -> u8 {
+    match search_kind {
+        TraversalKind::FindNode => KADEMLIA_FIND_NODE,
+        TraversalKind::Store => KADEMLIA_STORE,
+        _ => KADEMLIA_FIND_VALUE,
+    }
+}
+
+async fn run_lookup_phase(
+    rpc: &RpcManager,
+    initial_candidates: Vec<TraversalContact>,
+    config: LookupPhaseConfig<'_>,
+) -> LookupPhaseResult {
+    let mut candidates = initial_traversal_candidates(initial_candidates, config.target);
+    let mut seen: HashSet<NodeId> = candidates.iter().map(|c| c.contact.id).collect();
+    let mut join_set = JoinSet::new();
+    let mut last_lookup_response_at = None;
+
+    loop {
+        if lookup_deadline_reached(config.cancel, config.deadline) {
+            break;
+        }
+        let remaining = config.deadline - Instant::now();
+        launch_pending_queries(rpc, &mut candidates, &mut join_set, &config, remaining);
+        if join_set.is_empty() {
+            break;
+        }
+
+        let Some((contact_id, query_result)) =
+            wait_for_lookup_response(&mut join_set, config.cancel, remaining).await
+        else {
+            break;
+        };
+        if handle_lookup_response(
+            &mut candidates,
+            &mut seen,
+            &config,
+            contact_id,
+            query_result,
+        ) {
+            last_lookup_response_at = Some(Instant::now());
+        }
+        if lookup_phase_done(&candidates, config.search_kind, config.closest_limit) {
+            break;
+        }
+    }
+
+    join_set.abort_all();
+    build_lookup_phase_result(candidates, config.closest_limit, last_lookup_response_at)
+}
+
+fn initial_traversal_candidates(
+    contacts: Vec<TraversalContact>,
+    target: NodeId,
+) -> Vec<TraversalCandidate> {
+    let mut candidates: Vec<TraversalCandidate> = contacts
+        .into_iter()
+        .map(|contact| TraversalCandidate {
+            distance: target.distance(&contact.id),
+            contact,
+            state: CandidateState::Pending,
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+    candidates.dedup_by(|a, b| a.contact.id == b.contact.id);
+    candidates
+}
+
+fn lookup_deadline_reached(cancel: &CancellationToken, deadline: Instant) -> bool {
+    cancel.is_cancelled() || Instant::now() >= deadline
+}
+
+fn launch_pending_queries(
+    rpc: &RpcManager,
+    candidates: &mut [TraversalCandidate],
+    join_set: &mut JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)>,
+    config: &LookupPhaseConfig<'_>,
+    remaining: Duration,
+) {
+    let inflight_count = candidates
+        .iter()
+        .filter(|candidate| candidate.state == CandidateState::Inflight)
+        .count();
+    let pending_indexes = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.state == CandidateState::Pending)
+        .take(ALPHA.saturating_sub(inflight_count))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    for index in pending_indexes {
+        candidates[index].state = CandidateState::Inflight;
+        spawn_lookup_query(
+            rpc,
+            join_set,
+            candidates[index].contact.clone(),
+            config,
+            remaining,
+        );
+    }
+}
+
+fn spawn_lookup_query(
+    rpc: &RpcManager,
+    join_set: &mut JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)>,
+    contact: TraversalContact,
+    config: &LookupPhaseConfig<'_>,
+    remaining: Duration,
+) {
+    register_traversal_identity(rpc, &contact);
+    let rpc = rpc.clone();
+    let query_timeout = config.query_timeout.min(remaining);
+    let req_count = config.req_count;
+    let target = config.target;
+    let work_class = config.work_class;
+
+    join_set.spawn(async move {
+        let packet = KadPacket::Req(Req {
+            count: req_count,
+            target,
+            recipient_id: contact.id,
+        });
+        let result = rpc
+            .request_with_class(
+                contact.addr,
+                &packet,
+                opcode::RES,
+                query_timeout,
+                work_class,
+            )
+            .await;
+        (contact.id, result)
+    });
+}
+
+async fn wait_for_lookup_response(
+    join_set: &mut JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)>,
+    cancel: &CancellationToken,
+    remaining: Duration,
+) -> Option<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)> {
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => return None,
+            next = tokio::time::timeout(remaining, join_set.join_next()) => next,
+        };
+        match next {
+            Ok(Some(Ok(result))) => return Some(result),
+            Ok(Some(Err(error))) => warn!("traversal task panicked: {}", error),
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+fn handle_lookup_response(
+    candidates: &mut Vec<TraversalCandidate>,
+    seen: &mut HashSet<NodeId>,
+    config: &LookupPhaseConfig<'_>,
+    contact_id: NodeId,
+    query_result: Result<KadPacket, emulebb_kad_net::NetError>,
+) -> bool {
+    let candidate_idx = candidates
+        .iter()
+        .position(|candidate| candidate.contact.id == contact_id);
+    match query_result {
+        Err(error) => {
+            trace!("query failed for {}: {}", contact_id, error);
+            set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            false
+        }
+        Ok(KadPacket::Res(response)) => {
+            set_candidate_state(candidates, candidate_idx, CandidateState::Responded);
+            insert_response_contacts(
+                candidates,
+                seen,
+                config,
+                contact_id,
+                candidate_idx,
+                response,
+            );
+            true
+        }
+        Ok(other) => {
+            trace!(
+                "unexpected packet during traversal from {}: {:?}",
+                contact_id,
+                other.opcode()
+            );
+            set_candidate_state(candidates, candidate_idx, CandidateState::Failed);
+            false
+        }
+    }
+}
+
+fn set_candidate_state(
+    candidates: &mut [TraversalCandidate],
+    candidate_idx: Option<usize>,
+    state: CandidateState,
+) {
+    if let Some(index) = candidate_idx {
+        candidates[index].state = state;
+    }
+}
+
+fn insert_response_contacts(
+    candidates: &mut Vec<TraversalCandidate>,
+    seen: &mut HashSet<NodeId>,
+    config: &LookupPhaseConfig<'_>,
+    contact_id: NodeId,
+    candidate_idx: Option<usize>,
+    response: emulebb_kad_proto::packet::Res,
+) {
+    let responder_addr = candidate_idx
+        .and_then(|index| {
+            candidates
+                .get(index)
+                .map(|candidate| candidate.contact.addr)
+        })
+        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+    let Some(sanitized) = sanitize_res_contacts(
+        &response.contacts,
+        responder_addr,
+        config.req_count as usize,
+    ) else {
+        trace!(
+            "dropping RES from {} because it exceeds requested contact count",
+            contact_id
+        );
+        return;
+    };
+    for entry in sanitized {
+        insert_response_contact(candidates, seen, config.target, entry);
+    }
+}
+
+fn insert_response_contact(
+    candidates: &mut Vec<TraversalCandidate>,
+    seen: &mut HashSet<NodeId>,
+    target: NodeId,
+    entry: ContactEntry,
+) {
+    if seen.contains(&entry.node_id) || entry.ip == 0 || entry.udp_port == 0 {
+        return;
+    }
+    seen.insert(entry.node_id);
+    let distance = target.distance(&entry.node_id);
+    let candidate = TraversalCandidate {
+        contact: TraversalContact {
+            id: entry.node_id,
+            addr: SocketAddr::new(IpAddr::V4(entry.ip_addr()), entry.udp_port),
+            version: entry.version,
+        },
+        state: CandidateState::Pending,
+        distance,
+    };
+    let position = candidates.partition_point(|existing| existing.distance < distance);
+    candidates.insert(position, candidate);
+}
+
+fn lookup_phase_done(
+    candidates: &[TraversalCandidate],
+    search_kind: &TraversalKind,
+    closest_limit: usize,
+) -> bool {
+    if matches!(search_kind, TraversalKind::FindNode) && find_node_lookup_converged(candidates) {
+        return true;
+    }
+
+    candidates.iter().take(closest_limit).all(|candidate| {
+        matches!(
+            candidate.state,
+            CandidateState::Responded | CandidateState::Failed
+        )
+    }) && !candidates
+        .iter()
+        .any(|candidate| candidate.state == CandidateState::Inflight)
+}
+
+fn build_lookup_phase_result(
+    candidates: Vec<TraversalCandidate>,
+    closest_limit: usize,
+    last_lookup_response_at: Option<Instant>,
+) -> LookupPhaseResult {
+    let responded = candidates
+        .iter()
+        .filter(|candidate| candidate.state == CandidateState::Responded)
+        .map(|candidate| candidate.contact.clone())
+        .collect::<Vec<_>>();
+    let closest: Vec<TraversalContact> = responded.iter().take(closest_limit).cloned().collect();
+    log_lookup_phase_summary(&candidates, closest.len());
+    LookupPhaseResult {
+        responded,
+        closest,
+        last_lookup_response_at,
+    }
+}
+
+fn log_lookup_phase_summary(candidates: &[TraversalCandidate], closest_count: usize) {
+    let responded_count = candidates
+        .iter()
+        .filter(|candidate| candidate.state == CandidateState::Responded)
+        .count();
+    let failed_count = candidates
+        .iter()
+        .filter(|candidate| candidate.state == CandidateState::Failed)
+        .count();
+    info!(
+        "traversal phase1 done: {} responded, {} failed, {} total candidates, {} in closest set",
+        responded_count,
+        failed_count,
+        candidates.len(),
+        closest_count
+    );
 }
 
 /// Send search packets to the selected responding nodes and collect results.
@@ -486,30 +630,19 @@ async fn run_search_phase(
             continue;
         }
 
-        let Some(contact) = pending_contacts.pop_front() else {
-            continue;
-        };
-        register_traversal_identity(rpc, contact);
-        let packet = match kind {
-            TraversalKind::Keyword { ref request } => KadPacket::SearchKeyReq(request.clone()),
-            TraversalKind::Source { ref request } => KadPacket::SearchSourceReq(request.clone()),
-            TraversalKind::Notes { size } => {
-                KadPacket::SearchNotesReq(SearchNotesReq { target, size })
-            }
-            TraversalKind::FindNode => unreachable!(),
-            TraversalKind::Store => unreachable!(),
-        };
-
-        debug!(
-            "traversal phase2: jump-start send to {} remaining_contacts={}",
-            contact.addr,
-            pending_contacts.len()
-        );
-        if let Err(err) = rpc.send_with_class(contact.addr, &packet, work_class).await {
-            trace!("search phase send failed for {}: {}", contact.id, err);
+        if let Some(next) = emit_next_search_packet(
+            rpc,
+            &kind,
+            target,
+            work_class,
+            jumpstart_tick,
+            &mut pending_contacts,
+            &mut queried_addrs,
+        )
+        .await
+        {
+            next_emit_at = next;
         }
-        queried_addrs.insert(contact.addr);
-        next_emit_at = Instant::now() + jumpstart_tick;
     }
 
     info!(
@@ -518,6 +651,43 @@ async fn run_search_phase(
     );
 
     search_entries
+}
+
+async fn emit_next_search_packet(
+    rpc: &RpcManager,
+    kind: &TraversalKind,
+    target: NodeId,
+    work_class: RpcWorkClass,
+    jumpstart_tick: Duration,
+    pending_contacts: &mut VecDeque<&TraversalContact>,
+    queried_addrs: &mut HashSet<SocketAddr>,
+) -> Option<Instant> {
+    let contact = pending_contacts.pop_front()?;
+    register_traversal_identity(rpc, contact);
+    let packet = search_phase_packet(kind, target);
+
+    debug!(
+        "traversal phase2: jump-start send to {} remaining_contacts={}",
+        contact.addr,
+        pending_contacts.len()
+    );
+    if let Err(err) = rpc.send_with_class(contact.addr, &packet, work_class).await {
+        trace!("search phase send failed for {}: {}", contact.id, err);
+    }
+    queried_addrs.insert(contact.addr);
+    Some(Instant::now() + jumpstart_tick)
+}
+
+fn search_phase_packet(kind: &TraversalKind, target: NodeId) -> KadPacket {
+    match kind {
+        TraversalKind::Keyword { request } => KadPacket::SearchKeyReq(request.clone()),
+        TraversalKind::Source { request } => KadPacket::SearchSourceReq(request.clone()),
+        TraversalKind::Notes { size } => KadPacket::SearchNotesReq(SearchNotesReq {
+            target,
+            size: *size,
+        }),
+        TraversalKind::FindNode | TraversalKind::Store => unreachable!(),
+    }
 }
 
 /// Compute when the next phase-2 search packet is allowed to be emitted.
@@ -569,59 +739,127 @@ async fn collect_search_results_until(drain: SearchResultDrain<'_>) {
             _ = cancel.cancelled() => break,
             result = tokio::time::timeout(remaining, unsolicited.recv()) => result,
         } {
-            Ok(Ok(emulebb_kad_net::ReceivedKadPacket {
-                packet: KadPacket::SearchRes(sr),
-                from,
-                ..
-            })) => {
-                if !queried_addrs.contains(&from) {
-                    trace!("ignoring SEARCH_RES from unqueried sender {}", from);
-                    continue;
-                }
-                if sr.target != target {
-                    trace!(
-                        "ignoring SEARCH_RES from {} for mismatched target {}",
-                        from, sr.target
-                    );
-                    continue;
-                }
-
-                debug!(
-                    "search phase got SearchRes: {} results from sender {}",
-                    sr.results.len(),
-                    sr.sender_id
-                );
-                for entry in sr.results {
-                    if let Some(tx) = result_tx.as_ref() {
-                        let _ = tx.send((entry.entry_id, entry.tags.clone())).await;
-                    }
-                    if collect_search_entries {
-                        search_entries.push((entry.entry_id, entry.tags));
-                    }
+            Ok(Ok(packet)) => {
+                handle_search_phase_packet(
+                    packet,
+                    target,
+                    queried_addrs,
+                    result_tx,
+                    collect_search_entries,
+                    search_entries,
+                )
+                .await;
+            }
+            Ok(Err(error)) => {
+                if search_phase_receiver_closed(error) {
+                    break;
                 }
             }
-            Ok(Ok(emulebb_kad_net::ReceivedKadPacket {
-                packet: other,
-                from,
-                ..
-            })) => {
-                if queried_addrs.contains(&from) {
-                    trace!(
-                        "search phase unexpected packet opcode=0x{:02X} from {}",
-                        other.opcode(),
-                        from
-                    );
-                }
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
-                warn!(
-                    "search phase broadcast receiver lagged; skipped {} packets",
-                    skipped
-                );
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             Err(_) => break,
         }
+    }
+}
+
+async fn handle_search_phase_packet(
+    packet: emulebb_kad_net::ReceivedKadPacket,
+    target: NodeId,
+    queried_addrs: &HashSet<SocketAddr>,
+    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    collect_search_entries: bool,
+    search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
+) {
+    let emulebb_kad_net::ReceivedKadPacket { packet, from, .. } = packet;
+    match packet {
+        KadPacket::SearchRes(response) => {
+            handle_search_response(
+                response,
+                from,
+                target,
+                queried_addrs,
+                result_tx,
+                collect_search_entries,
+                search_entries,
+            )
+            .await;
+        }
+        other if queried_addrs.contains(&from) => {
+            trace!(
+                "search phase unexpected packet opcode=0x{:02X} from {}",
+                other.opcode(),
+                from
+            );
+        }
+        _ => {}
+    }
+}
+
+async fn handle_search_response(
+    response: emulebb_kad_proto::packet::SearchRes,
+    from: SocketAddr,
+    target: NodeId,
+    queried_addrs: &HashSet<SocketAddr>,
+    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    collect_search_entries: bool,
+    search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
+) {
+    if !search_response_matches(response.target, from, target, queried_addrs) {
+        return;
+    }
+
+    debug!(
+        "search phase got SearchRes: {} results from sender {}",
+        response.results.len(),
+        response.sender_id
+    );
+    for entry in response.results {
+        forward_search_result_entry(entry, result_tx, collect_search_entries, search_entries).await;
+    }
+}
+
+fn search_response_matches(
+    response_target: NodeId,
+    from: SocketAddr,
+    target: NodeId,
+    queried_addrs: &HashSet<SocketAddr>,
+) -> bool {
+    if !queried_addrs.contains(&from) {
+        trace!("ignoring SEARCH_RES from unqueried sender {}", from);
+        return false;
+    }
+    if response_target != target {
+        trace!(
+            "ignoring SEARCH_RES from {} for mismatched target {}",
+            from, response_target
+        );
+        return false;
+    }
+    true
+}
+
+async fn forward_search_result_entry(
+    entry: emulebb_kad_proto::packet::SearchResultEntry,
+    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    collect_search_entries: bool,
+    search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
+) {
+    if let Some(tx) = result_tx.as_ref() {
+        let _ = tx.send((entry.entry_id, entry.tags.clone())).await;
+    }
+    if collect_search_entries {
+        search_entries.push((entry.entry_id, entry.tags));
+    }
+}
+
+fn search_phase_receiver_closed(error: tokio::sync::broadcast::error::RecvError) -> bool {
+    match error {
+        tokio::sync::broadcast::error::RecvError::Lagged(skipped) => {
+            warn!(
+                "search phase broadcast receiver lagged; skipped {} packets",
+                skipped
+            );
+            false
+        }
+        tokio::sync::broadcast::error::RecvError::Closed => true,
     }
 }
 

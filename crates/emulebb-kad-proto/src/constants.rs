@@ -114,31 +114,37 @@ mod tests {
 
     #[test]
     fn kad2_opcode_constants_match_emule_oracle() {
-        assert_eq!(opcode::BOOTSTRAP_REQ, 0x01);
-        assert_eq!(opcode::BOOTSTRAP_RES, 0x09);
-        assert_eq!(opcode::HELLO_REQ, 0x11);
-        assert_eq!(opcode::HELLO_RES, 0x19);
-        assert_eq!(opcode::REQ, 0x21);
-        assert_eq!(opcode::HELLO_RES_ACK, 0x22);
-        assert_eq!(opcode::RES, 0x29);
-        assert_eq!(opcode::SEARCH_KEY_REQ, 0x33);
-        assert_eq!(opcode::SEARCH_SOURCE_REQ, 0x34);
-        assert_eq!(opcode::SEARCH_NOTES_REQ, 0x35);
-        assert_eq!(opcode::SEARCH_RES, 0x3B);
-        assert_eq!(opcode::PUBLISH_KEY_REQ, 0x43);
-        assert_eq!(opcode::PUBLISH_SOURCE_REQ, 0x44);
-        assert_eq!(opcode::PUBLISH_NOTES_REQ, 0x45);
-        assert_eq!(opcode::PUBLISH_RES, 0x4B);
-        assert_eq!(opcode::PUBLISH_RES_ACK, 0x4C);
-        assert_eq!(opcode::FIREWALLED_REQ, 0x50);
-        assert_eq!(opcode::FINDBUDDY_REQ, 0x51);
-        assert_eq!(opcode::CALLBACK_REQ, 0x52);
-        assert_eq!(opcode::FIREWALLED2_REQ, 0x53);
-        assert_eq!(opcode::FIREWALLED_RES, 0x58);
-        assert_eq!(opcode::FIREWALLED_ACK_RES, 0x59);
-        assert_eq!(opcode::FINDBUDDY_RES, 0x5A);
-        assert_eq!(opcode::PING, 0x60);
-        assert_eq!(opcode::PONG, 0x61);
-        assert_eq!(opcode::FIREWALLUDP, 0x62);
+        let oracle = [
+            ("BOOTSTRAP_REQ", opcode::BOOTSTRAP_REQ, 0x01),
+            ("BOOTSTRAP_RES", opcode::BOOTSTRAP_RES, 0x09),
+            ("HELLO_REQ", opcode::HELLO_REQ, 0x11),
+            ("HELLO_RES", opcode::HELLO_RES, 0x19),
+            ("REQ", opcode::REQ, 0x21),
+            ("HELLO_RES_ACK", opcode::HELLO_RES_ACK, 0x22),
+            ("RES", opcode::RES, 0x29),
+            ("SEARCH_KEY_REQ", opcode::SEARCH_KEY_REQ, 0x33),
+            ("SEARCH_SOURCE_REQ", opcode::SEARCH_SOURCE_REQ, 0x34),
+            ("SEARCH_NOTES_REQ", opcode::SEARCH_NOTES_REQ, 0x35),
+            ("SEARCH_RES", opcode::SEARCH_RES, 0x3B),
+            ("PUBLISH_KEY_REQ", opcode::PUBLISH_KEY_REQ, 0x43),
+            ("PUBLISH_SOURCE_REQ", opcode::PUBLISH_SOURCE_REQ, 0x44),
+            ("PUBLISH_NOTES_REQ", opcode::PUBLISH_NOTES_REQ, 0x45),
+            ("PUBLISH_RES", opcode::PUBLISH_RES, 0x4B),
+            ("PUBLISH_RES_ACK", opcode::PUBLISH_RES_ACK, 0x4C),
+            ("FIREWALLED_REQ", opcode::FIREWALLED_REQ, 0x50),
+            ("FINDBUDDY_REQ", opcode::FINDBUDDY_REQ, 0x51),
+            ("CALLBACK_REQ", opcode::CALLBACK_REQ, 0x52),
+            ("FIREWALLED2_REQ", opcode::FIREWALLED2_REQ, 0x53),
+            ("FIREWALLED_RES", opcode::FIREWALLED_RES, 0x58),
+            ("FIREWALLED_ACK_RES", opcode::FIREWALLED_ACK_RES, 0x59),
+            ("FINDBUDDY_RES", opcode::FINDBUDDY_RES, 0x5A),
+            ("PING", opcode::PING, 0x60),
+            ("PONG", opcode::PONG, 0x61),
+            ("FIREWALLUDP", opcode::FIREWALLUDP, 0x62),
+        ];
+
+        for (name, actual, expected) in oracle {
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 }

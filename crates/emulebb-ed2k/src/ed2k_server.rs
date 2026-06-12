@@ -15,6 +15,9 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
+use emulebb_kad_proto::Ed2kHash;
+
 mod active_callback;
 mod active_keyword;
 mod active_source;
@@ -61,11 +64,17 @@ use obfuscation::{
 };
 use packet_codec::{decode_server_payload, encode_packet};
 use packet_handler::handle_server_packet;
+#[cfg(test)]
+use packet_handler::{decode_callback_request, decode_id_change_payload, decode_server_ident};
+#[cfg(test)]
+use result_decoder::decode_search_results;
 use result_decoder::{
     decode_found_sources, decode_search_result_page, decode_udp_found_source_sets,
     decode_udp_search_result_pages,
 };
 use search_expr::encode_search_request;
+#[cfg(test)]
+use server_entry::ConfiguredServerEntry;
 use server_entry::{
     ResolvedServerEntry, configured_server_entries, resolve_callback_server_entry,
     resolve_server_entry,
@@ -80,9 +89,15 @@ use startup::{
     encode_udp_source_request, login_identity_for_server_transport, send_connected_server_startup,
     send_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };
+#[cfg(test)]
+use startup::{encode_offer_files_payload, offer_files_catalog_fingerprint, server_capabilities};
+#[cfg(test)]
+use tag_codec::ed2k_string_tag_type;
 use tag_codec::{decode_ed2k_string, decode_tag};
 use types::ServerUdpPacket;
 pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServerState};
+#[cfg(test)]
+use udp::derive_server_udp_cipher;
 use udp::{decode_server_udp_datagram, encode_server_udp_datagram, server_udp_endpoint};
 use udp_runtime::{read_server_udp_packet, send_udp_keyword_search, send_udp_source_search};
 
@@ -213,3 +228,6 @@ const SERVER_OBFUSCATION_PRIME_BYTES: [u8; SERVER_OBFUSCATION_PUBLIC_KEY_LEN] = 
     0x7D, 0xF7, 0x78, 0x18, 0x28, 0x10, 0x5F, 0x34, 0x0F, 0x76, 0x23, 0x87, 0xF8, 0x8B, 0x28, 0x91,
     0x42, 0xFB, 0x42, 0x68, 0x8F, 0x05, 0x15, 0x0F, 0x54, 0x8B, 0x5F, 0x43, 0x6A, 0xF7, 0x0D, 0xF3,
 ];
+
+#[cfg(test)]
+mod tests;

@@ -31,70 +31,8 @@ impl DhtNode {
 
         // Send BOOTSTRAP_REQ to up to 10 contacts
         for bc in contacts.iter().take(10) {
-            let addr = SocketAddr::new(IpAddr::V4(bc.ip), bc.udp_port);
-            if bc.node_id != NodeId::ZERO {
-                self.inner.rpc.register_peer_identity(addr, bc.node_id);
-            }
-            self.inner.rpc.register_peer_version(addr, bc.version);
-            if bc.udp_key != KadUdpKey::ZERO {
-                self.inner.rpc.register_peer_key(addr, bc.udp_key.value());
-            }
-            debug!("bootstrap attempt to {}", addr);
-
-            match self
-                .inner
-                .rpc
-                .request_with_class(
-                    addr,
-                    &KadPacket::BootstrapReq,
-                    opcode::BOOTSTRAP_RES,
-                    Duration::from_secs(5),
-                    work_class,
-                )
-                .await
-            {
-                Ok(KadPacket::BootstrapRes(res)) => {
-                    responded += 1;
-                    let mut rt = self.inner.routing_table.lock().await;
-                    let mut sender_contact = Contact::new(
-                        res.sender_id,
-                        bc.ip,
-                        bc.udp_port,
-                        res.sender_tcp_port,
-                        res.sender_version,
-                    );
-                    if let Some(known_udp_key) = self.known_peer_key(addr) {
-                        sender_contact.udp_key = known_udp_key;
-                    }
-                    let _ = rt.add_contact(sender_contact);
-                    for entry in res.contacts {
-                        if entry.ip == 0 || entry.udp_port == 0 {
-                            continue;
-                        }
-                        let contact = Contact::new(
-                            entry.node_id,
-                            entry.ip_addr(),
-                            entry.udp_port,
-                            entry.tcp_port,
-                            entry.version,
-                        );
-                        self.inner
-                            .rpc
-                            .register_peer_identity(addr_from_contact(&contact), contact.id);
-                        self.inner.rpc.register_peer_version(
-                            addr_from_contact(&contact),
-                            contact.kad_version,
-                        );
-                        let _ = rt.add_contact(contact);
-                    }
-                    info!(
-                        "bootstrap response from {} - routing table now {} contacts",
-                        addr,
-                        rt.len()
-                    );
-                }
-                Ok(_) => warn!("unexpected packet type during bootstrap from {}", addr),
-                Err(e) => debug!("bootstrap contact {} failed: {}", addr, e),
+            if self.bootstrap_contact(bc, work_class).await {
+                responded += 1;
             }
         }
 
@@ -141,4 +79,93 @@ impl DhtNode {
 
         contacts
     }
+
+    async fn bootstrap_contact(&self, bc: &BootstrapContact, work_class: RpcWorkClass) -> bool {
+        let addr = SocketAddr::new(IpAddr::V4(bc.ip), bc.udp_port);
+        self.register_bootstrap_contact(addr, bc);
+        debug!("bootstrap attempt to {}", addr);
+
+        match self
+            .inner
+            .rpc
+            .request_with_class(
+                addr,
+                &KadPacket::BootstrapReq,
+                opcode::BOOTSTRAP_RES,
+                Duration::from_secs(5),
+                work_class,
+            )
+            .await
+        {
+            Ok(KadPacket::BootstrapRes(res)) => {
+                self.add_bootstrap_response_contacts(bc, addr, res).await;
+                true
+            }
+            Ok(_) => {
+                warn!("unexpected packet type during bootstrap from {}", addr);
+                false
+            }
+            Err(e) => {
+                debug!("bootstrap contact {} failed: {}", addr, e);
+                false
+            }
+        }
+    }
+
+    fn register_bootstrap_contact(&self, addr: SocketAddr, bc: &BootstrapContact) {
+        if bc.node_id != NodeId::ZERO {
+            self.inner.rpc.register_peer_identity(addr, bc.node_id);
+        }
+        self.inner.rpc.register_peer_version(addr, bc.version);
+        if bc.udp_key != KadUdpKey::ZERO {
+            self.inner.rpc.register_peer_key(addr, bc.udp_key.value());
+        }
+    }
+
+    async fn add_bootstrap_response_contacts(
+        &self,
+        bc: &BootstrapContact,
+        addr: SocketAddr,
+        res: emulebb_kad_proto::packet::BootstrapRes,
+    ) {
+        let mut rt = self.inner.routing_table.lock().await;
+        let mut sender_contact = Contact::new(
+            res.sender_id,
+            bc.ip,
+            bc.udp_port,
+            res.sender_tcp_port,
+            res.sender_version,
+        );
+        if let Some(known_udp_key) = self.known_peer_key(addr) {
+            sender_contact.udp_key = known_udp_key;
+        }
+        let _ = rt.add_contact(sender_contact);
+        for contact in res.contacts.into_iter().filter_map(bootstrap_contact_entry) {
+            self.inner
+                .rpc
+                .register_peer_identity(addr_from_contact(&contact), contact.id);
+            self.inner
+                .rpc
+                .register_peer_version(addr_from_contact(&contact), contact.kad_version);
+            let _ = rt.add_contact(contact);
+        }
+        info!(
+            "bootstrap response from {} - routing table now {} contacts",
+            addr,
+            rt.len()
+        );
+    }
+}
+
+fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Option<Contact> {
+    if entry.ip == 0 || entry.udp_port == 0 {
+        return None;
+    }
+    Some(Contact::new(
+        entry.node_id,
+        entry.ip_addr(),
+        entry.udp_port,
+        entry.tcp_port,
+        entry.version,
+    ))
 }

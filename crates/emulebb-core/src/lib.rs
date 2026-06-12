@@ -2253,6 +2253,7 @@ impl EmulebbCore {
         ))
     }
 
+    #[allow(clippy::cognitive_complexity)]
     async fn run_ed2k_download_attempt(&self, transfer: &Transfer) -> Result<Option<&'static str>> {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
@@ -2587,6 +2588,7 @@ impl EmulebbCore {
         });
     }
 
+    #[allow(clippy::cognitive_complexity)]
     async fn resolve_hash_only_ed2k_metadata(
         &self,
         network: &Ed2kNetworkConfig,
@@ -2676,6 +2678,7 @@ impl EmulebbCore {
         Ok((!learned.is_empty()).then_some(learned))
     }
 
+    #[allow(clippy::cognitive_complexity)]
     async fn acquire_ed2k_sources(
         &self,
         network: &Ed2kNetworkConfig,
@@ -3026,6 +3029,7 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn run_kad_hello_intro_loop(
     dht: DhtNode,
     ed2k_listener: Arc<TcpListener>,
@@ -3130,6 +3134,7 @@ async fn run_kad_shared_file_publish_loop(
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn publish_kad_shared_files(
     dht: &DhtNode,
     transfer_runtime: &Ed2kTransferRuntime,
@@ -3877,6 +3882,7 @@ fn preferred_passive_replay_families(counts: SnoopQueueFamilyCounts) -> [Passive
     [families[0].0, families[1].0, families[2].0]
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn handle_kad_local_store_packet(
     runtime: &KadLocalStoreRuntime,
     received: ReceivedKadPacket,
@@ -4771,6 +4777,7 @@ fn is_retryable_direct_download_error(error: &anyhow::Error) -> bool {
     })
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn run_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
     options: DirectDownloadOptions,
     download_peer: DownloadFn,
@@ -5342,6 +5349,7 @@ async fn collect_kad_ed2k_metadata(
     (!learned.is_empty()).then_some(learned)
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn collect_kad_ed2k_sources(
     dht: &DhtNode,
     file_hash: Ed2kHash,

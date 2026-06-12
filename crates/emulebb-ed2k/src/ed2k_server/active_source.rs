@@ -43,6 +43,7 @@ pub struct Ed2kSourceSearchOptions<'a> {
 /// The ED2K server protocol uses `OP_GETSOURCES`/`OP_FOUNDSOURCES` rather than
 /// the generic search-query tree used for keyword searches, so this path stays
 /// separate from `search_keyword_servers`.
+#[allow(clippy::cognitive_complexity)]
 pub async fn search_source_servers(
     options: Ed2kSourceSearchOptions<'_>,
 ) -> Result<Vec<Ed2kFoundSource>> {
@@ -188,6 +189,7 @@ pub struct Ed2kUdpSourceSearchOptions<'a> {
 /// fresh TCP source-search login reaches `OP_IDCHANGE`. eMule can still use the
 /// server UDP `GlobGetSources` family, so keep that path available as a
 /// first-class source acquisition fallback.
+#[allow(clippy::cognitive_complexity)]
 pub async fn search_source_udp_servers(
     options: Ed2kUdpSourceSearchOptions<'_>,
 ) -> Result<Vec<Ed2kFoundSource>> {

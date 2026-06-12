@@ -98,52 +98,96 @@ fn log_routing_rejection(
 ) {
     match error {
         RoutingError::SubnetLimitExceeded { prefix, scope } => {
-            warn!(
-                target: "kad_routing",
-                contact_id = %contact_id,
-                contact_ip = %contact_ip,
-                contact_udp_port,
-                prefix = *prefix,
-                scope = match scope {
-                    RoutingSubnetLimitScope::Global => "global",
-                    RoutingSubnetLimitScope::BinLocal => "bin_local",
-                },
-                "routing contact rejected by subnet limit"
-            );
+            log_subnet_limit_rejection(contact_id, contact_ip, contact_udp_port, *prefix, scope);
         }
         RoutingError::SplitDenied { reason } => {
-            warn!(
-                target: "kad_routing",
-                contact_id = %contact_id,
-                contact_ip = %contact_ip,
-                contact_udp_port,
-                reason = match reason {
-                    RoutingSplitDeniedReason::DepthLimit => "depth_limit",
-                    RoutingSplitDeniedReason::MaxTableSize => "max_table_size",
-                    RoutingSplitDeniedReason::ZoneIndexCap => "zone_index_cap",
-                },
-                "routing leaf split denied while inserting contact"
-            );
+            log_split_denied_rejection(contact_id, contact_ip, contact_udp_port, reason);
         }
         RoutingError::IpLimitExceeded { .. } => {
-            debug!(
-                target: "kad_routing",
-                contact_id = %contact_id,
-                contact_ip = %contact_ip,
-                contact_udp_port,
-                "routing contact rejected by duplicate IP limit"
-            );
+            log_ip_limit_rejection(contact_id, contact_ip, contact_udp_port);
         }
         RoutingError::TableFull { max } => {
-            warn!(
-                target: "kad_routing",
-                contact_id = %contact_id,
-                contact_ip = %contact_ip,
-                contact_udp_port,
-                max = *max,
-                "routing table rejected contact because the destination bin is full"
-            );
+            log_table_full_rejection(contact_id, contact_ip, contact_udp_port, *max);
         }
+    }
+}
+
+fn log_subnet_limit_rejection(
+    contact_id: NodeId,
+    contact_ip: std::net::Ipv4Addr,
+    contact_udp_port: u16,
+    prefix: u8,
+    scope: &RoutingSubnetLimitScope,
+) {
+    warn!(
+        target: "kad_routing",
+        contact_id = %contact_id,
+        contact_ip = %contact_ip,
+        contact_udp_port,
+        prefix,
+        scope = routing_subnet_scope_label(scope),
+        "routing contact rejected by subnet limit"
+    );
+}
+
+fn log_split_denied_rejection(
+    contact_id: NodeId,
+    contact_ip: std::net::Ipv4Addr,
+    contact_udp_port: u16,
+    reason: &RoutingSplitDeniedReason,
+) {
+    warn!(
+        target: "kad_routing",
+        contact_id = %contact_id,
+        contact_ip = %contact_ip,
+        contact_udp_port,
+        reason = routing_split_denied_reason_label(reason),
+        "routing leaf split denied while inserting contact"
+    );
+}
+
+fn log_ip_limit_rejection(
+    contact_id: NodeId,
+    contact_ip: std::net::Ipv4Addr,
+    contact_udp_port: u16,
+) {
+    debug!(
+        target: "kad_routing",
+        contact_id = %contact_id,
+        contact_ip = %contact_ip,
+        contact_udp_port,
+        "routing contact rejected by duplicate IP limit"
+    );
+}
+
+fn log_table_full_rejection(
+    contact_id: NodeId,
+    contact_ip: std::net::Ipv4Addr,
+    contact_udp_port: u16,
+    max: usize,
+) {
+    warn!(
+        target: "kad_routing",
+        contact_id = %contact_id,
+        contact_ip = %contact_ip,
+        contact_udp_port,
+        max,
+        "routing table rejected contact because the destination bin is full"
+    );
+}
+
+fn routing_subnet_scope_label(scope: &RoutingSubnetLimitScope) -> &'static str {
+    match scope {
+        RoutingSubnetLimitScope::Global => "global",
+        RoutingSubnetLimitScope::BinLocal => "bin_local",
+    }
+}
+
+fn routing_split_denied_reason_label(reason: &RoutingSplitDeniedReason) -> &'static str {
+    match reason {
+        RoutingSplitDeniedReason::DepthLimit => "depth_limit",
+        RoutingSplitDeniedReason::MaxTableSize => "max_table_size",
+        RoutingSplitDeniedReason::ZoneIndexCap => "zone_index_cap",
     }
 }
 

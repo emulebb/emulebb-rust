@@ -20,6 +20,7 @@ use super::{
     start_background_server_search, validate_found_sources,
 };
 
+#[allow(clippy::cognitive_complexity)]
 pub(super) async fn run_one_server_session(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,

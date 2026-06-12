@@ -38,6 +38,7 @@ pub struct Ed2kKeywordSearchOptions<'a> {
 /// server connection pool exists. The function prefers the currently connected
 /// background server when one is available, caps how many configured servers it
 /// will probe, and returns the first non-empty result page it receives.
+#[allow(clippy::cognitive_complexity)]
 pub async fn search_keyword_servers(
     options: Ed2kKeywordSearchOptions<'_>,
 ) -> Result<Vec<Ed2kSearchFile>> {
