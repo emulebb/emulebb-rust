@@ -4,4 +4,3 @@ pub struct MetadataLocalIdentity {
     pub public_identity: Option<Vec<u8>>,
     pub private_secret: Option<Vec<u8>>,
 }
-

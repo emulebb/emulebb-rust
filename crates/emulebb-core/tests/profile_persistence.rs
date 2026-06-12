@@ -149,4 +149,3 @@ fn unique_test_dir(name: &str) -> PathBuf {
     fs::create_dir_all(&path).expect("create test dir");
     path
 }
-

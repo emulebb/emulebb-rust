@@ -26,7 +26,10 @@ impl super::MetadataStore {
     }
 
     pub fn upsert_local_identity(&self, identity: &MetadataLocalIdentity) -> Result<()> {
-        ensure!(!identity.kind.trim().is_empty(), "identity kind must not be empty");
+        ensure!(
+            !identity.kind.trim().is_empty(),
+            "identity kind must not be empty"
+        );
         let now = unix_ms();
         self.connection()?.execute(
             r#"

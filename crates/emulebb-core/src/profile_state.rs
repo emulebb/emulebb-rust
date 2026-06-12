@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 
 use crate::{
-    Category, CoreState, Friend, Preferences, ServerInfo, SharedDirectoryRoot,
-    default_categories, default_preferences,
+    Category, CoreState, Friend, Preferences, ServerInfo, SharedDirectoryRoot, default_categories,
+    default_preferences,
 };
 
 const CORE_PREFERENCES_KEY: &str = "core.preferences";
@@ -99,7 +99,9 @@ pub(crate) fn persist_friend(metadata: &MetadataStore, friend: &Friend) -> Resul
             .last_seen
             .map(|last_seen| last_seen.timestamp_millis())
             .unwrap_or_default(),
-        last_seen_ms: friend.last_seen.map(|last_seen| last_seen.timestamp_millis()),
+        last_seen_ms: friend
+            .last_seen
+            .map(|last_seen| last_seen.timestamp_millis()),
     })
 }
 
@@ -142,7 +144,9 @@ fn friend_from_metadata(friend: MetadataFriend) -> Friend {
     Friend {
         user_hash: friend.user_hash,
         name: friend.name,
-        last_seen: friend.last_seen_ms.and_then(DateTime::<Utc>::from_timestamp_millis),
+        last_seen: friend
+            .last_seen_ms
+            .and_then(DateTime::<Utc>::from_timestamp_millis),
         address: friend.last_address,
         port: friend.last_port,
     }
@@ -171,4 +175,3 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         files: server.files,
     }
 }
-

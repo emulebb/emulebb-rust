@@ -36,4 +36,3 @@ pub struct MetadataServer {
     pub hard_files: u64,
     pub version: String,
 }
-
