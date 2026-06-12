@@ -140,6 +140,7 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub queue_rank: Option<u16>,
     pub wait_time_ms: u64,
     pub uploaded_bytes: u64,
+    pub upload_speed_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +153,7 @@ struct Ed2kUploadSessionEntry {
     file_priority_score: i128,
     credit_score_permille: i128,
     uploaded_bytes: u64,
+    upload_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +244,7 @@ impl Ed2kUploadQueueState {
                 file_priority_score,
                 credit_score_permille,
                 uploaded_bytes: 0,
+                upload_started_at: None,
             },
         );
         self.trim_waiting_queue(now);
@@ -304,6 +307,9 @@ impl Ed2kUploadQueueState {
             return Ed2kUploadSessionStatus::Stale;
         }
         session.last_activity = now;
+        if byte_count != 0 {
+            session.upload_started_at.get_or_insert(now);
+        }
         session.uploaded_bytes = session.uploaded_bytes.saturating_add(byte_count);
         self.status_for_key(&handle.key, now)
     }
@@ -374,6 +380,7 @@ impl Ed2kUploadQueueState {
                     .try_into()
                     .unwrap_or(u64::MAX),
                 uploaded_bytes: session.uploaded_bytes,
+                upload_speed_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
@@ -622,6 +629,19 @@ fn upload_snapshot_sort_key(entry: &Ed2kUploadQueueSnapshotEntry) -> (u8, u16) {
         Ed2kUploadSessionPhaseSnapshot::Granted => (1, 0),
         Ed2kUploadSessionPhaseSnapshot::Waiting => (2, entry.queue_rank.unwrap_or(u16::MAX)),
     }
+}
+
+fn upload_speed_bytes_per_sec(session: &Ed2kUploadSessionEntry, now: Instant) -> u64 {
+    let Some(started_at) = session.upload_started_at else {
+        return 0;
+    };
+    if session.uploaded_bytes == 0 {
+        return 0;
+    }
+    let elapsed_ms = now.saturating_duration_since(started_at).as_millis().max(1);
+    ((u128::from(session.uploaded_bytes) * 1_000) / elapsed_ms)
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn upload_client_id_matches(peer: &Ed2kUploadPeerIdentity, client_id: &str) -> bool {

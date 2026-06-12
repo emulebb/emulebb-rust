@@ -4850,7 +4850,7 @@ fn upload_from_snapshot(
         client_software: "unknown".to_string(),
         client_mod: String::new(),
         upload_state,
-        upload_speed_ki_bps: 0.0,
+        upload_speed_ki_bps: entry.upload_speed_bytes_per_sec as f64 / 1024.0,
         uploaded_bytes: entry.uploaded_bytes,
         queue_session_uploaded: entry.uploaded_bytes,
         payload_buffered: 0,

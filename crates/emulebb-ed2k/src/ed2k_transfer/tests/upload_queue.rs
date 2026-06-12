@@ -39,24 +39,34 @@ async fn upload_queue_snapshot_tracks_session_uploaded_bytes() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;
     let file_hash = Ed2kHash::from_bytes([0x34; 16]);
+    let now = std::time::Instant::now();
 
     let (handle, status) = runtime
-        .begin_upload_session(upload_peer(1, 0x14, 0x0A00_0014), &file_hash)
+        .begin_upload_session_at(upload_peer(1, 0x14, 0x0A00_0014), &file_hash, now)
         .await;
     assert_eq!(status, Ed2kUploadSessionStatus::Granted);
 
     assert_eq!(
-        runtime.note_upload_payload_sent(&handle, 65_536).await,
+        runtime
+            .note_upload_payload_sent_at(&handle, 65_536, now + std::time::Duration::from_secs(1))
+            .await,
         Ed2kUploadSessionStatus::Granted
     );
     assert_eq!(
-        runtime.note_upload_payload_sent(&handle, 32_768).await,
+        runtime
+            .note_upload_payload_sent_at(&handle, 32_768, now + std::time::Duration::from_secs(3))
+            .await,
         Ed2kUploadSessionStatus::Granted
     );
 
-    let snapshot = runtime.upload_queue_snapshot().await;
+    let snapshot = runtime
+        .upload_queue
+        .lock()
+        .await
+        .snapshot(now + std::time::Duration::from_secs(3));
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].uploaded_bytes, 98_304);
+    assert_eq!(snapshot[0].upload_speed_bytes_per_sec, 49_152);
 }
 
 #[tokio::test]
