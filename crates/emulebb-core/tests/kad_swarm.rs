@@ -2,7 +2,9 @@ mod kad_swarm_support;
 
 use std::time::Duration;
 
-use emulebb_core::{LocalShareCreate, TransferCreate};
+use emulebb_core::{
+    LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate, TransferCreate,
+};
 use emulebb_kad_proto::{Ed2kHash, Tag, TagValue, tag_name};
 use kad_swarm_support::{
     LocalKadSwarm, deterministic_payload, file_hash, free_lan_tcp_port, node_id, open_network_core,
@@ -178,8 +180,9 @@ async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
     let payload_name = "Kad Unicode Transfer äöü 漢.bin";
     let payload = deterministic_payload(2 * 1024 * 1024 + 17);
     let shared_root = runtime_dir.join("shared");
-    std::fs::create_dir_all(&shared_root).expect("create shared root");
-    let payload_path = shared_root.join(payload_name);
+    let nested_root = shared_root.join("nested").join("unicode");
+    std::fs::create_dir_all(&nested_root).expect("create nested shared root");
+    let payload_path = nested_root.join(payload_name);
     std::fs::write(&payload_path, &payload).expect("write shared payload");
 
     let seed_core = open_network_core(
@@ -190,13 +193,21 @@ async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
         [0x31; 16],
         true,
     );
-    let share = seed_core
-        .share_local_file(LocalShareCreate {
-            path: payload_path.display().to_string(),
-            name: Some(payload_name.to_string()),
+    seed_core
+        .set_shared_directories(SharedDirectoriesUpdate {
+            roots: vec![SharedDirectoryRootUpdate::Object {
+                path: shared_root.display().to_string(),
+                recursive: true,
+            }],
+            confirm_replace_roots: true,
         })
         .await
-        .expect("share seed payload");
+        .expect("configure seed shared tree");
+    let shares = seed_core
+        .reload_shared_directories()
+        .await
+        .expect("reload seed shared tree");
+    let share = require_share_by_name(&shares, payload_name);
     seed_core.connect_ed2k().await.expect("start seed network");
     wait_for_kad_connected(&seed_core).await;
 
@@ -232,4 +243,12 @@ async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
     let completed = wait_for_completed_transfer(&download_core, &transfer.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
     assert_eq!(completed.completed_bytes, payload.len() as u64);
+}
+
+fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
+    shares
+        .iter()
+        .find(|share| share.name == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("shared tree did not publish {name}"))
 }
