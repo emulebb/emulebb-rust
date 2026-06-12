@@ -139,6 +139,7 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub phase: Ed2kUploadSessionPhaseSnapshot,
     pub queue_rank: Option<u16>,
     pub wait_time_ms: u64,
+    pub uploaded_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +151,7 @@ struct Ed2kUploadSessionEntry {
     waiting_sequence: u64,
     file_priority_score: i128,
     credit_score_permille: i128,
+    uploaded_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +241,7 @@ impl Ed2kUploadQueueState {
                 waiting_sequence,
                 file_priority_score,
                 credit_score_permille,
+                uploaded_bytes: 0,
             },
         );
         self.trim_waiting_queue(now);
@@ -284,6 +287,24 @@ impl Ed2kUploadQueueState {
             session.phase = Ed2kUploadSessionPhase::Uploading;
             return Ed2kUploadSessionStatus::Granted;
         }
+        self.status_for_key(&handle.key, now)
+    }
+
+    pub(super) fn note_uploaded_bytes(
+        &mut self,
+        handle: &Ed2kUploadSessionHandle,
+        byte_count: u64,
+        now: Instant,
+    ) -> Ed2kUploadSessionStatus {
+        self.reap_expired_sessions(now);
+        let Some(session) = self.sessions.get_mut(&handle.key) else {
+            return Ed2kUploadSessionStatus::Stale;
+        };
+        if session.connection_id != handle.connection_id {
+            return Ed2kUploadSessionStatus::Stale;
+        }
+        session.last_activity = now;
+        session.uploaded_bytes = session.uploaded_bytes.saturating_add(byte_count);
         self.status_for_key(&handle.key, now)
     }
 
@@ -352,6 +373,7 @@ impl Ed2kUploadQueueState {
                     .as_millis()
                     .try_into()
                     .unwrap_or(u64::MAX),
+                uploaded_bytes: session.uploaded_bytes,
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {

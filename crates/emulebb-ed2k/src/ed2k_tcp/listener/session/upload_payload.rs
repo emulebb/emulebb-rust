@@ -108,6 +108,12 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 0,
             )?;
         }
+        upload_queue
+            .note_payload_sent(
+                transfer_runtime,
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            )
+            .await;
     }
 
     Ok(UploadPayloadOutcome::Continue { requested })

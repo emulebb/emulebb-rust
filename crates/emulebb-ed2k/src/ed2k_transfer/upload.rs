@@ -83,6 +83,17 @@ impl Ed2kTransferRuntime {
             .note_request_parts(handle, Instant::now())
     }
 
+    pub(crate) async fn note_upload_payload_sent(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+        byte_count: u64,
+    ) -> Ed2kUploadSessionStatus {
+        self.upload_queue
+            .lock()
+            .await
+            .note_uploaded_bytes(handle, byte_count, Instant::now())
+    }
+
     /// Release one upload slot or waiting entry after disconnect or explicit cancel.
     pub(crate) async fn release_upload_session(&self, handle: &Ed2kUploadSessionHandle) {
         self.upload_queue

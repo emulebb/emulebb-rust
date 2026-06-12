@@ -34,6 +34,32 @@ async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {
 }
 
 #[tokio::test]
+async fn upload_queue_snapshot_tracks_session_uploaded_bytes() {
+    let root = unique_test_dir("ed2k-upload-queue-session-bytes");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x34; 16]);
+
+    let (handle, status) = runtime
+        .begin_upload_session(upload_peer(1, 0x14, 0x0A00_0014), &file_hash)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+
+    assert_eq!(
+        runtime.note_upload_payload_sent(&handle, 65_536).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime.note_upload_payload_sent(&handle, 32_768).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    let snapshot = runtime.upload_queue_snapshot().await;
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].uploaded_bytes, 98_304);
+}
+
+#[tokio::test]
 async fn upload_queue_grants_immediately_then_promotes_waiter() {
     let root = unique_test_dir("ed2k-upload-queue-promote");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

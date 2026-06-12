@@ -147,6 +147,9 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
 
     assert!(saw_compressed);
     assert_eq!(reconstructed, payload);
+    let upload_snapshot = transfer_runtime.upload_queue_snapshot().await;
+    assert_eq!(upload_snapshot.len(), 1);
+    assert_eq!(upload_snapshot[0].uploaded_bytes, payload.len() as u64);
     drop(stream);
     server.await.unwrap();
     assert_eq!(
@@ -218,6 +221,9 @@ async fn listener_obfuscated_upload_session_serves_verified_file_via_compressed_
 
     assert!(saw_compressed);
     assert_eq!(reconstructed, file.payload);
+    let upload_snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+    assert_eq!(upload_snapshot.len(), 1);
+    assert_eq!(upload_snapshot[0].uploaded_bytes, file.payload.len() as u64);
     drop(transport);
     server.await.unwrap();
     assert_eq!(

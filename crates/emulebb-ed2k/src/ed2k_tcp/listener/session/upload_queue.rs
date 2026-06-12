@@ -172,6 +172,18 @@ impl ListenerUploadQueue {
         self.send_status(transport, peer_addr, status).await
     }
 
+    pub(in crate::ed2k_tcp) async fn note_payload_sent(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        byte_count: u64,
+    ) {
+        if let Some(upload_session_handle) = self.session.as_ref() {
+            transfer_runtime
+                .note_upload_payload_sent(upload_session_handle, byte_count)
+                .await;
+        }
+    }
+
     pub(in crate::ed2k_tcp) async fn release(&mut self, transfer_runtime: &Ed2kTransferRuntime) {
         if let Some(upload_session_handle) = self.session.as_ref() {
             transfer_runtime
