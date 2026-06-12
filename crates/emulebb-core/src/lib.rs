@@ -39,8 +39,8 @@ use emulebb_ed2k::{
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
 };
 use emulebb_index::{
-    FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
-    SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts,
+    FileIndex, IndexedFile, IndexedSharedDirectoryRoot, KadLocalStore, KadLocalStoreConfig,
+    ScheduledSnoopRequest, SnoopEntry, SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts,
 };
 use emulebb_kad_dht::{
     DhtConfig, DhtNode, NoteResult as KadNoteResult, PublishAttemptStats, ReceivedKadPacket,
@@ -698,6 +698,11 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let ed2k_transfers = Ed2kTransferRuntime::load_or_create(&transfer_root)?;
+        let shared_directories = index
+            .shared_directory_roots()?
+            .into_iter()
+            .map(shared_directory_from_index)
+            .collect::<Vec<_>>();
         let kad_local_store = ed2k_network
             .as_ref()
             .map(|network| Arc::new(Mutex::new(KadLocalStore::new(network.kad_local_store))));
@@ -726,7 +731,7 @@ impl EmulebbCore {
                 disabled_servers: HashSet::new(),
                 banned_source_clients: HashSet::new(),
                 active_download_attempts: HashSet::new(),
-                shared_directories: Vec::new(),
+                shared_directories,
                 unshared_hashes: HashSet::new(),
                 kad_running: false,
             })),
@@ -1519,6 +1524,12 @@ impl EmulebbCore {
                 });
             }
         }
+        self.index.lock().await.replace_shared_directory_roots(
+            &roots
+                .iter()
+                .map(shared_directory_to_index)
+                .collect::<Vec<_>>(),
+        )?;
         self.state.lock().await.shared_directories = roots;
         Ok(self.shared_directories().await)
     }
@@ -5790,6 +5801,26 @@ fn shared_directory_update_parts(root: SharedDirectoryRootUpdate) -> (String, bo
     match root {
         SharedDirectoryRootUpdate::Path(path) => (path, false),
         SharedDirectoryRootUpdate::Object { path, recursive } => (path, recursive),
+    }
+}
+
+fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
+    SharedDirectoryRoot {
+        path: root.path,
+        recursive: root.recursive,
+        monitor_owned: root.monitor_owned,
+        shareable: root.shareable,
+        accessible: root.accessible,
+    }
+}
+
+fn shared_directory_to_index(root: &SharedDirectoryRoot) -> IndexedSharedDirectoryRoot {
+    IndexedSharedDirectoryRoot {
+        path: root.path.clone(),
+        recursive: root.recursive,
+        monitor_owned: root.monitor_owned,
+        shareable: root.shareable,
+        accessible: root.accessible,
     }
 }
 

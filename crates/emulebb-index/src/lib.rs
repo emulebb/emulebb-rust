@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use anyhow::Result;
-use emulebb_metadata::{MetadataIndexedFile, MetadataStore, normalize_search_text};
+use emulebb_metadata::{
+    MetadataIndexedFile, MetadataSharedDirectoryRoot, MetadataStore, normalize_search_text,
+};
 use serde::{Deserialize, Serialize};
 
 mod kad_search_expr;
@@ -24,6 +26,16 @@ pub struct IndexedFile {
     pub size_bytes: u64,
     pub content_type: String,
     pub availability_score: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedSharedDirectoryRoot {
+    pub path: String,
+    pub recursive: bool,
+    pub monitor_owned: bool,
+    pub shareable: bool,
+    pub accessible: bool,
 }
 
 #[derive(Debug)]
@@ -67,6 +79,39 @@ impl FileIndex {
             .find_indexed_file_by_hash(ed2k_hash)?
             .map(indexed_file_from_metadata)
             .transpose()
+    }
+
+    pub fn replace_shared_directory_roots(
+        &mut self,
+        roots: &[IndexedSharedDirectoryRoot],
+    ) -> Result<()> {
+        let metadata_roots = roots
+            .iter()
+            .map(|root| MetadataSharedDirectoryRoot {
+                path: root.path.clone(),
+                recursive: root.recursive,
+                monitor_owned: root.monitor_owned,
+                shareable: root.shareable,
+                accessible: root.accessible,
+            })
+            .collect::<Vec<_>>();
+        self.store.replace_shared_directory_roots(&metadata_roots)
+    }
+
+    pub fn shared_directory_roots(&self) -> Result<Vec<IndexedSharedDirectoryRoot>> {
+        self.store
+            .shared_directory_roots()?
+            .into_iter()
+            .map(|root| {
+                Ok(IndexedSharedDirectoryRoot {
+                    path: root.path,
+                    recursive: root.recursive,
+                    monitor_owned: root.monitor_owned,
+                    shareable: root.shareable,
+                    accessible: root.accessible,
+                })
+            })
+            .collect()
     }
 }
 
@@ -121,5 +166,24 @@ mod tests {
 
         let results = index.search("example movie", 10).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn shared_directory_roots_persist_through_file_index() {
+        let mut index = FileIndex::in_memory().unwrap();
+        index
+            .replace_shared_directory_roots(&[IndexedSharedDirectoryRoot {
+                path: "/tmp/sample".to_string(),
+                recursive: true,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            }])
+            .unwrap();
+
+        let roots = index.shared_directory_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path, "/tmp/sample");
+        assert!(roots[0].recursive);
     }
 }
