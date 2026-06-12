@@ -9,6 +9,7 @@ use super::hashset::{
 };
 use super::manifest::{manifest_has_structural_progress, piece_count};
 use super::transfer_sql::manifest_from_metadata;
+use super::upload_queue::upload_priority_score;
 use super::{
     Ed2kAichHashset, Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
     Ed2kTransferJob, Ed2kTransferRuntime, Ed2kTransferState,
@@ -214,6 +215,12 @@ impl Ed2kTransferRuntime {
         }
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;
+        if priority.is_some() {
+            self.upload_queue.lock().await.update_file_priority(
+                &manifest.file_hash,
+                upload_priority_score(&manifest.upload_priority),
+            );
+        }
         Ok(manifest)
     }
 

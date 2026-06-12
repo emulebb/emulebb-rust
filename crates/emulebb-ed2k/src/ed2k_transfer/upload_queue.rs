@@ -6,6 +6,10 @@ use std::{
 };
 
 const DEFAULT_FILE_PRIORITY_SCORE: i128 = 7;
+const VERY_LOW_FILE_PRIORITY_SCORE: i128 = 2;
+const LOW_FILE_PRIORITY_SCORE: i128 = 6;
+const HIGH_FILE_PRIORITY_SCORE: i128 = 9;
+const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
 
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
@@ -143,6 +147,7 @@ struct Ed2kUploadSessionEntry {
     queued_at: Instant,
     last_activity: Instant,
     waiting_sequence: u64,
+    file_priority_score: i128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +198,7 @@ impl Ed2kUploadQueueState {
         key: Ed2kUploadSessionKey,
         connection_id: u64,
         now: Instant,
+        file_priority_score: i128,
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
@@ -204,6 +210,7 @@ impl Ed2kUploadQueueState {
             }
             session.connection_id = connection_id;
             session.last_activity = now;
+            session.file_priority_score = file_priority_score;
             self.sessions.insert(key.clone(), session);
             return self.status_for_key(&key, now);
         }
@@ -223,6 +230,7 @@ impl Ed2kUploadQueueState {
                 queued_at: now,
                 last_activity: now,
                 waiting_sequence,
+                file_priority_score,
             },
         );
         self.trim_waiting_queue(now);
@@ -347,6 +355,14 @@ impl Ed2kUploadQueueState {
                 .then_with(|| left.file_hash.cmp(&right.file_hash))
         });
         entries
+    }
+
+    pub(super) fn update_file_priority(&mut self, file_hash: &str, file_priority_score: i128) {
+        for (key, session) in &mut self.sessions {
+            if key.file_hash == file_hash {
+                session.file_priority_score = file_priority_score;
+            }
+        }
     }
 
     fn status_for_key(&self, key: &Ed2kUploadSessionKey, now: Instant) -> Ed2kUploadSessionStatus {
@@ -501,7 +517,7 @@ impl Ed2kUploadQueueState {
             waiting_seconds: now.saturating_duration_since(session.queued_at).as_secs() as i128,
             friend_slot: key.peer.friend_slot
                 && !key.peer.client_id.is_some_and(is_low_id_client_id),
-            file_priority_score: file_priority_score(key),
+            file_priority_score: session.file_priority_score,
         })
     }
 
@@ -520,11 +536,15 @@ fn friend_slot_score(friend_slot: bool) -> i128 {
     }
 }
 
-fn file_priority_score(_key: &Ed2kUploadSessionKey) -> i128 {
-    // The runtime does not persist stock file-priority metadata yet. Keep the
-    // queue hook at stock normal priority so priority can be wired in without
-    // changing ranking callers when the shared catalog learns that field.
-    DEFAULT_FILE_PRIORITY_SCORE
+pub(super) fn upload_priority_score(priority: &str) -> i128 {
+    match priority {
+        "verylow" => VERY_LOW_FILE_PRIORITY_SCORE,
+        "low" => LOW_FILE_PRIORITY_SCORE,
+        "high" => HIGH_FILE_PRIORITY_SCORE,
+        "release" | "veryhigh" => RELEASE_FILE_PRIORITY_SCORE,
+        "normal" | "auto" => DEFAULT_FILE_PRIORITY_SCORE,
+        _ => DEFAULT_FILE_PRIORITY_SCORE,
+    }
 }
 
 fn is_low_id_client_id(client_id: u32) -> bool {
