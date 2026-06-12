@@ -1,11 +1,49 @@
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataStore;
 
 use crate::{
+    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, Ed2kUploadSessionStatus},
     paths::unique_test_dir,
 };
 
 use super::upload_queue_support::{one_slot_config, upload_peer};
+
+#[tokio::test]
+async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
+    let root = unique_test_dir("ed2k-upload-queue-configured-slots");
+    let metadata = MetadataStore::open(root.join("metadata.sqlite")).unwrap();
+    let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+        &root,
+        metadata,
+        &Ed2kConfig {
+            upload_queue: Ed2kUploadQueuePolicyConfig {
+                active_slots: 2,
+                waiting_capacity: 8,
+                waiting_timeout_secs: 180,
+                granted_timeout_secs: 30,
+                upload_timeout_secs: 90,
+            },
+            ..Ed2kConfig::default()
+        },
+    )
+    .unwrap();
+    let file_hash = Ed2kHash::from_bytes([0x31; 16]);
+
+    let (_first_handle, first_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x21, 0x0A00_0021), &file_hash)
+        .await;
+    let (_second_handle, second_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x22, 0x0A00_0022), &file_hash)
+        .await;
+    let (_third_handle, third_status) = runtime
+        .begin_upload_session(upload_peer(3, 0x23, 0x0A00_0023), &file_hash)
+        .await;
+
+    assert_eq!(first_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(second_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(third_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+}
 
 #[tokio::test]
 async fn upload_queue_snapshot_exposes_active_and_waiting_sessions() {

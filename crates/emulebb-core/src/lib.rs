@@ -677,10 +677,18 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
-        let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata(
-            &transfer_root,
-            metadata_store.clone(),
-        )?;
+        let ed2k_transfers = if let Some(network) = ed2k_network.as_ref() {
+            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+                &transfer_root,
+                metadata_store.clone(),
+                &network.config,
+            )?
+        } else {
+            Ed2kTransferRuntime::load_or_create_with_metadata(
+                &transfer_root,
+                metadata_store.clone(),
+            )?
+        };
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()

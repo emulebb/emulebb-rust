@@ -23,6 +23,8 @@ use anyhow::{Context, Result};
 use emulebb_metadata::MetadataStore;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
+
 mod callback;
 mod catalog;
 mod download_activity;
@@ -108,6 +110,19 @@ impl Ed2kTransferRuntime {
         )
     }
 
+    /// Load transfer state using the ED2K runtime policy supplied by the daemon/core config.
+    pub fn load_or_create_with_metadata_and_config(
+        root_dir: &Path,
+        metadata: MetadataStore,
+        config: &Ed2kConfig,
+    ) -> Result<Self> {
+        Self::load_or_create_with_metadata_and_upload_queue(
+            root_dir,
+            metadata,
+            upload_queue_config_from_policy(&config.upload_queue),
+        )
+    }
+
     /// Load any persisted transfer manifests with an explicit inbound upload
     /// queue policy and create the runtime root if it does not exist yet.
     pub(crate) fn load_or_create_with_upload_queue(
@@ -167,6 +182,16 @@ impl Ed2kTransferRuntime {
             requests.insert(key, now);
         }
         allowed
+    }
+}
+
+fn upload_queue_config_from_policy(policy: &Ed2kUploadQueuePolicyConfig) -> Ed2kUploadQueueConfig {
+    Ed2kUploadQueueConfig {
+        active_slots: policy.active_slots.max(1),
+        waiting_capacity: policy.waiting_capacity,
+        waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
+        granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
+        upload_timeout: Duration::from_secs(policy.upload_timeout_secs.max(1)),
     }
 }
 
