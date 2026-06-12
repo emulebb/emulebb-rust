@@ -26,4 +26,3 @@ pub struct MetadataSearchResult {
     pub directory: String,
     pub observed_at_ms: i64,
 }
-

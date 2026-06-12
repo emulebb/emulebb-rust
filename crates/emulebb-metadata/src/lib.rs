@@ -16,9 +16,9 @@ mod transfer_store;
 pub use identity_model::MetadataLocalIdentity;
 pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
+pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use search_model::{MetadataSearch, MetadataSearchResult};
 pub use search_store::normalized_search_query;
-pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
 pub use store::MetadataStore;
 pub use text::normalize_search_text;
 pub use transfer_model::{

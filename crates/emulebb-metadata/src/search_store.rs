@@ -141,7 +141,8 @@ impl super::MetadataStore {
     }
 
     pub fn clear_searches(&self) -> Result<()> {
-        self.connection()?.execute("DELETE FROM search_sessions", [])?;
+        self.connection()?
+            .execute("DELETE FROM search_sessions", [])?;
         Ok(())
     }
 }
@@ -252,4 +253,3 @@ mod tests {
         }
     }
 }
-
