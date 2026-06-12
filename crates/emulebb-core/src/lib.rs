@@ -1743,7 +1743,7 @@ impl EmulebbCore {
             .as_ref()
             .map(|transfer| transfer.state.as_str())
             .unwrap_or_else(|| manifest_default_state_name(&manifest));
-        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         if let Some(existing) = current.as_ref() {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -1903,7 +1903,7 @@ impl EmulebbCore {
                 return Ok(None);
             };
             let state_name = manifest_default_state_name(&manifest);
-            transfer_from_manifest(&manifest, state_name)
+            self.transfer_from_manifest(&manifest, state_name)
         };
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
@@ -1977,6 +1977,17 @@ impl EmulebbCore {
         self.upload(client_id, true).await
     }
 
+    fn transfer_from_manifest(&self, manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
+        transfer_from_manifest(
+            manifest,
+            state_name,
+            self.ed2k_transfers
+                .payload_path(&manifest.file_hash)
+                .display()
+                .to_string(),
+        )
+    }
+
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
         let mut state = self.state.lock().await;
         let transfer = state.transfers.get_mut(hash)?;
@@ -1996,7 +2007,7 @@ impl EmulebbCore {
             .ed2k_transfers
             .set_control_state(hash, Some(state_name))
             .await?;
-        let transfer = transfer_from_manifest(&manifest, state_name);
+        let transfer = self.transfer_from_manifest(&manifest, state_name);
         self.state
             .lock()
             .await
@@ -2091,7 +2102,7 @@ impl EmulebbCore {
                 .set_control_state(&manifest.file_hash, Some(state_name))
                 .await?;
         }
-        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         if let Some(existing) = self
             .state
             .lock()
@@ -2127,7 +2138,7 @@ impl EmulebbCore {
                 .get(&manifest.file_hash)
                 .map(|transfer| transfer.state.clone())
                 .unwrap_or_else(|| manifest_default_state_name(&manifest).to_string());
-            let mut transfer = transfer_from_manifest(&manifest, &state_name);
+            let mut transfer = self.transfer_from_manifest(&manifest, &state_name);
             if let Some(existing) = state.transfers.get(&manifest.file_hash) {
                 preserve_transfer_public_metadata(&mut transfer, existing);
             }
@@ -2142,7 +2153,7 @@ impl EmulebbCore {
         state_name: &str,
     ) -> Result<Option<Transfer>> {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
-        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         let mut state = self.state.lock().await;
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
@@ -2164,7 +2175,7 @@ impl EmulebbCore {
             return Ok(None);
         }
         let state_name = manifest_default_state_name(&manifest);
-        let mut transfer = transfer_from_manifest(&manifest, state_name);
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         let mut state = self.state.lock().await;
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
@@ -2315,7 +2326,7 @@ impl EmulebbCore {
                     .ed2k_transfers
                     .reconcile_job_metadata(&transfer.hash, learned_name, metadata.file_size)
                     .await?;
-                let mut updated = transfer_from_manifest(&manifest, &transfer.state);
+                let mut updated = self.transfer_from_manifest(&manifest, &transfer.state);
                 preserve_transfer_public_metadata(&mut updated, &transfer);
                 self.state
                     .lock()
@@ -4418,7 +4429,11 @@ fn encoded_search_response_len(
     .unwrap_or(usize::MAX)
 }
 
-fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
+fn transfer_from_manifest(
+    manifest: &Ed2kResumeManifest,
+    state_name: &str,
+    payload_path: String,
+) -> Transfer {
     let completed_bytes = manifest
         .pieces
         .iter()
@@ -4437,7 +4452,7 @@ fn transfer_from_manifest(manifest: &Ed2kResumeManifest, state_name: &str) -> Tr
         ),
         hash: manifest.file_hash.clone(),
         name: manifest.canonical_name.clone(),
-        path: String::new(),
+        path: payload_path,
         size_bytes: manifest.file_size,
         completed_bytes,
         state: state_name.to_string(),
@@ -7191,6 +7206,8 @@ mod tests {
         assert_eq!(transfers[0].state, "completed");
         assert_eq!(transfers[0].completed_bytes, payload.len() as u64);
         assert_eq!(transfers[0].progress, 1.0);
+        assert!(!transfers[0].path.is_empty());
+        assert_eq!(std::fs::read(&transfers[0].path).unwrap(), payload);
     }
 
     async fn completed_ed2k_transfer_runtime(

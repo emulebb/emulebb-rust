@@ -254,12 +254,20 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
     let completed = wait_for_completed_transfer(&download_core, &share.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
     assert_eq!(completed.completed_bytes, payload.len() as u64);
+    assert_eq!(
+        std::fs::read(&completed.path).expect("read completed Kad transfer payload"),
+        payload
+    );
 
     let second_completed = wait_for_completed_transfer(&download_core, &second_share.hash).await;
     assert_eq!(second_completed.size_bytes, second_payload.len() as u64);
     assert_eq!(
         second_completed.completed_bytes,
         second_payload.len() as u64
+    );
+    assert_eq!(
+        std::fs::read(&second_completed.path).expect("read second completed Kad transfer payload"),
+        second_payload
     );
 }
 
