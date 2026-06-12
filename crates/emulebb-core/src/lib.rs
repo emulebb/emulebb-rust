@@ -5511,19 +5511,22 @@ async fn collect_kad_ed2k_sources(
         attempts += 1;
         let cancel = CancellationToken::new();
         let mut stream = dht.search_sources_with_cancel(file_hash, file_size, cancel.clone());
-        let sleep = tokio::time::sleep(remaining);
-        tokio::pin!(sleep);
 
         loop {
-            tokio::select! {
-                _ = &mut sleep => {
-                    cancel.cancel();
-                    break;
-                }
-                result = stream.next() => {
-                    let Some(result) = result else {
-                        break;
-                    };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                cancel.cancel();
+                break;
+            }
+            let wait = if sources.is_empty() {
+                remaining
+            } else {
+                remaining.min(Duration::from_millis(
+                    ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS,
+                ))
+            };
+            match tokio::time::timeout(wait, stream.next()).await {
+                Ok(Some(result)) => {
                     merge_download_sources(
                         &mut sources,
                         vec![kad_source_result_to_ed2k_found_source(result)],
@@ -5538,6 +5541,11 @@ async fn collect_kad_ed2k_sources(
                         );
                         return sources;
                     }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    cancel.cancel();
+                    break;
                 }
             }
         }
@@ -5773,6 +5781,7 @@ const PR_VERYLOW: u32 = 4;
 const ED2K_DOWNLOAD_KAD_SOURCE_CAP: usize = 64;
 const ED2K_DOWNLOAD_KAD_SOURCE_TIMEOUT_FLOOR_SECS: u64 = 45;
 const ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS: u64 = 500;
+const ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS: u64 = 750;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
