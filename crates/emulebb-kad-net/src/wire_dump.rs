@@ -15,6 +15,7 @@ use tracing::warn;
 
 const EMULEBB_RUST_TMP_DIR_ENV: &str = "EMULEBB_RUST_TMP_DIR";
 const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
+const EMULEBB_WORKSPACE_OUTPUT_ROOT_ENV: &str = "EMULEBB_WORKSPACE_OUTPUT_ROOT";
 const DEFAULT_WORKSPACE_TMP_DIR_NAME: &str = "emulebb-rust";
 const DUMP_FILE_PREFIX: &str = "emulebb-rust-kad-udp-dump-";
 const DUMP_FILE_SUFFIX: &str = ".jsonl";
@@ -303,6 +304,10 @@ fn workspace_log_dir() -> PathBuf {
 
 fn workspace_tmp_dir() -> PathBuf {
     read_env_path(EMULEBB_RUST_TMP_DIR_ENV)
+        .or_else(|| {
+            read_env_path(EMULEBB_WORKSPACE_OUTPUT_ROOT_ENV)
+                .map(|root| root.join("tmp").join(DEFAULT_WORKSPACE_TMP_DIR_NAME))
+        })
         .unwrap_or_else(|| env::temp_dir().join(DEFAULT_WORKSPACE_TMP_DIR_NAME))
 }
 

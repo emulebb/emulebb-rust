@@ -28,6 +28,30 @@ remote indexer fleet.
 Indexing is a client capability, not a separate public API. It improves
 search results returned through the eMuleBB search resources.
 
+## Rust Client Policy
+
+The Rust client is multi-platform by tiered proof: Windows, Linux, and macOS
+must stay compile/test viable where practical, while platform runtime claims
+require smoke or live evidence for that platform. Platform-specific behavior
+belongs behind narrow adapters.
+
+The protocol surface is IPv4-only and stock-compatible for implemented eD2K and
+Kad behavior. Historic or niche behavior may be omitted only when it is recorded
+in `policy/rust-client-omissions.toml`, is not advertised on the wire, and does
+not change the semantics of supported stock interactions.
+
+Rust source should stay split by subsystem and responsibility. The guardrail in
+`policy/rust-client.toml` sets file-size budgets, names current legacy oversized
+files as refactor debt, and prevents new oversized modules from appearing
+without an explicit rationale.
+
+Run the local policy guard before policy-sensitive protocol or architecture
+changes:
+
+```powershell
+python tools\check_rust_client_policy.py
+```
+
 Compatibility proof for this line is local and deterministic first: Rust to
 Rust, Rust to eMuleBB through the common REST contract, and Rust to aMule as a
 short-path compatibility witness. Public hide.me live-wire proof is a future

@@ -54,7 +54,7 @@ pub(crate) mod paths {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let path = rust_test_tmp_root().join(format!(
             "emulebb-rust-{name}-{}-{stamp}-{}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -62,5 +62,12 @@ pub(crate) mod paths {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create test directory");
         path
+    }
+
+    fn rust_test_tmp_root() -> PathBuf {
+        std::env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
+            .map(PathBuf::from)
+            .map(|root| root.join("tmp").join("emulebb-rust-tests"))
+            .unwrap_or_else(|| std::env::temp_dir().join("emulebb-rust-tests"))
     }
 }

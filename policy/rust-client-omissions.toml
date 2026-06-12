@@ -1,0 +1,23 @@
+[[omissions]]
+id = "sx1-live-source-exchange"
+area = "ed2k"
+stock_behavior = "Legacy clients may advertise and use Source Exchange v1 live request and answer opcodes."
+rust_behavior = "The Rust client does not advertise or implement live SX1 paths; source exchange support is SX2-only."
+reason = "Workspace policy records SX1 live source exchange as intentionally removed deprecated behavior."
+compatibility = "Stock-compatible for the supported surface because unsupported SX1 is not advertised."
+
+[[omissions]]
+id = "ipv6-ed2k-kad"
+area = "ed2k-kad"
+stock_behavior = "Some modern clients may have protocol-adjacent IPv6 connectivity support."
+rust_behavior = "The Rust client is IPv4-only for eD2K, Kad, peer transfer, NAT, and bootstrap behavior."
+reason = "Rust client policy chooses IPv4-only scope for this line."
+compatibility = "Stock-compatible for IPv4 peers and servers; IPv6 is not advertised as supported."
+
+[[omissions]]
+id = "legacy-html-webserver"
+area = "controller"
+stock_behavior = "Classic eMule exposes a legacy HTML WebServer controller surface."
+rust_behavior = "The Rust client exposes the eMuleBB /api/v1 REST controller surface only."
+reason = "The Rust client is a headless local eMuleBB client, not legacy WebServer parity."
+compatibility = "Does not affect eD2K or Kad wire compatibility."

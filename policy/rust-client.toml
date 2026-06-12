@@ -1,0 +1,96 @@
+[platform]
+support_tier = "tiered"
+targets = ["windows", "linux", "macos"]
+runtime_claim = "requires smoke or live proof per platform"
+
+[protocol]
+address_family = "ipv4-only"
+compatibility = "stock-compatible implemented surface"
+omission_registry = "policy/rust-client-omissions.toml"
+
+[structure]
+max_rs_lines = 600
+max_test_rs_lines = 900
+generated_or_schema_files_exempt = true
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-core/src/lib.rs"
+hard_limit_lines = 7800
+rationale = "legacy core state/API orchestration; split by state model, protocol orchestration, and persistence as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-daemon/src/lib.rs"
+hard_limit_lines = 1100
+rationale = "legacy daemon config/runtime entrypoint; split config, paths, and startup wiring as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
+hard_limit_lines = 1200
+rationale = "legacy eD2K TCP codec aggregation; split request/response frame families as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs"
+hard_limit_lines = 1300
+rationale = "legacy download session state machine; split startup, range handling, and completion paths as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs"
+hard_limit_lines = 1200
+rationale = "legacy upload listener session; split negotiation, queue, and payload serving as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/kad_firewall.rs"
+hard_limit_lines = 850
+rationale = "legacy Kad firewall orchestration; split probe state, UDP handling, and TCP callback handling as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
+hard_limit_lines = 1100
+rationale = "legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-ed2k/src/nat.rs"
+hard_limit_lines = 1000
+rationale = "legacy NAT manager and shared types; split manager, provider contract, and snapshot types as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-index/src/kad_store.rs"
+hard_limit_lines = 2800
+rationale = "legacy Kad SQLite store; split schema, node store, search store, and snoop persistence as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-index/src/snoop_queue.rs"
+hard_limit_lines = 800
+rationale = "legacy snoop queue policy/runtime; split scheduling policy and persistence restore as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-kad-dht/src/traversal.rs"
+hard_limit_lines = 1200
+rationale = "legacy Kad traversal implementation; split lookup state, query selection, and result merge as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-miniupnpc/src/lib.rs"
+hard_limit_lines = 950
+rationale = "native miniupnpc adapter mirrors upstream ABI and platform setup; split safe API and FFI plumbing as touched"
+
+[[structure.large_file_allowlist]]
+path = "crates/emulebb-rest/src/lib.rs"
+hard_limit_lines = 4400
+rationale = "legacy REST route/controller aggregation; split routes, request models, and response mapping as touched"
+
+[ipv4_only]
+allowed_ipv6_mentions = [
+    "crates/emulebb-core/src/lib.rs",
+    "crates/emulebb-ed2k/src/ed2k_tcp/transport.rs",
+    "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",
+    "crates/emulebb-ed2k/src/nat/rupnp.rs",
+    "crates/emulebb-ed2k/src/nat/miniupnpc.rs",
+    "crates/emulebb-kad-dht/src/publish.rs",
+    "crates/emulebb-kad-dht/src/traversal.rs",
+    "crates/emulebb-kad-net/src/obfuscation/inbound.rs",
+    "crates/emulebb-kad-net/src/obfuscation/outbound.rs",
+    "crates/emulebb-kad-net/src/obfuscation/tests.rs",
+    "crates/emulebb-kad-net/src/rpc/tests/obfuscation.rs",
+    "crates/emulebb-miniupnpc/src/lib.rs",
+    "crates/emulebb-miniupnpc-sys/src/lib.rs",
+]

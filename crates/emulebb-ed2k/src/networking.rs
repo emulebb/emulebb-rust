@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum InterfaceAddressFamily {
     Ipv4,
-    Ipv6,
 }
 
 /// One IP address assigned to a local network interface.
@@ -90,6 +89,9 @@ pub struct NetworkReport {
 pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
     let mut by_name = HashMap::<String, NetworkInterface>::new();
     for iface in get_if_addrs()? {
+        let IfAddr::V4(ref v4) = iface.addr else {
+            continue;
+        };
         let description = platform_description(&iface.name);
         let entry = by_name
             .entry(iface.name.clone())
@@ -105,16 +107,10 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
             entry.is_vpn_candidate || entry.description.as_deref().is_some_and(is_vpn_like);
         entry.has_default_route =
             entry.has_default_route || platform_has_default_route(&iface.name);
-        match iface.addr {
-            IfAddr::V4(v4) => entry.addresses.push(NetworkInterfaceAddress {
-                family: InterfaceAddressFamily::Ipv4,
-                address: v4.ip.to_string(),
-            }),
-            IfAddr::V6(v6) => entry.addresses.push(NetworkInterfaceAddress {
-                family: InterfaceAddressFamily::Ipv6,
-                address: v6.ip.to_string(),
-            }),
-        }
+        entry.addresses.push(NetworkInterfaceAddress {
+            family: InterfaceAddressFamily::Ipv4,
+            address: v4.ip.to_string(),
+        });
     }
 
     let mut interfaces = by_name.into_values().collect::<Vec<_>>();

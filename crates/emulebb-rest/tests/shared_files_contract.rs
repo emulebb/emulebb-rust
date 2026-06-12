@@ -403,11 +403,18 @@ fn unique_test_dir(name: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
+    let path = rust_test_tmp_root().join(format!(
         "emulebb-rest-{name}-{}-{stamp}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("create test dir");
     path
+}
+
+fn rust_test_tmp_root() -> std::path::PathBuf {
+    std::env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join("tmp").join("emulebb-rust-tests"))
+        .unwrap_or_else(|| std::env::temp_dir().join("emulebb-rust-tests"))
 }
