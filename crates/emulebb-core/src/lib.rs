@@ -1429,7 +1429,7 @@ impl EmulebbCore {
                     aich_root: manifest.aich_root.clone().unwrap_or_default(),
                     transfer_dir: self
                         .ed2k_transfers
-                        .payload_path(&manifest.file_hash)
+                        .transfer_dir_path(&manifest.file_hash)
                         .display()
                         .to_string(),
                     priority: manifest.upload_priority.clone(),
@@ -7048,7 +7048,8 @@ mod tests {
                 .shares()
                 .await
                 .iter()
-                .any(|entry| entry.hash == share.hash)
+                .any(|entry| entry.hash == share.hash
+                    && std::path::Path::new(&entry.transfer_dir).is_dir())
         );
 
         let restored = reloaded

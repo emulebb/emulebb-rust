@@ -113,6 +113,12 @@ impl Ed2kTransferRuntime {
         self.root_dir.join(file_hash)
     }
 
+    /// Return the managed transfer directory for one ED2K transfer hash.
+    #[must_use]
+    pub fn transfer_dir_path(&self, file_hash: &str) -> PathBuf {
+        self.transfer_dir(file_hash)
+    }
+
     /// Return the managed payload path for one ED2K transfer hash.
     #[must_use]
     pub fn payload_path(&self, file_hash: &str) -> PathBuf {

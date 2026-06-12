@@ -144,9 +144,12 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     )
     .unwrap();
     let existing_shares = reloaded.shares().await;
+    let existing_first_share = require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin");
+    assert_eq!(existing_first_share.hash, first_hash);
+    assert!(PathBuf::from(&existing_first_share.transfer_dir).is_dir());
     assert_eq!(
-        require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin").hash,
-        first_hash
+        fs::read(share_payload_path(&existing_first_share)).unwrap(),
+        first_payload
     );
 
     let reloaded_shares = reloaded.reload_shared_directories().await.unwrap();
@@ -183,11 +186,8 @@ fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
 
 fn share_payload_path(share: &LocalShare) -> PathBuf {
     let path = PathBuf::from(&share.transfer_dir);
-    if path.is_dir() {
-        path.join("pieces.bin")
-    } else {
-        path
-    }
+    assert!(path.is_dir());
+    path.join("pieces.bin")
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
