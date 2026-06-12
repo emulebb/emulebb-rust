@@ -159,6 +159,46 @@ async fn listener_upload_queue_refreshes_waiting_rank_before_promotion() {
 }
 
 #[tokio::test]
+async fn listener_upload_queue_keeps_waiter_queued_after_parts_request() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-upload-listener-queue-parts-request",
+        listener_test_identity(0x52, 0x4252_5252, 41002, 41003),
+        [0x4F; 16],
+        0x3344_5566,
+    )
+    .await;
+    runtime.use_one_slot_upload_queue().await;
+    let file = runtime
+        .seed_verified_upload_file("queued-parts.txt", vec![0x72; 4096])
+        .await;
+    let server = runtime.spawn_listener_loop();
+
+    let mut first_stream = connect_peer_until_upload_accepted(
+        runtime.peer_addr,
+        listener_test_identity(0x63, 0x1111_3333, 4661, 4665),
+        &file.file_hash,
+    )
+    .await;
+    let mut queued_stream = connect_peer_until_queue_rank(
+        runtime.peer_addr,
+        listener_test_identity(0x64, 0x2222_4444, 4662, 4666),
+        &file.file_hash,
+        1,
+    )
+    .await;
+
+    request_upload_parts(&mut queued_stream, &file.file_hash, &[(0, 1024)]).await;
+    wait_for_queue_rank_timeout(&mut queued_stream, 1).await;
+
+    send_cancel_transfer(&mut first_stream).await;
+    drop(first_stream);
+
+    wait_for_upload_accept_timeout(&mut queued_stream).await;
+    drop(queued_stream);
+    server.abort();
+}
+
+#[tokio::test]
 async fn listener_upload_queue_reconnects_waiter_by_hello_identity() {
     let mut runtime = ListenerTestRuntime::new(
         "ed2k-upload-listener-queue-reconnect-hello",

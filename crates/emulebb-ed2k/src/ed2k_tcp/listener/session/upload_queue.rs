@@ -136,7 +136,17 @@ impl ListenerUploadQueue {
         peer_addr: SocketAddr,
     ) -> Result<ListenerQueueDecision> {
         if self.file_hash.as_ref() == Some(requested) {
-            return Ok(ListenerQueueDecision::Granted);
+            // WHY: queued peers remember the requested file before they own a slot; a later
+            // OP_REQUESTPARTS must re-check the global queue state instead of bypassing limits.
+            let status = match self.session.as_ref() {
+                Some(upload_session_handle) => {
+                    transfer_runtime
+                        .poll_upload_session(upload_session_handle, true)
+                        .await
+                }
+                None => Ed2kUploadSessionStatus::Stale,
+            };
+            return self.send_status(transport, peer_addr, status).await;
         }
         let (session_handle, status) = transfer_runtime
             .begin_upload_session(peer_identity, requested)
