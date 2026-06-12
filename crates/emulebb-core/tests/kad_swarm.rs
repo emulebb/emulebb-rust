@@ -172,18 +172,22 @@ async fn local_kad_swarm_publishes_and_searches_notes() {
 }
 
 #[tokio::test]
-async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
+async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transfers() {
     let swarm = LocalKadSwarm::with_star_topology(4).await;
     let bootstrap = swarm.nodes[0].addr;
     let bind_ip = swarm.bind_ip();
     let runtime_dir = unique_test_dir("kad-source-ed2k-transfer");
     let payload_name = "Kad Unicode Transfer äöü 漢.bin";
     let payload = deterministic_payload(2 * 1024 * 1024 + 17);
+    let second_payload_name = "Kad Batch Transfer.bin";
+    let second_payload = deterministic_payload(1024 * 1024 + 33);
     let shared_root = runtime_dir.join("shared");
     let nested_root = shared_root.join("nested").join("unicode");
     std::fs::create_dir_all(&nested_root).expect("create nested shared root");
     let payload_path = nested_root.join(payload_name);
     std::fs::write(&payload_path, &payload).expect("write shared payload");
+    std::fs::write(shared_root.join(second_payload_name), &second_payload)
+        .expect("write second shared payload");
 
     let seed_core = open_network_core(
         &runtime_dir.join("seed"),
@@ -208,6 +212,7 @@ async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
         .await
         .expect("reload seed shared tree");
     let share = require_share_by_name(&shares, payload_name);
+    let second_share = require_share_by_name(&shares, second_payload_name);
     seed_core.connect_ed2k().await.expect("start seed network");
     wait_for_kad_connected(&seed_core).await;
 
@@ -225,24 +230,38 @@ async fn local_kad_swarm_discovers_source_and_completes_ed2k_transfer() {
         .expect("start downloader network");
     wait_for_kad_connected(&download_core).await;
 
-    let transfer = download_core
-        .create_transfer(TransferCreate {
-            link: Some(share.ed2k_link.clone()),
-            links: None,
+    let transfers = download_core
+        .create_transfers(TransferCreate {
+            link: None,
+            links: Some(vec![
+                share.ed2k_link.clone(),
+                second_share.ed2k_link.clone(),
+            ]),
             paused: Some(true),
             category_id: None,
             category_name: None,
         })
         .await
-        .expect("queue Kad-discovered transfer");
+        .expect("queue Kad-discovered transfers");
+    assert_eq!(transfers.len(), 2);
     download_core
-        .resume_transfer(&transfer.hash)
+        .resume_transfer(&share.hash)
         .await
-        .expect("resume Kad-discovered transfer");
-
-    let completed = wait_for_completed_transfer(&download_core, &transfer.hash).await;
+        .expect("resume first Kad-discovered transfer");
+    let completed = wait_for_completed_transfer(&download_core, &share.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
     assert_eq!(completed.completed_bytes, payload.len() as u64);
+
+    download_core
+        .resume_transfer(&second_share.hash)
+        .await
+        .expect("resume second Kad-discovered transfer");
+    let second_completed = wait_for_completed_transfer(&download_core, &second_share.hash).await;
+    assert_eq!(second_completed.size_bytes, second_payload.len() as u64);
+    assert_eq!(
+        second_completed.completed_bytes,
+        second_payload.len() as u64
+    );
 }
 
 fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
