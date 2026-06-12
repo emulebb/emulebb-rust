@@ -41,6 +41,7 @@ use emulebb_ed2k::{
 use emulebb_index::{
     FileIndex, IndexedFile, IndexedSharedDirectoryRoot, KadLocalStore, KadLocalStoreConfig,
     ScheduledSnoopRequest, SnoopEntry, SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts,
+    metadata_from_publish_snapshot, publish_snapshot_from_metadata,
 };
 use emulebb_kad_dht::{
     DhtConfig, DhtNode, NoteResult as KadNoteResult, PublishAttemptStats, ReceivedKadPacket,
@@ -713,9 +714,19 @@ impl EmulebbCore {
             .map(shared_directory_from_index)
             .collect::<Vec<_>>();
         let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
-        let kad_local_store = ed2k_network
-            .as_ref()
-            .map(|network| Arc::new(Mutex::new(KadLocalStore::new(network.kad_local_store))));
+        let kad_local_store = ed2k_network.as_ref().map(|network| {
+            let mut store = KadLocalStore::new(network.kad_local_store);
+            match metadata_store
+                .load_kad_publish_cache()
+                .and_then(publish_snapshot_from_metadata)
+            {
+                Ok(snapshot) => store.merge_publish_snapshot(snapshot, Utc::now()),
+                Err(error) => {
+                    tracing::warn!("failed to hydrate Kad publish cache from metadata: {error:#}");
+                }
+            }
+            Arc::new(Mutex::new(store))
+        });
         let kad_snoop_queue = ed2k_network
             .as_ref()
             .map(|network| Arc::new(Mutex::new(SnoopQueue::new(network.kad_snoop_queue.clone()))));
@@ -959,6 +970,7 @@ impl EmulebbCore {
                 KadLocalStoreRuntime {
                     dht: dht.clone(),
                     local_store: kad_local_store,
+                    metadata_store: self.metadata_store.clone(),
                     snoop_queue: Arc::clone(&kad_snoop_queue),
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
@@ -2938,6 +2950,19 @@ impl EmulebbCore {
         Some(self.kad_snoop_queue.as_ref()?.lock().await.snapshot())
     }
 
+    #[cfg(test)]
+    async fn kad_publish_cache_snapshot_for_tests(
+        &self,
+    ) -> Option<emulebb_index::KadPublishCacheSnapshot> {
+        Some(
+            self.kad_local_store
+                .as_ref()?
+                .lock()
+                .await
+                .publish_snapshot(Utc::now()),
+        )
+    }
+
     async fn connected_ed2k_server_endpoint(&self) -> Option<SocketAddr> {
         let server_state = {
             let runtime_guard = self.ed2k_runtime.lock().await;
@@ -3308,6 +3333,7 @@ fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {
 struct KadLocalStoreRuntime {
     dht: DhtNode,
     local_store: Arc<Mutex<KadLocalStore>>,
+    metadata_store: MetadataStore,
     snoop_queue: Arc<Mutex<SnoopQueue>>,
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
@@ -4120,6 +4146,9 @@ async fn handle_kad_local_store_packet(
                 let mut store = local_store.lock().await;
                 store.record_keyword_publish_batch(req.target, &req.entries, Utc::now())
             };
+            if network.kad_local_store.enabled {
+                persist_kad_publish_cache(&runtime.metadata_store, local_store).await;
+            }
             let _ = dht
                 .send_packet(
                     from,
@@ -4146,6 +4175,7 @@ async fn handle_kad_local_store_packet(
                 None
             };
             if let Some(load) = load {
+                persist_kad_publish_cache(&runtime.metadata_store, local_store).await;
                 let _ = dht
                     .send_packet(
                         from,
@@ -4172,6 +4202,7 @@ async fn handle_kad_local_store_packet(
                 None
             };
             if let Some(load) = load {
+                persist_kad_publish_cache(&runtime.metadata_store, local_store).await;
                 let _ = dht
                     .send_packet(
                         from,
@@ -4187,6 +4218,18 @@ async fn handle_kad_local_store_packet(
         _ => {}
     }
     Ok(())
+}
+
+async fn persist_kad_publish_cache(
+    metadata_store: &MetadataStore,
+    local_store: &Arc<Mutex<KadLocalStore>>,
+) {
+    let snapshot = local_store.lock().await.publish_snapshot(Utc::now());
+    let result = metadata_from_publish_snapshot(&snapshot)
+        .and_then(|cache| metadata_store.replace_kad_publish_cache(&cache));
+    if let Err(error) = result {
+        tracing::warn!("failed to persist Kad publish cache: {error:#}");
+    }
 }
 
 async fn record_kad_snoop_entry(snoop_queue: &Arc<Mutex<SnoopQueue>>, entry: SnoopEntry) {
@@ -6127,6 +6170,50 @@ mod tests {
             core.kad_local_store_config_for_tests().await,
             Some(expected)
         );
+    }
+
+    #[tokio::test]
+    async fn network_config_hydrates_kad_publish_cache() {
+        let transfer_root = unique_runtime_dir("emulebb-core-kad-publish-cache-hydrate");
+        let metadata_store = MetadataStore::in_memory().unwrap();
+        let target = NodeId::from_bytes([1; 16]);
+        let file_hash = Ed2kHash::from_bytes([2; 16]);
+        let snapshot = emulebb_index::KadPublishCacheSnapshot {
+            keyword_publishes: vec![emulebb_index::KadKeywordPublishSnapshot {
+                observed_at: Utc::now(),
+                target,
+                file_hash,
+                tags: vec![
+                    Tag::filename("Sample Publish Cache.bin"),
+                    Tag::filesize(123),
+                ],
+                load: None,
+            }],
+            source_publishes: Vec::new(),
+            note_publishes: Vec::new(),
+        };
+        metadata_store
+            .replace_kad_publish_cache(&metadata_from_publish_snapshot(&snapshot).unwrap())
+            .unwrap();
+
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::from_metadata_store(metadata_store),
+            &transfer_root,
+            Some(test_network_config_with_store(
+                &transfer_root,
+                KadLocalStoreConfig {
+                    enabled: true,
+                    ..KadLocalStoreConfig::default()
+                },
+                SnoopQueueConfig::default(),
+            )),
+        )
+        .unwrap();
+
+        let hydrated = core.kad_publish_cache_snapshot_for_tests().await.unwrap();
+        assert_eq!(hydrated.keyword_publishes.len(), 1);
+        assert_eq!(hydrated.keyword_publishes[0].file_hash, file_hash);
     }
 
     #[tokio::test]
