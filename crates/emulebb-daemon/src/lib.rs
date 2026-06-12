@@ -126,8 +126,8 @@ impl DaemonConfig {
         toml::from_str(&text).with_context(|| format!("failed to parse config {}", path.display()))
     }
 
-    pub fn index_path(&self) -> PathBuf {
-        self.runtime_dir.join("index.sqlite")
+    pub fn metadata_path(&self) -> PathBuf {
+        self.runtime_dir.join("metadata.sqlite")
     }
 
     pub fn transfer_root(&self) -> PathBuf {
@@ -273,7 +273,7 @@ impl KadListenerConfig {
 pub async fn run(config: DaemonConfig) -> Result<()> {
     fs::create_dir_all(&config.runtime_dir)
         .with_context(|| format!("failed to create {}", config.runtime_dir.display()))?;
-    let index = FileIndex::open(config.index_path())?;
+    let index = FileIndex::open(config.metadata_path())?;
     let ed2k_network = config.ed2k_network_config()?;
     let core = Arc::new(EmulebbCore::new_with_network(
         env!("CARGO_PKG_VERSION"),

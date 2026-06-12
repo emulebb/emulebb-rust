@@ -1,0 +1,12 @@
+[package]
+name = "emulebb-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite metadata store for emulebb-rust"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true

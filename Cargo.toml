@@ -8,6 +8,7 @@ members = [
     "crates/emulebb-kad-net",
     "crates/emulebb-kad-proto",
     "crates/emulebb-kad-routing",
+    "crates/emulebb-metadata",
     "crates/emulebb-miniupnpc",
     "crates/emulebb-miniupnpc-sys",
     "crates/emulebb-rest",
@@ -45,6 +46,7 @@ toml = "0.9"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [patch.crates-io]
