@@ -244,18 +244,17 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
         .await
         .expect("queue Kad-discovered transfers");
     assert_eq!(transfers.len(), 2);
-    download_core
-        .resume_transfer(&share.hash)
-        .await
-        .expect("resume first Kad-discovered transfer");
+    for transfer in &transfers {
+        download_core
+            .resume_transfer(&transfer.hash)
+            .await
+            .expect("resume Kad-discovered transfer");
+    }
+
     let completed = wait_for_completed_transfer(&download_core, &share.hash).await;
     assert_eq!(completed.size_bytes, payload.len() as u64);
     assert_eq!(completed.completed_bytes, payload.len() as u64);
 
-    download_core
-        .resume_transfer(&second_share.hash)
-        .await
-        .expect("resume second Kad-discovered transfer");
     let second_completed = wait_for_completed_transfer(&download_core, &second_share.hash).await;
     assert_eq!(second_completed.size_bytes, second_payload.len() as u64);
     assert_eq!(

@@ -14,7 +14,7 @@ use emulebb_ed2k::{
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn open_network_core(
     root: &Path,

@@ -629,6 +629,7 @@ struct CoreState {
     disabled_servers: HashSet<String>,
     banned_source_clients: HashSet<String>,
     active_download_attempts: HashSet<String>,
+    active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
     kad_running: bool,
@@ -2331,7 +2332,7 @@ impl EmulebbCore {
             .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
             .await?;
         if sources.is_empty() {
-            return Ok(Some("queued"));
+            return Ok(Some("downloading"));
         }
         let hello_identity = self.ed2k_hello_identity(network);
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
@@ -2347,6 +2348,7 @@ impl EmulebbCore {
         let mut had_direct_sources = false;
         let mut accepted_incomplete_peers = 0u32;
         let mut last_direct_error: Option<anyhow::Error> = None;
+        let mut deferred_active_direct_sources = false;
         let mut source_requery_round = 0usize;
         loop {
             sort_download_sources(&mut sources);
@@ -2428,14 +2430,22 @@ impl EmulebbCore {
                 }
             }
 
-            let direct_sources =
+            let candidate_direct_sources =
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
-            had_direct_sources |= !direct_sources.is_empty();
+            had_direct_sources |= !candidate_direct_sources.is_empty();
+            let (direct_sources, deferred_count) = self
+                .acquire_direct_download_source_leases(&candidate_direct_sources)
+                .await;
+            deferred_active_direct_sources |= deferred_count != 0;
             for source in &direct_sources {
                 attempted_direct_endpoints.insert(source_endpoint_key(source));
             }
 
             if !direct_sources.is_empty() {
+                let leased_endpoints = direct_sources
+                    .iter()
+                    .map(source_endpoint_key)
+                    .collect::<Vec<_>>();
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
                         bind_ip: network.bind_ip,
@@ -2470,7 +2480,10 @@ impl EmulebbCore {
                         .await
                     },
                 )
-                .await?;
+                .await;
+                self.release_direct_download_source_leases(&leased_endpoints)
+                    .await;
+                let outcome = outcome?;
                 if outcome.completed {
                     return Ok(Some("completed"));
                 }
@@ -2572,6 +2585,9 @@ impl EmulebbCore {
         if !requested_callback_sources.is_empty() {
             return Ok(Some("downloading"));
         }
+        if deferred_active_direct_sources {
+            return Ok(Some("downloading"));
+        }
         if accepted_incomplete_peers != 0 {
             return Ok(Some("downloading"));
         }
@@ -2579,6 +2595,31 @@ impl EmulebbCore {
             return Err(error).context("ED2K direct download did not complete");
         }
         Ok(Some("queued"))
+    }
+
+    async fn acquire_direct_download_source_leases(
+        &self,
+        sources: &[Ed2kFoundSource],
+    ) -> (Vec<Ed2kFoundSource>, usize) {
+        let mut state = self.state.lock().await;
+        let mut acquired = Vec::new();
+        let mut deferred = 0usize;
+        for source in sources {
+            let endpoint = source_endpoint_key(source);
+            if state.active_download_peer_endpoints.insert(endpoint) {
+                acquired.push(source.clone());
+            } else {
+                deferred = deferred.saturating_add(1);
+            }
+        }
+        (acquired, deferred)
+    }
+
+    async fn release_direct_download_source_leases(&self, endpoints: &[(Ipv4Addr, u16)]) {
+        let mut state = self.state.lock().await;
+        for endpoint in endpoints {
+            state.active_download_peer_endpoints.remove(endpoint);
+        }
     }
 
     async fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
@@ -2595,8 +2636,10 @@ impl EmulebbCore {
         let core = self.clone();
         tokio::spawn(async move {
             let result = core.run_ed2k_download_attempt(&transfer).await;
+            let mut retry_downloading = false;
             match result {
                 Ok(Some(next_state)) => {
+                    retry_downloading = next_state == "downloading";
                     if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await
                     {
                         tracing::warn!(
@@ -2621,6 +2664,23 @@ impl EmulebbCore {
                 .await
                 .active_download_attempts
                 .remove(&hash);
+            if retry_downloading {
+                core.queue_ed2k_download_retry(hash);
+            }
+        });
+    }
+
+    fn queue_ed2k_download_retry(&self, hash: String) {
+        let core = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)).await;
+            let Some(transfer) = core.transfer(&hash).await else {
+                return;
+            };
+            if transfer.state != "downloading" {
+                return;
+            }
+            core.queue_ed2k_download_attempt(transfer).await;
         });
     }
 
@@ -5700,6 +5760,7 @@ const ED2K_DOWNLOAD_KAD_SOURCE_TIMEOUT_FLOOR_SECS: u64 = 45;
 const ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS: u64 = 500;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
+const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
 const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
 
 fn default_categories() -> BTreeMap<u32, Category> {
