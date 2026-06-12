@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -47,13 +47,15 @@ impl MetadataStore {
 
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
-            self.verify_schema_marker()?;
+            if self.schema_marker_matches()? {
+                return Ok(());
+            }
+            self.reset_schema()?;
             return Ok(());
         }
         if self.has_user_tables()? {
-            bail!(
-                "metadata database exists but is not {SCHEMA_ID} v{SCHEMA_VERSION}; remove or recreate the profile database"
-            );
+            self.reset_schema()?;
+            return Ok(());
         }
         self.create_schema()
     }
@@ -84,7 +86,7 @@ impl MetadataStore {
         Ok(count != 0)
     }
 
-    fn verify_schema_marker(&self) -> Result<()> {
+    fn schema_marker_matches(&self) -> Result<bool> {
         let marker = self
             .connection()?
             .query_row(
@@ -93,12 +95,35 @@ impl MetadataStore {
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        match marker {
-            Some(SCHEMA_VERSION) => Ok(()),
-            _ => bail!(
-                "metadata database schema marker mismatch; expected {SCHEMA_ID} v{SCHEMA_VERSION}"
-            ),
+        Ok(marker == Some(SCHEMA_VERSION))
+    }
+
+    fn reset_schema(&mut self) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let objects = tx
+            .prepare(
+                r#"
+                SELECT type, name
+                FROM sqlite_master
+                WHERE type IN ('table', 'view', 'trigger')
+                  AND name NOT LIKE 'sqlite_%'
+                ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END, name
+                "#,
+            )?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (object_type, name) in objects {
+            let escaped = name.replace('"', "\"\"");
+            match object_type.as_str() {
+                "trigger" => tx.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{escaped}\""))?,
+                "view" => tx.execute_batch(&format!("DROP VIEW IF EXISTS \"{escaped}\""))?,
+                _ => tx.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped}\""))?,
+            }
         }
+        tx.commit()?;
+        drop(conn);
+        self.create_schema()
     }
 
     fn create_schema(&mut self) -> Result<()> {
@@ -434,14 +459,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unmarked_existing_database() {
+    fn resets_unmarked_existing_database() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE files(id INTEGER PRIMARY KEY)", [])
             .unwrap();
-        let error = MetadataStore::from_connection(conn)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not emulebb.metadata.clean-v2"));
+        let store = MetadataStore::from_connection(conn).unwrap();
+        assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
+        assert!(!store.table_exists("files").unwrap());
     }
 
     #[test]
