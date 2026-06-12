@@ -2,6 +2,8 @@
 
 mod identity_model;
 mod identity_store;
+mod kad_publish_model;
+mod kad_publish_store;
 mod model;
 mod profile_model;
 mod profile_store;
@@ -14,6 +16,10 @@ mod transfer_model;
 mod transfer_store;
 
 pub use identity_model::MetadataLocalIdentity;
+pub use kad_publish_model::{
+    MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadPublishCache,
+    MetadataKadSourcePublish,
+};
 pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};
 pub use profile_model::{MetadataCategory, MetadataFriend, MetadataServer};
 pub use schema::{SCHEMA_ID, SCHEMA_SQL, SCHEMA_VERSION};
