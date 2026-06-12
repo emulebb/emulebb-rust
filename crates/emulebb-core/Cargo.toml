@@ -24,4 +24,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+emulebb-kad-routing = { path = "../emulebb-kad-routing" }
 serde_json.workspace = true
