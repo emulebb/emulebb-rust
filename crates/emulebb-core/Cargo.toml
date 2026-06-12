@@ -12,6 +12,7 @@ emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
+emulebb-metadata = { path = "../emulebb-metadata" }
 hex = "0.4"
 md4 = "0.10"
 serde.workspace = true

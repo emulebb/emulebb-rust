@@ -51,6 +51,7 @@ use emulebb_kad_proto::{
     KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry,
     SearchSourceReq, Tag, TagValue, constants::K, packet::ContactEntry, tag_name,
 };
+use emulebb_metadata::MetadataStore;
 use md4::{Digest, Md4};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -62,6 +63,8 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+mod profile_state;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -671,6 +674,7 @@ struct Ed2kRuntime {
 pub struct EmulebbCore {
     started_at: Instant,
     version: String,
+    metadata_store: MetadataStore,
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     transfer_root: PathBuf,
@@ -698,13 +702,16 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
-        let ed2k_transfers =
-            Ed2kTransferRuntime::load_or_create_with_metadata(&transfer_root, metadata_store)?;
+        let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata(
+            &transfer_root,
+            metadata_store.clone(),
+        )?;
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
             .map(shared_directory_from_index)
             .collect::<Vec<_>>();
+        let core_state = profile_state::load_core_state(&metadata_store, shared_directories)?;
         let kad_local_store = ed2k_network
             .as_ref()
             .map(|network| Arc::new(Mutex::new(KadLocalStore::new(network.kad_local_store))));
@@ -714,6 +721,7 @@ impl EmulebbCore {
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
+            metadata_store,
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
@@ -721,22 +729,7 @@ impl EmulebbCore {
             kad_local_store,
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(CoreState {
-                searches: HashMap::new(),
-                transfers: HashMap::new(),
-                preferences: default_preferences(),
-                categories: default_categories(),
-                next_category_id: 1,
-                friends: BTreeMap::new(),
-                servers: HashMap::new(),
-                server_overrides: HashMap::new(),
-                disabled_servers: HashSet::new(),
-                banned_source_clients: HashSet::new(),
-                active_download_attempts: HashSet::new(),
-                shared_directories,
-                unshared_hashes: HashSet::new(),
-                kad_running: false,
-            })),
+            state: Arc::new(Mutex::new(core_state)),
         })
     }
 
@@ -811,7 +804,10 @@ impl EmulebbCore {
             "preferences PATCH requires at least one preference"
         );
         let mut state = self.state.lock().await;
-        apply_preferences_update(&mut state.preferences, request)?;
+        let mut preferences = state.preferences.clone();
+        apply_preferences_update(&mut preferences, request)?;
+        profile_state::persist_preferences(&self.metadata_store, &preferences)?;
+        state.preferences = preferences;
         Ok(state.preferences.clone())
     }
 
@@ -1109,6 +1105,7 @@ impl EmulebbCore {
         if let Some(priority) = request.priority.as_deref() {
             server.priority = validate_server_priority(priority)?.to_string();
         }
+        profile_state::persist_server(&self.metadata_store, &server, true)?;
         let mut state = self.state.lock().await;
         state.disabled_servers.remove(&endpoint);
         state.servers.insert(endpoint, server.clone());
@@ -1129,6 +1126,7 @@ impl EmulebbCore {
         };
         validate_server_update(&request)?;
         apply_server_update(&mut server, Some(&request));
+        profile_state::persist_server(&self.metadata_store, &server, true)?;
         let mut state = self.state.lock().await;
         if let Some(dynamic) = state.servers.get_mut(&server.endpoint) {
             apply_server_update(dynamic, Some(&request));
@@ -1143,6 +1141,7 @@ impl EmulebbCore {
         let Some(server) = self.server(endpoint).await else {
             return Ok(None);
         };
+        profile_state::persist_server(&self.metadata_store, &server, false)?;
         let mut state = self.state.lock().await;
         state.servers.remove(&server.endpoint);
         state.server_overrides.remove(&server.endpoint);
@@ -1230,6 +1229,7 @@ impl EmulebbCore {
         let category_id = state.next_category_id;
         state.next_category_id = state.next_category_id.saturating_add(1).max(1);
         category.id = category_id;
+        profile_state::persist_category(&self.metadata_store, &category)?;
         state.categories.insert(category_id, category.clone());
         Ok(category)
     }
@@ -1244,13 +1244,22 @@ impl EmulebbCore {
         let Some(category) = state.categories.get_mut(&category_id) else {
             return Ok(None);
         };
-        apply_category_update(category, request)?;
-        Ok(Some(category.clone()))
+        let mut updated = category.clone();
+        apply_category_update(&mut updated, request)?;
+        profile_state::persist_category(&self.metadata_store, &updated)?;
+        *category = updated.clone();
+        Ok(Some(updated))
     }
 
     pub async fn delete_category(&self, category_id: u32) -> Result<Option<Category>> {
         ensure!(category_id != 0, "default category cannot be deleted");
-        Ok(self.state.lock().await.categories.remove(&category_id))
+        let mut state = self.state.lock().await;
+        let Some(category) = state.categories.get(&category_id).cloned() else {
+            return Ok(None);
+        };
+        self.metadata_store.delete_category(category_id)?;
+        state.categories.remove(&category_id);
+        Ok(Some(category))
     }
 
     pub async fn friends(&self) -> Vec<Friend> {
@@ -1271,13 +1280,20 @@ impl EmulebbCore {
             address: None,
             port: 0,
         };
+        profile_state::persist_friend(&self.metadata_store, &friend)?;
         state.friends.insert(user_hash, friend.clone());
         Ok(friend)
     }
 
     pub async fn delete_friend(&self, user_hash: &str) -> Result<Option<Friend>> {
         let user_hash = normalize_user_hash(user_hash)?;
-        Ok(self.state.lock().await.friends.remove(&user_hash))
+        let mut state = self.state.lock().await;
+        let Some(friend) = state.friends.get(&user_hash).cloned() else {
+            return Ok(None);
+        };
+        self.metadata_store.delete_friend(&user_hash)?;
+        state.friends.remove(&user_hash);
+        Ok(Some(friend))
     }
 
     pub async fn download_search_result(
@@ -1378,6 +1394,8 @@ impl EmulebbCore {
             .ed2k_transfers
             .ingest_local_file(source_path, &canonical_name)
             .await?;
+        self.metadata_store
+            .unmark_unshared_file(&summary.file_hash)?;
         self.state
             .lock()
             .await
@@ -1473,6 +1491,11 @@ impl EmulebbCore {
         self.ed2k_transfers
             .remove_completed_transfer_row(&share.hash)
             .await?;
+        ensure!(
+            self.metadata_store
+                .mark_unshared_file(&share.hash, "manual")?,
+            "shared file metadata row is missing"
+        );
         let mut state = self.state.lock().await;
         state.transfers.remove(&share.hash);
         state.unshared_hashes.insert(share.hash.clone());
@@ -1885,6 +1908,7 @@ impl EmulebbCore {
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
         }
+        self.metadata_store.unmark_unshared_file(hash)?;
         let mut state = self.state.lock().await;
         state.transfers.remove(hash);
         state.unshared_hashes.remove(hash);

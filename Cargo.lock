@@ -404,6 +404,7 @@ dependencies = [
  "emulebb-index",
  "emulebb-kad-dht",
  "emulebb-kad-proto",
+ "emulebb-metadata",
  "hex",
  "md4",
  "serde",

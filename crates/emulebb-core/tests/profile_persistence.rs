@@ -1,0 +1,152 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use emulebb_core::{
+    CategoryCreate, CategoryPriorityValue, EmulebbCore, FriendCreate, LocalShareCreate,
+    NullableStringField, NullableU32Field, PreferencesUpdate, ServerCreate, ServerUpdate,
+};
+use emulebb_index::FileIndex;
+
+#[tokio::test]
+async fn profile_state_survives_core_restart() {
+    let runtime_dir = unique_test_dir("profile-state");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+
+    {
+        let core = open_core(&metadata_path, &transfer_root);
+        core.update_preferences(PreferencesUpdate {
+            download_limit_ki_bps: Some(2048),
+            network_kademlia: Some(false),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+        let category = core
+            .create_category(CategoryCreate {
+                name: "Samples".to_string(),
+                path: NullableStringField::Missing,
+                comment: Some("Synthetic category".to_string()),
+                color: NullableU32Field::Value(0x00aa11),
+                priority: Some(CategoryPriorityValue::Name("high".to_string())),
+            })
+            .await
+            .unwrap();
+        assert_eq!(category.id, 1);
+        core.add_friend(FriendCreate {
+            user_hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: Some("Peer One".to_string()),
+        })
+        .await
+        .unwrap();
+        core.add_server(ServerCreate {
+            address: "192.0.2.10".to_string(),
+            port: 4661,
+            name: Some("Server One".to_string()),
+            priority: Some("high".to_string()),
+            static_server: Some(true),
+            connect: Some(false),
+        })
+        .await
+        .unwrap();
+    }
+
+    let reloaded = open_core(&metadata_path, &transfer_root);
+    let preferences = reloaded.preferences().await;
+    assert_eq!(preferences.download_limit_ki_bps, 2048);
+    assert!(!preferences.network_kademlia);
+
+    let categories = reloaded.categories().await;
+    assert_eq!(categories.len(), 2);
+    assert_eq!(categories[1].name, "Samples");
+    assert_eq!(categories[1].priority, 2);
+
+    let friends = reloaded.friends().await;
+    assert_eq!(friends.len(), 1);
+    assert_eq!(friends[0].name, "Peer One");
+
+    let server = reloaded.server("192.0.2.10:4661").await.unwrap();
+    assert_eq!(server.name, "Server One");
+    assert_eq!(server.priority, "high");
+    assert!(server.static_server);
+
+    reloaded
+        .update_server(
+            "192.0.2.10:4661",
+            ServerUpdate {
+                name: Some("Server Renamed".to_string()),
+                priority: Some("low".to_string()),
+                static_server: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    reloaded
+        .delete_friend("00112233445566778899aabbccddeeff")
+        .await
+        .unwrap();
+    reloaded.delete_category(1).await.unwrap();
+    reloaded.remove_server("192.0.2.10:4661").await.unwrap();
+
+    let reloaded_again = open_core(&metadata_path, &transfer_root);
+    assert_eq!(reloaded_again.categories().await.len(), 1);
+    assert!(reloaded_again.friends().await.is_empty());
+    assert!(reloaded_again.server("192.0.2.10:4661").await.is_none());
+}
+
+#[tokio::test]
+async fn unshared_file_marker_survives_core_restart() {
+    let runtime_dir = unique_test_dir("unshared-file");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let source_path = runtime_dir.join("sample.bin");
+    fs::write(&source_path, b"synthetic share payload").unwrap();
+
+    let file_hash = {
+        let core = open_core(&metadata_path, &transfer_root);
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: source_path.display().to_string(),
+                name: Some("Sample.bin".to_string()),
+            })
+            .await
+            .unwrap();
+        let file_hash = share.hash.clone();
+        core.unshare_file(&file_hash).await.unwrap();
+        file_hash
+    };
+
+    let reloaded = open_core(&metadata_path, &transfer_root);
+    assert!(reloaded.share(&file_hash).await.is_none());
+}
+
+fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {
+    EmulebbCore::new(
+        "test",
+        FileIndex::open(metadata_path).unwrap(),
+        transfer_root,
+    )
+    .unwrap()
+}
+
+fn unique_test_dir(name: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    let root = std::env::var_os("EMULEBB_WORKSPACE_OUTPUT_ROOT")
+        .map(PathBuf::from)
+        .map(|path| path.join("tmp"))
+        .unwrap_or_else(std::env::temp_dir);
+    let path = root.join(format!(
+        "emulebb-core-{name}-{}-{stamp}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&path);
+    fs::create_dir_all(&path).expect("create test dir");
+    path
+}
+
