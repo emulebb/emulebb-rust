@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::info;
 
+pub mod log_layer;
+pub use log_layer::LogBufferLayer;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DaemonConfig {

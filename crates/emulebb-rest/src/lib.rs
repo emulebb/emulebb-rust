@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+mod log_buffer;
+pub use log_buffer::record_log;
+
 #[derive(Debug, Clone)]
 pub struct RestConfig {
     pub api_key: String,
@@ -1784,7 +1787,18 @@ async fn transfer_delete_files(
 }
 
 async fn logs() -> impl IntoResponse {
-    api_collection(Vec::<Value>::new())
+    let entries: Vec<Value> = log_buffer::recent_logs()
+        .into_iter()
+        .map(|record| {
+            json!({
+                "timestamp": record.timestamp,
+                "level": record.level,
+                "message": record.message,
+                "debug": record.debug,
+            })
+        })
+        .collect();
+    api_collection(entries)
 }
 
 async fn clear_logs(body: Bytes) -> impl IntoResponse {
@@ -1800,6 +1814,7 @@ async fn clear_logs(body: Bytes) -> impl IntoResponse {
         )
         .into_response();
     }
+    log_buffer::clear_logs();
     api_ok(json!({ "ok": true })).into_response()
 }
 
