@@ -566,8 +566,31 @@ pub struct Upload {
     pub requested_parts_obtained: u32,
     pub requested_parts_total: u32,
     pub requested_parts_progress_text: String,
+    pub score_breakdown: UploadScoreBreakdown,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_rank: Option<u16>,
+}
+
+/// Upload-score modifier breakdown (eMuleBB `UploadScoreBreakdown` shape). The
+/// Rust upload scorer is base waiting-time x file-priority x credit-ratio; it
+/// does not apply the master's low-ratio bonus, low-ID divisor, old-client
+/// penalty, or slow-upload cooldown, so those report as not-applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadScoreBreakdown {
+    pub availability: String,
+    pub base_score: u32,
+    pub effective_score: u32,
+    pub core_score: f64,
+    pub effective_score_float: f64,
+    pub credit_ratio: f64,
+    pub file_priority: i64,
+    pub low_ratio_applied: bool,
+    pub low_ratio_bonus: u32,
+    pub low_id_penalty_applied: bool,
+    pub low_id_divisor: u32,
+    pub old_client_penalty_applied: bool,
+    pub cooldown_remaining_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -4993,6 +5016,30 @@ fn upload_from_snapshot(
         entry.phase,
         Ed2kUploadSessionPhaseSnapshot::Granted | Ed2kUploadSessionPhaseSnapshot::Uploading
     );
+    let score = entry.score.clamp(0, i128::from(u32::MAX)) as u32;
+    let availability = if entry.friend_slot {
+        "friendSlot"
+    } else if uploading || waiting_queue {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let score_breakdown = UploadScoreBreakdown {
+        availability: availability.to_string(),
+        base_score: score,
+        effective_score: score,
+        core_score: entry.score as f64,
+        effective_score_float: entry.score as f64,
+        credit_ratio: entry.credit_score_permille as f64 / 1000.0,
+        file_priority: entry.file_priority_score as i64,
+        // The Rust scorer applies none of the master's modifiers.
+        low_ratio_applied: false,
+        low_ratio_bonus: 0,
+        low_id_penalty_applied: false,
+        low_id_divisor: 1,
+        old_client_penalty_applied: false,
+        cooldown_remaining_ms: 0,
+    };
     Upload {
         client_id,
         user_name: format!("{}:{}", entry.ip, entry.tcp_port),
@@ -5006,7 +5053,8 @@ fn upload_from_snapshot(
         payload_buffered: 0,
         wait_time_ms: entry.wait_time_ms,
         wait_started_tick: 0,
-        score: 0,
+        score: u64::from(score),
+        score_breakdown,
         address: entry.ip.to_string(),
         port: entry.tcp_port,
         server_ip: String::new(),

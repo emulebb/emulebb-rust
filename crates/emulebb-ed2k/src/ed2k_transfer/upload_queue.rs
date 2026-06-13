@@ -141,6 +141,12 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub wait_time_ms: u64,
     pub uploaded_bytes: u64,
     pub upload_speed_bytes_per_sec: u64,
+    /// Computed upload-queue score for this peer.
+    pub score: i128,
+    /// File-priority component of the score.
+    pub file_priority_score: i128,
+    /// Credit-ratio component, in permille (1000 == neutral 1.0x).
+    pub credit_score_permille: i128,
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +390,9 @@ impl Ed2kUploadQueueState {
                     .unwrap_or(u64::MAX),
                 uploaded_bytes: session.uploaded_bytes,
                 upload_speed_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
+                score: self.waiting_score(key, session, now),
+                file_priority_score: session.file_priority_score,
+                credit_score_permille: session.credit_score_permille,
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
