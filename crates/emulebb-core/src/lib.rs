@@ -637,6 +637,16 @@ pub struct VpnGuardStatus {
     pub startup_block_reason: String,
 }
 
+impl VpnGuardStatus {
+    /// Disabled guard with the master "off" REST mode token.
+    pub fn off() -> Self {
+        Self {
+            mode: "off".to_string(),
+            ..Self::default()
+        }
+    }
+}
+
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
@@ -1007,18 +1017,18 @@ impl EmulebbCore {
     /// Resolved VPN-guard state for the REST status surfaces.
     pub fn vpn_guard_status(&self) -> VpnGuardStatus {
         let Some(network) = self.ed2k_network.as_ref() else {
-            return VpnGuardStatus::default();
+            return VpnGuardStatus::off();
         };
         let guard = &network.vpn_guard;
-        let enforce = guard.enabled && guard.mode.eq_ignore_ascii_case("enforce");
-        let startup_blocked = enforce && !network.vpn_interface_bound;
+        // Master parity (GetVpnGuardModeRestToken): the REST mode token is "block"
+        // when guarding is enabled in a blocking mode, otherwise "off".
+        let blocking = guard.enabled
+            && (guard.mode.eq_ignore_ascii_case("block")
+                || guard.mode.eq_ignore_ascii_case("enforce"));
+        let startup_blocked = blocking && !network.vpn_interface_bound;
         VpnGuardStatus {
             enabled: guard.enabled,
-            mode: if guard.mode.is_empty() {
-                "off".to_string()
-            } else {
-                guard.mode.clone()
-            },
+            mode: if blocking { "block" } else { "off" }.to_string(),
             allowed_public_ip_cidrs: guard.allowed_public_ip_cidrs.clone(),
             startup_blocked,
             startup_block_reason: if startup_blocked {

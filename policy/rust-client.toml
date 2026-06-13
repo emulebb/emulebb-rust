@@ -31,8 +31,8 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 8042
-rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver) and the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle)."
+hard_limit_lines = 8052
+rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver), the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle), and the VPN-guard mode normalization to the master 'off'/'block' REST token set (GetVpnGuardModeRestToken parity)."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
