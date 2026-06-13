@@ -1949,6 +1949,9 @@ fn app_info_response(app: AppInfo) -> Value {
         "name": app.name,
         "version": app.version,
         "apiVersion": app.api_version,
+        // Match the eMuleBB master app metadata: build flavor + platform token.
+        "build": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "platform": if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" },
         "lifecycle": lifecycle_response(&app.lifecycle),
         "capabilities": capabilities
     })
