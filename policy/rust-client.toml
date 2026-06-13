@@ -19,11 +19,6 @@ hard_limit_lines = 7780
 rationale = "legacy core state/API orchestration; split by state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders extracted to kad_snoop_entry)"
 
 [[structure.large_file_allowlist]]
-path = "crates/emulebb-daemon/src/lib.rs"
-hard_limit_lines = 1100
-rationale = "legacy daemon config/runtime entrypoint; split config, paths, and startup wiring as touched"
-
-[[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
 hard_limit_lines = 1200
 rationale = "legacy eD2K TCP codec aggregation; split request/response frame families as touched"
@@ -39,19 +34,9 @@ hard_limit_lines = 1200
 rationale = "legacy upload listener session; split negotiation, queue, and payload serving as touched"
 
 [[structure.large_file_allowlist]]
-path = "crates/emulebb-ed2k/src/kad_firewall.rs"
-hard_limit_lines = 850
-rationale = "legacy Kad firewall orchestration; split probe state, UDP handling, and TCP callback handling as touched"
-
-[[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
 hard_limit_lines = 1100
 rationale = "legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
-
-[[structure.large_file_allowlist]]
-path = "crates/emulebb-ed2k/src/nat.rs"
-hard_limit_lines = 1000
-rationale = "legacy NAT manager and shared types; split manager, provider contract, and snapshot types as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-index/src/kad_store.rs"
