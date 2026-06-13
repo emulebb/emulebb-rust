@@ -189,6 +189,28 @@ impl super::MetadataStore {
         row.map(|row| manifest_from_row(&conn, row)).transpose()
     }
 
+    /// Returns the persisted `(created_at_ms, completed_at_ms)` for a transfer,
+    /// used to surface `addedAt` / `completedAt` in the REST transfer view.
+    pub fn transfer_timestamps_by_hash(
+        &self,
+        file_hash: &str,
+    ) -> Result<Option<(i64, Option<i64>)>> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT transfers.created_at_ms, transfers.completed_at_ms
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.ed2k_hash = ?1
+            "#,
+            params![hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

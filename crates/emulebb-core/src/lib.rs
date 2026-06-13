@@ -33,8 +33,8 @@ use emulebb_ed2k::{
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
-        Ed2kTransferRuntime, Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot,
-        new_transfer_job,
+        Ed2kTransferRuntime, Ed2kTransferState, Ed2kUploadQueueSnapshotEntry,
+        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
 };
@@ -492,6 +492,20 @@ pub struct Transfer {
     pub priority: String,
     pub category_id: u32,
     pub category_name: String,
+    /// Estimated seconds to completion, or None when idle/complete.
+    pub eta: Option<u64>,
+    /// Unix ms when the transfer was created, when persisted.
+    pub added_at: Option<i64>,
+    /// Unix ms when the transfer completed, when persisted.
+    pub completed_at: Option<i64>,
+    /// Total ED2K parts (9.28 MB each) for the file.
+    pub parts_total: u32,
+    /// Parts fully downloaded and verified.
+    pub parts_obtained: u32,
+    /// One char per part: '#' obtained, '0' missing.
+    pub parts_progress_text: String,
+    /// Whether download priority is auto-managed (not modeled yet -> false).
+    pub auto_priority: bool,
 }
 
 /// One remembered ED2K peer source for a transfer.
@@ -2067,7 +2081,7 @@ impl EmulebbCore {
     }
 
     fn transfer_from_manifest(&self, manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
-        transfer_from_manifest(
+        let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
             self.ed2k_transfers
@@ -2076,7 +2090,16 @@ impl EmulebbCore {
                 .to_string(),
             self.ed2k_transfers
                 .download_speed_bytes_per_sec(&manifest.file_hash),
-        )
+        );
+        // Surface persisted addedAt/completedAt from the metadata store.
+        if let Ok(Some((created_ms, completed_ms))) = self
+            .metadata_store
+            .transfer_timestamps_by_hash(&manifest.file_hash)
+        {
+            transfer.added_at = Some(created_ms);
+            transfer.completed_at = completed_ms;
+        }
+        transfer
     }
 
     async fn set_transfer_state(&self, hash: &str, state_name: &str) -> Option<Transfer> {
@@ -4486,6 +4509,27 @@ fn transfer_from_manifest(
     } else {
         completed_bytes as f64 / manifest.file_size as f64
     };
+    // ED2K parts (9.28 MB each) map 1:1 to manifest pieces (piece_size ==
+    // ED2K_PART_SIZE). A part is "obtained" once verified.
+    let parts_progress_text: String = manifest
+        .pieces
+        .iter()
+        .map(|piece| {
+            if piece.state == Ed2kTransferState::Verified {
+                '#'
+            } else {
+                '0'
+            }
+        })
+        .collect();
+    let parts_total = manifest.pieces.len() as u32;
+    let parts_obtained = parts_progress_text.bytes().filter(|&c| c == b'#').count() as u32;
+    let remaining = manifest.file_size.saturating_sub(completed_bytes);
+    let eta = if download_speed_bytes_per_sec > 0 && remaining > 0 {
+        Some(remaining / download_speed_bytes_per_sec)
+    } else {
+        None
+    };
     Transfer {
         ed2k_link: format!(
             "ed2k://|file|{}|{}|{}|/",
@@ -4503,6 +4547,13 @@ fn transfer_from_manifest(
         priority: "normal".to_string(),
         category_id: 0,
         category_name: default_transfer_category_name().to_string(),
+        eta,
+        added_at: None,
+        completed_at: None,
+        parts_total,
+        parts_obtained,
+        parts_progress_text,
+        auto_priority: false,
     }
 }
 
