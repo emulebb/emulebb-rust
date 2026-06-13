@@ -2152,6 +2152,13 @@ impl EmulebbCore {
                 .ed2k_transfers
                 .set_control_state(&manifest.file_hash, Some(state_name))
                 .await?;
+        } else {
+            // Active create: clear any prior paused/stopped control so the
+            // download driver runs (matches resume_transfer).
+            manifest = self
+                .ed2k_transfers
+                .set_control_state(&manifest.file_hash, None)
+                .await?;
         }
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         if let Some(existing) = self
@@ -2173,6 +2180,11 @@ impl EmulebbCore {
             .await
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
+        // Non-paused downloads start immediately: kick the download driver so
+        // ED2K source acquisition begins without requiring an explicit resume.
+        if !matches!(state_name, "paused" | "stopped") {
+            self.queue_ed2k_download_attempt(transfer.clone()).await;
+        }
         Ok(transfer)
     }
 
@@ -4493,7 +4505,9 @@ fn transfer_create_state_name(paused: Option<bool>) -> &'static str {
     if paused.unwrap_or(false) {
         "paused"
     } else {
-        "queued"
+        // A newly added, non-paused download starts immediately (eMule/aMule
+        // parity), so it is created active rather than waiting in "queued".
+        "downloading"
     }
 }
 
@@ -6960,7 +6974,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(transfer.state, "queued");
+        // A non-paused download starts immediately (eMule/aMule parity).
+        assert_eq!(transfer.state, "downloading");
     }
 
     #[tokio::test]
