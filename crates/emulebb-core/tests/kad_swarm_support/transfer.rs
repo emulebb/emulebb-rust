@@ -126,6 +126,8 @@ fn test_network_config(
             ..NatConfig::default()
         },
         config,
+        vpn_guard: emulebb_core::VpnGuardConfig::default(),
+        vpn_interface_bound: false,
     }
 }
 

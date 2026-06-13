@@ -13,7 +13,7 @@ use emulebb_core::{
     AppInfo, AppLifecycle, CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare,
     LocalShareCreate, NetworkStatus, PreferencesUpdate, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedDirectoriesUpdate,
-    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate,
+    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate, VpnGuardStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -614,7 +614,10 @@ async fn snapshot(
         Err(response) => return *response,
     };
     let status = status_response(&state).await;
-    let kad = kad_response(&state.core.status().await.kad);
+    let kad = kad_response(
+        &state.core.status().await.kad,
+        &state.core.vpn_guard_status(),
+    );
     let shared_files = bounded(
         state
             .core
@@ -634,24 +637,33 @@ async fn snapshot(
         "uploadQueue": bounded(state.core.upload_queue().await, limit),
         "servers": bounded(server_responses(state.core.servers().await), limit),
         "kad": kad,
-        "network": network_response(),
+        "network": network_response(&state.core.vpn_guard_status()),
         "logs": Vec::<Value>::new()
     }))
     .into_response()
 }
 
 async fn kad(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(kad_response(&state.core.status().await.kad))
+    api_ok(kad_response(
+        &state.core.status().await.kad,
+        &state.core.vpn_guard_status(),
+    ))
 }
 
 async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(true).await;
-    api_ok(kad_response(&state.core.status().await.kad))
+    api_ok(kad_response(
+        &state.core.status().await.kad,
+        &state.core.vpn_guard_status(),
+    ))
 }
 
 async fn kad_stop(State(state): State<RestState>) -> impl IntoResponse {
     state.core.set_kad_running(false).await;
-    api_ok(kad_response(&state.core.status().await.kad))
+    api_ok(kad_response(
+        &state.core.status().await.kad,
+        &state.core.vpn_guard_status(),
+    ))
 }
 
 async fn kad_import_nodes_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
@@ -699,7 +711,9 @@ async fn kad_bootstrap(State(state): State<RestState>, body: Bytes) -> impl Into
         .bootstrap_kad(&request.address, request.port)
         .await
     {
-        Ok(status) => api_ok(kad_response(&status)).into_response(),
+        Ok(status) => {
+            api_ok(kad_response(&status, &state.core.vpn_guard_status())).into_response()
+        }
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -707,7 +721,10 @@ async fn kad_bootstrap(State(state): State<RestState>, body: Bytes) -> impl Into
 }
 
 async fn kad_recheck_firewall(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(kad_response(&state.core.recheck_kad_firewall().await))
+    api_ok(kad_response(
+        &state.core.recheck_kad_firewall().await,
+        &state.core.vpn_guard_status(),
+    ))
 }
 
 async fn categories(State(state): State<RestState>) -> impl IntoResponse {
@@ -2000,14 +2017,15 @@ fn stats_response(status: &Status) -> Value {
 
 async fn status_response(state: &RestState) -> Value {
     let status = state.core.status().await;
+    let guard = state.core.vpn_guard_status();
     let shared_file_count = state.core.shares().await.len();
     let download_file_count = status.transfers.active + status.transfers.completed;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status),
         "servers": server_status_response(state).await,
-        "kad": kad_response(&status.kad),
-        "network": network_response(),
+        "kad": kad_response(&status.kad, &guard),
+        "network": network_response(&guard),
         "sharedStartupCache": {
             "available": false,
             "ready": true,
@@ -2035,7 +2053,7 @@ async fn status_response(state: &RestState) -> Value {
     })
 }
 
-fn network_response() -> Value {
+fn network_response(guard: &VpnGuardStatus) -> Value {
     json!({
         "ports": {
             "tcp": 0,
@@ -2053,16 +2071,16 @@ fn network_response() -> Value {
             "resolveResult": "default"
         },
         "vpnGuard": {
-            "enabled": false,
-            "mode": "off",
-            "allowedPublicIpCidrs": "",
-            "startupBlocked": false,
-            "startupBlockReason": ""
+            "enabled": guard.enabled,
+            "mode": guard.mode,
+            "allowedPublicIpCidrs": guard.allowed_public_ip_cidrs,
+            "startupBlocked": guard.startup_blocked,
+            "startupBlockReason": guard.startup_block_reason
         }
     })
 }
 
-fn kad_response(kad: &NetworkStatus) -> Value {
+fn kad_response(kad: &NetworkStatus, guard: &VpnGuardStatus) -> Value {
     let contact_count = kad.contact_count.unwrap_or(kad.peer_count);
     json!({
         "running": kad.running,
@@ -2079,8 +2097,8 @@ fn kad_response(kad: &NetworkStatus) -> Value {
         "indexedKeywords": 0,
         "operationQueued": kad.operation_queued.unwrap_or(false),
         "alreadyRunning": kad.already_running.unwrap_or(false),
-        "blockedByVpnGuard": false,
-        "network": network_response()
+        "blockedByVpnGuard": guard.startup_blocked,
+        "network": network_response(guard)
     })
 }
 

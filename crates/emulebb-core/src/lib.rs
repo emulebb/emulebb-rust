@@ -611,6 +611,30 @@ pub struct Ed2kNetworkConfig {
     pub kad_hello_intro_fanout: usize,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
+    /// Configured VPN-binding guard.
+    pub vpn_guard: VpnGuardConfig,
+    /// Whether the P2P bind was resolved from a named interface (e.g. the VPN
+    /// adapter) rather than a raw address — the guard's confirmation signal.
+    pub vpn_interface_bound: bool,
+}
+
+/// Configured VPN-binding guard. When enabled in `enforce` mode the client
+/// refuses to start public P2P unless the bind is VPN-confirmed.
+#[derive(Debug, Clone, Default)]
+pub struct VpnGuardConfig {
+    pub enabled: bool,
+    pub mode: String,
+    pub allowed_public_ip_cidrs: String,
+}
+
+/// Resolved VPN-guard state surfaced through the REST status surfaces.
+#[derive(Debug, Clone, Default)]
+pub struct VpnGuardStatus {
+    pub enabled: bool,
+    pub mode: String,
+    pub allowed_public_ip_cidrs: String,
+    pub startup_blocked: bool,
+    pub startup_block_reason: String,
 }
 
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
@@ -980,6 +1004,31 @@ impl EmulebbCore {
         status
     }
 
+    /// Resolved VPN-guard state for the REST status surfaces.
+    pub fn vpn_guard_status(&self) -> VpnGuardStatus {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return VpnGuardStatus::default();
+        };
+        let guard = &network.vpn_guard;
+        let enforce = guard.enabled && guard.mode.eq_ignore_ascii_case("enforce");
+        let startup_blocked = enforce && !network.vpn_interface_bound;
+        VpnGuardStatus {
+            enabled: guard.enabled,
+            mode: if guard.mode.is_empty() {
+                "off".to_string()
+            } else {
+                guard.mode.clone()
+            },
+            allowed_public_ip_cidrs: guard.allowed_public_ip_cidrs.clone(),
+            startup_blocked,
+            startup_block_reason: if startup_blocked {
+                "public P2P bind is not VPN-confirmed (no VPN interface bind)".to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
     pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
         self.connect_ed2k_to_server(None).await
     }
@@ -992,6 +1041,10 @@ impl EmulebbCore {
     }
 
     async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
+        let guard = self.vpn_guard_status();
+        if guard.startup_blocked {
+            anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
+        }
         let Some(network) = self.ed2k_network.clone() else {
             anyhow::bail!("ED2K network is not configured");
         };
@@ -6287,6 +6340,8 @@ mod tests {
             kad_hello_intro_fanout: 2,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
+            vpn_guard: VpnGuardConfig::default(),
+            vpn_interface_bound: false,
         }
     }
 

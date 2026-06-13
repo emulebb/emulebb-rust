@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
+use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig, NetworkInterface, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
     resolve_bind_ip,
@@ -32,6 +32,17 @@ pub struct DaemonConfig {
     pub ed2k: Ed2kConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
+    pub vpn_guard: VpnGuardSettings,
+}
+
+/// Optional VPN-binding guard configuration (`[vpnGuard]`). Default disabled, so
+/// it never affects startup unless explicitly enabled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VpnGuardSettings {
+    pub enabled: bool,
+    pub mode: String,
+    pub allowed_public_ip_cidrs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +89,7 @@ impl Default for DaemonConfig {
             ed2k: Ed2kConfig::default(),
             nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
+            vpn_guard: VpnGuardSettings::default(),
         }
     }
 }
@@ -173,6 +185,12 @@ impl DaemonConfig {
             kad_hello_intro_fanout: self.kad.hello_intro_fanout,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
+            vpn_guard: VpnGuardConfig {
+                enabled: self.vpn_guard.enabled,
+                mode: self.vpn_guard.mode.clone(),
+                allowed_public_ip_cidrs: self.vpn_guard.allowed_public_ip_cidrs.clone(),
+            },
+            vpn_interface_bound: self.p2p_bind_interface.is_some(),
         }))
     }
 
