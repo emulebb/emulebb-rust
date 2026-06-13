@@ -15,8 +15,8 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 7800
-rationale = "legacy core state/API orchestration; split by state model, protocol orchestration, and persistence as touched"
+hard_limit_lines = 7780
+rationale = "legacy core state/API orchestration; split by state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders extracted to kad_snoop_entry)"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-daemon/src/lib.rs"
