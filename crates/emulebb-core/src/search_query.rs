@@ -1,0 +1,142 @@
+//! Search-result construction and request-side filtering for the `/api/v1/searches` surface.
+
+use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+use emulebb_index::IndexedFile;
+
+use crate::{SearchCreate, SearchResult};
+
+/// Apply the optional `SearchCreateRequest` filters (extension, size bounds, and
+/// minimum availability) from the eMuleBB `/api/v1` contract to a result set.
+pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &SearchCreate) {
+    let extension = request
+        .extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    results.retain(|result| {
+        if !extension.is_empty() {
+            let suffix = format!(".{extension}");
+            if !result.name.to_ascii_lowercase().ends_with(&suffix) {
+                return false;
+            }
+        }
+        if let Some(min) = request.min_size_bytes {
+            if result.size_bytes < min {
+                return false;
+            }
+        }
+        if let Some(max) = request.max_size_bytes {
+            if result.size_bytes > max {
+                return false;
+            }
+        }
+        if let Some(min_availability) = request.min_availability {
+            if result.sources < min_availability {
+                return false;
+            }
+        }
+        true
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(name: &str, size_bytes: u64, sources: u32) -> SearchResult {
+        SearchResult {
+            search_id: "s".to_string(),
+            method: "automatic".to_string(),
+            r#type: String::new(),
+            hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: name.to_string(),
+            size_bytes,
+            sources,
+            complete_sources: 0,
+            file_type: String::new(),
+            complete: false,
+            known_type: String::new(),
+            directory: String::new(),
+        }
+    }
+
+    fn request() -> SearchCreate {
+        SearchCreate {
+            query: "q".to_string(),
+            method: "automatic".to_string(),
+            r#type: String::new(),
+            extension: String::new(),
+            min_size_bytes: None,
+            max_size_bytes: None,
+            min_availability: None,
+        }
+    }
+
+    #[test]
+    fn empty_filters_keep_all_results() {
+        let mut results = vec![result("A.bin", 10, 1), result("B.mkv", 20, 2)];
+        apply_search_filters(&mut results, &request());
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn extension_size_and_availability_filters_apply() {
+        let mut results = vec![
+            result("Movie.One.mkv", 5_000, 8),
+            result("Movie.Two.mkv", 50, 8),
+            result("Movie.Three.avi", 5_000, 8),
+            result("Movie.Four.mkv", 5_000, 1),
+        ];
+        let mut req = request();
+        req.extension = "MKV".to_string();
+        req.min_size_bytes = Some(1_000);
+        req.max_size_bytes = Some(10_000);
+        req.min_availability = Some(5);
+        apply_search_filters(&mut results, &req);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Movie.One.mkv");
+    }
+}
+
+pub(crate) fn search_result_from_indexed(
+    search_id: &str,
+    request: &SearchCreate,
+    file: IndexedFile,
+) -> SearchResult {
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash: file.ed2k_hash,
+        name: file.name,
+        size_bytes: file.size_bytes,
+        sources: file.availability_score.max(0) as u32,
+        complete_sources: 0,
+        file_type: file.content_type.clone(),
+        complete: false,
+        known_type: file.content_type,
+        directory: String::new(),
+    }
+}
+
+pub(crate) fn search_result_from_ed2k(
+    search_id: &str,
+    request: &SearchCreate,
+    file: Ed2kSearchFile,
+) -> SearchResult {
+    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash: file.file_hash.to_string(),
+        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
+        size_bytes: file.file_size.unwrap_or_default(),
+        sources: file.source_count.unwrap_or_default(),
+        complete_sources: 0,
+        file_type: file_type.clone(),
+        complete: false,
+        known_type: file_type,
+        directory: String::new(),
+    }
+}

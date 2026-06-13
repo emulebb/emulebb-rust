@@ -29,6 +29,7 @@ async fn search_state_survives_core_restart_and_downloads_result() {
                 query: "sample payload".to_string(),
                 method: "automatic".to_string(),
                 r#type: "archive".to_string(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -89,6 +90,7 @@ async fn search_delete_and_clear_survive_core_restart() {
                 query: "alpha".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -96,6 +98,7 @@ async fn search_delete_and_clear_survive_core_restart() {
             query: "beta".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -134,6 +137,7 @@ async fn shared_local_file_is_searchable_after_core_restart() {
                 query: "searchable payload".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -148,6 +152,7 @@ async fn shared_local_file_is_searchable_after_core_restart() {
             query: "searchable payload".to_string(),
             method: "automatic".to_string(),
             r#type: String::new(),
+            ..Default::default()
         })
         .await
         .unwrap();

@@ -69,7 +69,9 @@ mod profile_state;
 mod search_state;
 mod shared_directories;
 mod kad_snoop_entry;
+mod search_query;
 use kad_snoop_entry::{build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry};
+use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
 
 pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
@@ -268,7 +270,7 @@ pub struct TransferStats {
     pub completed: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchCreate {
     pub query: String,
@@ -276,6 +278,14 @@ pub struct SearchCreate {
     pub method: String,
     #[serde(default)]
     pub r#type: String,
+    #[serde(default)]
+    pub extension: String,
+    #[serde(default)]
+    pub min_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub min_availability: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1184,6 +1194,7 @@ impl EmulebbCore {
                 .into_iter()
                 .map(|file| search_result_from_indexed(&search_id, &request, file)),
         );
+        apply_search_filters(&mut results, &request);
         let search = Search {
             id: search_id.clone(),
             query: request.query,
@@ -5148,49 +5159,6 @@ fn found_source_from_hint(file_hash: Ed2kHash, hint: &Ed2kSourceHint) -> Result<
     })
 }
 
-fn search_result_from_indexed(
-    search_id: &str,
-    request: &SearchCreate,
-    file: IndexedFile,
-) -> SearchResult {
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.ed2k_hash,
-        name: file.name,
-        size_bytes: file.size_bytes,
-        sources: file.availability_score.max(0) as u32,
-        complete_sources: 0,
-        file_type: file.content_type.clone(),
-        complete: false,
-        known_type: file.content_type,
-        directory: String::new(),
-    }
-}
-
-fn search_result_from_ed2k(
-    search_id: &str,
-    request: &SearchCreate,
-    file: Ed2kSearchFile,
-) -> SearchResult {
-    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.file_hash.to_string(),
-        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
-        size_bytes: file.file_size.unwrap_or_default(),
-        sources: file.source_count.unwrap_or_default(),
-        complete_sources: 0,
-        file_type: file_type.clone(),
-        complete: false,
-        known_type: file_type,
-        directory: String::new(),
-    }
-}
-
 fn configured_server_attempts(config: &Ed2kConfig) -> usize {
     config
         .server_entries
@@ -6826,6 +6794,7 @@ mod tests {
                 query: "indexed file".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -6975,6 +6944,7 @@ mod tests {
                 query: "download me".to_string(),
                 method: "automatic".to_string(),
                 r#type: String::new(),
+                ..Default::default()
             })
             .await
             .unwrap();
