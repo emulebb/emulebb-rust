@@ -1186,10 +1186,8 @@ impl EmulebbCore {
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
         let search_id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        // Local index results are cheap, so include them immediately.
         let mut results = Vec::new();
-        if let Some(ed2k_results) = self.search_ed2k_servers(&search_id, &request).await? {
-            results.extend(ed2k_results);
-        }
         let indexed = self.index.lock().await.search(&request.query, 200)?;
         results.extend(
             indexed
@@ -1197,12 +1195,17 @@ impl EmulebbCore {
                 .map(|file| search_result_from_indexed(&search_id, &request, file)),
         );
         apply_search_filters(&mut results, &request);
+        // Create the search as "running" and return immediately; the slow ED2K
+        // network search runs in the background and flips status to "completed".
+        // This follows the eMuleBB contract's running->complete search lifecycle
+        // so controllers (e.g. aMuTorrent) get a prompt POST and poll GET for
+        // results instead of blocking the create call until the network replies.
         let search = Search {
             id: search_id.clone(),
-            query: request.query,
-            method: request.method,
-            r#type: request.r#type,
-            status: "completed".to_string(),
+            query: request.query.clone(),
+            method: request.method.clone(),
+            r#type: request.r#type.clone(),
+            status: "running".to_string(),
             created_at: now,
             updated_at: now,
             results,
@@ -1212,8 +1215,45 @@ impl EmulebbCore {
             .lock()
             .await
             .searches
-            .insert(search_id, search.clone());
+            .insert(search_id.clone(), search.clone());
+        let core = self.clone();
+        tokio::spawn(async move {
+            core.run_background_search(search_id, request).await;
+        });
         Ok(search)
+    }
+
+    /// Runs the ED2K network search for an already-created "running" search,
+    /// merges any results with the local-index ones, and marks it completed.
+    async fn run_background_search(&self, search_id: String, request: SearchCreate) {
+        let outcome = self.search_ed2k_servers(&search_id, &request).await;
+        let mut state = self.state.lock().await;
+        let Some(search) = state.searches.get_mut(&search_id) else {
+            return;
+        };
+        match outcome {
+            Ok(ed2k_results) => {
+                if let Some(mut ed2k_results) = ed2k_results {
+                    apply_search_filters(&mut ed2k_results, &request);
+                    let seen: std::collections::HashSet<String> =
+                        search.results.iter().map(|result| result.hash.clone()).collect();
+                    search
+                        .results
+                        .extend(ed2k_results.into_iter().filter(|result| !seen.contains(&result.hash)));
+                }
+                search.status = "completed".to_string();
+            }
+            Err(error) => {
+                tracing::warn!("ED2K background search failed for {search_id}: {error:#}");
+                search.status = "error".to_string();
+            }
+        }
+        search.updated_at = Utc::now();
+        let snapshot = search.clone();
+        drop(state);
+        if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
+            tracing::warn!("failed to persist completed search {search_id}: {error}");
+        }
     }
 
     pub async fn searches(&self) -> Vec<Search> {
@@ -6814,8 +6854,20 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(search.status, "completed");
+        // Local index results are present immediately while the search starts
+        // "running"; it flips to "completed" once the background pass finishes.
+        assert_eq!(search.status, "running");
         assert_eq!(search.results.len(), 1);
+        let mut completed = search;
+        for _ in 0..100 {
+            if completed.status == "completed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            completed = core.search(&completed.id).await.unwrap();
+        }
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.results.len(), 1);
     }
 
     #[test]

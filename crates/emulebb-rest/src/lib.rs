@@ -2207,6 +2207,9 @@ fn search_page_response(search: &SearchResultsPage) -> Value {
         "method": search.method,
         "type": search.file_type,
         "status": search_status_token(&search.status),
+        "total": search.total,
+        "offset": search.offset,
+        "limit": search.limit,
         "results": search_results_response(&search.results)
     })
 }
@@ -3538,9 +3541,11 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["data"]["id"], search_id);
-        assert!(value["data"].get("total").is_none());
-        assert!(value["data"].get("offset").is_none());
-        assert!(value["data"].get("limit").is_none());
+        // The eMuleBB master returns paged search results with total/offset/limit
+        // alongside the "results" array (search/results contract).
+        assert_eq!(value["data"]["total"], 2);
+        assert_eq!(value["data"]["offset"], 1);
+        assert_eq!(value["data"]["limit"], 1);
         assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
 
         // An out-of-range limit is rejected (matching the emulebb master), not
