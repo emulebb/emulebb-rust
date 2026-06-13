@@ -657,7 +657,13 @@ async fn kad_import_nodes_url(State(state): State<RestState>, body: Bytes) -> im
         Err(response) => return *response,
     };
     match state.core.import_kad_nodes_url(&request.url).await {
-        Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
+        Ok(true) => api_ok(json!({ "ok": true, "imported": true })).into_response(),
+        Ok(false) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EMULE_ERROR",
+            "failed to update nodes.dat from URL",
+        )
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -830,7 +836,13 @@ async fn servers_import_met_url(State(state): State<RestState>, body: Bytes) -> 
         Err(response) => return *response,
     };
     match state.core.import_server_met_url(&request.url).await {
-        Ok(imported) => api_ok(json!({ "ok": imported, "imported": imported })).into_response(),
+        Ok(true) => api_ok(json!({ "ok": true, "imported": true })).into_response(),
+        Ok(false) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EMULE_ERROR",
+            "failed to update server.met from URL",
+        )
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -2190,13 +2202,19 @@ fn search_session_response(search: &Search) -> Value {
 }
 
 fn search_response(search: &Search) -> Value {
+    // search/start contract: a freshly created search returns an empty first
+    // page with the shared {items,total,offset,limit} shape (status "running").
+    // Results are fetched by polling GET /searches/{id}.
     json!({
         "id": search.id,
         "query": search.query,
         "method": search.method,
         "type": search.r#type,
         "status": search_status_token(&search.status),
-        "results": search_results_response(&search.results)
+        "total": 0,
+        "offset": 0,
+        "limit": 100,
+        "items": []
     })
 }
 
@@ -2210,7 +2228,7 @@ fn search_page_response(search: &SearchResultsPage) -> Value {
         "total": search.total,
         "offset": search.offset,
         "limit": search.limit,
-        "results": search_results_response(&search.results)
+        "items": search_results_response(&search.results)
     })
 }
 
@@ -3541,12 +3559,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["data"]["id"], search_id);
-        // The eMuleBB master returns paged search results with total/offset/limit
-        // alongside the "results" array (search/results contract).
+        // The eMuleBB master returns paged search results under "items" with
+        // total/offset/limit (search/results shares the common page shape).
         assert_eq!(value["data"]["total"], 2);
         assert_eq!(value["data"]["offset"], 1);
         assert_eq!(value["data"]["limit"], 1);
-        assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
 
         // An out-of-range limit is rejected (matching the emulebb master), not
         // silently clamped, and carries field/constraint details.
@@ -3607,7 +3625,9 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         let search_id = value["data"]["id"].as_str().unwrap();
-        assert_eq!(value["data"]["results"].as_array().unwrap().len(), 1);
+        // search/start returns an empty first page; the seeded index result is
+        // still recorded on the search and downloadable by hash.
+        assert_eq!(value["data"]["items"].as_array().unwrap().len(), 0);
 
         let download_uri = format!(
             "/api/v1/searches/{search_id}/results/00112233445566778899aabbccddeeff/operations/download"

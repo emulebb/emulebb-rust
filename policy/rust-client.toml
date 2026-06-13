@@ -76,8 +76,8 @@ rationale = "frozen native miniupnpc adapter mirrors upstream ABI and platform s
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-rest/src/lib.rs"
-hard_limit_lines = 4197
-rationale = "frozen legacy REST route/controller aggregation; split routes, request models, and response mapping as touched. Cap bumped +5 to add total/offset/limit to the paged search GET response (matching the eMuleBB master search/results contract)."
+hard_limit_lines = 4217
+rationale = "frozen legacy REST route/controller aggregation; split routes, request models, and response mapping as touched. Cap bumped for FEAT-014 contract alignment: paged search responses unified on items+total/offset/limit (search/start returns an empty first page) and URL-import failures returned as EMULE_ERROR instead of in-band {ok:false}."
 
 [ipv4_only]
 allowed_ipv6_mentions = [
