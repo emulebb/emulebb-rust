@@ -8,6 +8,12 @@ address_family = "ipv4-only"
 compatibility = "stock-compatible implemented surface"
 omission_registry = "policy/rust-client-omissions.toml"
 
+# New `.rs` files must stay within `max_rs_lines` (600) / `max_test_rs_lines` (900).
+# The legacy files below are grandfathered, but their caps are FROZEN at the
+# current line count: caps are ratchet-down-only. Do not raise a cap to fit new
+# code -- put new functionality in a new module within budget, and lower a cap
+# whenever a split shrinks its file. The remaining splits are deferred to
+# post-parity, done opportunistically "as touched".
 [structure]
 max_rs_lines = 600
 max_test_rs_lines = 900
@@ -15,53 +21,53 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 7780
-rationale = "legacy core state/API orchestration; split by state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders extracted to kad_snoop_entry)"
+hard_limit_lines = 7773
+rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders extracted to kad_snoop_entry)"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
-hard_limit_lines = 1200
-rationale = "legacy eD2K TCP codec aggregation; split request/response frame families as touched"
+hard_limit_lines = 1049
+rationale = "frozen legacy eD2K TCP codec aggregation; split request/response frame families as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs"
-hard_limit_lines = 1300
-rationale = "legacy download session state machine; split startup, range handling, and completion paths as touched"
+hard_limit_lines = 1116
+rationale = "frozen legacy download session state machine; split startup, range handling, and completion paths as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs"
-hard_limit_lines = 1200
-rationale = "legacy upload listener session; split negotiation, queue, and payload serving as touched"
+hard_limit_lines = 1002
+rationale = "frozen legacy upload listener session; split negotiation, queue, and payload serving as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
-hard_limit_lines = 1100
-rationale = "legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
+hard_limit_lines = 907
+rationale = "frozen legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-index/src/kad_store.rs"
-hard_limit_lines = 2800
-rationale = "legacy Kad SQLite store; split schema, node store, search store, and snoop persistence as touched"
+hard_limit_lines = 2715
+rationale = "frozen legacy Kad SQLite store; split schema, node store, search store, and snoop persistence as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-index/src/snoop_queue.rs"
-hard_limit_lines = 800
-rationale = "legacy snoop queue policy/runtime; split scheduling policy and persistence restore as touched"
+hard_limit_lines = 630
+rationale = "frozen legacy snoop queue policy/runtime; split scheduling policy and persistence restore as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-kad-dht/src/traversal.rs"
-hard_limit_lines = 1200
-rationale = "legacy Kad traversal implementation; split lookup state, query selection, and result merge as touched"
+hard_limit_lines = 982
+rationale = "frozen legacy Kad traversal implementation; split lookup state, query selection, and result merge as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-miniupnpc/src/lib.rs"
-hard_limit_lines = 950
-rationale = "native miniupnpc adapter mirrors upstream ABI and platform setup; split safe API and FFI plumbing as touched"
+hard_limit_lines = 768
+rationale = "frozen native miniupnpc adapter mirrors upstream ABI and platform setup; split safe API and FFI plumbing as touched"
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-rest/src/lib.rs"
-hard_limit_lines = 4400
-rationale = "legacy REST route/controller aggregation; split routes, request models, and response mapping as touched"
+hard_limit_lines = 4192
+rationale = "frozen legacy REST route/controller aggregation; split routes, request models, and response mapping as touched"
 
 [ipv4_only]
 allowed_ipv6_mentions = [
