@@ -308,7 +308,7 @@ CREATE TABLE peer_observations (
     endpoint TEXT NOT NULL DEFAULT '',
     protocol_family TEXT NOT NULL,
     event_kind TEXT NOT NULL,
-    known_file_id INTEGER REFERENCES known_files(id),
+    known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     raw_payload BLOB,
     observed_at_ms INTEGER NOT NULL
 );
@@ -355,7 +355,7 @@ CREATE TABLE kad_keyword_publishes (
     id INTEGER PRIMARY KEY,
     target_node_id BLOB NOT NULL CHECK(length(target_node_id) = 16),
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
-    known_file_id INTEGER REFERENCES known_files(id),
+    known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     raw_tags BLOB NOT NULL,
     load INTEGER,
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
@@ -418,7 +418,7 @@ CREATE TABLE search_sessions (
 CREATE TABLE search_results (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
-    known_file_id INTEGER REFERENCES known_files(id),
+    known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     source_method TEXT NOT NULL,
     file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
     name TEXT NOT NULL,
