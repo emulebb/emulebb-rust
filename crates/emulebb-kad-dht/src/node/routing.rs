@@ -14,6 +14,22 @@ impl DhtNode {
         self.inner.routing_table.lock().await.all_contacts()
     }
 
+    /// Parse a `nodes.dat` payload and upsert its contacts into the routing
+    /// table. Returns the number of contacts accepted.
+    pub async fn import_nodes_dat(&self, data: &[u8]) -> Result<usize, DhtError> {
+        let contacts = crate::bootstrap::parse_nodes_dat(data)?;
+        let mut added = 0usize;
+        for bc in contacts {
+            let mut contact =
+                Contact::new(bc.node_id, bc.ip, bc.udp_port, bc.tcp_port, bc.version);
+            contact.udp_key = bc.udp_key;
+            if self.add_contact(contact).await.is_ok() {
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
     /// Upsert a single contact into the routing table.
     pub async fn add_contact(&self, contact: Contact) -> Result<(), DhtError> {
         let mut contact = contact;

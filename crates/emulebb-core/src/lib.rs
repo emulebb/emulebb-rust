@@ -22,9 +22,9 @@ use emulebb_ed2k::{
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
         Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel,
         publish_shared_catalog_via_background_session, request_callback_on_server,
-        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
-        search_keyword_via_background_session, search_source_servers, search_source_udp_servers,
-        search_source_via_background_session,
+        parse_server_met, request_callback_via_background_session, run_ed2k_server_loop,
+        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
+        search_source_udp_servers, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -899,13 +899,55 @@ impl EmulebbCore {
     }
 
     pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
-        validate_url_import(url)?;
-        Ok(false)
+        let url = validate_url_import(url)?;
+        match fetch_url_bytes(&url).await {
+            Ok(bytes) => Ok(self.import_kad_nodes_bytes(&bytes).await.unwrap_or(0) > 0),
+            Err(error) => {
+                tracing::warn!("nodes.dat import fetch failed url={url}: {error:#}");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Parse a `nodes.dat` payload and add its contacts to the running Kad node.
+    pub async fn import_kad_nodes_bytes(&self, data: &[u8]) -> Result<usize> {
+        let Some(dht) = self.ed2k_dht_node().await else {
+            anyhow::bail!("Kad is not running");
+        };
+        dht.import_nodes_dat(data)
+            .await
+            .map_err(|error| anyhow::anyhow!("nodes.dat import failed: {error}"))
     }
 
     pub async fn import_server_met_url(&self, url: &str) -> Result<bool> {
-        validate_url_import(url)?;
-        Ok(false)
+        let url = validate_url_import(url)?;
+        match fetch_url_bytes(&url).await {
+            Ok(bytes) => Ok(self.import_server_met_bytes(&bytes).await.unwrap_or(0) > 0),
+            Err(error) => {
+                tracing::warn!("server.met import fetch failed url={url}: {error:#}");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Parse a `server.met` payload and add its servers to the server list.
+    pub async fn import_server_met_bytes(&self, data: &[u8]) -> Result<usize> {
+        let servers = parse_server_met(data)?;
+        let mut added = 0usize;
+        for server in servers {
+            let request = ServerCreate {
+                address: server.ip.to_string(),
+                port: server.port,
+                name: server.name,
+                priority: None,
+                static_server: None,
+                connect: None,
+            };
+            if self.add_server(request).await.is_ok() {
+                added += 1;
+            }
+        }
+        Ok(added)
     }
 
     pub async fn recheck_kad_firewall(&self) -> NetworkStatus {
@@ -4788,6 +4830,20 @@ fn validate_url_import(url: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Fetches a URL body for server.met / nodes.dat import. A browser User-Agent
+/// is required: public eMule list mirrors reject or redirect the default agent.
+async fn fetch_url_bytes(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        )
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let response = client.get(url).send().await?.error_for_status()?;
+    Ok(response.bytes().await?.to_vec())
+}
+
 fn validate_shared_upload_priority(priority: &str) -> Result<(&str, bool)> {
     match priority {
         "auto" => Ok((priority, true)),
@@ -6919,6 +6975,26 @@ mod tests {
         }
         assert_eq!(completed.status, "completed");
         assert_eq!(completed.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_server_met_bytes_adds_servers() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        // version 0x0E + count 1 + (ip 45.82.80.155, port 5687, 0 tags)
+        let mut met = vec![0x0Eu8];
+        met.extend_from_slice(&1u32.to_le_bytes());
+        met.extend_from_slice(&[45, 82, 80, 155]);
+        met.extend_from_slice(&5687u16.to_le_bytes());
+        met.extend_from_slice(&0u32.to_le_bytes());
+
+        let added = core.import_server_met_bytes(&met).await.unwrap();
+        assert_eq!(added, 1);
+        let servers = core.servers().await;
+        assert!(
+            servers
+                .iter()
+                .any(|server| server.address == "45.82.80.155" && server.port == 5687)
+        );
     }
 
     #[test]
