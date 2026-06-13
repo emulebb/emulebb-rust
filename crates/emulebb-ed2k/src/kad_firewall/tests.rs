@@ -71,19 +71,11 @@ fn external_port_discovery_resolves_after_two_matching_reporters() {
 
     state.begin_external_port_discovery(started_at);
     assert_eq!(
-        state.record_external_port_candidate(
-            "203.0.113.10".parse().unwrap(),
-            52123,
-            observed_at
-        ),
+        state.record_external_port_candidate("203.0.113.10".parse().unwrap(), 52123, observed_at),
         ExternalPortDiscoveryOutcome::Recorded
     );
     assert_eq!(
-        state.record_external_port_candidate(
-            "203.0.113.11".parse().unwrap(),
-            52123,
-            observed_at
-        ),
+        state.record_external_port_candidate("203.0.113.11".parse().unwrap(), 52123, observed_at),
         ExternalPortDiscoveryOutcome::Resolved(52123)
     );
     assert_eq!(state.external_udp_port_for_request(), 52123);
@@ -98,27 +90,15 @@ fn external_port_discovery_marks_inconsistent_reports_unreliable() {
 
     state.begin_external_port_discovery(started_at);
     assert_eq!(
-        state.record_external_port_candidate(
-            "203.0.113.10".parse().unwrap(),
-            52123,
-            observed_at
-        ),
+        state.record_external_port_candidate("203.0.113.10".parse().unwrap(), 52123, observed_at),
         ExternalPortDiscoveryOutcome::Recorded
     );
     assert_eq!(
-        state.record_external_port_candidate(
-            "203.0.113.11".parse().unwrap(),
-            52124,
-            observed_at
-        ),
+        state.record_external_port_candidate("203.0.113.11".parse().unwrap(), 52124, observed_at),
         ExternalPortDiscoveryOutcome::Recorded
     );
     assert_eq!(
-        state.record_external_port_candidate(
-            "203.0.113.12".parse().unwrap(),
-            52125,
-            observed_at
-        ),
+        state.record_external_port_candidate("203.0.113.12".parse().unwrap(), 52125, observed_at),
         ExternalPortDiscoveryOutcome::Unreliable
     );
     assert_eq!(state.external_udp_port_for_request(), 0);

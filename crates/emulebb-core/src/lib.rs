@@ -65,12 +65,14 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod kad_snoop_entry;
 mod profile_state;
+mod search_query;
 mod search_state;
 mod shared_directories;
-mod kad_snoop_entry;
-mod search_query;
-use kad_snoop_entry::{build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry};
+use kad_snoop_entry::{
+    build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
+};
 use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
 
 pub use shared_directories::{

@@ -31,7 +31,7 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 7743
+hard_limit_lines = 7745
 rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query)"
 
 [[structure.large_file_allowlist]]
