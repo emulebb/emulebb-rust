@@ -47,10 +47,13 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     pub ip: IpAddr,
     /// Remote peer TCP port advertised in hello or observed on the socket.
     pub tcp_port: u16,
-    /// Remote peer eD2k client UDP port (low 16 of `CT_EMULE_UDPPORTS`), when
-    /// advertised. Used to correlate inbound UDP source-reask by `(ip, udp_port)`
-    /// (eMule `GetWaitingClientByIP_UDP`); not part of peer-identity equality.
+    /// Peer eD2k client UDP port (low 16 of `CT_EMULE_UDPPORTS`), when advertised:
+    /// correlates inbound reask by `(ip, udp_port)` (eMule `GetWaitingClientByIP_UDP`).
     pub udp_port: Option<u16>,
+    /// Peer eD2k UDP version (`OP_EMULEINFO` ET_UDPVER); gates reask-ack partstatus.
+    pub udp_version: u8,
+    /// Obfuscate UDP reasks to this peer (its TCP session was obfuscated).
+    pub should_crypt: bool,
     /// Remote peer user hash when known.
     pub user_hash: Option<[u8; 16]>,
     /// Remote peer client-id when known.
@@ -136,8 +139,10 @@ pub enum Ed2kUploadSessionPhaseSnapshot {
 pub struct Ed2kUploadQueueSnapshotEntry {
     pub ip: IpAddr,
     pub tcp_port: u16,
-    /// Peer's eD2k client UDP port (for `(ip, udp_port)` reask correlation).
+    /// Reask correlation/framing mirrored from the peer identity (see that struct).
     pub udp_port: Option<u16>,
+    pub udp_version: u8,
+    pub should_crypt: bool,
     pub user_hash: Option<[u8; 16]>,
     pub client_id: Option<u32>,
     pub friend_slot: bool,
@@ -383,6 +388,8 @@ impl Ed2kUploadQueueState {
                 ip: key.peer.ip,
                 tcp_port: key.peer.tcp_port,
                 udp_port: key.peer.udp_port,
+                udp_version: key.peer.udp_version,
+                should_crypt: key.peer.should_crypt,
                 user_hash: key.peer.user_hash,
                 client_id: key.peer.client_id,
                 friend_slot: key.peer.friend_slot,

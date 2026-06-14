@@ -50,6 +50,12 @@ impl Ed2kTransportMode {
             Self::Obfuscated => "obfuscated",
         }
     }
+
+    /// Whether the session is obfuscated — a proxy for the peer supporting crypt,
+    /// used to decide whether UDP reasks to it should be obfuscated.
+    pub(crate) const fn is_obfuscated(self) -> bool {
+        matches!(self, Self::Obfuscated)
+    }
 }
 
 impl Ed2kTransport {

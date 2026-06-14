@@ -41,7 +41,8 @@ use super::super::dump::{
     dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
 };
 use super::super::hello::{
-    DecodedHelloIdentity, build_hello_responses, decode_hello_profile, encode_emule_info_answer,
+    DecodedHelloIdentity, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
+    encode_emule_info_answer,
 };
 use super::super::identity::{
     Ed2kPeerSecureIdentState, begin_secure_ident_probe, decode_public_key_payload,
@@ -197,6 +198,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
                 peer_upload_identity =
                     upload_peer_identity_from_hello(peer_addr, &hello_profile.identity);
+                // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
+                peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
                 debug!(
                     "received eD2k OP_HELLO from {peer_addr} transport={} mule_hello={}",
                     transport.mode.as_str(),
@@ -566,6 +569,15 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     "received eMule OP_EMULEINFO from {peer_addr} transport={}",
                     transport.mode.as_str()
                 );
+                // Capture the peer's advertised eD2k UDP version + port so a later
+                // UDP reask reply (OP_REASKACK) can gate its leading partstatus on
+                // the peer's udp_version, mirroring eMule's GetUDPVersion() > 3.
+                if let Ok(profile) = decode_emule_info_profile(&packet.payload) {
+                    peer_upload_identity.udp_version = profile.udp_version;
+                    if peer_upload_identity.udp_port.is_none() && profile.udp_port != 0 {
+                        peer_upload_identity.udp_port = Some(profile.udp_port);
+                    }
+                }
                 let reply = encode_emule_info_answer(kad_udp_port);
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
                 transport
@@ -911,6 +923,8 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         ip: peer_addr.ip(),
         tcp_port: peer_addr.port(),
         udp_port: None,
+        udp_version: 0,
+        should_crypt: false,
         user_hash: None,
         client_id: None,
         friend_slot: false,
@@ -929,6 +943,10 @@ fn upload_peer_identity_from_hello(
             remote_hello.tcp_port
         },
         udp_port: (remote_hello.udp_port != 0).then_some(remote_hello.udp_port),
+        // udp_version is learned later from OP_EMULEINFO; should_crypt is set by the
+        // caller from the live transport mode.
+        udp_version: 0,
+        should_crypt: false,
         user_hash: Some(remote_hello.user_hash),
         client_id: Some(remote_hello.client_id),
         friend_slot: false,
