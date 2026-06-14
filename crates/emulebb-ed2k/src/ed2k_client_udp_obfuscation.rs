@@ -427,4 +427,49 @@ mod tests {
             assert_eq!(recovered, plaintext);
         }
     }
+
+    /// Full pure pipeline the gated reask transport will run, end to end:
+    /// encode an OP_REASKFILEPING body -> wrap as an OP_EMULEPROT client UDP frame
+    /// -> obfuscate -> classify the inbound first byte -> deobfuscate -> decode.
+    /// Guards that the independently-built pieces compose losslessly.
+    #[test]
+    fn full_reask_obfuscation_pipeline_round_trips() {
+        use crate::ed2k_client_udp::{OP_REASKFILEPING, decode_reask_file_ping, encode_reask_file_ping};
+        use emulebb_kad_proto::Ed2kHash;
+
+        let file_hash = Ed2kHash::from_bytes([
+            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99,
+        ]);
+        let parts = [true, false, true, true, false];
+        let udp_version = 4;
+
+        // Downloader builds the OP_EMULEPROT client-UDP frame: [0xC5][opcode][body].
+        let body = encode_reask_file_ping(&file_hash, Some(&parts), 3, udp_version);
+        let mut frame = vec![OP_EMULEPROT, OP_REASKFILEPING];
+        frame.extend_from_slice(&body);
+
+        // Obfuscate toward the destination, keyed on its hash + our IP.
+        let datagram = obfuscate_client_udp_with(&DEST_HASH, SENDER_IP, &frame, 0x1357, 0x40);
+
+        // The receiver triages the first byte before any decrypt: with the ed2k
+        // marker bit set it tries the eD2k client key first.
+        assert_eq!(
+            classify_inbound_client_udp(datagram[0], true),
+            InboundUdpDecision::TryEd2kClientFirst
+        );
+
+        // Deobfuscate (receiver keys on its own hash == DEST_HASH + sender IP).
+        let recovered_frame = deobfuscate_client_udp(&DEST_HASH, SENDER_IP, &datagram)
+            .expect("pipeline should decrypt");
+        assert_eq!(recovered_frame, frame);
+
+        // Strip the 2-byte OP_EMULEPROT header and decode the reask ping back.
+        assert_eq!(recovered_frame[0], OP_EMULEPROT);
+        assert_eq!(recovered_frame[1], OP_REASKFILEPING);
+        let decoded = decode_reask_file_ping(&recovered_frame[2..], udp_version).unwrap();
+        assert_eq!(decoded.file_hash, file_hash);
+        assert_eq!(decoded.part_status.unwrap(), parts);
+        assert_eq!(decoded.complete_source_count, Some(3));
+    }
 }
