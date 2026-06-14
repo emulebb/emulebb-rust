@@ -157,6 +157,19 @@ impl RpcManager {
     pub fn set_foreign_datagram_handler(&self, handler: ForeignDatagramHandler) -> bool {
         self.inner.foreign_datagram_handler.set(handler).is_ok()
     }
+
+    /// Send an already-framed datagram on the shared UDP socket. For eD2k client
+    /// UDP reask sharing the Kad port: the bytes are framed + obfuscated by the
+    /// eD2k layer and must NOT be Kad-encoded, so this bypasses Kad packet
+    /// construction and the caller owns all framing. Pairs with
+    /// [`Self::set_foreign_datagram_handler`] for the reply/ticker send path.
+    pub async fn send_raw_datagram(
+        &self,
+        addr: SocketAddr,
+        data: &[u8],
+    ) -> Result<(), crate::error::NetError> {
+        self.inner.transport.send_raw(addr, data).await
+    }
 }
 
 #[cfg(test)]

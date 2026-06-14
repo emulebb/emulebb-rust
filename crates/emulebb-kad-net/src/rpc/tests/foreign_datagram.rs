@@ -80,6 +80,25 @@ async fn foreign_handler_not_invoked_for_valid_kad_packet() {
 }
 
 #[tokio::test]
+async fn send_raw_datagram_writes_unencoded_bytes() {
+    // The reply/ticker send path must put the caller's already-framed bytes on the
+    // wire verbatim (no Kad encoding/obfuscation).
+    let transport = Arc::new(MockTransport::new(make_local_addr()));
+    let rpc = make_rpc_with_shared_transport(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::from_bytes([0x10; 16]), 0x1122_3344, true),
+    );
+    let peer_addr = make_peer_addr();
+    let framed = non_kad_datagram();
+    rpc.send_raw_datagram(peer_addr, &framed).await.unwrap();
+
+    let out = transport.drain_outgoing();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, peer_addr);
+    assert_eq!(out[0].1, framed, "bytes must go out verbatim, un-Kad-encoded");
+}
+
+#[tokio::test]
 async fn foreign_handler_registration_is_at_most_once() {
     let rpc = make_rpc(RpcConfig::default());
     let first: ForeignDatagramHandler = Arc::new(|_: &[u8], _: SocketAddr| true);
