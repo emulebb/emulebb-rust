@@ -43,7 +43,7 @@ pub fn pin_egress_to_interface(sock: SockRef<'_>, if_index: Option<u32>) -> io::
         setsockopt(
             raw,
             IPPROTO_IP,
-            IP_UNICAST_IF as i32,
+            IP_UNICAST_IF,
             (&raw const net_index).cast::<u8>(),
             size_of::<u32>() as i32,
         )
