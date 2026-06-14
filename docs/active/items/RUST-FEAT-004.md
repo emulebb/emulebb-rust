@@ -1,5 +1,5 @@
 ---
-id: FEAT-004
+id: RUST-FEAT-004
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/4
 title: Arr integration — Torznab indexer + qBittorrent-emulating download client
@@ -14,12 +14,12 @@ source: suite forward program (note 15); SUITE-JOINT-ROADMAP
 
 > Workflow status is tracked in GitHub: https://github.com/emulebb/emulebb-rust/issues/4. This local document is retained as an engineering spec/evidence record.
 
-# FEAT-004 - Arr integration — Torznab indexer + qBittorrent-emulating download client
+# RUST-FEAT-004 - Arr integration — Torznab indexer + qBittorrent-emulating download client
 
 ## Summary
 
 Give emulebb-rust the three Arr-stack roles alongside its native `/api/v1` REST:
-a Torznab indexer (serving the FEAT-002 index), a Prowlarr indexer definition,
+a Torznab indexer (serving the RUST-FEAT-002 index), a Prowlarr indexer definition,
 and a qBittorrent-WebUI-emulating download-client API so Prowlarr/Sonarr/Radarr
 and aMuTorrent drive rust as if it were a qBittorrent — zero new integration.
 
@@ -50,7 +50,7 @@ that pattern rather than invent one.
 
 ## Acceptance Criteria
 
-- [ ] Torznab endpoint returns valid results from the FEAT-002 index to Prowlarr.
+- [ ] Torznab endpoint returns valid results from the RUST-FEAT-002 index to Prowlarr.
 - [ ] Prowlarr recognizes rust via the shared suite indexer definition.
 - [ ] Sonarr/Radarr/aMuTorrent can add and manage a download treating rust as a
       qBittorrent download client.
@@ -63,5 +63,5 @@ that pattern rather than invent one.
 
 ## Notes
 
-- Depends on FEAT-002 for index content. Parity with the qBittorrentBB Torznab
+- Depends on RUST-FEAT-002 for index content. Parity with the qBittorrentBB Torznab
   contract is a living goal (co-evolved, not frozen).

@@ -29,9 +29,12 @@ behaviour; intentional omissions are recorded in
 
 ## ID Taxonomy
 
-Same classes as eMuleBB: `BUG`, `FEAT`, `REF`, `CI`. IDs are allocated per class
-and never reused. Scan `docs/active/items` (and `docs/history/items` once it
-exists) before allocating the next number.
+Item IDs carry a **product prefix** so they never collide across the suite repos:
+emulebb-rust uses `RUST-<CLASS>-<NNN>` with classes `BUG`, `FEAT`, `REF`, `CI`
+(e.g. `RUST-FEAT-002`). Other products use `QBBB-`, `GOED2K-`, `AMUT-`; the frozen
+MFC app keeps its legacy unprefixed IDs. IDs are allocated per class and never
+reused. Scan `docs/active/items` (and `docs/history/items` once it exists) before
+allocating the next number.
 
 ## Phase 0 — "perfectly functional" gate
 
@@ -46,10 +49,10 @@ items.
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| [FEAT-001](items/FEAT-001.md) | Major | IN_PROGRESS | eD2K — Implement client UDP source reask and queue-slot persistence |
-| [FEAT-002](items/FEAT-002.md) | Major | OPEN | Indexer — autonomous Kad/eD2K snooping index with Torznab surface |
-| [FEAT-003](items/FEAT-003.md) | Major | OPEN | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
-| [FEAT-004](items/FEAT-004.md) | Major | OPEN | Arr integration — Torznab indexer + qBittorrent-emulating download client |
+| [RUST-FEAT-001](items/RUST-FEAT-001.md) | Major | IN_PROGRESS | eD2K — Implement client UDP source reask and queue-slot persistence |
+| [RUST-FEAT-002](items/RUST-FEAT-002.md) | Major | OPEN | Indexer — autonomous Kad/eD2K snooping index with Torznab surface |
+| [RUST-FEAT-003](items/RUST-FEAT-003.md) | Major | OPEN | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
+| [RUST-FEAT-004](items/RUST-FEAT-004.md) | Major | OPEN | Arr integration — Torznab indexer + qBittorrent-emulating download client |
 
 ## Bugs (`BUG`)
 

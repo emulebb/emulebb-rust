@@ -1,5 +1,5 @@
 ---
-id: FEAT-001
+id: RUST-FEAT-001
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/1
 title: eD2K — Implement client UDP source reask and queue-slot persistence
@@ -14,7 +14,7 @@ source: protocol-divergence audit (emulebb-rust vs emulebb-main vs p2p-overlord-
 
 > Workflow status is tracked in GitHub: https://github.com/emulebb/emulebb-rust/issues/1. This local document is retained as an engineering spec/evidence record.
 
-# FEAT-001 - eD2K — Implement client UDP source reask and queue-slot persistence
+# RUST-FEAT-001 - eD2K — Implement client UDP source reask and queue-slot persistence
 
 ## Summary
 

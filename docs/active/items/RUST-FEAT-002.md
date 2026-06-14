@@ -1,5 +1,5 @@
 ---
-id: FEAT-002
+id: RUST-FEAT-002
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/2
 title: Indexer — autonomous Kad/eD2K snooping index with Torznab surface
@@ -14,7 +14,7 @@ source: suite forward program (notes 13-15); SUITE-JOINT-ROADMAP
 
 > Workflow status is tracked in GitHub: https://github.com/emulebb/emulebb-rust/issues/2. This local document is retained as an engineering spec/evidence record.
 
-# FEAT-002 - Indexer — autonomous Kad/eD2K snooping index with Torznab surface
+# RUST-FEAT-002 - Indexer — autonomous Kad/eD2K snooping index with Torznab surface
 
 ## Summary
 
@@ -70,5 +70,5 @@ harvesting. The index is the eD2K half of the suite's Prowlarr-federated search.
 
 ## Notes
 
-- Surfaces pair with FEAT-004 (Arr integration). Design parity tracked against the
+- Surfaces pair with RUST-FEAT-004 (Arr integration). Design parity tracked against the
   qBittorrentBB harvester.
