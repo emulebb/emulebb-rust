@@ -19,6 +19,7 @@
 
 pub(crate) mod codec;
 pub(crate) mod dispatch;
+pub(crate) mod outbound;
 pub(crate) mod reciprocity;
 pub(crate) mod registry;
 pub(crate) mod state;
@@ -29,6 +30,10 @@ pub(crate) use codec::{
     decode_reask_file_ping, encode_reask_ack, encode_reask_callback_udp, encode_reask_file_ping,
 };
 pub(crate) use dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
+pub(crate) use outbound::{
+    OutboundReaskTarget, build_file_not_found_datagram, build_queue_full_datagram,
+    build_reask_ack_datagram, build_reask_callback_udp_datagram, build_reask_file_ping_datagram,
+};
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
 pub(crate) use state::{
