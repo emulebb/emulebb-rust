@@ -109,6 +109,7 @@ listenPort = 41001
 serverEndpoints = ["192.0.2.20:4661"]
 connectTimeoutSecs = 1
 reconnectIntervalSecs = 60
+enableUdpReask = true
 
 [nat]
 enabled = true
@@ -158,6 +159,9 @@ externalIpOverride = "203.0.113.10"
     assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
     assert_eq!(config.ed2k.connect_timeout_secs, 1);
     assert_eq!(config.ed2k.reconnect_interval_secs, 60);
+    // The UDP source-reask flag is config-settable (camelCase), so enabling it
+    // for live validation is a config flip, not a code change (FEAT-001).
+    assert!(config.ed2k.enable_udp_reask);
     assert!(config.nat.enabled);
     assert_eq!(
         config.nat.backend_order,
