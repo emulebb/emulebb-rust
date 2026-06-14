@@ -31,8 +31,8 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 8052
-rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver), the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle), and the VPN-guard mode normalization to the master 'off'/'block' REST token set (GetVpnGuardModeRestToken parity)."
+hard_limit_lines = 8135
+rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver), the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle), and the VPN-guard mode normalization to the master 'off'/'block' REST token set (GetVpnGuardModeRestToken parity), and the transfer-details part breakdown (TransferPart/TransferDetails + transfer_parts_from_manifest, mirroring the master BuildTransferDetailsJson)."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
@@ -76,8 +76,8 @@ rationale = "frozen native miniupnpc adapter mirrors upstream ABI and platform s
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-rest/src/lib.rs"
-hard_limit_lines = 4253
-rationale = "frozen legacy REST route/controller aggregation; split routes, request models, and response mapping as touched. Cap bumped for FEAT-014 contract alignment: paged search responses unified on items+total/offset/limit (search/start returns an empty first page) and URL-import failures returned as EMULE_ERROR instead of in-band {ok:false}."
+hard_limit_lines = 4271
+rationale = "frozen legacy REST route/controller aggregation; split routes, request models, and response mapping as touched. Cap bumped for FEAT-014 contract alignment: paged search responses unified on items+total/offset/limit (search/start returns an empty first page) and URL-import failures returned as EMULE_ERROR instead of in-band {ok:false}. Also bumped for the dedicated GET /transfers/{hash}/details handler returning the master {transfer,parts,sources} envelope."
 
 [ipv4_only]
 allowed_ipv6_mentions = [

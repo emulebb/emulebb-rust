@@ -536,6 +536,33 @@ pub struct TransferSource {
     pub status: String,
 }
 
+/// One ED2K part's live download geometry/progress for the transfer details view.
+/// Mirrors the master `BuildTransferPartsJson` `TransferPart` shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPart {
+    pub index: u32,
+    pub start: u64,
+    pub end: u64,
+    pub size: u64,
+    pub completed_bytes: u64,
+    pub gap_bytes: u64,
+    pub complete: bool,
+    pub requested: bool,
+    pub corrupted: bool,
+    pub available_sources: u32,
+}
+
+/// Transfer details envelope: the transfer plus its per-part breakdown and live
+/// source list. Mirrors the master `BuildTransferDetailsJson` shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferDetails {
+    pub transfer: Transfer,
+    pub parts: Vec<TransferPart>,
+    pub sources: Vec<TransferSource>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
@@ -1998,6 +2025,23 @@ impl EmulebbCore {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
         let banned = self.state.lock().await.banned_source_clients.clone();
         Ok(Some(transfer_sources_from_manifest(&manifest, &banned)))
+    }
+
+    /// Transfer details: the transfer plus its per-part breakdown and source
+    /// list, mirroring the master `BuildTransferDetailsJson` shape.
+    pub async fn transfer_details(&self, hash: &str) -> Result<Option<TransferDetails>> {
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        let manifest = self.ed2k_transfers.manifest(hash).await?;
+        let banned = self.state.lock().await.banned_source_clients.clone();
+        let sources = transfer_sources_from_manifest(&manifest, &banned);
+        let parts = transfer_parts_from_manifest(&manifest);
+        Ok(Some(TransferDetails {
+            transfer,
+            parts,
+            sources,
+        }))
     }
 
     pub async fn transfer_source(
@@ -4856,6 +4900,45 @@ fn transfer_sources_from_manifest(
                 shared_files_request_pending: false,
                 banned,
                 status: "remembered".to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Builds the per-part download breakdown from the resume manifest. ED2K parts
+/// map 1:1 to manifest pieces (piece_size == ED2K_PART_SIZE). Geometry and
+/// completion are real (per-piece `bytes_written`/`state`); `availableSources`
+/// and `corrupted` are live-session-only signals the persistent manifest does
+/// not track, so they are honestly reported as 0/false rather than fabricated.
+fn transfer_parts_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferPart> {
+    let part_size = manifest.piece_size.max(1);
+    let file_size = manifest.file_size;
+    manifest
+        .pieces
+        .iter()
+        .map(|piece| {
+            let start = u64::from(piece.piece_index) * part_size;
+            let end_exclusive = (start + part_size).min(file_size).max(start);
+            let size = end_exclusive - start;
+            let end = end_exclusive.saturating_sub(1);
+            let verified = matches!(piece.state, Ed2kTransferState::Verified);
+            let completed_bytes = if verified {
+                size
+            } else {
+                piece.bytes_written.min(size)
+            };
+            let gap_bytes = size - completed_bytes;
+            TransferPart {
+                index: piece.piece_index,
+                start,
+                end,
+                size,
+                completed_bytes,
+                gap_bytes,
+                complete: size > 0 && gap_bytes == 0,
+                requested: matches!(piece.state, Ed2kTransferState::Requested),
+                corrupted: false,
+                available_sources: 0,
             }
         })
         .collect()

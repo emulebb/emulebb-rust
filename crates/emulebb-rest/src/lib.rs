@@ -367,7 +367,7 @@ pub fn router_with_shutdown(
             "/api/v1/transfers/{hash}/files",
             delete(transfer_delete_files),
         )
-        .route("/api/v1/transfers/{hash}/details", get(transfer))
+        .route("/api/v1/transfers/{hash}/details", get(transfer_details))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
         .route(
             "/api/v1/transfers/{hash}/sources/{client_id}",
@@ -1344,6 +1344,24 @@ async fn transfer(State(state): State<RestState>, Path(hash): Path<String>) -> i
     match state.core.transfer(&hash).await {
         Some(transfer) => api_ok(transfer).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),
+    }
+}
+
+async fn transfer_details(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.transfer_details(&hash).await {
+        Ok(Some(details)) => api_ok(details).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EMULE_ERROR",
+            error.to_string(),
+        )
+        .into_response(),
     }
 }
 
