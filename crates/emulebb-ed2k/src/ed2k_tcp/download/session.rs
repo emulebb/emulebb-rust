@@ -96,18 +96,30 @@ fn try_detach_queued_source_for_reask(
     let SocketAddr::V4(v4) = peer_addr else {
         return false; // IPv4-only client
     };
+    // A peer that advertised a non-zero eD2k UDP port in its hello
+    // (CT_EMULE_UDPPORTS) supports client UDP, even when the download session
+    // never completed an OP_EMULEINFO exchange to learn its ET_UDPVER. Default
+    // the version to our own advertised udp_version (4) for the eligibility gate
+    // and the ReaskSource; the outbound reask ping is framed by OUR udp_version,
+    // so this does not affect the wire format.
+    const DEFAULT_PEER_UDP_VERSION: u8 = 4;
+    let effective_udp_version = if session_state.peer_udp_version != 0 {
+        session_state.peer_udp_version
+    } else {
+        DEFAULT_PEER_UDP_VERSION
+    };
     // We hold the shared Kad UDP port whenever reask is enabled (have_local_udp);
     // we are detaching, so no live TCP socket remains; no proxy/firewall modelled.
     let eligible = crate::ed2k_client_udp::udp_reask_eligible(
         session_state.peer_udp_port,
-        session_state.peer_udp_version,
+        effective_udp_version,
         true,
         false,
         false,
         false,
     );
     tracing::debug!(
-        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} eligible={eligible}",
+        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} (effective={effective_udp_version}) eligible={eligible}",
         session_state.peer_udp_port, session_state.peer_udp_version,
     );
     if !eligible {
@@ -116,7 +128,7 @@ fn try_detach_queued_source_for_reask(
     handle.detach(
         file_hash,
         (*v4.ip(), session_state.peer_udp_port),
-        session_state.peer_udp_version,
+        effective_udp_version,
         session_state.peer_user_hash,
         should_crypt,
     );
