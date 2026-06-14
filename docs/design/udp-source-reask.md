@@ -165,10 +165,11 @@ thing that remains:
 
 | Piece | Module | Covers |
 |---|---|---|
-| Reask codec | `ed2k_client_udp.rs` | encode/decode `OP_REASKFILEPING`/`OP_REASKACK` + partstatus bitfield, exact `udp_version` tail gating (§1.2) |
-| Reask policy | `ed2k_client_udp.rs` | `reask_interval` (FILEREASKTIME ×2 NNP ≥ MIN_REQUESTTIME), `udp_reask_eligible`, failure-ratio TCP fallback (§1.3) |
-| Pending registry | `ed2k_client_udp.rs` | `(ip,udp_port)` anti-spoof correlation gate (R3) |
-| Source state | `ed2k_client_udp.rs` | `ReaskSource` (QueuedDetached) success/failure/reschedule transitions (§4.1) |
+| Reask codec | `ed2k_client_udp/codec.rs` | encode/decode `OP_REASKFILEPING`/`OP_REASKACK` + partstatus bitfield, exact `udp_version` tail gating (§1.2); plus the Phase-2 `OP_REASKCALLBACKUDP` LowID buddy codec (buddy_id + ping tail) |
+| Reask policy | `ed2k_client_udp/state.rs` | `reask_interval` (FILEREASKTIME ×2 NNP ≥ MIN_REQUESTTIME), `udp_reask_eligible`, failure-ratio TCP fallback (§1.3) |
+| Pending registry | `ed2k_client_udp/registry.rs` | `(ip,udp_port)` anti-spoof correlation gate (R3) |
+| Source state + reaction | `ed2k_client_udp/state.rs` | `ReaskSource` (QueuedDetached) transitions + downloader `apply_reask_reply` reaction table (§4.4) |
+| Uploader reciprocity | `ed2k_client_udp/reciprocity.rs` | `answer_inbound_reask` decision: Ack/FileNotFound/QueueFull/Silent (§4.5, R5) |
 | Client UDP obfuscation | `ed2k_client_udp_obfuscation.rs` | userhash-key encrypt/decrypt (§1.4) + `classify_inbound_client_udp` first-byte key-try triage |
 
 **Still gated — do not land blind (operator design call + live validation):** the
@@ -341,8 +342,8 @@ are an uploader. Reuse the upload-queue state already in
   built and unit-tested. **Remaining (gated):** the shared/separate-port design
   call, the transport recv loop + demux, the per-transfer ticker, uploader
   reciprocity, and live validation.
-- **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP`) and
-  `OP_DIRECTCALLBACKREQ`.
+- **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP` — **codec done**, buddy-
+  relay transport pending) and `OP_DIRECTCALLBACKREQ`.
 - New code lands as new modules within the per-module size budget
   (`policy/rust-client.toml`); no big-refactor of the legacy-shaped `.rs` files.
 
