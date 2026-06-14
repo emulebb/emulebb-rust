@@ -18,8 +18,8 @@ use contact_helpers::expire_contact_for_massive_flood;
 
 use crate::error::DhtError;
 use emulebb_kad_net::{
-    ObfuscationLayer, ReceivedKadPacket, RpcConfig, RpcManager, RpcObservabilitySnapshot,
-    UdpTransport,
+    ForeignDatagramHandler, ObfuscationLayer, ReceivedKadPacket, RpcConfig, RpcManager,
+    RpcObservabilitySnapshot, UdpTransport,
 };
 use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::RoutingTable;
@@ -163,5 +163,25 @@ impl DhtNode {
     #[must_use]
     pub fn rpc_observability(&self) -> RpcObservabilitySnapshot {
         self.inner.rpc.observability()
+    }
+
+    /// Register a handler for inbound UDP datagrams that are not Kad packets —
+    /// e.g. eD2k client UDP reask sharing the Kad port. Pass-through to the inner
+    /// RPC manager; at-most-once, `None` until set (no foreign handling). See
+    /// `RpcManager::set_foreign_datagram_handler`.
+    pub fn set_foreign_datagram_handler(&self, handler: ForeignDatagramHandler) -> bool {
+        self.inner.rpc.set_foreign_datagram_handler(handler)
+    }
+
+    /// Send an already-framed datagram on the shared Kad UDP socket without Kad
+    /// encoding — for eD2k reask replies + the per-transfer ticker. Pass-through
+    /// to `RpcManager::send_raw_datagram`.
+    pub async fn send_raw_datagram(
+        &self,
+        addr: SocketAddr,
+        data: &[u8],
+    ) -> Result<(), DhtError> {
+        self.inner.rpc.send_raw_datagram(addr, data).await?;
+        Ok(())
     }
 }
