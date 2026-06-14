@@ -4,6 +4,7 @@ use crate::transport::MockTransport;
 use std::sync::Arc;
 
 mod flood_observability;
+mod foreign_datagram;
 mod obfuscation;
 mod request_response;
 mod unsolicited;

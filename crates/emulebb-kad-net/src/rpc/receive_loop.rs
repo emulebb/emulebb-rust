@@ -34,6 +34,16 @@ impl RpcManager {
                         let packet = match KadPacket::decode(&plain) {
                             Ok(p) => p,
                             Err(e) => {
+                                // Before treating this as a Kad decode failure,
+                                // offer the raw datagram to a registered foreign
+                                // handler (e.g. eD2k client UDP reask sharing the
+                                // Kad port). If it consumes the datagram, this was
+                                // never a Kad packet — skip the decode-failure path.
+                                if let Some(handler) = inner.foreign_datagram_handler.get()
+                                    && handler(&data, from)
+                                {
+                                    continue;
+                                }
                                 inner.observability.lock().unwrap().record_decode_failure();
                                 dump_kad_udp_packet(
                                     "recv",

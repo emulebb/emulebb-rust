@@ -27,7 +27,7 @@ use emulebb_kad_proto::KadPacket;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot};
 
@@ -56,9 +56,21 @@ pub struct ReceivedKadPacket {
     pub receiver_verify_key_valid: bool,
 }
 
+/// Handler for inbound datagrams that fail Kad decode — e.g. eD2k client UDP
+/// reask packets that share the Kad UDP port. Returns `true` if it consumed the
+/// datagram (the recv loop then skips the Kad decode-failure path). Registered
+/// post-construction by the eD2k layer via
+/// [`RpcManager::set_foreign_datagram_handler`]; unset means no foreign handling
+/// (exactly the prior behaviour).
+pub type ForeignDatagramHandler = Arc<dyn Fn(&[u8], SocketAddr) -> bool + Send + Sync>;
+
 struct RpcInner {
     transport: Arc<dyn Transport>,
     obfuscation: ObfuscationLayer,
+    /// Optional handler for non-Kad inbound datagrams (e.g. eD2k reask on the
+    /// shared port). Late-bound and at-most-once; `None` until the eD2k layer
+    /// registers it.
+    foreign_datagram_handler: OnceLock<ForeignDatagramHandler>,
     global_rate_limiter: RateLimiter,
     interactive_rate_limiter: RateLimiter,
     harvest_rate_limiter: RateLimiter,
@@ -98,6 +110,7 @@ impl RpcManager {
         let inner = Arc::new(RpcInner {
             transport: Arc::new(transport),
             obfuscation,
+            foreign_datagram_handler: OnceLock::new(),
             global_rate_limiter: RateLimiter::new(config.max_outbound_pps),
             interactive_rate_limiter: RateLimiter::new(
                 config
@@ -135,6 +148,14 @@ impl RpcManager {
             massive_flood_handler: config.massive_flood_handler,
         });
         Self { inner }
+    }
+
+    /// Register a handler for inbound datagrams that are not Kad packets (e.g.
+    /// eD2k client UDP reask sharing the Kad port). Late-bound and at-most-once;
+    /// returns `false` if a handler was already set. Until set, such datagrams
+    /// follow the unchanged Kad decode-failure path.
+    pub fn set_foreign_datagram_handler(&self, handler: ForeignDatagramHandler) -> bool {
+        self.inner.foreign_datagram_handler.set(handler).is_ok()
     }
 }
 
