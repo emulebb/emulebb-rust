@@ -14,8 +14,10 @@
 //! downloader **detach hook** — a download session that gets queued on a
 //! UDP-eligible peer sends a [`ReaskCommand`] over the command channel; the loop
 //! registers it as a `QueuedDetached` source and keeps its slot warm by periodic
-//! UDP reask (real per-file part status pulled from the transfer runtime). The
-//! remaining gated piece is the TCP-fallback re-engage on a bad UDP failure ratio.
+//! UDP reask (real per-file part status pulled from the transfer runtime). When a
+//! source exhausts its UDP-reask budget (`RetryTcp`), the loop drops it so core's
+//! normal source acquisition re-engages it over TCP. The whole loop stays gated
+//! behind `enable_udp_reask` until live-validated.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
-use super::state::ReaskSource;
+use super::state::{ReaskAction, ReaskSource};
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::public_ip::SharedPublicIp;
 
@@ -258,7 +260,15 @@ async fn drive_reask_tick(
     }
     for (addr, action) in out.timed_out {
         trace!("ed2k udp reask: reask to {addr} timed out: {action:?}");
-        // TODO(reask-tcp-fallback): RetryTcp -> drive a TCP reconnect reask.
+        // On RetryTcp the source has exhausted its UDP-reask budget (failure ratio
+        // tripped). Drop it from reask state so it returns to the normal TCP path:
+        // it stays in the transfer's remembered sources, so core's next download
+        // cycle re-acquires and reconnects it over TCP. (RetryUdp keeps reasking.)
+        if matches!(action, ReaskAction::RetryTcp)
+            && let SocketAddr::V4(v4) = addr
+        {
+            service.remove_source(*v4.ip(), v4.port());
+        }
     }
 }
 
