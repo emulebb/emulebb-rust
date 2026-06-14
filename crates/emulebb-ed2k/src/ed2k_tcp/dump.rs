@@ -1,3 +1,9 @@
+// The packet dump is gated by the `packet-diagnostics` Cargo feature (the
+// equivalent of eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). When the
+// feature is off the public dump wrappers below become no-ops and the record
+// machinery is dead-code-eliminated, so release builds carry zero dump cost.
+#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+
 use std::{
     borrow::Cow,
     fs,
@@ -291,6 +297,7 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     let _ = writeln!(file, "{line}");
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_tcp_meta(
     flow: &'static str,
     remote_addr: SocketAddr,
@@ -325,6 +332,7 @@ fn dump_ed2k_tcp_meta(
     dump_ed2k_tcp_record(&record);
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_tcp_send(
     flow: &'static str,
     remote_addr: SocketAddr,
@@ -375,6 +383,7 @@ fn dump_ed2k_tcp_send(
     dump_ed2k_tcp_record(&record);
 }
 
+#[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_tcp_recv(
     flow: &'static str,
     remote_addr: SocketAddr,
@@ -414,6 +423,38 @@ fn dump_ed2k_tcp_recv(
         note: None,
     };
     dump_ed2k_tcp_record(&record);
+}
+
+// No-op variants compiled when the `packet-diagnostics` feature is off, so the
+// public wrappers (called from the hot eD2k paths) cost nothing in release builds.
+#[cfg(not(feature = "packet-diagnostics"))]
+fn dump_ed2k_tcp_meta(
+    _flow: &'static str,
+    _remote_addr: SocketAddr,
+    _transport_mode: Option<Ed2kTransportMode>,
+    _phase: &str,
+    _note: impl Into<String>,
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+fn dump_ed2k_tcp_send(
+    _flow: &'static str,
+    _remote_addr: SocketAddr,
+    _transport_mode: Ed2kTransportMode,
+    _phase: &str,
+    _bytes: &[u8],
+) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+fn dump_ed2k_tcp_recv(
+    _flow: &'static str,
+    _remote_addr: SocketAddr,
+    _transport_mode: Ed2kTransportMode,
+    _phase: &str,
+    _packet: &EmuleTcpPacket,
+) {
 }
 
 pub(super) fn dump_ed2k_tcp_helper_meta(

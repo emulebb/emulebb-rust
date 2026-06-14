@@ -9,6 +9,11 @@ description = "Headless emulebb-rust daemon"
 name = "emulebb-rust"
 path = "src/bin/emulebb-rust.rs"
 
+[features]
+# Build the daemon with `--features packet-diagnostics` to compile in the
+# ed2k_packet_v1 packet dump (diagnostic/live-wire builds); off by default.
+packet-diagnostics = ["emulebb-core/packet-diagnostics", "emulebb-ed2k/packet-diagnostics"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Local emulebb-rust application state and orchestration"
 
+[features]
+# Forwards the ed2k_packet_v1 packet-dump compile gate down to emulebb-ed2k.
+packet-diagnostics = ["emulebb-ed2k/packet-diagnostics"]
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

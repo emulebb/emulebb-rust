@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "ED2K transfer runtime extracted for emulebb-rust"
 
+[features]
+# Compile-time gate for the ed2k_packet_v1 packet dump (the Cargo equivalent of
+# eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). Off by default so release
+# builds compile the dump out entirely; enable for diagnostic/live-wire builds.
+# When enabled, the dump is still runtime-gated by the EMULEBB_RUST_LOG_DIR env var.
+packet-diagnostics = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
