@@ -162,6 +162,19 @@ pub fn resolve_bind_ip(
         .map(|address| address.address.clone())
 }
 
+/// Resolves the OS interface index that owns `bind_ip`, for `IP_UNICAST_IF`
+/// egress pinning (eMule `ApplyConfiguredIpv4UnicastInterface`). Returns `None`
+/// when no local interface advertises that IPv4 address. The index lets the P2P
+/// sockets pin egress to the VPN/tunnel interface so split-tunnel routing cannot
+/// leak traffic onto the LAN.
+#[must_use]
+pub fn resolve_bind_if_index(bind_ip: std::net::Ipv4Addr) -> Option<u32> {
+    get_if_addrs().ok()?.into_iter().find_map(|iface| match iface.addr {
+        IfAddr::V4(ref v4) if v4.ip == bind_ip => iface.index,
+        _ => None,
+    })
+}
+
 /// Converts a resolved binding to the serializable report shape.
 #[must_use]
 pub fn build_interface_binding_report(
@@ -247,8 +260,9 @@ mod tests {
     use super::{
         InterfaceAddressFamily, InterfaceSelectionState, NetworkInterface, NetworkInterfaceAddress,
         ResolvedInterfaceBindingReport, build_interface_binding_report, recommend_interface,
-        resolve_bind_ip,
+        resolve_bind_if_index, resolve_bind_ip,
     };
+    use if_addrs::IfAddr;
 
     fn iface(name: &str, vpn: bool, default_route: bool, ip: &str) -> NetworkInterface {
         NetworkInterface {
@@ -290,6 +304,25 @@ mod tests {
             resolve_bind_ip(&[], None, Some("0.0.0.0")).as_deref(),
             Some("0.0.0.0")
         );
+    }
+
+    #[test]
+    fn resolve_bind_if_index_matches_a_present_address_and_rejects_absent() {
+        // An IP not assigned to any local interface resolves to no index.
+        assert_eq!(
+            resolve_bind_if_index(std::net::Ipv4Addr::new(203, 0, 113, 234)),
+            None
+        );
+        // Self-consistency: any V4 address the OS reports (with an index) must
+        // resolve back to that same index. Skips hosts where no indexed V4 exists.
+        if let Some((ip, index)) = if_addrs::get_if_addrs().ok().and_then(|ifaces| {
+            ifaces.into_iter().find_map(|iface| match iface.addr {
+                IfAddr::V4(ref v4) => iface.index.map(|idx| (v4.ip, idx)),
+                _ => None,
+            })
+        }) {
+            assert_eq!(resolve_bind_if_index(ip), Some(index));
+        }
     }
 
     #[test]
