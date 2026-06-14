@@ -13,6 +13,7 @@ pub mod kad_firewall;
 pub mod nat;
 pub mod networking;
 pub mod public_ip;
+pub mod stun;
 
 #[allow(deprecated)]
 pub use nat::RupnpPortMappingProvider;
