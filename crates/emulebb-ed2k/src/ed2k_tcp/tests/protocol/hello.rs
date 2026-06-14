@@ -157,6 +157,9 @@ fn hello_decode_preserves_multipacket_capabilities() {
     assert!(profile.supports_source_exchange);
     assert!(profile.supports_source_exchange2);
     assert!(profile.supports_file_identifiers);
+    // The peer's eD2k UDP port is recovered from CT_EMULE_UDPPORTS (low 16 bits)
+    // for (ip, udp_port) reask correlation.
+    assert_eq!(profile.identity.udp_port, 41000);
 }
 
 #[test]

@@ -334,6 +334,12 @@ pub(super) struct DecodedHelloIdentity {
     pub(super) user_hash: [u8; 16],
     pub(super) client_id: u32,
     pub(super) tcp_port: u16,
+    /// Peer's eD2k client UDP port, from the low 16 bits of `CT_EMULE_UDPPORTS`
+    /// (eMule `m_nUDPPort`); `0` when not advertised. Needed to correlate inbound
+    /// UDP source-reask by `(ip, udp_port)`; the reciprocity consumer that reads
+    /// it lands with the gated reask loop.
+    #[allow(dead_code)]
+    pub(super) udp_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,7 +414,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     if type_payload.len() < 16 + 4 + 2 + 4 {
         anyhow::bail!("short eD2k hello identity payload");
     }
-    let identity = DecodedHelloIdentity {
+    let mut identity = DecodedHelloIdentity {
         user_hash: type_payload[..16]
             .try_into()
             .context("short eD2k hello user hash")?,
@@ -419,6 +425,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             type_payload[19],
         ]),
         tcp_port: u16::from_le_bytes([type_payload[20], type_payload[21]]),
+        udp_port: 0,
     };
 
     let mut cursor = &type_payload[22..];
@@ -455,6 +462,12 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             source_exchange_version = ((misc_options1 >> 12) & 0x0F) as u8;
             supports_source_exchange = source_exchange_version != 0;
             supports_multipacket = ((misc_options1 >> 1) & 1) != 0;
+        }
+        if tag.tag_name == Some(CT_EMULE_UDPPORTS)
+            && let Some(udp_ports) = decode_hello_tag_u32(&tag)
+        {
+            // eMule CT_EMULE_UDPPORTS: high 16 = Kad port, low 16 = eD2k UDP port.
+            identity.udp_port = udp_ports as u16;
         }
         cursor = tag.remaining;
     }
