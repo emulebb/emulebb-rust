@@ -55,7 +55,24 @@ struct Ed2kTcpDumpRecord<'a> {
     raw_hex: Option<String>,
     payload_len: Option<usize>,
     payload_hex: Option<String>,
+    payload_hex_truncated: Option<bool>,
     note: Option<String>,
+}
+
+/// Cap on hex-encoded bytes emitted per packet, matching the eMuleBB diagnostic
+/// build (`kMaxPacketDiagnosticsPayloadHexBytes` = 4 KiB) so the two clients'
+/// packet dumps stay byte-for-byte comparable.
+const MAX_PACKET_DUMP_HEX_BYTES: usize = 4 * 1024;
+
+/// Hex-encode up to `MAX_PACKET_DUMP_HEX_BYTES` bytes, returning the hex string
+/// and whether the source was truncated (matching eMuleBB's `payload_hex` +
+/// `payload_hex_truncated`).
+fn capped_packet_hex(bytes: &[u8]) -> (String, bool) {
+    if bytes.len() > MAX_PACKET_DUMP_HEX_BYTES {
+        (hex::encode(&bytes[..MAX_PACKET_DUMP_HEX_BYTES]), true)
+    } else {
+        (hex::encode(bytes), false)
+    }
 }
 
 fn ed2k_tcp_dump_event_seq() -> u64 {
@@ -282,7 +299,7 @@ fn dump_ed2k_tcp_meta(
     note: impl Into<String>,
 ) {
     let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_tcp_helper_v1",
+        schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: ed2k_tcp_dump_event_seq(),
@@ -302,6 +319,7 @@ fn dump_ed2k_tcp_meta(
         raw_hex: None,
         payload_len: None,
         payload_hex: None,
+        payload_hex_truncated: None,
         note: Some(note.into()),
     };
     dump_ed2k_tcp_record(&record);
@@ -322,8 +340,16 @@ fn dump_ed2k_tcp_send(
         None
     };
     let canonical_phase = canonical_ed2k_send_phase(flow, phase, protocol, opcode);
+    let (raw_hex, _) = capped_packet_hex(bytes);
+    let (payload_hex, payload_hex_truncated) = match payload {
+        Some(payload) => {
+            let (hex, truncated) = capped_packet_hex(payload);
+            (Some(hex), Some(truncated))
+        }
+        None => (None, None),
+    };
     let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_tcp_helper_v1",
+        schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: ed2k_tcp_dump_event_seq(),
@@ -340,9 +366,10 @@ fn dump_ed2k_tcp_send(
         opcode,
         opcode_name: protocol.zip(opcode).map(|(p, o)| ed2k_opcode_name(p, o)),
         raw_len: Some(bytes.len()),
-        raw_hex: Some(hex::encode(bytes)),
+        raw_hex: Some(raw_hex),
         payload_len: payload.map(<[u8]>::len),
-        payload_hex: payload.map(hex::encode),
+        payload_hex,
+        payload_hex_truncated,
         note: None,
     };
     dump_ed2k_tcp_record(&record);
@@ -356,8 +383,14 @@ fn dump_ed2k_tcp_recv(
     packet: &EmuleTcpPacket,
 ) {
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
+    let (raw_hex, _) = capped_packet_hex(&encode_packet(
+        packet.protocol,
+        packet.opcode,
+        &packet.payload,
+    ));
+    let (payload_hex, payload_hex_truncated) = capped_packet_hex(&packet.payload);
     let record = Ed2kTcpDumpRecord {
-        schema: "ed2k_tcp_helper_v1",
+        schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: ed2k_tcp_dump_event_seq(),
@@ -374,13 +407,10 @@ fn dump_ed2k_tcp_recv(
         opcode: Some(packet.opcode),
         opcode_name: Some(ed2k_opcode_name(packet.protocol, packet.opcode)),
         raw_len: Some(TCP_PACKET_HEADER_LEN + packet.payload.len()),
-        raw_hex: Some(hex::encode(encode_packet(
-            packet.protocol,
-            packet.opcode,
-            &packet.payload,
-        ))),
+        raw_hex: Some(raw_hex),
         payload_len: Some(packet.payload.len()),
-        payload_hex: Some(hex::encode(&packet.payload)),
+        payload_hex: Some(payload_hex),
+        payload_hex_truncated: Some(payload_hex_truncated),
         note: None,
     };
     dump_ed2k_tcp_record(&record);
