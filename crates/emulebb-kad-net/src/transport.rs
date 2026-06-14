@@ -44,7 +44,21 @@ pub struct UdpTransport {
 impl UdpTransport {
     /// Bind to addr. Use `0.0.0.0:0` for random port.
     pub async fn bind(addr: SocketAddr) -> Result<Self, NetError> {
+        Self::bind_pinned(addr, None).await
+    }
+
+    /// Bind and apply eMule-style P2P socket options: pin egress to the VPN
+    /// interface `if_index` (`IP_UNICAST_IF`) so split-tunnel routing cannot leak
+    /// Kad/reask UDP onto the LAN, and enlarge the receive buffer. `None` index =
+    /// plain bind (no tunnel resolved). Fails closed if egress pinning cannot be
+    /// applied, matching eMule's `ApplyConfiguredIpv4UnicastInterface`.
+    pub async fn bind_pinned(addr: SocketAddr, if_index: Option<u32>) -> Result<Self, NetError> {
         let socket = UdpSocket::bind(addr).await?;
+        crate::socket_opts::apply_p2p_socket_options(
+            socket2::SockRef::from(&socket),
+            if_index,
+            true,
+        )?;
         Ok(Self { socket })
     }
 }

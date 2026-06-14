@@ -44,6 +44,10 @@ pub struct DhtConfig {
     pub nodes_dat: Option<Vec<u8>>,
     /// Bootstrap sources: plain text format.
     pub nodes_text: Option<String>,
+    /// OS interface index of the VPN/tunnel bind interface, for `IP_UNICAST_IF`
+    /// egress pinning of the Kad UDP socket (solid VPN binding). `None` = plain
+    /// bind (no tunnel resolved).
+    pub bind_if_index: Option<u32>,
 }
 
 impl Default for DhtConfig {
@@ -68,6 +72,7 @@ impl Default for DhtConfig {
             udp_key: 0,
             nodes_dat: None,
             nodes_text: None,
+            bind_if_index: None,
         }
     }
 }

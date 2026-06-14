@@ -1124,6 +1124,8 @@ impl EmulebbCore {
             obfuscation_enabled: network.config.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             nodes_text: configured_bootstrap_nodes_text.clone(),
+            // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
+            bind_if_index: emulebb_ed2k::networking::resolve_bind_if_index(network.bind_ip),
             ..DhtConfig::default()
         })
         .await

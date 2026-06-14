@@ -70,7 +70,9 @@ impl DhtNode {
         }
 
         let bind_addr = config.bind_addr.ok_or(DhtError::MissingBindAddr)?;
-        let transport = UdpTransport::bind(bind_addr).await?;
+        // Pin the Kad UDP socket's egress to the VPN tunnel interface when known
+        // (IP_UNICAST_IF) so split-tunnel routing cannot leak Kad/reask onto LAN.
+        let transport = UdpTransport::bind_pinned(bind_addr, config.bind_if_index).await?;
         let obfuscation =
             ObfuscationLayer::new(config.node_id, config.udp_key, config.obfuscation_enabled);
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_max_size(
