@@ -11,6 +11,7 @@ pub mod ipfilter;
 pub mod kad_firewall;
 pub mod nat;
 pub mod networking;
+pub mod public_ip;
 
 #[allow(deprecated)]
 pub use nat::RupnpPortMappingProvider;
