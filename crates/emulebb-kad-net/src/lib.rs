@@ -9,6 +9,7 @@ pub mod error;
 pub mod obfuscation;
 pub mod rate_limit;
 pub mod rpc;
+pub mod socket_opts;
 pub mod tracker;
 pub mod transport;
 mod wire_dump;

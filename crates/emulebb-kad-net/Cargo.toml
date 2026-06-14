@@ -17,7 +17,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 async-trait = "0.1"
+socket2 = { workspace = true, features = ["all"] }
 md5 = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

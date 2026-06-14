@@ -538,9 +538,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2 0.6.4",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
