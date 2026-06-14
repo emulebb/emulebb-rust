@@ -1,3 +1,8 @@
+// Gated by the `packet-diagnostics` Cargo feature (matches the client dump and
+// eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS): off-by-default builds compile the
+// server dump out (emitters become no-ops, record machinery is dead-eliminated).
+#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+
 use std::{
     fs,
     sync::{
@@ -53,6 +58,10 @@ struct Ed2kServerDumpRecord<'a> {
     note: Option<String>,
 }
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_meta(_session: &ServerSession, _note: impl Into<String>) {}
+
+#[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<String>) {
     let record = Ed2kServerDumpRecord {
         schema: "ed2k_packet_v1",
@@ -85,6 +94,16 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
     dump_ed2k_server_record(&record);
 }
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_packet(
+    _session: &ServerSession,
+    _direction: &'static str,
+    _opcode: u8,
+    _payload: &[u8],
+) {
+}
+
+#[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_packet(
     session: &ServerSession,
     direction: &'static str,
