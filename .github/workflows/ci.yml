@@ -54,7 +54,7 @@ jobs:
           X_LOCAL_IP: 127.0.0.1
         # The kad_swarm multi-node networking tests are exercised in the
         # non-blocking step below while their cross-node transfer timing is
-        # investigated (see tracker). Everything else gates the matrix.
+        # investigated (tracked: RUST-BUG-001). Everything else gates the matrix.
         run: cargo test --workspace --locked -- --skip local_kad_swarm
 
       - name: Test kad_swarm (non-blocking)
@@ -88,6 +88,19 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-      - name: Clippy (non-blocking)
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets
+      - name: Clippy (blocking)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  supply-chain:
+    name: cargo-deny (advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@v4
+
+      - name: cargo-deny — security advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Advisories (vulnerabilities/yanked) are the hard gate from day one.
+          # bans/licenses tighten after a dependency audit (see deny.toml).
+          command: check advisories

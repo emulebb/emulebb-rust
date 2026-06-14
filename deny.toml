@@ -1,0 +1,40 @@
+# cargo-deny configuration for emulebb-rust.
+#
+# Rollout is incremental: security advisories are the hard CI gate from day one
+# (`cargo deny check advisories` in .github/workflows/ci.yml). The bans, sources,
+# and licenses sections below are configured but NOT yet enforced in CI; enable
+# `check bans sources licenses` after a dependency + license audit so the first
+# enforcement does not block on pre-existing dependency facts.
+
+[advisories]
+# Deny known vulnerabilities and yanked crates; warn on unmaintained.
+yanked = "deny"
+unmaintained = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+
+[licenses]
+# Permissive + GPL-compatible allow-list (emulebb-rust is GPL-2.0). Tighten and
+# complete this list during the license audit before enforcing in CI.
+confidence-threshold = 0.8
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "GPL-2.0",
+  "GPL-3.0",
+]

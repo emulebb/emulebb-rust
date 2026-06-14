@@ -58,7 +58,7 @@ items.
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| _none yet_ | | | |
+| [RUST-BUG-001](items/RUST-BUG-001.md) | Minor | OPEN | kad_swarm multi-node transfer tests are flaky and run non-blocking in CI |
 
 ## Refactors (`REF`)
 
