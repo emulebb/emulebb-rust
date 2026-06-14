@@ -110,6 +110,7 @@ serverEndpoints = ["192.0.2.20:4661"]
 connectTimeoutSecs = 1
 reconnectIntervalSecs = 60
 enableUdpReask = true
+publishEmuleRustIdentity = true
 
 [nat]
 enabled = true
@@ -162,6 +163,9 @@ externalIpOverride = "203.0.113.10"
     // The UDP source-reask flag is config-settable (camelCase), so enabling it
     // for live validation is a config flip, not a code change (FEAT-001).
     assert!(config.ed2k.enable_udp_reask);
+    // The eD2k identity flag is config-settable: default appears as eMule
+    // Community, this opts in to publishing the real emule-rust identity.
+    assert!(config.ed2k.publish_emule_rust_identity);
     assert!(config.nat.enabled);
     assert_eq!(
         config.nat.backend_order,

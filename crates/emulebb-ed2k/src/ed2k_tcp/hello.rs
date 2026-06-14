@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::{
-    CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2, CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME,
+    CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2, CT_EMULE_UDPPORTS, CT_EMULE_VERSION,
+    CT_MOD_VERSION, CT_NAME,
     CT_VERSION, EDONKEY_VERSION, EMULE_ADVERTISED_KAD_VERSION, EMULE_CRYPT_REQUESTS,
     EMULE_CRYPT_SUPPORTS, EMULE_INFO_FEATURES, EMULE_PROTOCOL_VERSION, EMULE_SECURE_IDENT_VERSION,
     EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR, EMULE_VERSION_SHORT, EMULE_VERSION_UPDATE,
@@ -142,10 +145,36 @@ fn append_emule_hello_answer_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
     append_recent_emule_hello_tags(payload, identity);
 }
 
+/// Mod-version string published only when the operator opts in to the real
+/// identity. Left off by default so the hello carries exactly the standard
+/// eMule tag set (i.e. an eMule Community 0.7-series client, which sends no
+/// CT_MOD_VERSION string).
+const RUST_MOD_VERSION: &str = "emule-rust";
+
+/// Process-wide identity mode: when true, the hello adds a CT_MOD_VERSION tag
+/// publishing the real `emule-rust` identity; when false (default) the hello is
+/// the plain eMule tag set, indistinguishable from eMule Community. Set once
+/// from `Ed2kConfig.publish_emule_rust_identity` at startup.
+static PUBLISH_RUST_IDENTITY: AtomicBool = AtomicBool::new(false);
+
+/// Select the advertised eD2k client identity (plain eMule/Community vs the real
+/// emule-rust mod). Idempotent; called by core from the daemon config at startup.
+pub fn set_publish_rust_identity(publish_rust: bool) {
+    PUBLISH_RUST_IDENTITY.store(publish_rust, Ordering::Relaxed);
+}
+
 fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIdentity) {
-    payload.extend_from_slice(&6u32.to_le_bytes());
+    // Default: the exact standard eMule hello tag set (6 tags) so we appear as a
+    // stock eMule Community 0.7-series client. Only when the operator opts in do
+    // we append a CT_MOD_VERSION="emule-rust" tag to publish the real identity.
+    let publish_rust = PUBLISH_RUST_IDENTITY.load(Ordering::Relaxed);
+    let tag_count: u32 = if publish_rust { 7 } else { 6 };
+    payload.extend_from_slice(&tag_count.to_le_bytes());
     push_ed2k_string_tag(payload, CT_NAME, HELLO_NICKNAME);
     push_ed2k_u32_tag(payload, CT_VERSION, EDONKEY_VERSION);
+    if publish_rust {
+        push_ed2k_string_tag(payload, CT_MOD_VERSION, RUST_MOD_VERSION);
+    }
     // The Rust client only exposes one UDP surface today, so advertise the Kad port
     // in both halves until a separate eD2k UDP listener exists.
     push_ed2k_u32_tag(

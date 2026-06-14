@@ -39,6 +39,9 @@ pub struct Ed2kConfig {
     /// (FEAT-001). Off by default: the reask transport must be wire-validated
     /// before it is trusted (see `docs/design/udp-source-reask.md`).
     pub enable_udp_reask: bool,
+    /// Publish the real `emule-rust` mod identity in the eD2k hello instead of
+    /// the default "eMule Community" (0.7-series) identity used to blend in.
+    pub publish_emule_rust_identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +88,7 @@ impl Default for Ed2kConfig {
             kad_source_supplement_max_existing_sources: 2,
             upload_queue: Ed2kUploadQueuePolicyConfig::default(),
             enable_udp_reask: false,
+            publish_emule_rust_identity: false,
         }
     }
 }

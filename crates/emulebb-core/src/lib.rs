@@ -29,7 +29,7 @@ use emulebb_ed2k::{
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
         Ed2kSecureIdent, download_file_from_peer, emule_connect_options, enrich_hello_identity,
-        run_ed2k_listener, send_kad_firewall_tcp_ack,
+        run_ed2k_listener, send_kad_firewall_tcp_ack, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kLiveSource, Ed2kResumeManifest, Ed2kSourceHint,
@@ -1223,6 +1223,10 @@ impl EmulebbCore {
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).
         let ed2k_public_ip = SharedPublicIp::new();
+        // Select the advertised eD2k client identity (eMule Community by default,
+        // or the real emule-rust mod when the operator opts in). Process-wide;
+        // read lazily when each hello is encoded.
+        set_publish_rust_identity(config.publish_emule_rust_identity);
         let enable_udp_reask = config.enable_udp_reask;
         let reask_user_hash = network.user_hash;
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {

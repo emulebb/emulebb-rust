@@ -61,6 +61,14 @@ fn hello_answer_advertises_emule_style_tags() {
         u32::from_le_bytes([packet[28], packet[29], packet[30], packet[31]]),
         6
     );
+    // Default identity is the plain eMule tag set (eMule Community 0.7-series):
+    // no CT_MOD_VERSION string, indistinguishable from stock eMule on the wire.
+    assert!(
+        !packet
+            .windows(b"emule-rust".len())
+            .any(|window| window == b"emule-rust"),
+        "default hello must not leak the emule-rust mod identity"
+    );
     assert!(
         packet
             .windows(expected_name_header.len())

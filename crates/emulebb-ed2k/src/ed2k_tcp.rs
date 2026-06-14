@@ -113,6 +113,7 @@ pub(in crate::ed2k_tcp) use identity::{
     try_send_secure_ident_signature,
 };
 pub(crate) use listener::reply_with_firewall_udp;
+pub use hello::set_publish_rust_identity;
 #[cfg(test)]
 use listener::{Ed2kConnectionContext, handle_connection};
 pub use listener::{Ed2kListenerOptions, run_ed2k_listener};
@@ -234,6 +235,10 @@ const TAG_SHORT_NAME_MASK: u8 = 0x80;
 
 const CT_NAME: u8 = 0x01;
 const CT_VERSION: u8 = 0x11;
+/// eMule hello mod-version string tag (eMule `CT_MOD_VERSION`). Mods/forks set it
+/// to their name; we use it to advertise as "eMule Community" (or, when the
+/// operator opts in, the real "emule-rust" identity).
+const CT_MOD_VERSION: u8 = 0x55;
 const CT_EMULE_UDPPORTS: u8 = 0xF9;
 const CT_EMULE_MISCOPTIONS1: u8 = 0xFA;
 const CT_EMULE_VERSION: u8 = 0xFB;
