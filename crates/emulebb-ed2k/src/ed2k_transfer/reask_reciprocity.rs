@@ -103,16 +103,23 @@ impl Ed2kTransferRuntime {
         match self.manifest(&hex).await {
             // Incomplete partfile: advertise which pieces we already hold.
             Ok(manifest) if !manifest.completed && !manifest.pieces.is_empty() => {
+                let total_parts = manifest.pieces.len();
                 let part_status = manifest
                     .pieces
                     .iter()
                     .map(|piece| piece.state == Ed2kTransferState::Verified)
                     .collect();
+                // Complete-source hint: live sources advertising every part
+                // (eMule `m_nCompleteSourcesCount`). Optional, gated on udp_version > 2.
+                let complete_source_count = self
+                    .live_download_sources(&hex)
+                    .iter()
+                    .filter(|source| source.available_parts as usize == total_parts)
+                    .count()
+                    .min(u16::MAX as usize) as u16;
                 TransferReaskInfo {
                     part_status: Some(part_status),
-                    // Complete-source accounting is not tracked here yet; 0 is the
-                    // honest hint (the field is optional, udp_version > 2).
-                    complete_source_count: 0,
+                    complete_source_count,
                 }
             }
             // Complete / unknown file: no partfile bitmap.

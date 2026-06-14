@@ -118,10 +118,27 @@ async fn reask_transfer_info_advertises_partfile_bitmap_for_incomplete_download(
     let job = new_transfer_job(file_hash, "ubuntu-linux.iso".to_string(), ED2K_PART_SIZE + 7);
     runtime.ensure_job(&job).await.unwrap();
 
+    // Two live sources: one advertises both parts (complete), one only one part.
+    let hex = file_hash.to_string();
+    runtime.note_download_source_part_bitmap(
+        &hex,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 4662),
+        None,
+        vec![true, true],
+    );
+    runtime.note_download_source_part_bitmap(
+        &hex,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 4662),
+        None,
+        vec![true, false],
+    );
+
     let info = runtime.reask_transfer_info(&file_hash).await;
     let part_status = info.part_status.expect("a partfile bitmap");
     assert_eq!(part_status.len(), 2);
     assert!(part_status.iter().all(|have| !have));
+    // Only the all-parts source counts as complete.
+    assert_eq!(info.complete_source_count, 1);
 
     // An unknown file has no manifest, so no bitmap is advertised.
     let unknown = runtime
