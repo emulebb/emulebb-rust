@@ -1,4 +1,5 @@
 pub mod config;
+mod ed2k_client_udp;
 #[allow(dead_code)]
 pub mod ed2k_server;
 #[allow(dead_code)]
