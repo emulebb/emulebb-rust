@@ -81,6 +81,24 @@ pub(super) fn decode_file_status_payload(
     Ok((returned_hash, part_count))
 }
 
+/// Decodes the peer's advertised per-part availability from an OP_FILESTATUS
+/// payload. Bits are LSB-first within each byte (mirrors
+/// `encode_request_filename_ext_info`). A `part_count` of 0 means the peer holds
+/// the complete file; the caller maps that to an all-available bitmap of the
+/// expected length.
+pub(super) fn decode_file_status_availability(
+    payload: &[u8],
+) -> Result<(emulebb_kad_proto::Ed2kHash, Vec<bool>)> {
+    let (returned_hash, part_count) = decode_file_status_payload(payload)?;
+    let mut bitmap = Vec::with_capacity(usize::from(part_count));
+    let bitfield = &payload[18..];
+    for index in 0..usize::from(part_count) {
+        let present = (bitfield[index / 8] >> (index % 8)) & 1 == 1;
+        bitmap.push(present);
+    }
+    Ok((returned_hash, bitmap))
+}
+
 pub(super) fn validate_file_status_part_count(part_count: u16, file_size: u64) -> Result<()> {
     if part_count == 0 {
         return Ok(());
@@ -731,7 +749,10 @@ pub(super) fn encode_file_status_body_complete() -> Vec<u8> {
     0u16.to_le_bytes().to_vec()
 }
 
-pub(super) fn skip_file_status_body(payload: &[u8]) -> Result<(u16, &[u8])> {
+/// Like the legacy skip helper but also returns the peer's per-part
+/// availability bitmap (LSB-first within each byte). Empty when `part_count`
+/// is 0, which the caller maps to "complete file".
+pub(super) fn decode_file_status_body_availability(payload: &[u8]) -> Result<(Vec<bool>, &[u8])> {
     if payload.len() < 2 {
         anyhow::bail!("short OP_FILESTATUS body");
     }
@@ -745,7 +766,11 @@ pub(super) fn skip_file_status_body(payload: &[u8]) -> Result<(u16, &[u8])> {
             expected_len
         );
     }
-    Ok((part_count, &payload[expected_len..]))
+    let bitfield = &payload[2..expected_len];
+    let bitmap = (0..usize::from(part_count))
+        .map(|index| (bitfield[index / 8] >> (index % 8)) & 1 == 1)
+        .collect();
+    Ok((bitmap, &payload[expected_len..]))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

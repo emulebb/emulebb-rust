@@ -41,7 +41,8 @@ mod upload;
 mod upload_queue;
 
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
-use download_activity::Ed2kDownloadActivity;
+use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+pub use download_activity::Ed2kLiveSource;
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
@@ -86,6 +87,10 @@ pub struct Ed2kTransferRuntime {
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
     source_exchange_requests: Arc<Mutex<HashMap<SourceExchangeRequestKey, Instant>>>,
     download_activity: Arc<StdMutex<HashMap<String, Ed2kDownloadActivity>>>,
+    /// Live per-source download state keyed by file hash -> peer endpoint, used
+    /// to surface sourcesTransferring/partsAvailable and live transfer-source
+    /// detail. In-memory only (live session state, never persisted).
+    download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     next_upload_connection_id: AtomicU64,
 }
@@ -157,6 +162,7 @@ impl Ed2kTransferRuntime {
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             source_exchange_requests: Arc::new(Mutex::new(HashMap::new())),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
+            download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
             next_upload_connection_id: AtomicU64::new(1),
         })

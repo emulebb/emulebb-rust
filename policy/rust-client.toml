@@ -31,18 +31,18 @@ generated_or_schema_files_exempt = true
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/lib.rs"
-hard_limit_lines = 8135
-rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver), the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle), and the VPN-guard mode normalization to the master 'off'/'block' REST token set (GetVpnGuardModeRestToken parity), and the transfer-details part breakdown (TransferPart/TransferDetails + transfer_parts_from_manifest, mirroring the master BuildTransferDetailsJson)."
+hard_limit_lines = 8209
+rationale = "frozen legacy core state/API orchestration; split state model, protocol orchestration, and persistence as touched (Kad snoop-entry builders -> kad_snoop_entry, search-result/filter helpers -> search_query). Cap bumped for the added-download auto-start fix (non-paused creates kick the download driver), the async search fix (create returns 'running' immediately and a background task populates ED2K results + flips to completed, matching the contract search lifecycle), and the VPN-guard mode normalization to the master 'off'/'block' REST token set (GetVpnGuardModeRestToken parity), and the transfer-details part breakdown (TransferPart/TransferDetails + transfer_parts_from_manifest, mirroring the master BuildTransferDetailsJson), and the live download-source registry wiring plus master-aligned Transfer fields (downloadSpeedKiBps/uploadSpeedKiBps/stopped/sourcesTransferring/partsAvailable + live per-part availableSources)."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/codec/mod.rs"
-hard_limit_lines = 1049
-rationale = "frozen legacy eD2K TCP codec aggregation; split request/response frame families as touched"
+hard_limit_lines = 1074
+rationale = "frozen legacy eD2K TCP codec aggregation; split request/response frame families as touched. Cap bumped for OP_FILESTATUS per-part availability decoders (decode_file_status_availability / decode_file_status_body_availability) feeding the live download-source registry."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs"
-hard_limit_lines = 1116
-rationale = "frozen legacy download session state machine; split startup, range handling, and completion paths as touched"
+hard_limit_lines = 1177
+rationale = "frozen legacy download session state machine; split startup, range handling, and completion paths as touched. Cap bumped for recording peer part-availability from the OP_FILESTATUS arms into the live download-source registry."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs"

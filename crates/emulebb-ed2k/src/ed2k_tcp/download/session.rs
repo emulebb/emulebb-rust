@@ -29,7 +29,8 @@ use super::super::{
     decode_chat_captcha_result_payload, decode_client_id_change_payload,
     decode_client_message_payload, decode_edonkey_queue_rank_payload, decode_emule_info_profile,
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
-    decode_file_description_payload, decode_file_status_payload, decode_hashset_answer,
+    decode_file_description_payload, decode_file_status_availability,
+    decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_hello_answer_profile, decode_hello_profile,
     decode_kad_callback_payload, decode_optional_file_hash_payload, decode_preview_answer_payload,
     decode_preview_request_payload, decode_public_ip_answer_payload, decode_public_key_payload,
@@ -40,7 +41,7 @@ use super::super::{
     dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send, encode_aich_recovery_failure_answer,
     encode_empty_shared_files_answer, encode_emule_info_answer, encode_packet,
     encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
-    is_connection_shutdown_error, skip_file_status_body, try_send_secure_ident_signature,
+    is_connection_shutdown_error, try_send_secure_ident_signature,
     validate_file_status_part_count,
 };
 use super::{
@@ -590,14 +591,26 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     session_state.startup_file_response_received = true;
                 }
                 (OP_EDONKEYPROT, OP_FILESTATUS) => {
-                    let (returned_hash, part_count) = decode_file_status_payload(&packet.payload)?;
+                    let (returned_hash, availability) =
+                        decode_file_status_availability(&packet.payload)?;
                     if returned_hash != file_hash {
                         anyhow::bail!(
                             "peer {peer_addr} returned file status for unexpected file {}",
                             returned_hash
                         );
                     }
-                    validate_file_status_part_count(part_count, manifest.file_size)?;
+                    validate_file_status_part_count(
+                        u16::try_from(availability.len()).unwrap_or(u16::MAX),
+                        manifest.file_size,
+                    )?;
+                    record_source_part_availability(
+                        transfer_runtime,
+                        file_hash_hex,
+                        peer_addr,
+                        session_state.peer_user_hash,
+                        availability,
+                        manifest.pieces.len(),
+                    );
                     session_state.startup_file_response_received = true;
                 }
                 (OP_EMULEPROT, OP_MULTIPACKETANSWER) => {
@@ -627,8 +640,20 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 returned_file_name = Some(file_name);
                             }
                             OP_FILESTATUS => {
-                                let (part_count, rest) = skip_file_status_body(remaining)?;
-                                validate_file_status_part_count(part_count, manifest.file_size)?;
+                                let (availability, rest) =
+                                    decode_file_status_body_availability(remaining)?;
+                                validate_file_status_part_count(
+                                    u16::try_from(availability.len()).unwrap_or(u16::MAX),
+                                    manifest.file_size,
+                                )?;
+                                record_source_part_availability(
+                                    transfer_runtime,
+                                    file_hash_hex,
+                                    peer_addr,
+                                    session_state.peer_user_hash,
+                                    availability,
+                                    manifest.pieces.len(),
+                                );
                                 remaining = rest;
                             }
                             OP_AICHFILEHASHANS => {
@@ -681,8 +706,20 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 returned_file_name = Some(file_name);
                             }
                             OP_FILESTATUS => {
-                                let (part_count, rest) = skip_file_status_body(remaining)?;
-                                validate_file_status_part_count(part_count, manifest.file_size)?;
+                                let (availability, rest) =
+                                    decode_file_status_body_availability(remaining)?;
+                                validate_file_status_part_count(
+                                    u16::try_from(availability.len()).unwrap_or(u16::MAX),
+                                    manifest.file_size,
+                                )?;
+                                record_source_part_availability(
+                                    transfer_runtime,
+                                    file_hash_hex,
+                                    peer_addr,
+                                    session_state.peer_user_hash,
+                                    availability,
+                                    manifest.pieces.len(),
+                                );
                                 remaining = rest;
                             }
                             _ => {
@@ -1113,4 +1150,28 @@ async fn remember_source_exchange_sources(
     }
 
     Ok(())
+}
+
+/// Records a peer's advertised per-part availability into the live download
+/// source registry. An empty `availability` (OP_FILESTATUS part_count 0) means
+/// the peer holds the complete file, mapped to an all-available bitmap.
+fn record_source_part_availability(
+    transfer_runtime: &Ed2kTransferRuntime,
+    file_hash_hex: &str,
+    peer_addr: SocketAddr,
+    peer_user_hash: Option<[u8; 16]>,
+    availability: Vec<bool>,
+    manifest_part_count: usize,
+) {
+    let bitmap = if availability.is_empty() {
+        vec![true; manifest_part_count]
+    } else {
+        availability
+    };
+    transfer_runtime.note_download_source_part_bitmap(
+        file_hash_hex,
+        peer_addr,
+        peer_user_hash,
+        bitmap,
+    );
 }

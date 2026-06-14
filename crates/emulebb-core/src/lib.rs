@@ -32,7 +32,7 @@ use emulebb_ed2k::{
         run_ed2k_listener, send_kad_firewall_tcp_ack,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
+        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kLiveSource, Ed2kResumeManifest, Ed2kSourceHint,
         Ed2kTransferRuntime, Ed2kTransferState, Ed2kUploadQueueSnapshotEntry,
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
@@ -487,7 +487,15 @@ pub struct Transfer {
     pub state: String,
     pub progress: f64,
     pub sources: u32,
-    pub download_speed_bytes_per_sec: u64,
+    /// Sources currently transferring payload to us (live session count).
+    pub sources_transferring: u32,
+    pub download_speed_ki_bps: f64,
+    /// Upload rate for this file; downloads do not serve from the transfer view
+    /// so this is 0 (uploads are tracked under the upload queue).
+    pub upload_speed_ki_bps: f64,
+    /// Whether the transfer is stopped (master IsStopped): emitted alongside a
+    /// `paused` state, matching the master contract's separate stopped flag.
+    pub stopped: bool,
     pub ed2k_link: String,
     pub priority: String,
     pub category_id: u32,
@@ -504,6 +512,8 @@ pub struct Transfer {
     pub parts_obtained: u32,
     /// One char per part: '#' obtained, '0' missing.
     pub parts_progress_text: String,
+    /// Parts available from at least one live source (live session count).
+    pub parts_available: u32,
     /// Whether download priority is auto-managed (not modeled yet -> false).
     pub auto_priority: bool,
 }
@@ -2024,7 +2034,13 @@ impl EmulebbCore {
         }
         let manifest = self.ed2k_transfers.manifest(hash).await?;
         let banned = self.state.lock().await.banned_source_clients.clone();
-        Ok(Some(transfer_sources_from_manifest(&manifest, &banned)))
+        let mut sources = transfer_sources_from_manifest(&manifest, &banned);
+        enrich_sources_with_live(
+            &mut sources,
+            &self.ed2k_transfers.live_download_sources(hash),
+            manifest.pieces.len() as u32,
+        );
+        Ok(Some(sources))
     }
 
     /// Transfer details: the transfer plus its per-part breakdown and source
@@ -2035,8 +2051,17 @@ impl EmulebbCore {
         };
         let manifest = self.ed2k_transfers.manifest(hash).await?;
         let banned = self.state.lock().await.banned_source_clients.clone();
-        let sources = transfer_sources_from_manifest(&manifest, &banned);
-        let parts = transfer_parts_from_manifest(&manifest);
+        let part_total = manifest.pieces.len() as u32;
+        let mut sources = transfer_sources_from_manifest(&manifest, &banned);
+        enrich_sources_with_live(
+            &mut sources,
+            &self.ed2k_transfers.live_download_sources(hash),
+            part_total,
+        );
+        let available_sources_per_part = self
+            .ed2k_transfers
+            .available_sources_per_part(hash, part_total);
+        let parts = transfer_parts_from_manifest(&manifest, &available_sources_per_part);
         Ok(Some(TransferDetails {
             transfer,
             parts,
@@ -2253,6 +2278,7 @@ impl EmulebbCore {
     }
 
     fn transfer_from_manifest(&self, manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
+        let parts_total = manifest.pieces.len() as u32;
         let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
@@ -2262,6 +2288,10 @@ impl EmulebbCore {
                 .to_string(),
             self.ed2k_transfers
                 .download_speed_bytes_per_sec(&manifest.file_hash),
+            self.ed2k_transfers
+                .transferring_source_count(&manifest.file_hash),
+            self.ed2k_transfers
+                .available_part_count(&manifest.file_hash, parts_total),
         );
         // Surface persisted addedAt/completedAt from the metadata store.
         if let Ok(Some((created_ms, completed_ms))) = self
@@ -2309,10 +2339,7 @@ impl EmulebbCore {
         if current.state == "completed" {
             return Ok(Some(current));
         }
-        anyhow::ensure!(
-            current.state != "stopped",
-            "stopped transfer cannot be resumed"
-        );
+        anyhow::ensure!(!current.stopped, "stopped transfer cannot be resumed");
         self.ed2k_transfers.set_control_state(hash, None).await?;
         let Some(transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
@@ -4669,6 +4696,8 @@ fn transfer_from_manifest(
     state_name: &str,
     payload_path: String,
     download_speed_bytes_per_sec: u64,
+    sources_transferring: u32,
+    parts_available: u32,
 ) -> Transfer {
     let completed_bytes = manifest
         .pieces
@@ -4702,6 +4731,11 @@ fn transfer_from_manifest(
     } else {
         None
     };
+    // Master parity (GetTransferStateName + IsStopped): a stopped transfer is
+    // reported with the `paused` state plus a separate `stopped` flag, not a
+    // distinct `stopped` state token (which is not in the TransferState enum).
+    let stopped = state_name == "stopped";
+    let emitted_state = if stopped { "paused" } else { state_name };
     Transfer {
         ed2k_link: format!(
             "ed2k://|file|{}|{}|{}|/",
@@ -4712,10 +4746,13 @@ fn transfer_from_manifest(
         path: payload_path,
         size_bytes: manifest.file_size,
         completed_bytes,
-        state: state_name.to_string(),
+        state: emitted_state.to_string(),
         progress,
         sources: manifest.sources.len() as u32,
-        download_speed_bytes_per_sec,
+        sources_transferring,
+        download_speed_ki_bps: download_speed_bytes_per_sec as f64 / 1024.0,
+        upload_speed_ki_bps: 0.0,
+        stopped,
         priority: "normal".to_string(),
         category_id: 0,
         category_name: default_transfer_category_name().to_string(),
@@ -4725,6 +4762,7 @@ fn transfer_from_manifest(
         parts_total,
         parts_obtained,
         parts_progress_text,
+        parts_available,
         auto_priority: false,
     }
 }
@@ -4905,12 +4943,46 @@ fn transfer_sources_from_manifest(
         .collect()
 }
 
+/// Overlays live download-session state from the F1 registry onto the remembered
+/// source list: matching a remembered source by `ip:tcp_port`, set its live
+/// download state, speed, and advertised part availability. Sources with no live
+/// session keep their "remembered" defaults.
+fn enrich_sources_with_live(
+    sources: &mut [TransferSource],
+    live: &[Ed2kLiveSource],
+    part_count: u32,
+) {
+    let live_by_endpoint: HashMap<String, &Ed2kLiveSource> = live
+        .iter()
+        .map(|source| (source.endpoint.to_string(), source))
+        .collect();
+    for source in sources.iter_mut() {
+        let Some(live_source) = live_by_endpoint.get(&source.endpoint) else {
+            continue;
+        };
+        source.download_speed_ki_bps =
+            live_source.download_speed_bytes_per_sec as f64 / 1024.0;
+        source.available_parts = live_source.available_parts;
+        source.part_count = part_count;
+        let state = if live_source.transferring {
+            "downloading"
+        } else {
+            "connected"
+        };
+        source.download_state = state.to_string();
+        source.status = state.to_string();
+    }
+}
+
 /// Builds the per-part download breakdown from the resume manifest. ED2K parts
 /// map 1:1 to manifest pieces (piece_size == ED2K_PART_SIZE). Geometry and
 /// completion are real (per-piece `bytes_written`/`state`); `availableSources`
 /// and `corrupted` are live-session-only signals the persistent manifest does
 /// not track, so they are honestly reported as 0/false rather than fabricated.
-fn transfer_parts_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferPart> {
+fn transfer_parts_from_manifest(
+    manifest: &Ed2kResumeManifest,
+    available_sources_per_part: &[u32],
+) -> Vec<TransferPart> {
     let part_size = manifest.piece_size.max(1);
     let file_size = manifest.file_size;
     manifest
@@ -4938,7 +5010,10 @@ fn transfer_parts_from_manifest(manifest: &Ed2kResumeManifest) -> Vec<TransferPa
                 complete: size > 0 && gap_bytes == 0,
                 requested: matches!(piece.state, Ed2kTransferState::Requested),
                 corrupted: false,
-                available_sources: 0,
+                available_sources: available_sources_per_part
+                    .get(piece.piece_index as usize)
+                    .copied()
+                    .unwrap_or(0),
             }
         })
         .collect()
@@ -7555,14 +7630,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            core.stop_transfer(&transfer.hash)
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            "stopped"
-        );
+        let stopped_transfer = core.stop_transfer(&transfer.hash).await.unwrap().unwrap();
+        // Master parity: stopped is reported as the `paused` state + stopped flag.
+        assert_eq!(stopped_transfer.state, "paused");
+        assert!(stopped_transfer.stopped);
 
         let error = core.resume_transfer(&transfer.hash).await.unwrap_err();
 
@@ -7607,7 +7678,10 @@ mod tests {
         .unwrap();
         let reloaded_transfer = reloaded.transfer(&transfer.hash).await.unwrap();
 
-        assert_eq!(reloaded_transfer.state, "stopped");
+        // Master parity: a stopped transfer reports the `paused` state plus a
+        // separate `stopped` flag (not a distinct `stopped` state token).
+        assert_eq!(reloaded_transfer.state, "paused");
+        assert!(reloaded_transfer.stopped);
         let error = reloaded.resume_transfer(&transfer.hash).await.unwrap_err();
         assert!(
             error

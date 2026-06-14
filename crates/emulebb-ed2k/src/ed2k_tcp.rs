@@ -48,7 +48,8 @@ pub(in crate::ed2k_tcp) use codec::{
     decode_client_id_change_payload, decode_client_message_payload,
     decode_compressed_part_fragment, decode_edonkey_queue_rank_payload,
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
-    decode_file_description_payload, decode_file_status_payload, decode_hashset_answer,
+    decode_file_description_payload, decode_file_status_availability,
+    decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_kad_callback_payload, decode_optional_file_hash_payload,
     decode_peer_payload, decode_preview_answer_payload, decode_preview_request_payload,
     decode_public_ip_answer_payload, decode_reask_callback_tcp_payload,
@@ -61,12 +62,17 @@ pub(in crate::ed2k_tcp) use codec::{
     encode_packet, encode_port_test_answer, encode_public_ip_answer, encode_request_filename,
     encode_request_parts_batch, encode_request_sources, encode_request_sources2,
     encode_set_req_file_id, encode_shared_browse_denied_answer, encode_start_upload_req,
-    inflate_compressed_part_fragment, skip_file_status_body, validate_file_status_part_count,
+    inflate_compressed_part_fragment, validate_file_status_part_count,
 };
+// Re-exported only for codec unit tests; the production decode path uses the
+// availability-returning variants above.
+#[cfg(test)]
+pub(in crate::ed2k_tcp) use codec::decode_file_status_payload;
 #[cfg(test)]
 #[allow(unused_imports)]
 use codec::{
-    build_upload_part_packets, decode_file_hash_payload, decode_hashset_request2,
+    build_upload_part_packets, decode_file_hash_payload,
+    decode_hashset_request2,
     decode_request_parts_payload, decode_request_sources_payload, encode_accept_upload_req,
     encode_aich_file_hash_answer, encode_answer_sources, encode_answer_sources2,
     encode_compressed_part_fragment, encode_file_req_ans_nofil, encode_file_status_complete,

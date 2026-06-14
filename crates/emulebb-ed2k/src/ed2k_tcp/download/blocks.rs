@@ -88,6 +88,12 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             transfer_runtime.add_peer_credit_delta(user_hash, 0, downloaded_bytes)?;
         }
         transfer_runtime.note_download_payload_bytes(file_hash_hex, downloaded_bytes);
+        transfer_runtime.note_download_source_bytes(
+            file_hash_hex,
+            peer_addr,
+            peer_user_hash,
+            downloaded_bytes,
+        );
     }
     if !pending_part_requests.iter().any(|request| request.queued) {
         *part_response_deadline = None;
@@ -139,6 +145,12 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;
         }
         transfer_runtime.note_download_payload_bytes(file_hash_hex, end.saturating_sub(start));
+        transfer_runtime.note_download_source_bytes(
+            file_hash_hex,
+            peer_addr,
+            peer_user_hash,
+            end.saturating_sub(start),
+        );
         dump_ed2k_tcp_download_meta(
             peer_addr,
             Some(transport_mode),
