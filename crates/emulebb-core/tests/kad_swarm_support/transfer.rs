@@ -128,6 +128,7 @@ fn test_network_config(
         config,
         vpn_guard: emulebb_core::VpnGuardConfig::default(),
         vpn_interface_bound: false,
+        ip_filter: Default::default(),
     }
 }
 

@@ -36,6 +36,7 @@ use emulebb_ed2k::{
         Ed2kTransferRuntime, Ed2kTransferState, Ed2kUploadQueueSnapshotEntry,
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
+    ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
 };
 use emulebb_index::{
@@ -653,6 +654,8 @@ pub struct Ed2kNetworkConfig {
     /// Whether the P2P bind was resolved from a named interface (e.g. the VPN
     /// adapter) rather than a raw address — the guard's confirmation signal.
     pub vpn_interface_bound: bool,
+    /// IPv4 range filter (ipfilter.dat). Empty when no filter is configured.
+    pub ip_filter: IpFilter,
 }
 
 /// Configured VPN-binding guard. When enabled in `enforce` mode the client
@@ -1205,6 +1208,7 @@ impl EmulebbCore {
             transfer_runtime: Arc::clone(&self.ed2k_transfers),
             hello_identity,
             shutdown: Arc::clone(&shutdown),
+            ip_filter: network.ip_filter.clone(),
         })));
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
@@ -2667,6 +2671,9 @@ impl EmulebbCore {
         let mut sources = self
             .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
             .await?;
+        if !network.ip_filter.is_empty() {
+            sources.retain(|source| !network.ip_filter.is_filtered(source.ip));
+        }
         if sources.is_empty() {
             return Ok(Some("downloading"));
         }
@@ -4341,6 +4348,12 @@ async fn handle_kad_local_store_packet(
     let kad_firewall = &runtime.kad_firewall;
     let network = &runtime.network;
     let ReceivedKadPacket { packet, from, .. } = received;
+    if let IpAddr::V4(ip) = from.ip() {
+        if network.ip_filter.is_filtered(ip) {
+            tracing::trace!("dropping Kad packet from IP-filtered peer {from}");
+            return Ok(());
+        }
+    }
     match packet {
         KadPacket::HelloReq(req) => {
             if let Err(error) = dht
@@ -6510,6 +6523,7 @@ mod tests {
             config: Ed2kConfig::default(),
             vpn_guard: VpnGuardConfig::default(),
             vpn_interface_bound: false,
+            ip_filter: IpFilter::default(),
         }
     }
 

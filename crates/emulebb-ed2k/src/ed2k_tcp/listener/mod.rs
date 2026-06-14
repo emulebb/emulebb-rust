@@ -37,6 +37,8 @@ pub struct Ed2kListenerOptions {
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
     pub hello_identity: Ed2kHelloIdentity,
     pub shutdown: Arc<AtomicBool>,
+    /// IPv4 range filter; inbound connections from filtered peers are dropped.
+    pub ip_filter: crate::ipfilter::IpFilter,
 }
 
 /// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
@@ -50,10 +52,18 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         transfer_runtime,
         hello_identity,
         shutdown,
+        ip_filter,
     } = options;
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
+                if let std::net::IpAddr::V4(ip) = peer_addr.ip() {
+                    if ip_filter.is_filtered(ip) {
+                        debug!("dropping inbound eD2k connection from IP-filtered peer {peer_addr}");
+                        drop(stream);
+                        continue;
+                    }
+                }
                 let dht = dht.clone();
                 let server_state = Arc::clone(&server_state);
                 let kad_firewall = Arc::clone(&kad_firewall);

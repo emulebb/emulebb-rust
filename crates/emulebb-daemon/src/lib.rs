@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig, NetworkInterface, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
-    resolve_bind_ip,
+    ipfilter, ipfilter::IpFilter, resolve_bind_ip,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
@@ -33,6 +33,7 @@ pub struct DaemonConfig {
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
     pub vpn_guard: VpnGuardSettings,
+    pub ip_filter: IpFilterSettings,
 }
 
 /// Optional VPN-binding guard configuration (`[vpnGuard]`). Default disabled, so
@@ -43,6 +44,26 @@ pub struct VpnGuardSettings {
     pub enabled: bool,
     pub mode: String,
     pub allowed_public_ip_cidrs: String,
+}
+
+/// Optional IPv4 range filter configuration (`[ipFilter]`). Default disabled, so
+/// no addresses are filtered unless explicitly enabled with a loadable file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct IpFilterSettings {
+    pub enabled: bool,
+    pub path: Option<PathBuf>,
+    pub level: u32,
+}
+
+impl Default for IpFilterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            level: ipfilter::DEFAULT_FILTER_LEVEL,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +111,7 @@ impl Default for DaemonConfig {
             nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
             vpn_guard: VpnGuardSettings::default(),
+            ip_filter: IpFilterSettings::default(),
         }
     }
 }
@@ -168,6 +190,7 @@ impl DaemonConfig {
             None => load_or_create_user_hash(metadata)?,
         };
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
+        let ip_filter = self.load_ip_filter()?;
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
@@ -191,7 +214,24 @@ impl DaemonConfig {
                 allowed_public_ip_cidrs: self.vpn_guard.allowed_public_ip_cidrs.clone(),
             },
             vpn_interface_bound: self.p2p_bind_interface.is_some(),
+            ip_filter,
         }))
+    }
+
+    /// Loads the configured `ipfilter.dat` into an `IpFilter`. Returns an empty
+    /// filter (no filtering) when disabled or no path is configured.
+    fn load_ip_filter(&self) -> Result<IpFilter> {
+        if !self.ip_filter.enabled {
+            return Ok(IpFilter::default());
+        }
+        let Some(path) = self.ip_filter.path.as_ref() else {
+            return Ok(IpFilter::default());
+        };
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read ipfilter.dat at {}", path.display()))?;
+        let filter = IpFilter::parse(&body, self.ip_filter.level);
+        info!(ranges = filter.len(), path = %path.display(), "loaded ip filter");
+        Ok(filter)
     }
 
     pub fn kad_local_store_config(&self) -> KadLocalStoreConfig {

@@ -5,6 +5,7 @@ pub mod ed2k_server;
 pub mod ed2k_tcp;
 #[allow(dead_code)]
 pub mod ed2k_transfer;
+pub mod ipfilter;
 pub mod kad_firewall;
 pub mod nat;
 pub mod networking;
