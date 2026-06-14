@@ -296,6 +296,40 @@ are an uploader. Reuse the upload-queue state already in
   near-full → `OP_QUEUEFULL`.
 - File not shared → `OP_FILENOTFOUND`.
 
+### 4.6 Concrete integration point (shared-Kad-port decision taken)
+
+The operator chose the **shared Kad UDP port** (eMule-faithful; peers reask to the
+advertised `ET_UDPPORT == kad_udp_port`). The pure framing layer is built
+(`ed2k_client_udp/{codec,dispatch,outbound}` + `ed2k_client_udp_obfuscation`).
+What remains is the wiring, and the safe hook is precise:
+
+- **Inbound hook = the Kad-decode-failure branch** of
+  `emulebb-kad-net/src/rpc/receive_loop.rs` (`KadPacket::decode(&plain)` `Err`,
+  ~L34-77). A reask datagram lands there (Kad's `decrypt` is non-destructive on a
+  non-Kad key, and the raw `data` is still in scope). Calling
+  `parse_inbound_reask_datagram(&data, from_ipv4, our_user_hash, our_udp_version)`
+  there is **purely additive**: it only inspects packets Kad already rejected, so
+  it cannot change Kad behaviour for any packet Kad decodes. On `Some(msg)`,
+  handle + `continue`; on `None`, fall through to today's decode-failed logging.
+- **Three plumbing needs** (the boundary architecture, the part to land behind
+  live validation):
+  1. **eD2k user hash** into kad-net — kad-net knows the Kad `NodeId`, not the
+     eD2k user hash the reask key needs. Inject it (config/handle), don't derive.
+  2. **Foreign-datagram handler** — kad-net must hand a non-Kad datagram up to an
+     ed2k/core-registered callback (kad-net must not depend on core). An
+     `Option<Arc<dyn Fn(&[u8], SocketAddr) + Send + Sync>>` on `RpcManager` inner,
+     `None` by default (= exactly today's behaviour), invoked in the hook above.
+  3. **Send-handle** — replies (reciprocity) and the per-transfer ticker
+     (outbound `build_*_datagram`) send via the *same* shared socket, so the
+     handler/ticker needs a clone of kad-net's `Transport` (or a thin
+     `send_raw(addr, bytes)` handle).
+- **Ticker** (§4.2) lives in the core download runtime, owns the
+  `ReaskPendingRegistry` + per-source `ReaskSource`s, calls the outbound builders,
+  and feeds replies (routed by `(ip,udp_port)`) into `apply_reask_reply`.
+- **Validation gate:** land the above incrementally and prove it on the wire
+  (Rust↔Rust accelerated cadence, then a gentle Rust↔stock witness) before
+  trusting it — do not enable by default until validated.
+
 ---
 
 ## 5. What we deliberately keep, and what we drop
@@ -337,11 +371,14 @@ are an uploader. Reuse the upload-queue state already in
 - **Phase 0 (now):** record the omission in
   `policy/rust-client-omissions.toml` (id e.g. `udp-source-reask`) so the wire
   surface is honestly described. Reconcile the advertised `udp_version`.
-- **Phase 1 — foundation DONE (2026-06-14, §2.1):** reask codec, policy,
-  pending gate, source state, client-UDP obfuscation + inbound classifier are
-  built and unit-tested. **Remaining (gated):** the shared/separate-port design
-  call, the transport recv loop + demux, the per-transfer ticker, uploader
-  reciprocity, and live validation.
+- **Phase 1 — foundation + framing DONE (2026-06-14, §2.1):** reask codec,
+  policy, pending gate, source state, both reaction tables (downloader
+  `apply_reask_reply` + uploader `answer_inbound_reask`), client-UDP obfuscation +
+  inbound classifier, and the bidirectional datagram framing
+  (`parse_inbound_reask_datagram` / `build_*_datagram`) are built and unit-tested.
+  The shared-Kad-port design call is **taken** (§4.6). **Remaining (gated on live
+  validation):** the receive_loop.rs inbound hook + the three plumbing needs
+  (user hash, foreign-datagram callback, send-handle) + the per-transfer ticker.
 - **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP` — **codec done**, buddy-
   relay transport pending) and `OP_DIRECTCALLBACKREQ`.
 - New code lands as new modules within the per-module size budget
