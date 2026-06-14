@@ -193,6 +193,30 @@ The transport integration (§4) is now implemented behind `enable_udp_reask`:
 **Only remaining step: live validation** (operator-gated, gentle Rust↔Rust then
 Rust↔stock) before flipping `enable_udp_reask` on.
 
+#### Known first-cut limitations (watch during live validation)
+
+These are deliberate simplifications of the off-by-default Phase-1 transport, each
+needing the loop→core feedback channel that was intentionally deferred. None
+affects the flag-off default; all are safe degradations:
+
+1. **Re-engagement for actual download relies on core's source-acquisition
+   cycle.** The reask keeps the queue *position* warm, but a detached source is
+   only re-downloaded when core's next download cycle re-acquires it (the reask
+   `OP_REASKACK` rank does not itself trigger a TCP reconnect). A more eager
+   "rank low enough → reconnect now" re-engage is post-validation polish.
+2. **Possible redundant TCP re-attempt.** A detached source's core lease
+   (`active_download_peer_endpoints`) is released when its attempt ends, so the
+   next download cycle can open a fresh TCP session to a peer still in UDP reask
+   (no cross-layer dedup — the reask state lives in the ed2k crate, not core). The
+   re-detach just overwrites the reask entry by endpoint, so it self-heals, but
+   one redundant connect can happen. Eliminating it needs a loop→core "endpoint
+   is detached" signal.
+3. **Detach needs `OP_EMULEINFO` (peer udp_port/udp_version) before the queue
+   rank.** If a peer sends `OP_QUEUERANK`/`OP_QUEUERANKING` before its
+   `OP_EMULEINFO`, `udp_reask_eligible` is false (udp_port 0) and the source
+   stays on the held-TCP path that run. In practice eMule exchanges the eMule-info
+   during hello, before queueing, so this is rare.
+
 ---
 
 ## 3. The problem, stated independently of eMule
