@@ -35,6 +35,10 @@ pub struct Ed2kConfig {
     pub kad_source_supplement_max_existing_sources: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
     pub upload_queue: Ed2kUploadQueuePolicyConfig,
+    /// Enable client-to-client UDP source reask on the shared Kad UDP port
+    /// (FEAT-001). Off by default: the reask transport must be wire-validated
+    /// before it is trusted (see `docs/design/udp-source-reask.md`).
+    pub enable_udp_reask: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +84,7 @@ impl Default for Ed2kConfig {
             source_server_attempt_budget: 3,
             kad_source_supplement_max_existing_sources: 2,
             upload_queue: Ed2kUploadQueuePolicyConfig::default(),
+            enable_udp_reask: false,
         }
     }
 }
