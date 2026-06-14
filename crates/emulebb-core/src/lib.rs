@@ -38,6 +38,8 @@ use emulebb_ed2k::{
     },
     ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
+    public_ip::SharedPublicIp,
+    run_ed2k_udp_reask_loop,
 };
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
@@ -1210,6 +1212,11 @@ impl EmulebbCore {
             shutdown: Arc::clone(&shutdown),
             ip_filter: network.ip_filter.clone(),
         })));
+        // Learned public-IP cell (eMule theApp public IP), shared by the server
+        // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).
+        let ed2k_public_ip = SharedPublicIp::new();
+        let enable_udp_reask = config.enable_udp_reask;
+        let reask_user_hash = network.user_hash;
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::clone(&nat),
@@ -1220,7 +1227,19 @@ impl EmulebbCore {
             search_inbox,
             kad_firewall,
             shutdown: Arc::clone(&shutdown),
+            public_ip: ed2k_public_ip.clone(),
         })));
+        if enable_udp_reask {
+            // Off by default; wire-validate before enabling. udp_version 4 matches
+            // our advertised hello ET_UDPVER.
+            tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
+                dht.clone(),
+                reask_user_hash,
+                4,
+                ed2k_public_ip.clone(),
+                Arc::clone(&shutdown),
+            )));
+        }
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,

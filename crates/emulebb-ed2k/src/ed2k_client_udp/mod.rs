@@ -22,6 +22,7 @@ pub(crate) mod dispatch;
 pub(crate) mod outbound;
 pub(crate) mod reciprocity;
 pub(crate) mod registry;
+pub(crate) mod runtime;
 pub(crate) mod service;
 pub(crate) mod source_set;
 pub(crate) mod state;
@@ -38,6 +39,7 @@ pub(crate) use outbound::{
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
+pub use runtime::run_ed2k_udp_reask_loop;
 pub(crate) use service::{
     ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo,
 };
