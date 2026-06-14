@@ -1,0 +1,51 @@
+---
+id: RUST-FEAT-005
+workflow: github
+github_issue: https://github.com/emulebb/emulebb-rust/issues/5
+title: Automated VPN leak-test — assert no data egress off the tunnel (release-blocking)
+status: OPEN
+priority: Critical
+category: feature
+labels: [vpn, anonymity, safety, tests, ci, release-blocker]
+milestone: phase-0
+created: 2026-06-14
+source: PM quality review (2026-06-14); WORKSPACE-POLICY Network Safety invariant
+---
+
+> Workflow status is tracked in GitHub. This local document is retained as an engineering spec/evidence record.
+
+# RUST-FEAT-005 - Automated VPN leak-test — assert no data egress off the tunnel (release-blocking)
+
+## Summary
+
+Add an automated leak-test that proves emulebb-rust honors the P0 Network Safety
+invariant: with the VPN tunnel down/unavailable, the client emits **zero P2P
+data-plane traffic** (eD2K TCP, Kad/eD2K UDP) off the tunnel interface. The
+control/REST plane on the local IP is unaffected. This gate is **release-blocking**.
+
+## Why This Matters
+
+The suite's "safe / anonymous" promise rests entirely on fail-closed VPN binding.
+A leak that ships once destroys the core trust claim. A code-level pin
+(RUST-FEAT-003) is necessary but not sufficient without an automated test that
+keeps it true over time.
+
+## Intended Shape
+
+- A test that brings the data-plane up with no/incorrect tunnel and asserts no
+  connect/sendto leaves a non-tunnel interface (e.g. via a deny-by-default
+  firewall/route fixture, or interface-scoped capture asserting zero off-tunnel
+  data packets).
+- Runs in CI as a blocking gate for emulebb-rust; respects the live-wire policy
+  (no public-network contact — the test is local/deterministic).
+
+## Acceptance Criteria
+
+- [ ] Tunnel-down scenario: zero eD2K TCP / Kad UDP egress off the tunnel observed.
+- [ ] Control/REST plane on the local IP still functions.
+- [ ] Test runs blocking in CI and fails if the data plane leaks.
+
+## Notes
+
+- Pairs with RUST-FEAT-003 (eD2K TCP egress pin). Both are release-blockers per the
+  WORKSPACE-POLICY Network Safety invariant. Cross-product sibling: QBBB-FEAT-004.
