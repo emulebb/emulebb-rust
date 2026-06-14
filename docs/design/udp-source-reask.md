@@ -335,12 +335,16 @@ What remains is the wiring, and the safe hook is precise:
   channel-recv (→ `route_message` → for `AnswerNeeded` call `answer_inbound_reask`
   with the upload-queue state + `send_raw_datagram`; for `RoutedReply` honour
   TCP-fallback) and a tick interval (→ `service.tick` → `send_raw_datagram` each
-  due ping). Its two runtime-dynamic dependencies (the reason it is live-gated):
-  **our public IP** (learned from server IDCHANGE / Kad — required for the
-  obfuscation key) and a **download-session hook** that calls
-  `service.register_source` when a peer queues us (§4.1) + the **upload-queue
-  query** for reciprocity. These touch live runtime state, so wire them with
-  validation, not blind.
+  due ping). Runtime-dynamic dependencies:
+  - **Our public IP** (obfuscation key) — **DONE** the eMule way
+    (`theApp.GetPublicIP`/`SetPublicIP`): `public_ip::SharedPublicIp` (`f7692f7`)
+    set from the server `OP_IDCHANGE` (HighID `client_id` via `ipv4_from_client_id`;
+    LowID/zero clears) in the server session (`c5db635`). Cell currently owned by
+    the server loop — move its creation up so the reask loop shares it. Kad
+    external-IP fallback pends rust Kad exposing one.
+  - **Download-session hook** calling `service.register_source` when a peer queues
+    us (§4.1), and the **upload-queue query** for reciprocity — still to wire.
+  These touch live runtime state, so wire them with validation, not blind.
 - **Validation gate:** prove it on the wire (Rust↔Rust accelerated cadence, then a
   gentle Rust↔stock witness) before flipping the flag on — do not enable by
   default until validated.
