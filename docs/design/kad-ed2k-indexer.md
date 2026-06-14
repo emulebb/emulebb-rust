@@ -87,6 +87,11 @@ enumeration.
   same dialect + caps + apikey scheme + "everything category 8000/Other" decision
   as qBittorrentBB, so a Prowlarr operator cannot structurally tell them apart.
   Ship a suite Prowlarr indexer definition (YAML) for both.
+  - **Known limitation:** all-8000/Other means no content categorization, which
+    Sonarr/Radarr use to filter and route grabs — automatic-grab quality is
+    weaker than a categorized feed. This matches current qBittorrentBB behavior
+    and is a conscious choice for now; revisit if note-16/17 automation needs
+    category-aware routing.
 - **qBittorrent-WebUI-emulating download-client API** — so the Arr stack and
   `amutorrent` drive rust as if it were a qBittorrent, with zero new integration.
   This reuses the pattern eMuleBB already proved with its `/api/v2` compat layer
