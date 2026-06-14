@@ -271,6 +271,76 @@ pub(crate) const UDP_MAX_QUEUE_TIME: Duration = Duration::from_secs(20);
 const UDP_FAILURE_MIN_ATTEMPTS: u32 = 3;
 const UDP_FAILURE_RATIO: f64 = 0.3;
 
+/// Live reask state for one queued, TCP-detached source (eMuleBB
+/// `QueuedDetached`): we hold its queue slot purely by periodic UDP reask, with
+/// no socket open. Drives the per-transfer reask ticker.
+#[derive(Debug, Clone)]
+pub(crate) struct ReaskSource {
+    pub endpoint: (Ipv4Addr, u16),
+    pub file_hash: Ed2kHash,
+    pub udp_version: u8,
+    /// Our last known queue rank on this source (0 == queue full / unknown).
+    pub last_rank: Option<u16>,
+    /// When the next reask is due.
+    pub next_reask: Instant,
+    pub udp_total: u32,
+    pub udp_failed: u32,
+    /// Set once the UDP failure ratio is bad; subsequent reasks use TCP.
+    pub fallback_tcp_only: bool,
+    /// Whether the source has no parts we currently need (doubles the interval).
+    pub no_needed_parts: bool,
+}
+
+impl ReaskSource {
+    pub(crate) fn new(
+        endpoint: (Ipv4Addr, u16),
+        file_hash: Ed2kHash,
+        udp_version: u8,
+        now: Instant,
+    ) -> Self {
+        Self {
+            endpoint,
+            file_hash,
+            udp_version,
+            last_rank: None,
+            // Reask immediately on entry; the ticker spaces subsequent reasks.
+            next_reask: now,
+            udp_total: 0,
+            udp_failed: 0,
+            fallback_tcp_only: false,
+            no_needed_parts: false,
+        }
+    }
+
+    pub(crate) fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_reask
+    }
+
+    /// Schedules the next reask one cadence interval out.
+    pub(crate) fn schedule_next(&mut self, now: Instant) {
+        self.next_reask = now + reask_interval(self.no_needed_parts);
+    }
+
+    /// Records a successful reask reply with our updated queue rank.
+    pub(crate) fn record_success(&mut self, rank: u16, now: Instant) {
+        self.udp_total = self.udp_total.saturating_add(1);
+        self.last_rank = Some(rank);
+        self.schedule_next(now);
+    }
+
+    /// Records a reask with no reply; flips to TCP fallback once the failure
+    /// ratio is bad. Returns whether UDP is now disqualified for this source.
+    pub(crate) fn record_failure(&mut self, now: Instant) -> bool {
+        self.udp_total = self.udp_total.saturating_add(1);
+        self.udp_failed = self.udp_failed.saturating_add(1);
+        if should_fall_back_to_tcp(self.udp_total, self.udp_failed) {
+            self.fallback_tcp_only = true;
+        }
+        self.schedule_next(now);
+        self.fallback_tcp_only
+    }
+}
+
 /// Per-source reask interval: nominal `FILE_REASK_TIME`, doubled for
 /// no-needed-parts sources, never below `MIN_REQUEST_TIME` (mirrors
 /// `CUpDownClient::GetTimeUntilReask`-style spacing).
@@ -441,6 +511,42 @@ mod tests {
         // A second reply for the same endpoint is now unsolicited.
         assert!(registry.take_reply(ip, 4672).is_none());
         assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn reask_source_success_updates_rank_and_reschedules() {
+        let now = Instant::now();
+        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 5), 4672), hash(), 4, now);
+        assert!(source.is_due(now)); // reasks immediately on entry
+        source.record_success(12, now);
+        assert_eq!(source.last_rank, Some(12));
+        assert_eq!(source.udp_total, 1);
+        assert_eq!(source.udp_failed, 0);
+        assert!(!source.is_due(now)); // rescheduled one interval out
+        assert!(source.is_due(now + reask_interval(false)));
+    }
+
+    #[test]
+    fn reask_source_failures_flip_to_tcp_fallback() {
+        let now = Instant::now();
+        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 6), 4672), hash(), 4, now);
+        // 4 attempts, all failed -> ratio 1.0 > 0.3 with > 3 attempts.
+        for _ in 0..3 {
+            assert!(!source.record_failure(now));
+        }
+        assert!(source.record_failure(now)); // 4th failure trips the backoff
+        assert!(source.fallback_tcp_only);
+        assert_eq!(source.udp_failed, 4);
+    }
+
+    #[test]
+    fn reask_source_no_needed_parts_doubles_interval() {
+        let now = Instant::now();
+        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 7), 4672), hash(), 4, now);
+        source.no_needed_parts = true;
+        source.schedule_next(now);
+        assert!(!source.is_due(now + FILE_REASK_TIME)); // not due at single interval
+        assert!(source.is_due(now + FILE_REASK_TIME * 2));
     }
 
     #[test]
