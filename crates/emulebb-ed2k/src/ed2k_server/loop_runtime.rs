@@ -24,6 +24,10 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         kad_firewall,
         shutdown,
     } = options;
+    // Learned public IP (eMule theApp public IP), set from the HighID OP_IDCHANGE
+    // and cleared on disconnect. Owned by the server loop for now; the pending
+    // UDP reask loop will share this cell as its obfuscation key source.
+    let public_ip = crate::public_ip::SharedPublicIp::new();
     let reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
     let session_context = ServerSessionContext {
         bind_ip,
@@ -38,6 +42,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         rotation_interval: (config.session_rotation_secs > 0)
             .then(|| Duration::from_secs(config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),
+        public_ip,
     };
 
     let configured_servers = match configured_server_entries(&config) {

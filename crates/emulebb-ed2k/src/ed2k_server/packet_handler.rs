@@ -35,6 +35,8 @@ pub(super) async fn handle_server_packet(
                 session.assigned_client_id = None;
                 session.server_flags = id_change.server_flags;
                 session.login_accepted = false;
+                // No public IP without a client id (eMule SetPublicIP(0)).
+                context.public_ip.clear();
                 info!(
                     "ED2K server {} returned zero client_id in OP_IDCHANGE; login not accepted",
                     session.endpoint
@@ -60,6 +62,14 @@ pub(super) async fn handle_server_packet(
             session.assigned_client_id = Some(id_change.client_id);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
+            // Learn our public IP exactly as eMule does (theApp.SetPublicIP from
+            // the HighID OP_IDCHANGE client_id == our public IPv4); a LowID id
+            // means we are firewalled, so the server gives us no public IP.
+            if is_low_id(id_change.client_id) {
+                context.public_ip.clear();
+            } else {
+                context.public_ip.set(ipv4_from_client_id(id_change.client_id));
+            }
             send_connected_server_startup(
                 session,
                 &context.shared_catalog,

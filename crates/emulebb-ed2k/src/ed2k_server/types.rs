@@ -58,6 +58,9 @@ pub(super) struct ServerSessionContext {
     pub(super) connect_timeout: Duration,
     pub(super) rotation_interval: Option<Duration>,
     pub(super) shutdown: Arc<AtomicBool>,
+    /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
+    /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
+    pub(super) public_ip: crate::public_ip::SharedPublicIp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
