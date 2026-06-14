@@ -72,6 +72,15 @@ impl Ed2kTransport {
         socket
             .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
             .with_context(|| format!("failed to bind outgoing eD2k socket to {bind_ip}"))?;
+        // Pin egress to the VPN tunnel interface (IP_UNICAST_IF) before connect so
+        // the SYN + payload leave via the tunnel, not just bound by source IP —
+        // solid VPN binding (eMule ApplyConfiguredIpv4UnicastInterface). No-op when
+        // bind_ip resolves to no interface (e.g. unspecified bind).
+        emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+            socket2::SockRef::from(&socket),
+            crate::networking::resolve_bind_if_index(bind_ip),
+        )
+        .with_context(|| format!("failed to pin eD2k egress to the bind interface for {bind_ip}"))?;
         let mut stream = tokio::time::timeout(timeout, socket.connect(peer_addr))
             .await
             .with_context(|| format!("timed out connecting to eD2k peer {peer_addr}"))??;

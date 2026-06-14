@@ -94,6 +94,13 @@ impl ServerSession {
         socket
             .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
             .with_context(|| format!("failed to bind ED2K server socket to {bind_ip}"))?;
+        // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) before connect so
+        // the server session leaves via the tunnel — solid VPN binding.
+        emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+            socket2::SockRef::from(&socket),
+            crate::networking::resolve_bind_if_index(bind_ip),
+        )
+        .with_context(|| format!("failed to pin ED2K server egress for {bind_ip}"))?;
         let stream = tokio::time::timeout(timeout, socket.connect(endpoint))
             .await
             .with_context(|| format!("timed out connecting to ED2K server {endpoint}"))??;

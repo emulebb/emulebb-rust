@@ -12,9 +12,16 @@ use super::{
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
-    UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+    let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
         .await
-        .with_context(|| format!("failed to bind ED2K server UDP helper on {bind_ip}:0"))
+        .with_context(|| format!("failed to bind ED2K server UDP helper on {bind_ip}:0"))?;
+    // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) — solid VPN binding.
+    emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+        socket2::SockRef::from(&socket),
+        crate::networking::resolve_bind_if_index(bind_ip),
+    )
+    .with_context(|| format!("failed to pin ED2K server UDP egress for {bind_ip}"))?;
+    Ok(socket)
 }
 
 async fn send_server_udp_packet(

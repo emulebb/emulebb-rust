@@ -230,6 +230,12 @@ pub async fn search_source_udp_servers(
     let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
         .await
         .with_context(|| format!("failed to bind ED2K UDP source-search socket on {bind_ip}"))?;
+    // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) — solid VPN binding.
+    emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+        socket2::SockRef::from(&socket),
+        crate::networking::resolve_bind_if_index(bind_ip),
+    )
+    .with_context(|| format!("failed to pin ED2K UDP source-search egress for {bind_ip}"))?;
     let mut aggregated_results = Vec::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));

@@ -8,7 +8,7 @@ pub mod types;
 
 pub use emulebb_kad_net::{
     ForeignDatagramHandler, ReceivedKadPacket, RpcClassBudgetConfig, RpcObservabilitySnapshot,
-    RpcWorkClass, RpcWorkClassSnapshot,
+    RpcWorkClass, RpcWorkClassSnapshot, socket_opts,
 };
 pub use error::DhtError;
 pub use node::{DhtConfig, DhtNode};
