@@ -32,11 +32,23 @@ Same classes as eMuleBB: `BUG`, `FEAT`, `REF`, `CI`. IDs are allocated per class
 and never reused. Scan `docs/active/items` (and `docs/history/items` once it
 exists) before allocating the next number.
 
+## Phase 0 — "perfectly functional" gate
+
+emulebb-rust is the strategic forward eD2K/Kad core (eMuleBB MFC is frozen at
+`0.7.3`). "Perfectly functional" = client parity **plus** the indexer role, per
+`emulebb-tooling/docs/active/SUITE-JOINT-ROADMAP.md`. The FEAT items below are the
+Phase 0 scope. Cooperative-DHT / BEP-46 publishing and similar ideas are **parked**
+(see the roadmap's Active vs Parked ledger) and are intentionally **not** backlog
+items.
+
 ## Features (`FEAT`)
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| [FEAT-001](items/FEAT-001.md) | Major | OPEN | eD2K — Implement client UDP source reask and queue-slot persistence |
+| [FEAT-001](items/FEAT-001.md) | Major | IN_PROGRESS | eD2K — Implement client UDP source reask and queue-slot persistence |
+| [FEAT-002](items/FEAT-002.md) | Major | OPEN | Indexer — autonomous Kad/eD2K snooping index with Torznab surface |
+| [FEAT-003](items/FEAT-003.md) | Major | OPEN | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
+| [FEAT-004](items/FEAT-004.md) | Major | OPEN | Arr integration — Torznab indexer + qBittorrent-emulating download client |
 
 ## Bugs (`BUG`)
 

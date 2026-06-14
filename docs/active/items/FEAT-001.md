@@ -2,11 +2,11 @@
 id: FEAT-001
 workflow: local
 title: eD2K — Implement client UDP source reask and queue-slot persistence
-status: OPEN
+status: IN_PROGRESS
 priority: Major
 category: feature
 labels: [ed2k, udp, downloads, parity]
-milestone: post-parity
+milestone: phase-0
 created: 2026-06-14
 source: protocol-divergence audit (emulebb-rust vs emulebb-main vs p2p-overlord-agents)
 ---
@@ -25,6 +25,14 @@ queue slots on TCP teardown and silently fails to answer reasks it advertises
 support for. Full design: [`docs/design/udp-source-reask.md`](../../design/udp-source-reask.md).
 
 ## Current State
+
+**Update 2026-06-14 — code-complete off by default.** The pure + state + loop
+layers are implemented behind `enable_udp_reask` (off): codec/policy/registry/
+state, the shared-Kad-UDP-port transport, uploader reciprocity, downloader detach,
+and TCP-fallback re-engage (~64 tests, clippy-clean). The omission is recorded in
+`policy/rust-client-omissions.toml` (`udp-source-reask-transport`). **Remaining:
+live validation (Rust↔Rust, then gentle Rust↔stock) before flipping the flag on.**
+The original pre-implementation audit below is retained as provenance.
 
 - No client UDP socket exists; `crates/emulebb-ed2k/src/ed2k_tcp/` has no reask
   opcode handling. The gap is **inherited verbatim** from
