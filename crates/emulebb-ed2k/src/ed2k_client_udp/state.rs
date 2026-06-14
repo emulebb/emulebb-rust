@@ -38,6 +38,11 @@ pub(crate) struct ReaskSource {
     pub no_needed_parts: bool,
     /// Set when the last reply was `OP_QUEUEFULL`; cleared on a real rank ack.
     pub remote_queue_full: bool,
+    /// The peer's eD2k user hash — obfuscation key material for outbound reasks.
+    /// `None` until learned (then reasks to it can be obfuscated).
+    pub user_hash: Option<[u8; 16]>,
+    /// Whether to obfuscate reasks to this peer (`ShouldReceiveCryptUDPPackets`).
+    pub should_crypt: bool,
 }
 
 impl ReaskSource {
@@ -59,7 +64,17 @@ impl ReaskSource {
             fallback_tcp_only: false,
             no_needed_parts: false,
             remote_queue_full: false,
+            user_hash: None,
+            should_crypt: false,
         }
+    }
+
+    /// Attach the peer's obfuscation key material (learned from the download
+    /// session) so reasks to this source can be encrypted.
+    pub(crate) fn with_obfuscation(mut self, user_hash: [u8; 16], should_crypt: bool) -> Self {
+        self.user_hash = Some(user_hash);
+        self.should_crypt = should_crypt;
+        self
     }
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {

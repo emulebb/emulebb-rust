@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 
+use super::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
 use super::registry::ReaskPendingRegistry;
 use super::state::{ReaskAction, ReaskReply, ReaskSource, apply_reask_reply};
 
@@ -47,6 +48,48 @@ impl ReaskSourceSet {
             })
             .map(|(endpoint, _)| *endpoint)
             .collect()
+    }
+
+    /// Build the outbound `OP_REASKFILEPING` datagrams for every source that is
+    /// due (and not already awaiting a reply), marking each pending. The ticker
+    /// sends each `(endpoint, bytes)` via `RpcManager::send_raw_datagram`.
+    /// UDP-disqualified sources (`fallback_tcp_only`) are skipped — the caller
+    /// reasks those over TCP. Transfer-level inputs (`our_part_status`,
+    /// `complete_source_count`, `our_udp_version`, `our_public_ip`) are passed in;
+    /// per-source obfuscation comes from the source's learned `user_hash`.
+    pub(crate) fn due_datagrams(
+        &mut self,
+        now: Instant,
+        our_part_status: Option<&[bool]>,
+        complete_source_count: u16,
+        our_udp_version: u8,
+        our_public_ip: [u8; 4],
+    ) -> Vec<((Ipv4Addr, u16), Vec<u8>)> {
+        let mut out = Vec::new();
+        for (ip, udp_port) in self.due(now) {
+            let Some(source) = self.sources.get(&(ip, udp_port)) else {
+                continue;
+            };
+            if source.fallback_tcp_only {
+                continue; // UDP disqualified — caller reasks over TCP
+            }
+            let target = OutboundReaskTarget {
+                dest_user_hash: source.user_hash.unwrap_or([0u8; 16]),
+                our_public_ip,
+                // Only obfuscate when we actually hold the peer's key.
+                obfuscate: source.should_crypt && source.user_hash.is_some(),
+            };
+            let datagram = build_reask_file_ping_datagram(
+                &source.file_hash,
+                our_part_status,
+                complete_source_count,
+                our_udp_version,
+                &target,
+            );
+            self.mark_reasked(ip, udp_port, now);
+            out.push(((ip, udp_port), datagram));
+        }
+        out
     }
 
     /// Mark that a reask was just sent to `endpoint` (opens the pending-reply
@@ -217,6 +260,52 @@ mod tests {
         assert_eq!(last_action, Some(ReaskAction::RetryTcp));
         assert!(set.get(a, pa).unwrap().fallback_tcp_only);
         assert_eq!(set.get(a, pa).unwrap().udp_failed, 4);
+    }
+
+    #[test]
+    fn due_datagrams_builds_pings_marks_pending_and_skips_tcp_fallback() {
+        use super::super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
+
+        let now = Instant::now();
+        let our_ip = [203, 0, 113, 9];
+        let peer_hash = [0x55u8; 16];
+        let mut set = ReaskSourceSet::new();
+
+        // One obfuscation-capable due source.
+        let endpoint = (ip(8), 4672);
+        set.insert(
+            ReaskSource::new(endpoint, hash(), 4, now).with_obfuscation(peer_hash, true),
+        );
+
+        let datagrams = set.due_datagrams(now, Some(&[true, false, true]), 2, 4, our_ip);
+        assert_eq!(datagrams.len(), 1);
+        assert_eq!(datagrams[0].0, endpoint);
+
+        // The built datagram is a valid OP_REASKFILEPING the peer (keying on its
+        // own hash == peer_hash + our IP as the sender) can parse back.
+        let msg = parse_inbound_reask_datagram(&datagrams[0].1, our_ip, &peer_hash, 4)
+            .expect("peer should parse our reask");
+        match msg {
+            InboundReaskMessage::FilePing(ping) => {
+                assert_eq!(ping.file_hash, hash());
+                assert_eq!(ping.complete_source_count, Some(2));
+            }
+            other => panic!("expected FilePing, got {other:?}"),
+        }
+
+        // The source is now pending, so it is no longer due.
+        assert!(set.due(now).is_empty());
+
+        // A TCP-fallback source produces no datagram.
+        let tcp_endpoint = (ip(9), 4672);
+        let mut tcp_src = ReaskSource::new(tcp_endpoint, hash(), 4, now);
+        tcp_src.fallback_tcp_only = true;
+        set.insert(tcp_src);
+        let next = set.due_datagrams(now, None, 0, 4, our_ip);
+        assert!(
+            next.iter().all(|(ep, _)| *ep != tcp_endpoint),
+            "tcp-fallback source must not get a UDP reask datagram"
+        );
     }
 
     #[test]
