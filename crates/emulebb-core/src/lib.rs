@@ -709,6 +709,11 @@ struct DirectDownloadOutcome {
     completed: bool,
     accepted_incomplete_peers: u32,
     last_error: Option<anyhow::Error>,
+    /// Endpoints that detached their TCP socket onto the UDP reask loop. Their
+    /// source leases are deliberately NOT released so the next download cycle
+    /// does not re-connect them over TCP while the reask loop holds them (the
+    /// loop owns re-engagement; on UDP failure it drops them back to TCP).
+    detached_reask_endpoints: Vec<(Ipv4Addr, u16)>,
 }
 
 struct DirectDownloadOptions {
@@ -2870,7 +2875,20 @@ impl EmulebbCore {
                     },
                 )
                 .await;
-                self.release_direct_download_source_leases(&leased_endpoints)
+                // Release every leased endpoint EXCEPT those that detached onto the
+                // UDP reask loop: the loop now owns re-engagement for them, so
+                // releasing the lease would let the next cycle re-connect them over
+                // TCP (the reask churn). On error, detached is empty -> release all.
+                let detached_endpoints: std::collections::HashSet<(Ipv4Addr, u16)> = match &outcome {
+                    Ok(outcome) => outcome.detached_reask_endpoints.iter().copied().collect(),
+                    Err(_) => std::collections::HashSet::new(),
+                };
+                let endpoints_to_release: Vec<(Ipv4Addr, u16)> = leased_endpoints
+                    .iter()
+                    .copied()
+                    .filter(|endpoint| !detached_endpoints.contains(endpoint))
+                    .collect();
+                self.release_direct_download_source_leases(&endpoints_to_release)
                     .await;
                 let outcome = outcome?;
                 if outcome.completed {
@@ -5441,6 +5459,9 @@ where
     let retry_sources = sources;
     let mut retry_round = 0u32;
     let mut last_error: Option<anyhow::Error> = None;
+    // Endpoints that detached onto UDP reask across all retry rounds; their leases
+    // are kept (not released) so the next cycle does not re-TCP them.
+    let mut detached_reask_endpoints: Vec<(Ipv4Addr, u16)> = Vec::new();
 
     loop {
         let mut accepted_incomplete_peers = 0u32;
@@ -5490,6 +5511,7 @@ where
                             last_error: last_error
                                 .as_ref()
                                 .map(|error| anyhow::anyhow!(error.to_string())),
+                            detached_reask_endpoints: detached_reask_endpoints.clone(),
                         });
                     }
                 }
@@ -5506,6 +5528,7 @@ where
                     // which now keeps its queue slot warm and re-engages over TCP
                     // on UDP failure. Count it like an accepted-incomplete peer.
                     accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
+                    detached_reask_endpoints.push(source_endpoint_key(&source));
                     tracing::info!(
                         "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
                         file_hash_hex,
@@ -5547,6 +5570,7 @@ where
             last_error: last_error
                 .as_ref()
                 .map(|error| anyhow::anyhow!(error.to_string())),
+            detached_reask_endpoints: detached_reask_endpoints.clone(),
         };
         if outcome.completed || outcome.accepted_incomplete_peers != 0 {
             return Ok(outcome);

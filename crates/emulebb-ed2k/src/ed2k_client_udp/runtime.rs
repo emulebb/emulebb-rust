@@ -254,8 +254,9 @@ async fn drive_reask_tick(
             })
     });
     for (addr, datagram) in out.send {
-        if let Err(err) = dht.send_raw_datagram(addr, &datagram).await {
-            trace!("ed2k udp reask: send to {addr} failed: {err}");
+        match dht.send_raw_datagram(addr, &datagram).await {
+            Ok(()) => trace!("ed2k udp reask: sent reask ping to {addr} ({} bytes)", datagram.len()),
+            Err(err) => trace!("ed2k udp reask: send to {addr} failed: {err}"),
         }
     }
     for (addr, action) in out.timed_out {
