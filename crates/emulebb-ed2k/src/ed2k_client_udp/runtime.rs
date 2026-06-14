@@ -103,6 +103,21 @@ const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
 /// (the source keeps its TCP behaviour), so a modest bound is safe.
 const REASK_COMMAND_CHANNEL_BOUND: usize = 256;
 
+/// Hex preview of a datagram for reask packet-trace diagnostics (capped so a
+/// stray large datagram cannot blow up the log line).
+fn hex_preview(bytes: &[u8]) -> String {
+    const MAX: usize = 64;
+    let shown = &bytes[..bytes.len().min(MAX)];
+    let mut out = String::with_capacity(shown.len() * 2 + 8);
+    for b in shown {
+        out.push_str(&format!("{b:02x}"));
+    }
+    if bytes.len() > MAX {
+        out.push_str(&format!("…(+{} more)", bytes.len() - MAX));
+    }
+    out
+}
+
 /// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
 /// when `enable_udp_reask` is on; off by default because the transport must be
 /// wire-validated before it is trusted.
@@ -172,6 +187,10 @@ async fn handle_inbound_datagram(
     data: &[u8],
     from: SocketAddr,
 ) {
+    trace!(
+        "ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}",
+        data.len(), hex_preview(data),
+    );
     match service.handle_inbound(data, from, Instant::now()) {
         ReaskInboundOutcome::RoutedReply(action) => {
             trace!("ed2k udp reask: routed reply from {from}: {action:?}");
@@ -255,7 +274,10 @@ async fn drive_reask_tick(
     });
     for (addr, datagram) in out.send {
         match dht.send_raw_datagram(addr, &datagram).await {
-            Ok(()) => trace!("ed2k udp reask: sent reask ping to {addr} ({} bytes)", datagram.len()),
+            Ok(()) => trace!(
+                "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
+                datagram.len(), hex_preview(&datagram),
+            ),
             Err(err) => trace!("ed2k udp reask: send to {addr} failed: {err}"),
         }
     }
