@@ -65,6 +65,46 @@ fn apply_emule_info_profile(
     session_state.remote_supports_source_exchange = profile.supports_source_exchange;
     session_state.remote_supports_source_exchange2 = false;
     session_state.remote_supports_secure_ident = profile.supports_secure_ident;
+    session_state.peer_udp_port = profile.udp_port;
+    session_state.peer_udp_version = profile.udp_version;
+}
+
+/// Detach a just-queued source onto UDP reask when reask is enabled and the peer
+/// is UDP-eligible (eMuleBB §4.1 `QueuedDetached`). Returns whether the source
+/// was handed off (so the session can close its TCP socket and return early).
+fn try_detach_queued_source_for_reask(
+    reask_register: &Option<crate::ed2k_client_udp::ReaskSourceHandle>,
+    peer_addr: SocketAddr,
+    file_hash: Ed2kHash,
+    session_state: &DownloadSessionState,
+    should_crypt: bool,
+) -> bool {
+    let Some(handle) = reask_register else {
+        return false;
+    };
+    let SocketAddr::V4(v4) = peer_addr else {
+        return false; // IPv4-only client
+    };
+    // We hold the shared Kad UDP port whenever reask is enabled (have_local_udp);
+    // we are detaching, so no live TCP socket remains; no proxy/firewall modelled.
+    if !crate::ed2k_client_udp::udp_reask_eligible(
+        session_state.peer_udp_port,
+        session_state.peer_udp_version,
+        true,
+        false,
+        false,
+        false,
+    ) {
+        return false;
+    }
+    handle.detach(
+        file_hash,
+        (*v4.ip(), session_state.peer_udp_port),
+        session_state.peer_udp_version,
+        session_state.peer_user_hash,
+        should_crypt,
+    );
+    true
 }
 
 /// Outcome of one outbound ED2K peer download attempt.
@@ -75,6 +115,11 @@ pub enum Ed2kPeerDownloadOutcome {
     /// The peer accepted the session and looked valid, but the transfer did not
     /// complete before the peer closed or the attempt timed out.
     AcceptedButIncomplete,
+    /// The peer queued us and is UDP-reask eligible, so the session detached its
+    /// TCP socket and handed the source to the UDP reask loop (eMuleBB
+    /// `QueuedDetached`). The driver should not immediately reconnect — the reask
+    /// loop keeps the queue slot warm and re-engages over TCP on UDP failure.
+    QueuedDetachedForUdpReask,
 }
 
 pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
@@ -91,6 +136,10 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) initial_hello_complete: bool,
     pub(in crate::ed2k_tcp) initial_secure_ident_started: bool,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
+    /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its
+    /// TCP socket onto UDP reask via this handle instead of holding the queue
+    /// position over TCP. `None` keeps the legacy TCP-only queued behaviour.
+    pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
 }
 
 pub(in crate::ed2k_tcp) async fn drive_download_session(
@@ -110,6 +159,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         initial_hello_complete,
         initial_secure_ident_started,
         peer_user_hash,
+        reask_register,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(20);
     const PART_RESPONSE_GRACE: Duration = Duration::from_secs(20);
@@ -792,6 +842,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "queue_ranking",
                         format!("file_hash={file_hash_hex} rank={rank} protocol=edonkey"),
                     );
+                    if try_detach_queued_source_for_reask(
+                        &reask_register,
+                        peer_addr,
+                        file_hash,
+                        &session_state,
+                        transport.mode.is_obfuscated(),
+                    ) {
+                        return Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask);
+                    }
                 }
                 (OP_EMULEPROT, OP_QUEUERANKING) => {
                     let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
@@ -802,6 +861,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "queue_ranking",
                         format!("file_hash={file_hash_hex} rank={rank} protocol=emule"),
                     );
+                    if try_detach_queued_source_for_reask(
+                        &reask_register,
+                        peer_addr,
+                        file_hash,
+                        &session_state,
+                        transport.mode.is_obfuscated(),
+                    ) {
+                        return Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask);
+                    }
                 }
                 (OP_EDONKEYPROT, OP_END_OF_DOWNLOAD) => {
                     let ended_hash = decode_optional_file_hash_payload(&packet.payload);

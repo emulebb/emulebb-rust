@@ -195,6 +195,16 @@ impl ReaskService {
     pub(crate) fn source_count(&self) -> usize {
         self.per_file.values().map(ReaskSourceSet::len).sum()
     }
+
+    /// File hashes that currently have at least one detached reask source, so the
+    /// tick caller can pre-fetch each file's [`TransferReaskInfo`].
+    pub(crate) fn registered_file_hashes(&self) -> Vec<Ed2kHash> {
+        self.per_file
+            .iter()
+            .filter(|(_, set)| !set.is_empty())
+            .map(|(hash, _)| *hash)
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -118,6 +118,7 @@ macro_rules! download_file_from_peer_test {
             canonical_name: $canonical_name,
             file_size: $file_size,
             timeout: $timeout,
+            reask_register: None,
         })
     };
 }

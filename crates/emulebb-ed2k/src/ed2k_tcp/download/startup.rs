@@ -41,6 +41,9 @@ pub struct Ed2kPeerDownloadOptions<'a> {
     pub canonical_name: String,
     pub file_size: u64,
     pub timeout: Duration,
+    /// When set (UDP reask enabled), a queued + UDP-eligible source detaches onto
+    /// UDP reask via this handle. `None` keeps the legacy TCP-only queued path.
+    pub reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
 }
 
 pub async fn download_file_from_peer(
@@ -55,6 +58,7 @@ pub async fn download_file_from_peer(
         canonical_name,
         file_size,
         timeout,
+        reask_register,
     } = options;
     let file_hash = peer.file_hash;
     let file_hash_hex = file_hash.to_string();
@@ -127,6 +131,7 @@ pub async fn download_file_from_peer(
             initial_hello_complete: false,
             initial_secure_ident_started: false,
             peer_user_hash: peer.user_hash,
+            reask_register,
         })
         .await;
         match &session_result {
@@ -140,6 +145,12 @@ pub async fn download_file_from_peer(
                 peer_addr,
                 Some(transport.mode),
                 "accepted_incomplete",
+                format!("file_hash={file_hash_hex}"),
+            ),
+            Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask) => dump_ed2k_tcp_download_meta(
+                peer_addr,
+                Some(transport.mode),
+                "queued_detached_udp_reask",
                 format!("file_hash={file_hash_hex}"),
             ),
             Err(error) => dump_ed2k_tcp_download_meta(

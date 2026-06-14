@@ -13,12 +13,16 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
+use emulebb_kad_proto::Ed2kHash;
+
 use crate::ed2k_client_udp::codec::ReaskFilePing;
 use crate::ed2k_client_udp::reciprocity::{
     InboundReaskRequest, ReciprocityReplyFraming, build_reciprocity_reply,
 };
+use crate::ed2k_client_udp::service::TransferReaskInfo;
 
 use super::Ed2kTransferRuntime;
+use super::model::Ed2kTransferState;
 use super::upload_queue::Ed2kUploadSessionPhaseSnapshot;
 
 impl Ed2kTransferRuntime {
@@ -88,5 +92,34 @@ impl Ed2kTransferRuntime {
         };
 
         build_reciprocity_reply(&req, &framing, our_public_ip)
+    }
+
+    /// Our downloader-side reask facts for one file: the part-availability bitmap
+    /// to advertise in an outbound `OP_REASKFILEPING` (verified pieces, only for
+    /// an incomplete partfile) and our complete-source count. Mirrors the
+    /// partstatus eMule sends with a reask when `GetUDPVersion() > 3`.
+    pub(crate) async fn reask_transfer_info(&self, file_hash: &Ed2kHash) -> TransferReaskInfo {
+        let hex = file_hash.to_string();
+        match self.manifest(&hex).await {
+            // Incomplete partfile: advertise which pieces we already hold.
+            Ok(manifest) if !manifest.completed && !manifest.pieces.is_empty() => {
+                let part_status = manifest
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.state == Ed2kTransferState::Verified)
+                    .collect();
+                TransferReaskInfo {
+                    part_status: Some(part_status),
+                    // Complete-source accounting is not tracked here yet; 0 is the
+                    // honest hint (the field is optional, udp_version > 2).
+                    complete_source_count: 0,
+                }
+            }
+            // Complete / unknown file: no partfile bitmap.
+            _ => TransferReaskInfo {
+                part_status: None,
+                complete_source_count: 0,
+            },
+        }
     }
 }

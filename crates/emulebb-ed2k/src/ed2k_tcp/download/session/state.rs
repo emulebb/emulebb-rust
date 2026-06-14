@@ -31,6 +31,11 @@ pub(super) struct DownloadSessionState {
     pub(super) completed_block_count: usize,
     pub(super) session_payload_down: u64,
     pub(super) peer_user_hash: Option<[u8; 16]>,
+    /// Peer's advertised eD2k UDP port (from OP_EMULEINFO ET_UDPPORT), 0 if none.
+    /// Used to detach a queued source onto UDP reask.
+    pub(super) peer_udp_port: u16,
+    /// Peer's advertised eD2k UDP version (OP_EMULEINFO ET_UDPVER), 0 if unknown.
+    pub(super) peer_udp_version: u8,
 }
 
 impl DownloadSessionState {
@@ -72,6 +77,8 @@ impl DownloadSessionState {
             completed_block_count: 0,
             session_payload_down: 0,
             peer_user_hash,
+            peer_udp_port: 0,
+            peer_udp_version: 0,
         }
     }
 

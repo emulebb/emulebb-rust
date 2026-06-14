@@ -1,7 +1,10 @@
 pub mod config;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
-pub use ed2k_client_udp::run_ed2k_udp_reask_loop;
+pub use ed2k_client_udp::{
+    ReaskCommand, ReaskCommandReceiver, ReaskSourceHandle, reask_command_channel,
+    run_ed2k_udp_reask_loop,
+};
 #[allow(dead_code)]
 pub mod ed2k_server;
 #[allow(dead_code)]

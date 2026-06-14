@@ -108,6 +108,29 @@ async fn reciprocity_replies_file_not_found_for_an_unshared_file() {
 }
 
 #[tokio::test]
+async fn reask_transfer_info_advertises_partfile_bitmap_for_incomplete_download() {
+    use crate::ed2k_transfer::{ED2K_PART_SIZE, new_transfer_job};
+
+    let root = unique_test_dir("ed2k-reask-transfer-info");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    // A fresh two-part job is incomplete with no verified pieces yet.
+    let file_hash = Ed2kHash::from_bytes([0x42; 16]);
+    let job = new_transfer_job(file_hash, "ubuntu-linux.iso".to_string(), ED2K_PART_SIZE + 7);
+    runtime.ensure_job(&job).await.unwrap();
+
+    let info = runtime.reask_transfer_info(&file_hash).await;
+    let part_status = info.part_status.expect("a partfile bitmap");
+    assert_eq!(part_status.len(), 2);
+    assert!(part_status.iter().all(|have| !have));
+
+    // An unknown file has no manifest, so no bitmap is advertised.
+    let unknown = runtime
+        .reask_transfer_info(&Ed2kHash::from_bytes([0x99; 16]))
+        .await;
+    assert!(unknown.part_status.is_none());
+}
+
+#[tokio::test]
 async fn reciprocity_is_silent_for_an_unknown_sender_with_room() {
     let root = unique_test_dir("ed2k-reask-reciprocity-silent");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

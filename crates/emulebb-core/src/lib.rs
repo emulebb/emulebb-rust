@@ -39,7 +39,7 @@ use emulebb_ed2k::{
     ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
     public_ip::SharedPublicIp,
-    run_ed2k_udp_reask_loop,
+    reask_command_channel, run_ed2k_udp_reask_loop, ReaskSourceHandle,
 };
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
@@ -784,6 +784,11 @@ pub struct EmulebbCore {
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
     ed2k_runtime: Arc<Mutex<Option<Ed2kRuntime>>>,
+    /// Handle for detaching queued download sources onto the UDP reask loop.
+    /// `Some` only while connected with `enable_udp_reask`; read by the direct
+    /// download driver to detach queued sources. `std::sync::Mutex` so the
+    /// download closure can read it without `.await`.
+    ed2k_reask_handle: Arc<std::sync::Mutex<Option<ReaskSourceHandle>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -864,6 +869,7 @@ impl EmulebbCore {
             kad_local_store,
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),
+            ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1233,10 +1239,14 @@ impl EmulebbCore {
         })));
         if enable_udp_reask {
             // Off by default; wire-validate before enabling. udp_version 4 matches
-            // our advertised hello ET_UDPVER.
+            // our advertised hello ET_UDPVER. The handle lets the direct download
+            // driver detach queued sources onto the loop over the command channel.
+            let (reask_handle, reask_commands) = reask_command_channel();
+            *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
             tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
                 dht.clone(),
                 Arc::clone(&self.ed2k_transfers),
+                reask_commands,
                 reask_user_hash,
                 4,
                 ed2k_public_ip.clone(),
@@ -1257,6 +1267,9 @@ impl EmulebbCore {
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
+        // Drop the reask detach handle so post-disconnect downloads stay on TCP
+        // and the closed command channel lets the (aborted) loop wind down.
+        *self.ed2k_reask_handle.lock().unwrap() = None;
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
             for task in runtime.tasks {
@@ -2811,6 +2824,9 @@ impl EmulebbCore {
                     .iter()
                     .map(source_endpoint_key)
                     .collect::<Vec<_>>();
+                // Captured per-call into each peer attempt so a queued + UDP-eligible
+                // source can detach onto the reask loop (None when reask is off).
+                let reask_register = self.ed2k_reask_handle.lock().unwrap().clone();
                 let outcome = run_ed2k_direct_downloads(
                     DirectDownloadOptions {
                         bind_ip: network.bind_ip,
@@ -2824,25 +2840,29 @@ impl EmulebbCore {
                         connect_timeout: timeout,
                         max_parallel_download_peers: max_peers,
                     },
-                    |bind_ip,
-                     source,
-                     hello_identity,
-                     secure_ident,
-                     transfer_runtime,
-                     file_name,
-                     file_size,
-                     connect_timeout| async move {
-                        download_file_from_peer(Ed2kPeerDownloadOptions {
-                            bind_ip,
-                            peer: &source,
-                            hello_identity,
-                            secure_ident: &secure_ident,
-                            transfer_runtime: transfer_runtime.as_ref(),
-                            canonical_name: file_name,
-                            file_size,
-                            timeout: connect_timeout,
-                        })
-                        .await
+                    move |bind_ip,
+                          source,
+                          hello_identity,
+                          secure_ident,
+                          transfer_runtime,
+                          file_name,
+                          file_size,
+                          connect_timeout| {
+                        let reask_register = reask_register.clone();
+                        async move {
+                            download_file_from_peer(Ed2kPeerDownloadOptions {
+                                bind_ip,
+                                peer: &source,
+                                hello_identity,
+                                secure_ident: &secure_ident,
+                                transfer_runtime: transfer_runtime.as_ref(),
+                                canonical_name: file_name,
+                                file_size,
+                                timeout: connect_timeout,
+                                reask_register,
+                            })
+                            .await
+                        }
                     },
                 )
                 .await;
@@ -5473,6 +5493,17 @@ where
                     accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
                     tracing::info!(
                         "ED2K direct download peer accepted incomplete file_hash={} peer={}",
+                        file_hash_hex,
+                        peer_addr
+                    );
+                }
+                Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask) => {
+                    // The source detached its TCP socket onto the UDP reask loop,
+                    // which now keeps its queue slot warm and re-engages over TCP
+                    // on UDP failure. Count it like an accepted-incomplete peer.
+                    accepted_incomplete_peers = accepted_incomplete_peers.saturating_add(1);
+                    tracing::info!(
+                        "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
                         file_hash_hex,
                         peer_addr
                     );

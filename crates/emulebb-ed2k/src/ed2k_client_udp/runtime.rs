@@ -9,25 +9,85 @@
 //! reasks. All reask *decisions* live in the I/O-free [`super::ReaskService`];
 //! this is the thin async shell that performs the socket I/O.
 //!
-//! Wiring still pending (the live-validated next slice, flagged inline): the
-//! download-session **detach hook** (`register_source` when a peer queues us).
-//! The uploader **reciprocity** answer is wired (via the runtime's global
-//! upload-queue `(ip,udp_port)` lookup). Until the detach hook lands the loop
-//! holds no downloader sources, so it only answers inbound pings — it is
-//! structurally complete and inert as a downloader.
+//! Both directions are wired (off by default): the uploader **reciprocity**
+//! answer (via the runtime's global upload-queue `(ip,udp_port)` lookup) and the
+//! downloader **detach hook** — a download session that gets queued on a
+//! UDP-eligible peer sends a [`ReaskCommand`] over the command channel; the loop
+//! registers it as a `QueuedDetached` source and keeps its slot warm by periodic
+//! UDP reask (real per-file part status pulled from the transfer runtime). The
+//! remaining gated piece is the TCP-fallback re-engage on a bad UDP failure ratio.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use emulebb_kad_dht::{DhtNode, ForeignDatagramHandler};
+use emulebb_kad_proto::Ed2kHash;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
+use super::state::ReaskSource;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::public_ip::SharedPublicIp;
+
+/// A command from a download session to the reask loop: detach a just-queued
+/// source onto UDP reask, or drop one that no longer needs reasking. Public so
+/// core can carry the channel; constructed in-crate by the download session.
+#[derive(Debug, Clone)]
+pub enum ReaskCommand {
+    /// Detach a source that queued us (eMuleBB §4.1 `QueuedDetached` transition).
+    Register {
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+        udp_version: u8,
+        user_hash: Option<[u8; 16]>,
+        should_crypt: bool,
+    },
+    /// Drop a source by endpoint (transfer completed / no longer wanted).
+    Remove { endpoint: (Ipv4Addr, u16) },
+}
+
+/// Receiver end of the detach-command channel, owned by the reask loop.
+pub type ReaskCommandReceiver = mpsc::Receiver<ReaskCommand>;
+
+/// Cloneable sender handle a download session uses to detach a queued source.
+#[derive(Debug, Clone)]
+pub struct ReaskSourceHandle(mpsc::Sender<ReaskCommand>);
+
+impl ReaskSourceHandle {
+    /// Detach a queued source onto UDP reask. Best-effort: a full/closed channel
+    /// silently drops the command (the source just stays on its TCP path).
+    pub(crate) fn detach(
+        &self,
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+        udp_version: u8,
+        user_hash: Option<[u8; 16]>,
+        should_crypt: bool,
+    ) {
+        let _ = self.0.try_send(ReaskCommand::Register {
+            file_hash,
+            endpoint,
+            udp_version,
+            user_hash,
+            should_crypt,
+        });
+    }
+
+    /// Drop a source from reask state by endpoint. Best-effort.
+    pub(crate) fn remove(&self, endpoint: (Ipv4Addr, u16)) {
+        let _ = self.0.try_send(ReaskCommand::Remove { endpoint });
+    }
+}
+
+/// Create the detach-command channel: the handle goes to download sessions, the
+/// receiver to [`run_ed2k_udp_reask_loop`].
+pub fn reask_command_channel() -> (ReaskSourceHandle, ReaskCommandReceiver) {
+    let (tx, rx) = mpsc::channel(REASK_COMMAND_CHANNEL_BOUND);
+    (ReaskSourceHandle(tx), rx)
+}
 
 /// How long to wait for a reask reply before counting it a UDP failure.
 const REASK_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,6 +97,9 @@ const REASK_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// Bound on the inbound channel so a flood of non-Kad datagrams cannot grow it
 /// without limit; excess is dropped (the sender forces a TCP reconnect anyway).
 const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
+/// Bound on the detach-command channel; a full channel just drops the detach
+/// (the source keeps its TCP behaviour), so a modest bound is safe.
+const REASK_COMMAND_CHANNEL_BOUND: usize = 256;
 
 /// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
 /// when `enable_udp_reask` is on; off by default because the transport must be
@@ -44,6 +107,7 @@ const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
 pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
+    mut commands: ReaskCommandReceiver,
     user_hash: [u8; 16],
     udp_version: u8,
     public_ip: SharedPublicIp,
@@ -85,8 +149,12 @@ pub async fn run_ed2k_udp_reask_loop(
                 )
                 .await;
             }
+            maybe = commands.recv() => {
+                let Some(command) = maybe else { break };
+                apply_reask_command(&mut service, command);
+            }
             _ = ticker.tick() => {
-                drive_reask_tick(&mut service, &dht).await;
+                drive_reask_tick(&mut service, &dht, &transfer_runtime).await;
             }
         }
     }
@@ -131,16 +199,57 @@ async fn handle_inbound_datagram(
     }
 }
 
-/// Drive one reask tick: send due reask pings and account timed-out reasks.
-async fn drive_reask_tick(service: &mut ReaskService, dht: &DhtNode) {
-    // TODO(reask-transfer-info): supply real per-file part status + complete-source
-    // count once the download-session detach hook registers sources. With no
-    // sources registered this closure is never invoked.
-    let out = service.tick(Instant::now(), REASK_REPLY_TIMEOUT, |_file_hash| {
-        TransferReaskInfo {
-            part_status: None,
-            complete_source_count: 0,
+/// Apply a download session's detach command to the reask source state.
+fn apply_reask_command(service: &mut ReaskService, command: ReaskCommand) {
+    match command {
+        ReaskCommand::Register {
+            file_hash,
+            endpoint,
+            udp_version,
+            user_hash,
+            should_crypt,
+        } => {
+            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, Instant::now());
+            if let Some(hash) = user_hash {
+                source = source.with_obfuscation(hash, should_crypt);
+            }
+            trace!(
+                "ed2k udp reask: detaching source {}:{} for {} onto UDP reask",
+                endpoint.0, endpoint.1, file_hash
+            );
+            service.register_source(file_hash, source);
         }
+        ReaskCommand::Remove { endpoint } => {
+            service.remove_source(endpoint.0, endpoint.1);
+        }
+    }
+}
+
+/// Drive one reask tick: send due reask pings and account timed-out reasks.
+/// Per-file transfer info (our part availability) is pulled from the transfer
+/// runtime before the sync `tick`, since the source state lives in the service.
+async fn drive_reask_tick(
+    service: &mut ReaskService,
+    dht: &DhtNode,
+    transfer_runtime: &Ed2kTransferRuntime,
+) {
+    // Pre-fetch each registered file's reask info (async manifest read) so the
+    // sync `tick` closure can look it up without blocking.
+    let mut info_by_file: std::collections::HashMap<Ed2kHash, TransferReaskInfo> =
+        std::collections::HashMap::new();
+    for file_hash in service.registered_file_hashes() {
+        let info = transfer_runtime.reask_transfer_info(&file_hash).await;
+        info_by_file.insert(file_hash, info);
+    }
+
+    let out = service.tick(Instant::now(), REASK_REPLY_TIMEOUT, |file_hash| {
+        info_by_file
+            .get(file_hash)
+            .cloned()
+            .unwrap_or(TransferReaskInfo {
+                part_status: None,
+                complete_source_count: 0,
+            })
     });
     for (addr, datagram) in out.send {
         if let Err(err) = dht.send_raw_datagram(addr, &datagram).await {
@@ -150,5 +259,53 @@ async fn drive_reask_tick(service: &mut ReaskService, dht: &DhtNode) {
     for (addr, action) in out.timed_out {
         trace!("ed2k udp reask: reask to {addr} timed out: {action:?}");
         // TODO(reask-tcp-fallback): RetryTcp -> drive a TCP reconnect reask.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::public_ip::SharedPublicIp;
+
+    fn service() -> ReaskService {
+        let public_ip = SharedPublicIp::new();
+        public_ip.set(std::net::Ipv4Addr::new(203, 0, 113, 9));
+        ReaskService::new([0x10; 16], 4, public_ip)
+    }
+
+    #[test]
+    fn register_command_adds_a_source_and_remove_drops_it() {
+        let mut svc = service();
+        let file_hash = Ed2kHash::from_bytes([0xAB; 16]);
+        let endpoint = (Ipv4Addr::new(198, 51, 100, 7), 4672);
+        apply_reask_command(
+            &mut svc,
+            ReaskCommand::Register {
+                file_hash,
+                endpoint,
+                udp_version: 4,
+                user_hash: Some([0x55; 16]),
+                should_crypt: true,
+            },
+        );
+        assert_eq!(svc.source_count(), 1);
+        assert_eq!(svc.registered_file_hashes(), vec![file_hash]);
+
+        apply_reask_command(&mut svc, ReaskCommand::Remove { endpoint });
+        assert_eq!(svc.source_count(), 0);
+        assert!(svc.registered_file_hashes().is_empty());
+    }
+
+    #[test]
+    fn detach_handle_register_is_received_as_a_command() {
+        let (handle, mut rx) = reask_command_channel();
+        let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
+        handle.detach(file_hash, (Ipv4Addr::new(10, 0, 0, 1), 5000), 4, None, false);
+        match rx.try_recv().expect("a queued command") {
+            ReaskCommand::Register { endpoint, .. } => {
+                assert_eq!(endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
+            }
+            other => panic!("expected Register, got {other:?}"),
+        }
     }
 }
