@@ -80,6 +80,41 @@ fn sanitize_ed2k_marker(candidate: u8) -> u8 {
     }
 }
 
+/// Triage decision for an inbound UDP datagram on the shared eD2k/Kad socket,
+/// from its first protocol byte — the `emulebb-ed2k`-owned slice of eMule's
+/// `DecryptReceivedClient` key-try heuristic (`EncryptedDatagramSocket.cpp`
+/// lines 181-188). Tells the (gated) demux whether to attempt eD2k
+/// client-to-client deobfuscation first; the Kad NodeID-vs-ReceiverKey ordering
+/// behind `TryKadFirst` is `emulebb-kad-net`'s concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundUdpDecision {
+    /// First byte is a reserved protocol marker — the packet is plaintext and
+    /// must never be fed to deobfuscation (eMule's early `switch` pass-through).
+    Plaintext,
+    /// Try eD2k client-to-client deobfuscation first: the ed2k marker bit is set,
+    /// or Kad is not running so the eD2k key is the only one worth trying.
+    TryEd2kClientFirst,
+    /// Kad is running and the ed2k bit is clear, so the packet is more likely a
+    /// Kad packet; the eD2k client key remains a later fallback (eMule rotates
+    /// through all key types regardless).
+    TryKadFirst,
+}
+
+/// Classify an inbound shared-socket UDP datagram by its first byte.
+///
+/// `kad_active` mirrors eMule's `Kademlia::CKademlia::GetPrefs() != NULL`: when
+/// Kad never started there is no point trying Kad keys, so eD2k is forced first.
+pub fn classify_inbound_client_udp(first_byte: u8, kad_active: bool) -> InboundUdpDecision {
+    if is_reserved_protocol_marker(first_byte) {
+        return InboundUdpDecision::Plaintext;
+    }
+    if !kad_active || (first_byte & ED2K_MARKER_BIT) != 0 {
+        InboundUdpDecision::TryEd2kClientFirst
+    } else {
+        InboundUdpDecision::TryKadFirst
+    }
+}
+
 /// Minimal RC4 keystream, no key-drop — eD2k UDP keys are created with
 /// `RC4CreateKey(..., /*bSkipDiscard=*/true)`, i.e. the 1024-byte discard that
 /// the TCP handshake performs is skipped (`OtherFunctions.cpp` `RC4CreateKey`).
@@ -322,6 +357,61 @@ mod tests {
             assert!(!is_reserved_protocol_marker(marker));
             assert_eq!(marker & ED2K_MARKER_BIT, ED2K_MARKER_BIT);
         }
+    }
+
+    #[test]
+    fn classify_reserved_markers_are_plaintext() {
+        for reserved in [
+            OP_EMULEPROT,
+            OP_KADEMLIAPACKEDPROT,
+            OP_KADEMLIAHEADER,
+            OP_UDPRESERVEDPROT1,
+            OP_UDPRESERVEDPROT2,
+            OP_PACKEDPROT,
+        ] {
+            assert_eq!(
+                classify_inbound_client_udp(reserved, true),
+                InboundUdpDecision::Plaintext
+            );
+        }
+        // OP_EDONKEYPROT (0xE3) is NOT in the plaintext switch, so it is treated
+        // as a deobfuscation candidate (and it is odd => ed2k bit set).
+        assert_eq!(
+            classify_inbound_client_udp(OP_EDONKEYPROT, true),
+            InboundUdpDecision::TryEd2kClientFirst
+        );
+    }
+
+    #[test]
+    fn classify_ed2k_bit_prefers_ed2k_when_kad_active() {
+        // ed2k marker bit set => eD2k key first even with Kad running.
+        assert_eq!(
+            classify_inbound_client_udp(0x43, true),
+            InboundUdpDecision::TryEd2kClientFirst
+        );
+        // ed2k bit clear + Kad active => Kad first.
+        assert_eq!(
+            classify_inbound_client_udp(0x42, true),
+            InboundUdpDecision::TryKadFirst
+        );
+    }
+
+    #[test]
+    fn classify_forces_ed2k_when_kad_inactive() {
+        // Kad never ran => only the eD2k key is worth trying, regardless of bits.
+        assert_eq!(
+            classify_inbound_client_udp(0x42, false),
+            InboundUdpDecision::TryEd2kClientFirst
+        );
+        assert_eq!(
+            classify_inbound_client_udp(0x43, false),
+            InboundUdpDecision::TryEd2kClientFirst
+        );
+        // A reserved marker is still plaintext even when Kad is inactive.
+        assert_eq!(
+            classify_inbound_client_udp(OP_EMULEPROT, false),
+            InboundUdpDecision::Plaintext
+        );
     }
 
     #[test]
