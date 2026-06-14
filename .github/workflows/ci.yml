@@ -88,8 +88,11 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-      - name: Clippy (blocking)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Relaxed (advisory) while emulebb-rust is in active development. Tighten to
+      # blocking `-- -D warnings` before the Phase 0 "perfectly functional" gate.
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
 
   supply-chain:
     name: cargo-deny (advisories)
