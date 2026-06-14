@@ -54,6 +54,16 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         shutdown,
         ip_filter,
     } = options;
+    // Resolve the VPN bind interface index once (from the listener's local addr)
+    // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
+    // a per-connection interface lookup.
+    let bind_if_index = listener.local_addr().ok().and_then(|addr| {
+        if let std::net::IpAddr::V4(v4) = addr.ip() {
+            crate::networking::resolve_bind_if_index(v4)
+        } else {
+            None
+        }
+    });
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -63,6 +73,15 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                         drop(stream);
                         continue;
                     }
+                }
+                // Pin the accepted socket's egress to the VPN tunnel (IP_UNICAST_IF),
+                // best-effort: the socket already sources from the VPN bind IP, so a
+                // pin failure does not justify dropping an inbound connection.
+                if let Err(error) = emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+                    socket2::SockRef::from(&stream),
+                    bind_if_index,
+                ) {
+                    debug!("failed to pin inbound eD2k egress for {peer_addr}: {error}");
                 }
                 let dht = dht.clone();
                 let server_state = Arc::clone(&server_state);
