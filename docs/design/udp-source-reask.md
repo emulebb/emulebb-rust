@@ -1,6 +1,6 @@
 # eD2K UDP Source Reask & Queue-Slot Persistence — Design Sketch
 
-**Status:** Proposed · post-parity · **out of RC2 scope**
+**Status:** **Implemented behind `enable_udp_reask` (off by default)** · post-parity · out of RC2 scope · pending live validation before the flag is flipped on
 **Area:** ed2k download/upload client (`emulebb-ed2k`)
 **Audience:** anyone implementing client↔client UDP reask in emulebb-rust
 **Backlog item:** [`FEAT-001`](../active/items/FEAT-001.md)
@@ -123,13 +123,14 @@ vs Kad-first). The Kad NodeID/RecvKey paths remain `emulebb-kad-net`'s concern.
 ## 2. Current state in emulebb-rust
 
 emulebb-rust (and its upstream `p2p-overlord-agents`, from which the eD2K stack
-was copied verbatim) inherited **none** of the client↔client UDP *transport*:
-there is still no client UDP socket and `ed2k_tcp/` has no reask dispatcher.
-Provenance is upstream — an inherited gap, not a rust regression. The **pure,
-transport-free foundation is now built** (see §2.1); what remains is the gated
-transport wiring.
+was copied verbatim) originally inherited **none** of the client↔client UDP
+transport. As of 2026-06-14 the **full transport is implemented and unit-tested
+but gated OFF by default** behind `Ed2kConfig.enable_udp_reask` (see §2.1–§2.2);
+the only remaining step is gentle live validation before the flag is enabled. The
+**shipped default behaviour is still the held-TCP queued model below**, so the
+consequences table describes the flag-off default.
 
-Instead, the rust downloader uses a **held-TCP queued** model
+When the flag is off, the rust downloader uses a **held-TCP queued** model
 (`crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs`):
 
 - It opens a TCP session per source and, if queued, **keeps the socket open**,
@@ -172,15 +173,25 @@ thing that remains:
 | Uploader reciprocity | `ed2k_client_udp/reciprocity.rs` | `answer_inbound_reask` decision: Ack/FileNotFound/QueueFull/Silent (§4.5, R5) |
 | Client UDP obfuscation | `ed2k_client_udp_obfuscation.rs` | userhash-key encrypt/decrypt (§1.4) + `classify_inbound_client_udp` first-byte key-try triage |
 
-**Still gated — do not land blind (operator design call + live validation):** the
-inbound reask arrives on the **shared Kad UDP socket** (rust advertises
-`kad_udp_port` as its eD2k UDP port, hello `ET_UDPPORT`). The remaining wiring is
-(1) the §4.3 transport recv loop + demux in `emulebb-kad-net` (now that the
-classifier and obfuscation exist), (2) the §4.2 per-transfer ticker in the
-download runtime, (3) §4.5 uploader reciprocity, and (4) live validation. The
-open **design decision** is shared Kad UDP port (eMule-faithful, touches working
-Kad) vs a separate eD2k client UDP port (safer, diverges). The pure foundation
-above is agnostic to that decision.
+The **design decision is taken**: shared Kad UDP port (eMule-faithful — rust
+advertises `kad_udp_port` as its eD2k UDP port via hello `ET_UDPPORT`, so peers
+reask there). See §2.2 for the transport built on top of this foundation.
+
+### 2.2 Transport wired, gated off (2026-06-14)
+
+The transport integration (§4) is now implemented behind `enable_udp_reask`:
+
+| Piece | Module | Covers |
+|---|---|---|
+| Loop shell | `ed2k_client_udp/runtime.rs` | `run_ed2k_udp_reask_loop`: registers a foreign-datagram handler on the Kad recv loop's decode-failure branch, `select!`s inbound datagrams / detach commands / a 30 s tick; sends via `DhtNode::send_raw_datagram` |
+| Inbound demux | `emulebb-kad-net` `rpc/receive_loop.rs` | `ForeignDatagramHandler` hook on Kad decode-failure (additive; raw datagram forwarded to the reask loop) |
+| Uploader reciprocity | `ed2k_transfer/reask_reciprocity.rs` | `reask_reciprocity_reply`: locates the sender in the global upload queue by `(ip,udp_port)` + consults the shared catalog → `build_reciprocity_reply` (§4.5) |
+| Downloader detach | `ed2k_tcp/download/session.rs` | a queued + UDP-eligible source detaches its TCP socket onto the loop via a `ReaskSourceHandle` command channel (§4.1), returning `QueuedDetachedForUdpReask` |
+| Per-file ticker info | `ed2k_transfer/reask_reciprocity.rs` | `reask_transfer_info`: real partfile bitmap + complete-source count for outbound reask pings |
+| TCP fallback | `ed2k_client_udp/runtime.rs` | on `RetryTcp` (UDP failure-ratio tripped) the source is dropped from reask state so core's next download cycle re-acquires it over TCP |
+
+**Only remaining step: live validation** (operator-gated, gentle Rust↔Rust then
+Rust↔stock) before flipping `enable_udp_reask` on.
 
 ---
 
@@ -403,9 +414,16 @@ What remains is the wiring, and the safe hook is precise:
   `apply_reask_reply` + uploader `answer_inbound_reask`), client-UDP obfuscation +
   inbound classifier, and the bidirectional datagram framing
   (`parse_inbound_reask_datagram` / `build_*_datagram`) are built and unit-tested.
-  The shared-Kad-port design call is **taken** (§4.6). **Remaining (gated on live
-  validation):** the receive_loop.rs inbound hook + the three plumbing needs
-  (user hash, foreign-datagram callback, send-handle) + the per-transfer ticker.
+  The shared-Kad-port design call is **taken** (§4.6).
+- **Phase 1 — transport DONE, gated off (2026-06-14, §2.2):** the loop shell
+  (`run_ed2k_udp_reask_loop`), the `receive_loop.rs` foreign-datagram inbound
+  hook + `send_raw_datagram`, the uploader reciprocity answer
+  (`reask_reciprocity_reply` over the global upload queue + shared catalog), the
+  downloader detach hook (queued source → `ReaskSourceHandle` command channel →
+  `QueuedDetachedForUdpReask`), the per-file ticker info (`reask_transfer_info`,
+  real partfile bitmap + complete-source count), and the `RetryTcp` fallback are
+  all wired behind `enable_udp_reask` (off by default). **Only live validation
+  remains** before the flag is enabled.
 - **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP` — **codec done**, buddy-
   relay transport pending) and `OP_DIRECTCALLBACKREQ`.
 - New code lands as new modules within the per-module size budget
