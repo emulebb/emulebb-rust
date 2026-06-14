@@ -311,24 +311,29 @@ What remains is the wiring, and the safe hook is precise:
   there is **purely additive**: it only inspects packets Kad already rejected, so
   it cannot change Kad behaviour for any packet Kad decodes. On `Some(msg)`,
   handle + `continue`; on `None`, fall through to today's decode-failed logging.
-- **Three plumbing needs** (the boundary architecture, the part to land behind
-  live validation):
-  1. **eD2k user hash** into kad-net — kad-net knows the Kad `NodeId`, not the
-     eD2k user hash the reask key needs. Inject it (config/handle), don't derive.
-  2. **Foreign-datagram handler** — kad-net must hand a non-Kad datagram up to an
-     ed2k/core-registered callback (kad-net must not depend on core). An
-     `Option<Arc<dyn Fn(&[u8], SocketAddr) + Send + Sync>>` on `RpcManager` inner,
-     `None` by default (= exactly today's behaviour), invoked in the hook above.
-  3. **Send-handle** — replies (reciprocity) and the per-transfer ticker
-     (outbound `build_*_datagram`) send via the *same* shared socket, so the
-     handler/ticker needs a clone of kad-net's `Transport` (or a thin
-     `send_raw(addr, bytes)` handle).
-- **Ticker** (§4.2) lives in the core download runtime, owns the
-  `ReaskPendingRegistry` + per-source `ReaskSource`s, calls the outbound builders,
-  and feeds replies (routed by `(ip,udp_port)`) into `apply_reask_reply`.
-- **Validation gate:** land the above incrementally and prove it on the wire
-  (Rust↔Rust accelerated cadence, then a gentle Rust↔stock witness) before
-  trusting it — do not enable by default until validated.
+- **Three plumbing needs:**
+  1. **eD2k user hash** — needed by the reask deobfuscation key. *No kad-net
+     change*: the handler closure the eD2k/core layer registers simply **captures**
+     its user hash (kad-net stays oblivious to eD2k identity).
+  2. **Foreign-datagram handler** — **DONE** (`ce1c02a`):
+     `RpcManager::set_foreign_datagram_handler` takes a
+     `ForeignDatagramHandler = Arc<dyn Fn(&[u8], SocketAddr) -> bool + Send + Sync>`
+     (OnceLock, `None` by default = today's behaviour), invoked in the hook above;
+     `true` consumes the datagram and skips the decode-failure path.
+  3. **Send-handle** — **DONE** (`a687be2`): `RpcManager::send_raw_datagram(addr,
+     bytes)` puts already-framed eD2k bytes on the shared socket without Kad
+     encoding, for replies + the ticker.
+- **Remaining = the core-side consumer** (the live-validation-gated unit): a
+  closure (capturing the user hash + a `RpcManager` clone for replies) registered
+  via `set_foreign_datagram_handler` that runs `parse_inbound_reask_datagram` then
+  routes to `answer_inbound_reask` (uploader, reply via `send_raw_datagram`) or
+  `apply_reask_reply` (downloader, routed by `(ip,udp_port)` through the pending
+  registry); plus the **ticker** (§4.2) in the core download runtime owning the
+  `ReaskPendingRegistry` + per-source `ReaskSource`s and calling the outbound
+  builders. Gate it behind an off-by-default `enable_udp_reask` flag.
+- **Validation gate:** prove it on the wire (Rust↔Rust accelerated cadence, then a
+  gentle Rust↔stock witness) before flipping the flag on — do not enable by
+  default until validated.
 
 ---
 
