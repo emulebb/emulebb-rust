@@ -81,6 +81,57 @@ pub(crate) fn answer_inbound_reask(req: &InboundReaskRequest) -> InboundReaskAns
     }
 }
 
+/// Framing facts for an inbound reask answer, gathered by the caller from the
+/// located waiting client + the requested file: how to address/obfuscate the
+/// reply and (for an `Ack`) the partstatus + the peer's udp_version gating it.
+#[derive(Debug, Clone)]
+pub(crate) struct ReciprocityReplyFraming {
+    /// The peer's advertised eD2k UDP version (gates the leading partstatus in
+    /// the `OP_REASKACK`, mirroring eMule `GetUDPVersion() > 3`).
+    pub peer_udp_version: u8,
+    /// The peer's user hash — obfuscation key when `should_crypt`.
+    pub dest_user_hash: [u8; 16],
+    /// Whether to obfuscate the reply (`ShouldReceiveCryptUDPPackets`).
+    pub should_crypt: bool,
+    /// Our part availability for the requested file (partfile bitmap, or `None`
+    /// for a complete/unshared file).
+    pub our_part_status: Option<Vec<bool>>,
+}
+
+/// Build the ready-to-send uploader reply datagram for an inbound reask (or
+/// `None` for the deliberate-silence cases). Composes the §4.5 decision
+/// ([`answer_inbound_reask`]) with the outbound framing/obfuscation builders so
+/// the transport just sends the bytes. Pure; the caller gathers `req` + `framing`
+/// from the upload queue + shared catalog.
+pub(crate) fn build_reciprocity_reply(
+    req: &InboundReaskRequest,
+    framing: &ReciprocityReplyFraming,
+    our_public_ip: [u8; 4],
+) -> Option<Vec<u8>> {
+    let target = super::outbound::OutboundReaskTarget {
+        dest_user_hash: framing.dest_user_hash,
+        our_public_ip,
+        obfuscate: framing.should_crypt,
+    };
+    match answer_inbound_reask(req) {
+        InboundReaskAnswer::Ack { queue_position } => {
+            Some(super::outbound::build_reask_ack_datagram(
+                framing.our_part_status.as_deref(),
+                queue_position,
+                framing.peer_udp_version,
+                &target,
+            ))
+        }
+        InboundReaskAnswer::QueueFull => {
+            Some(super::outbound::build_queue_full_datagram(&target))
+        }
+        InboundReaskAnswer::FileNotFound => {
+            Some(super::outbound::build_file_not_found_datagram(&target))
+        }
+        InboundReaskAnswer::Silent => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +155,49 @@ mod tests {
             ..base()
         };
         assert_eq!(answer_inbound_reask(&req), InboundReaskAnswer::FileNotFound);
+    }
+
+    #[test]
+    fn reciprocity_reply_acks_a_located_match_and_round_trips() {
+        use crate::ed2k_client_udp::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
+
+        let peer_hash = [0x55u8; 16];
+        let our_ip = [203, 0, 113, 9];
+        let req = InboundReaskRequest {
+            waiting_position: 7,
+            ..base()
+        };
+        let framing = ReciprocityReplyFraming {
+            peer_udp_version: 4,
+            dest_user_hash: peer_hash,
+            should_crypt: true,
+            our_part_status: None,
+        };
+        let datagram = build_reciprocity_reply(&req, &framing, our_ip).expect("ack reply");
+        // The peer parses the obfuscated ack: it keys on its own hash (== peer_hash)
+        // and the sender IP it sees (our public IP).
+        match parse_inbound_reask_datagram(&datagram, our_ip, &peer_hash, 4) {
+            Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 7),
+            other => panic!("expected obfuscated Ack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reciprocity_reply_is_none_for_silent_decisions() {
+        // Unknown sender with room => Silent => no datagram.
+        let req = InboundReaskRequest {
+            sender_located: false,
+            waiting_user_count: 1,
+            queue_size: 1000,
+            ..base()
+        };
+        let framing = ReciprocityReplyFraming {
+            peer_udp_version: 4,
+            dest_user_hash: [0u8; 16],
+            should_crypt: false,
+            our_part_status: None,
+        };
+        assert!(build_reciprocity_reply(&req, &framing, [203, 0, 113, 9]).is_none());
     }
 
     #[test]
