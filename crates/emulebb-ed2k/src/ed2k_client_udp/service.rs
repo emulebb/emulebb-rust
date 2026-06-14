@@ -19,6 +19,7 @@ use emulebb_kad_proto::Ed2kHash;
 use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use super::source_set::ReaskSourceSet;
 use super::state::{ReaskAction, ReaskReply, ReaskSource};
+use crate::public_ip::SharedPublicIp;
 
 /// What the caller must do after [`ReaskService::handle_inbound`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +65,9 @@ pub(crate) struct TransferReaskInfo {
 pub(crate) struct ReaskService {
     our_user_hash: [u8; 16],
     our_udp_version: u8,
-    our_public_ip: [u8; 4],
+    /// Our learned public IP, read dynamically (it is set after connect, at the
+    /// server `OP_IDCHANGE`) for the outbound obfuscation key.
+    public_ip: SharedPublicIp,
     /// Global `(ip,udp_port)` -> file hash routing for inbound replies.
     endpoint_index: HashMap<(Ipv4Addr, u16), Ed2kHash>,
     /// Per-file detached reask sources.
@@ -75,12 +78,12 @@ impl ReaskService {
     pub(crate) fn new(
         our_user_hash: [u8; 16],
         our_udp_version: u8,
-        our_public_ip: [u8; 4],
+        public_ip: SharedPublicIp,
     ) -> Self {
         Self {
             our_user_hash,
             our_udp_version,
-            our_public_ip,
+            public_ip,
             endpoint_index: HashMap::new(),
             per_file: HashMap::new(),
         }
@@ -181,7 +184,7 @@ impl ReaskService {
                 info.part_status.as_deref(),
                 info.complete_source_count,
                 self.our_udp_version,
-                self.our_public_ip,
+                self.public_ip.octets(),
             ) {
                 out.send.push((SocketAddr::new(ip.into(), port), datagram));
             }
@@ -215,7 +218,9 @@ mod tests {
     }
 
     fn service() -> ReaskService {
-        ReaskService::new(OUR_HASH, 4, [203, 0, 113, 9])
+        let public_ip = SharedPublicIp::new();
+        public_ip.set(Ipv4Addr::new(203, 0, 113, 9));
+        ReaskService::new(OUR_HASH, 4, public_ip)
     }
 
     fn register(svc: &mut ReaskService, now: Instant) {
