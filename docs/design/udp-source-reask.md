@@ -105,18 +105,29 @@ UDP-port-mapping confusion). If queue is near full, answer `OP_QUEUEFULL`.
 
 UDP reask packets honour eMule UDP protocol obfuscation: they are sent encrypted
 when the peer `ShouldReceiveCryptUDPPackets()` (keyed on the peer user hash),
-plain otherwise. The rust client already has the matching primitives in
-`kad-net/obfuscation` (RC4 + MD5 keying) and `ed2k_server/obfuscation` — the new
-client-UDP path must reuse them, not reinvent.
+plain otherwise. This is the **client-to-client userhash key path** of
+`CEncryptedDatagramSocket::EncryptSendClient`/`DecryptReceivedClient` —
+`MD5(userHash16 || ip4 || MAGICVALUE_UDP || randomKeyPart2)` with **no RC4 drop**
+(`bSkipDiscard=true`). It is genuinely distinct from the keys the rust client
+already had: `kad-net/obfuscation` uses Kad NodeID / ReceiverVerifyKey, and
+`ed2k_server/obfuscation` uses the server base key — neither derives the
+client userhash key. So a dedicated primitive was the correct call, **now built**
+as `crates/emulebb-ed2k/src/ed2k_client_udp_obfuscation.rs`
+(`obfuscate_client_udp` / `deobfuscate_client_udp`, faithful 8-byte crypt header,
+reserved-marker pass-through) plus `classify_inbound_client_udp`, the
+`DecryptReceivedClient` first-byte key-try triage (plaintext vs eD2k-client-first
+vs Kad-first). The Kad NodeID/RecvKey paths remain `emulebb-kad-net`'s concern.
 
 ---
 
 ## 2. Current state in emulebb-rust
 
 emulebb-rust (and its upstream `p2p-overlord-agents`, from which the eD2K stack
-was copied verbatim) implements **none** of the client↔client UDP family. There
-is no client UDP socket; `ed2k_tcp/` has no reask dispatcher. Provenance is
-upstream — this is an inherited gap, not a rust regression.
+was copied verbatim) inherited **none** of the client↔client UDP *transport*:
+there is still no client UDP socket and `ed2k_tcp/` has no reask dispatcher.
+Provenance is upstream — an inherited gap, not a rust regression. The **pure,
+transport-free foundation is now built** (see §2.1); what remains is the gated
+transport wiring.
 
 Instead, the rust downloader uses a **held-TCP queued** model
 (`crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs`):
@@ -145,6 +156,30 @@ but **long-duration queue persistence — the core of eMule's "wait in queue"
 behaviour — is effectively absent for real sources.** On a busy swarm where
 uploaders won't hold idle TCP sockets open to queued downloaders, the rust client
 struggles to climb queues.
+
+### 2.1 Foundation implemented (2026-06-14)
+
+The Phase-1 pieces that are **pure** (no socket, no integration decision) are
+built, committed and unit-tested, so the gated transport wiring (§4) is the only
+thing that remains:
+
+| Piece | Module | Covers |
+|---|---|---|
+| Reask codec | `ed2k_client_udp.rs` | encode/decode `OP_REASKFILEPING`/`OP_REASKACK` + partstatus bitfield, exact `udp_version` tail gating (§1.2) |
+| Reask policy | `ed2k_client_udp.rs` | `reask_interval` (FILEREASKTIME ×2 NNP ≥ MIN_REQUESTTIME), `udp_reask_eligible`, failure-ratio TCP fallback (§1.3) |
+| Pending registry | `ed2k_client_udp.rs` | `(ip,udp_port)` anti-spoof correlation gate (R3) |
+| Source state | `ed2k_client_udp.rs` | `ReaskSource` (QueuedDetached) success/failure/reschedule transitions (§4.1) |
+| Client UDP obfuscation | `ed2k_client_udp_obfuscation.rs` | userhash-key encrypt/decrypt (§1.4) + `classify_inbound_client_udp` first-byte key-try triage |
+
+**Still gated — do not land blind (operator design call + live validation):** the
+inbound reask arrives on the **shared Kad UDP socket** (rust advertises
+`kad_udp_port` as its eD2k UDP port, hello `ET_UDPPORT`). The remaining wiring is
+(1) the §4.3 transport recv loop + demux in `emulebb-kad-net` (now that the
+classifier and obfuscation exist), (2) the §4.2 per-transfer ticker in the
+download runtime, (3) §4.5 uploader reciprocity, and (4) live validation. The
+open **design decision** is shared Kad UDP port (eMule-faithful, touches working
+Kad) vs a separate eD2k client UDP port (safer, diverges). The pure foundation
+above is agnostic to that decision.
 
 ---
 
@@ -301,9 +336,11 @@ are an uploader. Reuse the upload-queue state already in
 - **Phase 0 (now):** record the omission in
   `policy/rust-client-omissions.toml` (id e.g. `udp-source-reask`) so the wire
   surface is honestly described. Reconcile the advertised `udp_version`.
-- **Phase 1:** client UDP transport module + HighID `OP_REASKFILEPING` /
-  `OP_REASKACK` / `OP_QUEUEFULL` / `OP_FILENOTFOUND`, downloader + uploader
-  sides, obfuscation, pending gate, failure-ratio backoff, per-transfer ticker.
+- **Phase 1 — foundation DONE (2026-06-14, §2.1):** reask codec, policy,
+  pending gate, source state, client-UDP obfuscation + inbound classifier are
+  built and unit-tested. **Remaining (gated):** the shared/separate-port design
+  call, the transport recv loop + demux, the per-transfer ticker, uploader
+  reciprocity, and live validation.
 - **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP`) and
   `OP_DIRECTCALLBACKREQ`.
 - New code lands as new modules within the per-module size budget
