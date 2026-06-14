@@ -181,6 +181,58 @@ pub(crate) fn decode_reask_ack(body: &[u8], our_udp_version: u8) -> Result<Reask
     })
 }
 
+use std::time::Duration;
+
+/// Nominal per-source reask interval (`FILEREASKTIME`, eMuleBB opcodes.h).
+pub(crate) const FILE_REASK_TIME: Duration = Duration::from_secs(29 * 60);
+/// Minimum spacing between reasks to one source (`MIN_REQUESTTIME`).
+pub(crate) const MIN_REQUEST_TIME: Duration = Duration::from_secs(10 * 60);
+/// Uploader-side: how long a just-asked slot is held warm (`UDPMAXQUEUETIME`).
+pub(crate) const UDP_MAX_QUEUE_TIME: Duration = Duration::from_secs(20);
+/// Failure-ratio backoff gate: stop UDP-reasking a source once it has had more
+/// than this many attempts and the failure ratio exceeds `UDP_FAILURE_RATIO`.
+const UDP_FAILURE_MIN_ATTEMPTS: u32 = 3;
+const UDP_FAILURE_RATIO: f64 = 0.3;
+
+/// Per-source reask interval: nominal `FILE_REASK_TIME`, doubled for
+/// no-needed-parts sources, never below `MIN_REQUEST_TIME` (mirrors
+/// `CUpDownClient::GetTimeUntilReask`-style spacing).
+pub(crate) fn reask_interval(no_needed_parts: bool) -> Duration {
+    let base = if no_needed_parts {
+        FILE_REASK_TIME.saturating_mul(2)
+    } else {
+        FILE_REASK_TIME
+    };
+    base.max(MIN_REQUEST_TIME)
+}
+
+/// Whether a queued source is eligible for UDP reask (eMuleBB
+/// `UDPReaskForDownload` preconditions): the source advertised a UDP port and a
+/// non-zero udp_version, we have a local UDP port, we are not firewalled, there
+/// is no live TCP socket to it, and no proxy is configured.
+pub(crate) fn udp_reask_eligible(
+    source_udp_port: u16,
+    source_udp_version: u8,
+    have_local_udp_port: bool,
+    self_firewalled: bool,
+    has_live_tcp_socket: bool,
+    proxy_configured: bool,
+) -> bool {
+    source_udp_port != 0
+        && source_udp_version != 0
+        && have_local_udp_port
+        && !self_firewalled
+        && !has_live_tcp_socket
+        && !proxy_configured
+}
+
+/// Whether UDP reask for a source should fall back to TCP because its UDP
+/// failure ratio is bad (`total > 3 && failed/total > 0.3`).
+pub(crate) fn should_fall_back_to_tcp(udp_total: u32, udp_failed: u32) -> bool {
+    udp_total > UDP_FAILURE_MIN_ATTEMPTS
+        && f64::from(udp_failed) / f64::from(udp_total) > UDP_FAILURE_RATIO
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +317,35 @@ mod tests {
         assert!(decode_reask_file_ping(&[0u8; 4], 4).is_err());
         assert!(decode_reask_ack(&[], 2).is_err());
         assert!(decode_part_status(&[1]).is_err());
+    }
+
+    #[test]
+    fn reask_interval_doubles_for_no_needed_parts() {
+        assert_eq!(reask_interval(false), FILE_REASK_TIME);
+        assert_eq!(reask_interval(true), FILE_REASK_TIME * 2);
+        // Nominal interval always clears the minimum spacing floor.
+        assert!(reask_interval(false) >= MIN_REQUEST_TIME);
+    }
+
+    #[test]
+    fn udp_eligibility_requires_all_preconditions() {
+        // All good -> eligible.
+        assert!(udp_reask_eligible(4672, 4, true, false, false, false));
+        // Each disqualifier individually blocks UDP reask.
+        assert!(!udp_reask_eligible(0, 4, true, false, false, false)); // no source UDP port
+        assert!(!udp_reask_eligible(4672, 0, true, false, false, false)); // udp_version 0
+        assert!(!udp_reask_eligible(4672, 4, false, false, false, false)); // no local UDP port
+        assert!(!udp_reask_eligible(4672, 4, true, true, false, false)); // firewalled
+        assert!(!udp_reask_eligible(4672, 4, true, false, true, false)); // live TCP socket held
+        assert!(!udp_reask_eligible(4672, 4, true, false, false, true)); // proxy configured
+    }
+
+    #[test]
+    fn failure_ratio_backoff_threshold() {
+        assert!(!should_fall_back_to_tcp(0, 0));
+        assert!(!should_fall_back_to_tcp(3, 3)); // not > 3 attempts yet
+        assert!(!should_fall_back_to_tcp(10, 3)); // 0.3 ratio, not > 0.3
+        assert!(should_fall_back_to_tcp(10, 4)); // 0.4 > 0.3
+        assert!(should_fall_back_to_tcp(4, 2)); // 0.5 > 0.3, > 3 attempts
     }
 }
