@@ -9,11 +9,12 @@
 //! reasks. All reask *decisions* live in the I/O-free [`super::ReaskService`];
 //! this is the thin async shell that performs the socket I/O.
 //!
-//! Wiring still pending (the live-validated next slices, flagged inline): the
-//! download-session **detach hook** (`register_source` when a peer queues us) and
-//! the uploader **reciprocity** answer (needs the upload-queue `(ip,udp_port)`
-//! lookup). Until those land the loop runs but holds no sources and does not
-//! answer inbound pings — it is structurally complete and inert in effect.
+//! Wiring still pending (the live-validated next slice, flagged inline): the
+//! download-session **detach hook** (`register_source` when a peer queues us).
+//! The uploader **reciprocity** answer is wired (via the runtime's global
+//! upload-queue `(ip,udp_port)` lookup). Until the detach hook lands the loop
+//! holds no downloader sources, so it only answers inbound pings — it is
+//! structurally complete and inert as a downloader.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
+use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::public_ip::SharedPublicIp;
 
 /// How long to wait for a reask reply before counting it a UDP failure.
@@ -41,12 +43,13 @@ const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
 /// wire-validated before it is trusted.
 pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
     user_hash: [u8; 16],
     udp_version: u8,
     public_ip: SharedPublicIp,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut service = ReaskService::new(user_hash, udp_version, public_ip);
+    let mut service = ReaskService::new(user_hash, udp_version, public_ip.clone());
 
     // Inbound: the foreign-datagram handler runs in the Kad recv loop (sync), so
     // it just forwards the raw datagram to this task over a bounded channel.
@@ -72,7 +75,15 @@ pub async fn run_ed2k_udp_reask_loop(
         tokio::select! {
             maybe = rx.recv() => {
                 let Some((data, from)) = maybe else { break };
-                handle_inbound_datagram(&mut service, &dht, &data, from).await;
+                handle_inbound_datagram(
+                    &mut service,
+                    &dht,
+                    &transfer_runtime,
+                    public_ip.octets(),
+                    &data,
+                    from,
+                )
+                .await;
             }
             _ = ticker.tick() => {
                 drive_reask_tick(&mut service, &dht).await;
@@ -85,7 +96,9 @@ pub async fn run_ed2k_udp_reask_loop(
 /// Route one inbound datagram through the service and act on the outcome.
 async fn handle_inbound_datagram(
     service: &mut ReaskService,
-    _dht: &DhtNode,
+    dht: &DhtNode,
+    transfer_runtime: &Ed2kTransferRuntime,
+    our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
 ) {
@@ -96,13 +109,23 @@ async fn handle_inbound_datagram(
             // reconnect+SETREQFILEID for this source.
         }
         ReaskInboundOutcome::AnswerNeeded { ping, from } => {
-            // TODO(reask-reciprocity): answer the peer's OP_REASKFILEPING using the
-            // upload-queue (ip,udp_port) lookup + answer_inbound_reask, sending via
-            // `dht.send_raw_datagram`. Needs the upload-queue udp_port wiring.
-            trace!(
-                "ed2k udp reask: inbound reask for {} from {from} (reciprocity pending)",
-                ping.file_hash
-            );
+            // Answer the peer's OP_REASKFILEPING from the global upload-queue +
+            // shared-catalog state (eMule's OP_REASKFILEPING reaction table).
+            match transfer_runtime
+                .reask_reciprocity_reply(&ping, from, our_public_ip)
+                .await
+            {
+                Some(reply) => {
+                    if let Err(err) = dht.send_raw_datagram(from, &reply).await {
+                        trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
+                    }
+                }
+                // Deliberate silence (force TCP / file mismatch); nothing to send.
+                None => trace!(
+                    "ed2k udp reask: inbound reask for {} from {from} answered with silence",
+                    ping.file_hash
+                ),
+            }
         }
         ReaskInboundOutcome::Ignored => {}
     }

@@ -34,6 +34,7 @@ mod manifest;
 mod metadata;
 mod model;
 mod piece_store;
+mod reask_reciprocity;
 mod shared_catalog;
 mod store;
 mod transfer_sql;

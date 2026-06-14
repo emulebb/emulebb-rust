@@ -1236,6 +1236,7 @@ impl EmulebbCore {
             // our advertised hello ET_UDPVER.
             tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
                 dht.clone(),
+                Arc::clone(&self.ed2k_transfers),
                 reask_user_hash,
                 4,
                 ed2k_public_ip.clone(),
