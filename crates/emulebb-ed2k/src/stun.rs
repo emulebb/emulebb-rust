@@ -1,27 +1,26 @@
 //! RFC 5389 STUN Binding probe for active UDP egress verification.
 //!
-//! This mirrors the libtorrent fork's `aux::stun_probe` (`src/stun.cpp`): it
-//! sends a single STUN Binding Request to a public STUN server over UDP and
-//! reports the reflexive (server-observed, public) address from the response's
-//! `XOR-MAPPED-ADDRESS` attribute.
+//! Counterpart to the eMuleBB (`StunProbeSeams.h` / `PublicIpProbe.cpp`) and
+//! libtorrent (`aux::stun_probe`) implementations; the three share one design:
 //!
-//! The point is leak detection that the TCP/HTTP public-IP path cannot give:
-//! the probe socket is egress-pinned to the same interface as the eD2k/Kad data
-//! plane (`IP_UNICAST_IF`, via [`pin_egress_to_interface`]), so the reflexive
-//! address reflects the *actual* UDP egress (e.g. the VPN tunnel). A probe bound
-//! to an unspecified address (`0.0.0.0`) takes the OS default route — useful as
-//! a "clear" baseline to compare against the pinned probe.
+//! * race a fixed set of public STUN servers concurrently and accept the first
+//!   valid reflexive address (resilience comes from the fan-out, not retransmits);
+//! * each per-server probe binds and egress-pins the socket to the data-plane
+//!   interface (`IP_UNICAST_IF` via [`pin_egress_to_interface`]) so the reflexive
+//!   address reflects the real UDP egress (e.g. a VPN tunnel);
+//! * each probe `connect()`s to its server so the kernel drops datagrams from any
+//!   other source — an off-path host cannot inject a spoofed Binding response;
+//! * single send, no retransmit;
+//! * IPv4 gate only (matching emulebb-rust's IPv4-only policy).
 //!
-//! IPv4-only, matching the rest of emulebb-rust (IPv6 is deferred). This is a
-//! standalone primitive; it is not yet wired into a periodic loop (neither is the
-//! libtorrent counterpart).
+//! DNS resolution of the server hostnames is acceptable and done per probe.
 //!
 //! [`pin_egress_to_interface`]: emulebb_kad_dht::socket_opts::pin_egress_to_interface
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use rand::RngCore;
 use tokio::net::UdpSocket;
 
@@ -35,25 +34,74 @@ const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
 const STUN_FAMILY_IPV4: u8 = 0x01;
 const STUN_HEADER_LEN: usize = 20;
 
-/// Default probe timeout, matching libtorrent's `stun_probe` (5 seconds).
+/// Default per-server probe timeout, matching the eMuleBB/libtorrent probes (5s).
 pub const DEFAULT_STUN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Send one STUN Binding Request to `server` from a socket bound to `bind_ip`
-/// and return the reflexive public IPv4 the server observed.
+/// Public STUN servers raced by [`stun_probe`]. Kept in sync (same set, same
+/// order) with `StunProbeSeams::GetStunIpv4ProbeServers` (eMuleBB) and the
+/// libtorrent default list. Google is UDP-only on 19302; the rest answer on the
+/// IANA STUN port 3478.
+pub const DEFAULT_STUN_SERVERS: &[(&str, u16)] = &[
+    ("stun.l.google.com", 19302),
+    ("stun1.l.google.com", 19302),
+    ("stun.cloudflare.com", 3478),
+    ("stun.nextcloud.com", 3478),
+];
+
+/// Race [`DEFAULT_STUN_SERVERS`] from a socket bound to `bind_ip` and return the
+/// first reflexive public IPv4 observed. Fails only if every server fails.
 ///
 /// `bind_ip` should be the resolved data-plane bind address (the VPN tunnel IP)
 /// so the probe is egress-pinned exactly like the eD2k/Kad sockets; pass an
-/// unspecified address (`0.0.0.0`) for a default-route baseline probe. The
-/// egress pin is a no-op when `bind_ip` does not resolve to a local interface
-/// index (which includes the unspecified address).
-///
-/// Returns an error on bind/send failure, on timeout, or if the response is not
-/// a valid STUN Binding Success carrying an IPv4 mapped address.
-pub async fn stun_probe(
-    server: SocketAddrV4,
+/// unspecified address (`0.0.0.0`) for a default-route baseline probe.
+pub async fn stun_probe(bind_ip: Ipv4Addr, timeout: Duration) -> Result<Ipv4Addr> {
+    stun_probe_servers(DEFAULT_STUN_SERVERS, bind_ip, timeout).await
+}
+
+/// Race an explicit server set. See [`stun_probe`].
+pub async fn stun_probe_servers(
+    servers: &[(&'static str, u16)],
     bind_ip: Ipv4Addr,
     timeout: Duration,
 ) -> Result<Ipv4Addr> {
+    let mut set = tokio::task::JoinSet::new();
+    for &(host, port) in servers {
+        set.spawn(async move {
+            // Bound the whole per-server probe (DNS + connect + send + recv) with
+            // one deadline, consistent with the libtorrent/eMuleBB probes.
+            match tokio::time::timeout(timeout, probe_one(host, port, bind_ip)).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!("STUN probe to {host}:{port} timed out")),
+            }
+        });
+    }
+
+    let mut last_err: Option<anyhow::Error> = None;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(ip)) => {
+                set.abort_all();
+                return Ok(ip);
+            }
+            Ok(Err(err)) => last_err = Some(err),
+            Err(err) => last_err = Some(anyhow!("STUN probe task failed: {err}")),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("no STUN servers configured")))
+}
+
+/// One server probe: resolve, bind + egress-pin, `connect()`, single send, parse.
+/// The caller bounds the whole probe with a timeout (see `stun_probe_servers`).
+async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<Ipv4Addr> {
+    let server = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("STUN DNS lookup failed for {host}:{port}"))?
+        .find_map(|addr| match addr {
+            SocketAddr::V4(v4) => Some(v4),
+            SocketAddr::V6(_) => None,
+        })
+        .with_context(|| format!("no IPv4 address for STUN server {host}:{port}"))?;
+
     let mut txid = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut txid);
     let request = build_request(&txid);
@@ -70,16 +118,23 @@ pub async fn stun_probe(
     )
     .with_context(|| format!("failed to pin STUN probe egress for {bind_ip}"))?;
 
+    // connect() so the kernel drops datagrams from any source other than the
+    // server: defends a security gate from spoofed responses and lets us use
+    // send()/recv() without inspecting the sender.
     socket
-        .send_to(&request, server)
+        .connect(SocketAddr::V4(server))
+        .await
+        .with_context(|| format!("failed to connect STUN probe socket to {server}"))?;
+    // Single send, no retransmit: resilience is the multi-server race.
+    socket
+        .send(&request)
         .await
         .with_context(|| format!("failed to send STUN binding request to {server}"))?;
 
     let mut buf = [0u8; 1500];
-    let received = tokio::time::timeout(timeout, socket.recv_from(&mut buf))
+    let len = socket
+        .recv(&mut buf)
         .await
-        .with_context(|| format!("STUN binding request to {server} timed out"))?;
-    let (len, _from) = received
         .with_context(|| format!("failed to receive STUN response from {server}"))?;
 
     parse_response(&buf[..len], &txid)
