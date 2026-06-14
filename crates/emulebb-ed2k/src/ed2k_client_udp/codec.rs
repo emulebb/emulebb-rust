@@ -24,6 +24,11 @@ pub(crate) const OP_REASKFILEPING: u8 = 0x90;
 pub(crate) const OP_REASKACK: u8 = 0x91;
 pub(crate) const OP_FILENOTFOUND: u8 = 0x92;
 pub(crate) const OP_QUEUEFULL: u8 = 0x93;
+/// LowID buddy-relayed reask (`OP_REASKCALLBACKUDP`): sent to the source's Kad
+/// buddy when the source is LowID. Phase 2 — codec only; the transport that
+/// relays it (and which eMule sends *unencrypted*, since the buddy's Kad version
+/// is unknown) is deferred with the rest of the reask transport.
+pub(crate) const OP_REASKCALLBACKUDP: u8 = 0x94;
 
 /// Decoded `OP_REASKFILEPING` request (uploader/reciprocity side).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +48,17 @@ pub(crate) struct ReaskAck {
     pub part_status: Option<Vec<bool>>,
     /// Our position in the uploader's queue.
     pub queue_position: u16,
+}
+
+/// Decoded `OP_REASKCALLBACKUDP` request (LowID buddy-relayed reask). Same as
+/// `OP_REASKFILEPING` with the source's buddy Kad id prepended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReaskCallbackUdp {
+    /// The source's buddy Kad id (`GetBuddyID`), which relays the reask.
+    pub buddy_id: Ed2kHash,
+    pub file_hash: Ed2kHash,
+    pub part_status: Option<Vec<bool>>,
+    pub complete_source_count: Option<u16>,
 }
 
 /// Encodes a `partstatus` field: `u16 count` + LSB-first bitfield. `None` (no
@@ -173,6 +189,60 @@ pub(crate) fn decode_reask_ack(body: &[u8], our_udp_version: u8) -> Result<Reask
     })
 }
 
+/// Encodes the `OP_REASKCALLBACKUDP` body: `buddy_id16` + `file_hash16` + the same
+/// `sender_udp_version`-gated partstatus/complete-count tail as `OP_REASKFILEPING`.
+pub(crate) fn encode_reask_callback_udp(
+    buddy_id: &Ed2kHash,
+    file_hash: &Ed2kHash,
+    part_status: Option<&[bool]>,
+    complete_source_count: u16,
+    sender_udp_version: u8,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16 + 16 + 4);
+    body.extend_from_slice(&buddy_id.0);
+    body.extend_from_slice(&file_hash.0);
+    if sender_udp_version > 3 {
+        body.extend_from_slice(&encode_part_status(part_status));
+    }
+    if sender_udp_version > 2 {
+        body.extend_from_slice(&complete_source_count.to_le_bytes());
+    }
+    body
+}
+
+/// Decodes an `OP_REASKCALLBACKUDP` body. `sender_udp_version` is the relaying
+/// downloader's advertised UDP version (gates the optional tails).
+pub(crate) fn decode_reask_callback_udp(
+    body: &[u8],
+    sender_udp_version: u8,
+) -> Result<ReaskCallbackUdp> {
+    if body.len() < 32 {
+        bail!("short OP_REASKCALLBACKUDP body ({})", body.len());
+    }
+    let buddy_id = Ed2kHash::from_bytes(body[..16].try_into()?);
+    let file_hash = Ed2kHash::from_bytes(body[16..32].try_into()?);
+    let mut rest = &body[32..];
+    let mut part_status = None;
+    if sender_udp_version > 3 {
+        let (bitmap, tail) = decode_part_status(rest)?;
+        part_status = bitmap;
+        rest = tail;
+    }
+    let mut complete_source_count = None;
+    if sender_udp_version > 2 {
+        if rest.len() < 2 {
+            bail!("short OP_REASKCALLBACKUDP complete-source count");
+        }
+        complete_source_count = Some(u16::from_le_bytes([rest[0], rest[1]]));
+    }
+    Ok(ReaskCallbackUdp {
+        buddy_id,
+        file_hash,
+        part_status,
+        complete_source_count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +327,38 @@ mod tests {
         assert!(decode_reask_file_ping(&[0u8; 4], 4).is_err());
         assert!(decode_reask_ack(&[], 2).is_err());
         assert!(decode_part_status(&[1]).is_err());
+        assert!(decode_reask_callback_udp(&[0u8; 20], 4).is_err()); // < 32 (two hashes)
+    }
+
+    fn buddy() -> Ed2kHash {
+        Ed2kHash::from_bytes([
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00,
+        ])
+    }
+
+    #[test]
+    fn reask_callback_udp_v4_round_trip_prepends_buddy_id() {
+        let parts = [true, false, false, true];
+        let body = encode_reask_callback_udp(&buddy(), &hash(), Some(&parts), 5, 4);
+        // buddy(16) + file(16) + partstatus(u16 count + 1 byte) + count(u16).
+        assert_eq!(&body[..16], &buddy().0);
+        assert_eq!(&body[16..32], &hash().0);
+        let decoded = decode_reask_callback_udp(&body, 4).unwrap();
+        assert_eq!(decoded.buddy_id, buddy());
+        assert_eq!(decoded.file_hash, hash());
+        assert_eq!(decoded.part_status.unwrap(), parts);
+        assert_eq!(decoded.complete_source_count, Some(5));
+    }
+
+    #[test]
+    fn reask_callback_udp_low_version_is_two_hashes_only() {
+        let body = encode_reask_callback_udp(&buddy(), &hash(), Some(&[true]), 9, 2);
+        assert_eq!(body.len(), 32); // udp_version 2: no tail
+        let decoded = decode_reask_callback_udp(&body, 2).unwrap();
+        assert_eq!(decoded.buddy_id, buddy());
+        assert_eq!(decoded.file_hash, hash());
+        assert!(decoded.part_status.is_none());
+        assert!(decoded.complete_source_count.is_none());
     }
 }

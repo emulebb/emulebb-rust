@@ -23,8 +23,9 @@ pub(crate) mod registry;
 pub(crate) mod state;
 
 pub(crate) use codec::{
-    OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKFILEPING, ReaskAck, ReaskFilePing,
-    decode_reask_ack, decode_reask_file_ping, encode_reask_ack, encode_reask_file_ping,
+    OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck,
+    ReaskCallbackUdp, ReaskFilePing, decode_reask_ack, decode_reask_callback_udp,
+    decode_reask_file_ping, encode_reask_ack, encode_reask_callback_udp, encode_reask_file_ping,
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
