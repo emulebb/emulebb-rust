@@ -1,6 +1,7 @@
 ---
 id: FEAT-003
-workflow: local
+workflow: github
+github_issue: https://github.com/emulebb/emulebb-rust/issues/3
 title: VPN — pin eD2K TCP egress to the tunnel interface (fail-closed)
 status: OPEN
 priority: Major
@@ -10,6 +11,8 @@ milestone: phase-0
 created: 2026-06-14
 source: suite forward program (note 10 anonymity); VPN binding parity
 ---
+
+> Workflow status is tracked in GitHub: https://github.com/emulebb/emulebb-rust/issues/3. This local document is retained as an engineering spec/evidence record.
 
 # FEAT-003 - VPN — pin eD2K TCP egress to the tunnel interface (fail-closed)
 
