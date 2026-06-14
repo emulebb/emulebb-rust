@@ -1,0 +1,31 @@
+//! Client-to-client eD2k UDP source reask (the `OP_REASKFILEPING` family).
+//!
+//! eMule keeps an upload-queue position warm for hours by disconnecting and
+//! periodically *reasking* over UDP instead of holding a TCP socket per queued
+//! source. This module is the pure, transport-free foundation for that
+//! behaviour in emulebb-rust (see `docs/design/udp-source-reask.md`):
+//!
+//! - [`codec`]: wire encode/decode of the four HighID reask opcodes.
+//! - [`registry`]: the `(ip, udp_port)` anti-spoof pending-reply gate.
+//! - [`state`]: per-source reask state, cadence policy, and the downloader-side
+//!   reaction table.
+//!
+//! The client-UDP transport + per-transfer reask ticker that call these (and the
+//! shared-vs-separate UDP-port decision) are the gated next slice. The re-exports
+//! below are the public surface that transport will consume; until it lands they
+//! are unused by design.
+#![allow(dead_code, unused_imports)]
+
+pub(crate) mod codec;
+pub(crate) mod registry;
+pub(crate) mod state;
+
+pub(crate) use codec::{
+    OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKFILEPING, ReaskAck, ReaskFilePing,
+    decode_reask_ack, decode_reask_file_ping, encode_reask_ack, encode_reask_file_ping,
+};
+pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
+pub(crate) use state::{
+    FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,
+    apply_reask_reply, reask_interval, should_fall_back_to_tcp, udp_reask_eligible,
+};
