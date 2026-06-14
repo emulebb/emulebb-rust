@@ -21,3 +21,11 @@ stock_behavior = "Classic eMule exposes a legacy HTML WebServer controller surfa
 rust_behavior = "The Rust client exposes the eMuleBB /api/v1 REST controller surface only."
 reason = "The Rust client is a headless local eMuleBB client, not legacy WebServer parity."
 compatibility = "Does not affect eD2K or Kad wire compatibility."
+
+[[omissions]]
+id = "peer-chat-messaging"
+area = "ed2k"
+stock_behavior = "Classic eMule supports interactive peer-to-peer text chat/messaging (OP_MESSAGE) and a chat window."
+rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state."
+reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so it is outside the headless, REST-controllable scope of this client."
+compatibility = "Does not affect eD2K or Kad wire compatibility; unsupported OP_MESSAGE from peers is simply not surfaced."
