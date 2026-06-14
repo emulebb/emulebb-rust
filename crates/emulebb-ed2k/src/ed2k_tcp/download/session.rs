@@ -65,8 +65,19 @@ fn apply_emule_info_profile(
     session_state.remote_supports_source_exchange = profile.supports_source_exchange;
     session_state.remote_supports_source_exchange2 = false;
     session_state.remote_supports_secure_ident = profile.supports_secure_ident;
-    session_state.peer_udp_port = profile.udp_port;
-    session_state.peer_udp_version = profile.udp_version;
+    tracing::debug!(
+        "applied OP_EMULEINFO profile: udp_port={} udp_version={}",
+        profile.udp_port, profile.udp_version,
+    );
+    // udp_port is normally learned from the hello (CT_EMULE_UDPPORTS); only let
+    // OP_EMULEINFO fill it when the hello did not. udp_version is an OP_EMULEINFO
+    // field (ET_UDPVER), so always take it from here.
+    if profile.udp_port != 0 {
+        session_state.peer_udp_port = profile.udp_port;
+    }
+    if profile.udp_version != 0 {
+        session_state.peer_udp_version = profile.udp_version;
+    }
 }
 
 /// Detach a just-queued source onto UDP reask when reask is enabled and the peer
@@ -87,14 +98,19 @@ fn try_detach_queued_source_for_reask(
     };
     // We hold the shared Kad UDP port whenever reask is enabled (have_local_udp);
     // we are detaching, so no live TCP socket remains; no proxy/firewall modelled.
-    if !crate::ed2k_client_udp::udp_reask_eligible(
+    let eligible = crate::ed2k_client_udp::udp_reask_eligible(
         session_state.peer_udp_port,
         session_state.peer_udp_version,
         true,
         false,
         false,
         false,
-    ) {
+    );
+    tracing::debug!(
+        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} eligible={eligible}",
+        session_state.peer_udp_port, session_state.peer_udp_version,
+    );
+    if !eligible {
         return false;
     }
     handle.detach(
@@ -310,6 +326,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    if hello_profile.identity.udp_port != 0 {
+                        session_state.peer_udp_port = hello_profile.identity.udp_port;
+                    }
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;
@@ -344,6 +363,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    // The peer's eD2k UDP port rides in the hello (CT_EMULE_UDPPORTS);
+                    // capture it for UDP-reask detach (udp_version comes from OP_EMULEINFO).
+                    if hello_profile.identity.udp_port != 0 {
+                        session_state.peer_udp_port = hello_profile.identity.udp_port;
+                    }
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;

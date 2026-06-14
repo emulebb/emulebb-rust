@@ -41,8 +41,8 @@ rationale = "frozen legacy eD2K TCP codec aggregation; split request/response fr
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs"
-hard_limit_lines = 1245
-rationale = "frozen legacy download session state machine; split startup, range handling, and completion paths as touched. Cap bumped for recording peer part-availability from the OP_FILESTATUS arms into the live download-source registry. Bumped again (+68) for the UDP source-reask detach hook: capture the peer eD2k udp_port/udp_version from OP_EMULEINFO, and on a queue-rank (OP_QUEUERANK/OP_QUEUERANKING) detach a UDP-eligible source onto the reask loop (try_detach_queued_source_for_reask) returning QueuedDetachedForUdpReask instead of holding the slot over TCP."
+hard_limit_lines = 1271
+rationale = "frozen legacy download session state machine; split startup, range handling, and completion paths as touched. Cap bumped for recording peer part-availability from the OP_FILESTATUS arms into the live download-source registry. Bumped again (+68) for the UDP source-reask detach hook: capture the peer eD2k udp_port/udp_version from OP_EMULEINFO, and on a queue-rank (OP_QUEUERANK/OP_QUEUERANKING) detach a UDP-eligible source onto the reask loop (try_detach_queued_source_for_reask) returning QueuedDetachedForUdpReask instead of holding the slot over TCP. Bumped again (+26) after local rust↔eMuleBB reask validation: capture the peer eD2k UDP port from the hello CT_EMULE_UDPPORTS (the canonical source; OP_EMULEINFO sends 0) in both hello handlers, guard the OP_EMULEINFO udp fields against clobbering with 0, and add reask detach-decision debug logging."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs"
