@@ -18,6 +18,15 @@ use super::{
 
 const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
 
+/// eD2k server protocol marker (OP_EDONKEYPROT) — server packets ride the eD2k
+/// protocol byte, same as the converged client/server packet diagnostics.
+const OP_EDONKEYPROT_MARKER: u8 = 0xE3;
+/// Payload hex cap, matching the client dump + eMuleBB diagnostic build.
+const MAX_SERVER_DUMP_HEX_BYTES: usize = 4 * 1024;
+
+/// One server-flow packet in the converged `ed2k_packet_v1` shape (flow="server"),
+/// so client<->server traces diff 1:1 against eMuleBB's server-packet emitter.
+/// Carries server-session extras (role/trace_id) the diff harness ignores.
 #[derive(Debug, Serialize)]
 struct Ed2kServerDumpRecord<'a> {
     schema: &'static str,
@@ -29,20 +38,24 @@ struct Ed2kServerDumpRecord<'a> {
     state_id: String,
     state_label: &'a str,
     role: &'a str,
+    flow: &'static str,
     phase: &'a str,
     direction: &'a str,
-    endpoint: String,
-    transport: &'a str,
-    opcode: Option<String>,
+    remote_addr: String,
+    transport_mode: &'a str,
+    protocol: Option<&'static str>,
+    protocol_marker: Option<u8>,
+    opcode: Option<u8>,
     opcode_name: Option<&'static str>,
     payload_len: Option<usize>,
     payload_hex: Option<String>,
+    payload_hex_truncated: Option<bool>,
     note: Option<String>,
 }
 
 pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<String>) {
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_server_session_v1",
+        schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: next_ed2k_server_dump_event_seq(),
@@ -51,18 +64,22 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         state_id: ed2k_server_state_id(session),
         state_label: session.phase.as_str(),
         role: session.trace_role,
+        flow: "server",
         phase: session.phase.as_str(),
         direction: "meta",
-        endpoint: session.endpoint.to_string(),
-        transport: if session.send_cipher.is_some() {
+        remote_addr: session.endpoint.to_string(),
+        transport_mode: if session.send_cipher.is_some() {
             "obfuscated"
         } else {
             "plaintext"
         },
+        protocol: None,
+        protocol_marker: None,
         opcode: None,
         opcode_name: None,
         payload_len: None,
         payload_hex: None,
+        payload_hex_truncated: None,
         note: Some(note.into()),
     };
     dump_ed2k_server_record(&record);
@@ -74,8 +91,21 @@ pub(super) fn dump_ed2k_server_packet(
     opcode: u8,
     payload: &[u8],
 ) {
+    // Normalize the wire direction to the shared send/recv vocabulary so the
+    // packet-trace diff harness aligns these with eMuleBB's server packets.
+    let direction = match direction {
+        "tx" => "send",
+        "rx" => "recv",
+        other => other,
+    };
+    let truncated = payload.len() > MAX_SERVER_DUMP_HEX_BYTES;
+    let payload_hex = if truncated {
+        hex::encode(&payload[..MAX_SERVER_DUMP_HEX_BYTES])
+    } else {
+        hex::encode(payload)
+    };
     let record = Ed2kServerDumpRecord {
-        schema: "ed2k_server_session_v1",
+        schema: "ed2k_packet_v1",
         source: "emulebb-rust",
         ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         event_seq: next_ed2k_server_dump_event_seq(),
@@ -84,18 +114,22 @@ pub(super) fn dump_ed2k_server_packet(
         state_id: ed2k_server_state_id(session),
         state_label: session.phase.as_str(),
         role: session.trace_role,
+        flow: "server",
         phase: session.phase.as_str(),
         direction,
-        endpoint: session.endpoint.to_string(),
-        transport: if session.send_cipher.is_some() {
+        remote_addr: session.endpoint.to_string(),
+        transport_mode: if session.send_cipher.is_some() {
             "obfuscated"
         } else {
             "plaintext"
         },
-        opcode: Some(format!("0x{opcode:02X}")),
+        protocol: Some("ed2k"),
+        protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+        opcode: Some(opcode),
         opcode_name: Some(server_opcode_name(opcode)),
         payload_len: Some(payload.len()),
-        payload_hex: Some(hex::encode(payload)),
+        payload_hex: Some(payload_hex),
+        payload_hex_truncated: Some(truncated),
         note: None,
     };
     dump_ed2k_server_record(&record);
