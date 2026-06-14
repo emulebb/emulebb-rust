@@ -535,12 +535,18 @@ async fn test_run_search_phase_walks_one_contact_per_jumpstart_tick() {
                         },
                     },
                     target,
-                    query_timeout: Duration::from_millis(160),
-                    deadline: Instant::now() + Duration::from_millis(220),
+                    // This is a wall-clock test (the worker schedules on
+                    // std::time::Instant), so the windows are sized generously to
+                    // tolerate scheduler jitter when the suite runs under parallel
+                    // load: first emit ~60ms (idle grace), second ~260ms (one
+                    // jumpstart tick later). The two drains below sample at 150ms
+                    // and 350ms, leaving ~90ms of slack on each side.
+                    query_timeout: Duration::from_millis(640),
+                    deadline: Instant::now() + Duration::from_millis(900),
                     phase2_fanout: 2,
                     last_lookup_response_at: Some(Instant::now()),
-                    jumpstart_idle_grace: Duration::from_millis(15),
-                    jumpstart_tick: Duration::from_millis(50),
+                    jumpstart_idle_grace: Duration::from_millis(60),
+                    jumpstart_tick: Duration::from_millis(200),
                     work_class: RpcWorkClass::Interactive,
                     cancel: &CancellationToken::new(),
                     result_tx: None,
@@ -550,12 +556,12 @@ async fn test_run_search_phase_walks_one_contact_per_jumpstart_tick() {
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(35)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     let first_wave = transport.drain_outgoing();
     assert_eq!(first_wave.len(), 1);
     assert_eq!(first_wave[0].0, first_addr);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let second_wave = transport.drain_outgoing();
     assert_eq!(second_wave.len(), 1);
     assert_eq!(second_wave[0].0, second_addr);
