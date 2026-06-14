@@ -344,6 +344,14 @@ What remains is the wiring, and the safe hook is precise:
     external-IP fallback pends rust Kad exposing one.
   - **Download-session hook** calling `service.register_source` when a peer queues
     us (§4.1), and the **upload-queue query** for reciprocity — still to wire.
+    **Known data-model gap (found 2026-06-14):** reciprocity correlates inbound
+    reasks by `(ip, udp_port)` (eMule `GetWaitingClientByIP_UDP`), but
+    `Ed2kUploadQueueSnapshotEntry` (`ed2k_transfer/upload_queue.rs`) currently
+    records only `tcp_port`, not the peer's advertised UDP port. So the live
+    integration must first extend the upload-queue entry to capture the peer UDP
+    port (from the peer hello misc-options) before reciprocity can locate senders
+    by endpoint; until then only an IP-only match is possible (eMule's
+    `bSenderMultipleIpUnknown` fallback forces TCP on ambiguity).
   These touch live runtime state, so wire them with validation, not blind.
 - **Validation gate:** prove it on the wire (Rust↔Rust accelerated cadence, then a
   gentle Rust↔stock witness) before flipping the flag on — do not enable by
