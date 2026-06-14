@@ -22,6 +22,7 @@ pub(crate) mod dispatch;
 pub(crate) mod outbound;
 pub(crate) mod reciprocity;
 pub(crate) mod registry;
+pub(crate) mod source_set;
 pub(crate) mod state;
 
 pub(crate) use codec::{
@@ -36,6 +37,7 @@ pub(crate) use outbound::{
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
+pub(crate) use source_set::ReaskSourceSet;
 pub(crate) use state::{
     FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,
     apply_reask_reply, reask_interval, should_fall_back_to_tcp, udp_reask_eligible,
