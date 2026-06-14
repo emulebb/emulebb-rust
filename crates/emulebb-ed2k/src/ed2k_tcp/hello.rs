@@ -335,10 +335,8 @@ pub(super) struct DecodedHelloIdentity {
     pub(super) client_id: u32,
     pub(super) tcp_port: u16,
     /// Peer's eD2k client UDP port, from the low 16 bits of `CT_EMULE_UDPPORTS`
-    /// (eMule `m_nUDPPort`); `0` when not advertised. Needed to correlate inbound
-    /// UDP source-reask by `(ip, udp_port)`; the reciprocity consumer that reads
-    /// it lands with the gated reask loop.
-    #[allow(dead_code)]
+    /// (eMule `m_nUDPPort`); `0` when not advertised. Threaded into the upload
+    /// queue to correlate inbound UDP source-reask by `(ip, udp_port)`.
     pub(super) udp_port: u16,
 }
 

@@ -910,6 +910,7 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
     Ed2kUploadPeerIdentity {
         ip: peer_addr.ip(),
         tcp_port: peer_addr.port(),
+        udp_port: None,
         user_hash: None,
         client_id: None,
         friend_slot: false,
@@ -927,6 +928,7 @@ fn upload_peer_identity_from_hello(
         } else {
             remote_hello.tcp_port
         },
+        udp_port: (remote_hello.udp_port != 0).then_some(remote_hello.udp_port),
         user_hash: Some(remote_hello.user_hash),
         client_id: Some(remote_hello.client_id),
         friend_slot: false,

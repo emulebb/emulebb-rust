@@ -46,8 +46,8 @@ rationale = "frozen legacy download session state machine; split startup, range 
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs"
-hard_limit_lines = 1002
-rationale = "frozen legacy upload listener session; split negotiation, queue, and payload serving as touched"
+hard_limit_lines = 1004
+rationale = "frozen legacy upload listener session; split negotiation, queue, and payload serving as touched. Cap bumped (+2) to capture the peer eD2k UDP port on the upload-queue peer identity (from the hello CT_EMULE_UDPPORTS), needed for (ip,udp_port) reask reciprocity correlation."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"

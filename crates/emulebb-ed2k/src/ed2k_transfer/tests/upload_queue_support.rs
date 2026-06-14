@@ -19,6 +19,7 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
     Ed2kUploadPeerIdentity {
         ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
         tcp_port: 4660 + u16::from(octet),
+        udp_port: None,
         user_hash: Some([user_marker; 16]),
         client_id: Some(client_id),
         friend_slot: false,
