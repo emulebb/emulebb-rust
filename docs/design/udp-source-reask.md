@@ -323,14 +323,24 @@ What remains is the wiring, and the safe hook is precise:
   3. **Send-handle** — **DONE** (`a687be2`): `RpcManager::send_raw_datagram(addr,
      bytes)` puts already-framed eD2k bytes on the shared socket without Kad
      encoding, for replies + the ticker.
-- **Remaining = the core-side consumer** (the live-validation-gated unit): a
-  closure (capturing the user hash + a `RpcManager` clone for replies) registered
-  via `set_foreign_datagram_handler` that runs `parse_inbound_reask_datagram` then
-  routes to `answer_inbound_reask` (uploader, reply via `send_raw_datagram`) or
-  `apply_reask_reply` (downloader, routed by `(ip,udp_port)` through the pending
-  registry); plus the **ticker** (§4.2) in the core download runtime owning the
-  `ReaskPendingRegistry` + per-source `ReaskSource`s and calling the outbound
-  builders. Gate it behind an off-by-default `enable_udp_reask` flag.
+- **Built so far for the consumer:** the I/O-free `ReaskService`
+  (`service.rs` — global `(ip,port)` routing + per-file `ReaskSourceSet`s;
+  `handle_inbound`/`route_message`, `tick`), the `DhtNode` pass-throughs
+  (`set_foreign_datagram_handler` + `send_raw_datagram`, `45a860e`), and the
+  off-by-default `Ed2kConfig.enable_udp_reask` flag (`ec3189d`).
+- **Remaining = one core runtime task** (`run_ed2k_udp_reask_loop`, spawned in the
+  network-runtime setup ~`lib.rs:1142` gated by `network.config.enable_udp_reask`)
+  that: builds `ReaskService`, registers a `DhtNode::set_foreign_datagram_handler`
+  closure forwarding `(datagram, from)` to an mpsc channel, and `select!`s between
+  channel-recv (→ `route_message` → for `AnswerNeeded` call `answer_inbound_reask`
+  with the upload-queue state + `send_raw_datagram`; for `RoutedReply` honour
+  TCP-fallback) and a tick interval (→ `service.tick` → `send_raw_datagram` each
+  due ping). Its two runtime-dynamic dependencies (the reason it is live-gated):
+  **our public IP** (learned from server IDCHANGE / Kad — required for the
+  obfuscation key) and a **download-session hook** that calls
+  `service.register_source` when a peer queues us (§4.1) + the **upload-queue
+  query** for reciprocity. These touch live runtime state, so wire them with
+  validation, not blind.
 - **Validation gate:** prove it on the wire (Rust↔Rust accelerated cadence, then a
   gentle Rust↔stock witness) before flipping the flag on — do not enable by
   default until validated.
