@@ -9,6 +9,7 @@
 //! - [`registry`]: the `(ip, udp_port)` anti-spoof pending-reply gate.
 //! - [`state`]: per-source reask state, cadence policy, and the downloader-side
 //!   reaction table.
+//! - [`reciprocity`]: the uploader-side answer decision for inbound reasks.
 //!
 //! The client-UDP transport + per-transfer reask ticker that call these (and the
 //! shared-vs-separate UDP-port decision) are the gated next slice. The re-exports
@@ -17,6 +18,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod codec;
+pub(crate) mod reciprocity;
 pub(crate) mod registry;
 pub(crate) mod state;
 
@@ -24,6 +26,7 @@ pub(crate) use codec::{
     OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKFILEPING, ReaskAck, ReaskFilePing,
     decode_reask_ack, decode_reask_file_ping, encode_reask_ack, encode_reask_file_ping,
 };
+pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
 pub(crate) use state::{
     FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,
