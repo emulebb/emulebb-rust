@@ -62,11 +62,19 @@ pub(super) async fn handle_server_packet(
             session.assigned_client_id = Some(id_change.client_id);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
-            // Learn our public IP exactly as eMule does (theApp.SetPublicIP from
-            // the HighID OP_IDCHANGE client_id == our public IPv4); a LowID id
-            // means we are firewalled, so the server gives us no public IP.
+            // Learn our public IP exactly as eMule does (theApp.SetPublicIP).
+            // HighID: the OP_IDCHANGE client_id IS our public IPv4. LowID: we are
+            // firewalled, but the server may still report our real external IP
+            // (ServerSocket.cpp: `if IsLowID(clientid) && reportedIP != 0
+            // SetPublicIP(reportedIP)`), used only when it is itself non-LowID.
             if is_low_id(id_change.client_id) {
-                context.public_ip.clear();
+                match id_change
+                    .reported_client_ip
+                    .filter(|ip| !is_low_id(u32::from_le_bytes(ip.octets())))
+                {
+                    Some(reported_ip) => context.public_ip.set(reported_ip),
+                    None => context.public_ip.clear(),
+                }
             } else {
                 context.public_ip.set(ipv4_from_client_id(id_change.client_id));
             }
