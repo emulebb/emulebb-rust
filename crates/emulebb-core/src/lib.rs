@@ -4534,6 +4534,20 @@ fn kad_req_masked_count(type_byte: u8) -> Option<u8> {
     }
 }
 
+/// Whether an inbound publish for `target` is close enough to our own ID to be
+/// accepted, mirroring the oracle publish responders
+/// (`Process_KADEMLIA2_PUBLISH_*_REQ`): drop the publish when
+/// `XOR(own_id, target).Get32BitChunk(0) > SEARCHTOLERANCE` unless the publisher
+/// is on a LAN IP (which is exempt from the tolerance gate).
+fn kad_publish_within_tolerance(own_id: NodeId, target: NodeId, publisher_ip: IpAddr) -> bool {
+    if let IpAddr::V4(ip) = publisher_ip
+        && (ip.is_private() || ip.is_loopback() || ip.is_link_local())
+    {
+        return true;
+    }
+    own_id.distance(&target).chunk_u32(0) <= emulebb_kad_proto::constants::SEARCHTOLERANCE
+}
+
 fn build_kad_hello_response_tags(
     kad_udp_port: u16,
     udp_firewalled: bool,
@@ -5207,6 +5221,20 @@ async fn handle_kad_local_store_packet(
             send_local_search_response(dht, from, response).await;
         }
         KadPacket::PublishKeyReq(req) => {
+            // Oracle Process_KADEMLIA2_PUBLISH_KEY_REQ: do not index (and do not
+            // give the publisher a false ack) while we are UDP firewalled, and
+            // drop publishes whose XOR distance exceeds SEARCHTOLERANCE unless on
+            // a LAN IP.
+            if kad_firewall.lock().await.is_udp_firewalled() {
+                tracing::debug!("dropping Kad PUBLISH_KEY_REQ from {from}: locally UDP firewalled");
+                return Ok(());
+            }
+            if !kad_publish_within_tolerance(dht.own_id(), req.target, from.ip()) {
+                tracing::debug!(
+                    "dropping Kad PUBLISH_KEY_REQ from {from}: target beyond SEARCHTOLERANCE"
+                );
+                return Ok(());
+            }
             let load = {
                 let mut store = local_store.lock().await;
                 store.record_keyword_publish_batch(req.target, &req.entries, Utc::now())
@@ -5226,6 +5254,18 @@ async fn handle_kad_local_store_packet(
                 .await;
         }
         KadPacket::PublishSourceReq(req) => {
+            if kad_firewall.lock().await.is_udp_firewalled() {
+                tracing::debug!(
+                    "dropping Kad PUBLISH_SOURCE_REQ from {from}: locally UDP firewalled"
+                );
+                return Ok(());
+            }
+            if !kad_publish_within_tolerance(dht.own_id(), req.target, from.ip()) {
+                tracing::debug!(
+                    "dropping Kad PUBLISH_SOURCE_REQ from {from}: target beyond SEARCHTOLERANCE"
+                );
+                return Ok(());
+            }
             let load = if let IpAddr::V4(source_ip) = from.ip() {
                 let mut store = local_store.lock().await;
                 store.record_source_publish(
@@ -5254,6 +5294,18 @@ async fn handle_kad_local_store_packet(
             }
         }
         KadPacket::PublishNotesReq(req) => {
+            if kad_firewall.lock().await.is_udp_firewalled() {
+                tracing::debug!(
+                    "dropping Kad PUBLISH_NOTES_REQ from {from}: locally UDP firewalled"
+                );
+                return Ok(());
+            }
+            if !kad_publish_within_tolerance(dht.own_id(), req.target, from.ip()) {
+                tracing::debug!(
+                    "dropping Kad PUBLISH_NOTES_REQ from {from}: target beyond SEARCHTOLERANCE"
+                );
+                return Ok(());
+            }
             let load = if let IpAddr::V4(publisher_ip) = from.ip() {
                 let mut store = local_store.lock().await;
                 store.record_notes_publish(
@@ -8182,6 +8234,39 @@ mod tests {
                 Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05)),
             ]
         );
+    }
+
+    #[test]
+    fn kad_publish_tolerance_gate_matches_oracle_distance_and_lan_exemption() {
+        use std::net::Ipv4Addr;
+        let own = NodeId::ZERO;
+
+        // Close target (chunk0 distance well under SEARCHTOLERANCE) -> accepted.
+        let close = NodeId::from_be_bytes([
+            0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        assert!(kad_publish_within_tolerance(
+            own,
+            close,
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))
+        ));
+
+        // Far target (chunk0 distance > SEARCHTOLERANCE) from a public IP -> dropped.
+        let far = NodeId::from_be_bytes([
+            0x7F, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        assert!(!kad_publish_within_tolerance(
+            own,
+            far,
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))
+        ));
+
+        // The same far target from a LAN IP is exempt -> accepted.
+        assert!(kad_publish_within_tolerance(
+            own,
+            far,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))
+        ));
     }
 
     #[test]

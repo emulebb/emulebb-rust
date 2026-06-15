@@ -28,6 +28,26 @@ fn udp_round_marks_open_on_matching_port() {
 }
 
 #[test]
+fn is_udp_firewalled_assumes_open_until_verified_closed() {
+    // Mirrors IsFirewalledUDP(true): unknown/unverified -> open (false).
+    let mut state = KadFirewallState::default();
+    assert!(!state.is_udp_firewalled());
+
+    // Verified open stays not-firewalled.
+    state.udp_verified = true;
+    state.udp_open = true;
+    assert!(!state.is_udp_firewalled());
+
+    // Only a verified-closed result reports firewalled.
+    state.udp_open = false;
+    assert!(state.is_udp_firewalled());
+
+    // An unverified closed state is still treated as open.
+    state.udp_verified = false;
+    assert!(!state.is_udp_firewalled());
+}
+
+#[test]
 fn udp_round_times_out_as_firewalled_after_negative_results() {
     let mut state = KadFirewallState::default();
     let helper_a = "203.0.113.10".parse().unwrap();

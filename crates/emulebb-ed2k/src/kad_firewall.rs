@@ -514,6 +514,17 @@ impl KadFirewallState {
             &mut self.last_udp_check_failed_at,
         )
     }
+
+    /// Whether we should treat ourselves as UDP-firewalled for the purpose of
+    /// responding to inbound publishes / buddy requests.
+    ///
+    /// Mirrors `CUDPFirewallTester::IsFirewalledUDP(true)`: an unknown/unverified
+    /// state is treated as OPEN (returns false); we only report firewalled once a
+    /// completed check has verified the UDP port is closed.
+    #[must_use]
+    pub fn is_udp_firewalled(&self) -> bool {
+        self.udp_verified && !self.udp_open
+    }
 }
 
 fn finalize_round(
