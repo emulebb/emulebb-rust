@@ -4535,24 +4535,28 @@ fn build_kad_hello_request_tags(
     tcp_firewalled: bool,
     request_ack: bool,
 ) -> Vec<Tag> {
+    // Mirror the oracle SendMyDetails (KademliaUDPListener.cpp:146-169): the two
+    // tags are independent and additive, not mutually exclusive. SOURCEUPORT is
+    // written whenever we advertise our intern Kad port (!GetUseExternKadPort),
+    // and KADMISCOPTIONS is written (v8+) whenever we request an ACK or are
+    // firewalled. A firewalled node on its intern port therefore emits BOTH.
+    let mut tags = Vec::new();
+    if can_advertise_source_udp_port {
+        tags.push(Tag::new_short(
+            tag_name::SOURCEUPORT,
+            TagValue::U16(kad_udp_port),
+        ));
+    }
     if request_ack || udp_firewalled || tcp_firewalled {
         let misc_options = u8::from(udp_firewalled)
             | (u8::from(tcp_firewalled) << 1)
             | (u8::from(request_ack) << 2);
-        return vec![Tag::new_short(
+        tags.push(Tag::new_short(
             tag_name::KADMISCOPTIONS,
             TagValue::U8(misc_options),
-        )];
+        ));
     }
-
-    if can_advertise_source_udp_port {
-        return vec![Tag::new_short(
-            tag_name::SOURCEUPORT,
-            TagValue::U16(kad_udp_port),
-        )];
-    }
-
-    Vec::new()
+    tags
 }
 
 async fn build_kad_hello_request(
@@ -8081,8 +8085,25 @@ mod tests {
     }
 
     #[test]
-    fn kad_hello_request_tags_prefer_misc_bits_for_firewall_or_ack_state() {
+    fn kad_hello_request_tags_emit_source_port_and_misc_bits_additively() {
+        // Oracle SendMyDetails writes SOURCEUPORT (intern port) AND KADMISCOPTIONS
+        // (firewalled/ack) together, not one or the other.
         let tags = build_kad_hello_request_tags(41000, true, true, false, true);
+
+        assert_eq!(
+            tags,
+            vec![
+                Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
+                Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05)),
+            ]
+        );
+    }
+
+    #[test]
+    fn kad_hello_request_tags_emit_only_misc_bits_when_on_extern_port() {
+        // When we advertise our extern Kad port (GetUseExternKadPort), the oracle
+        // omits SOURCEUPORT but still emits KADMISCOPTIONS while firewalled.
+        let tags = build_kad_hello_request_tags(41000, false, true, false, true);
 
         assert_eq!(
             tags,
