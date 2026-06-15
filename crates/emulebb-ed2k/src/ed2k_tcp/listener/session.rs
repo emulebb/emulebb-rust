@@ -931,11 +931,20 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 reply_with_firewall_udp(dht, peer_addr.ip(), request).await?;
             }
             (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => {
+                // A helper we asked (via KADEMLIA2_FIREWALLED2_REQ) connected back
+                // to our eD2k listener and confirmed our TCP port is open. Count
+                // it as an open observation, but only from an IP we actually
+                // probed (oracle ListenSocket.cpp: IsKadFirewallCheckIP ->
+                // IncFirewalled).
+                let accepted = kad_firewall
+                    .lock()
+                    .await
+                    .record_tcp_open_ack(peer_addr.ip(), chrono::Utc::now());
                 dump_ed2k_tcp_listener_meta(
                     peer_addr,
                     Some(transport.mode),
                     "kad_firewall_tcp_ack",
-                    "received=true",
+                    format!("received=true accepted={accepted}"),
                 );
             }
             (OP_EMULEPROT, OP_BUDDYPING) => {

@@ -40,7 +40,7 @@ use emulebb_ed2k::{
         Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     ipfilter::IpFilter,
-    kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
+    kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
@@ -79,6 +79,7 @@ use uuid::Uuid;
 mod download_source_registry;
 mod kad_buddy;
 mod kad_snoop_entry;
+mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
 mod profile_state;
 mod search_query;
@@ -709,6 +710,11 @@ pub struct Ed2kNetworkConfig {
     pub kad_udp_firewall_check_enabled: bool,
     /// Seconds between Kad UDP firewall self-check rounds (gentle cadence).
     pub kad_udp_firewall_check_interval_secs: u64,
+    /// Whether the requester-side Kad TCP firewall recheck is driven (oracle
+    /// FIREWALLED2_REQ / FIREWALLED_RES + TCP connect-back ack). Default on.
+    pub kad_tcp_firewall_check_enabled: bool,
+    /// Seconds between Kad TCP firewall recheck rounds (gentle cadence).
+    pub kad_tcp_firewall_check_interval_secs: u64,
     /// Whether the Kad LowID buddy/firewalled-callback subsystem is active.
     /// Default on (per operator policy): when we are firewalled we seek a buddy,
     /// and we answer buddy requests from firewalled peers when we are reachable.
@@ -1447,6 +1453,25 @@ impl EmulebbCore {
         } else {
             None
         };
+        // Requester-side Kad TCP firewall recheck driver (oracle FirewalledCheck
+        // / GetRecheckIP). Asks open v6+ helpers to TCP connect-back via
+        // KADEMLIA2_FIREWALLED2_REQ and derives a TCP-firewalled verdict from the
+        // open acks + FIREWALLED_RES, so a pure-Kad node (no eD2k server) still
+        // detects LowID and seeks a buddy. Off only when the operator disables it.
+        if network.kad_tcp_firewall_check_enabled {
+            tasks.push(tokio::spawn(
+                kad_tcp_firewall_check::run_kad_tcp_firewall_check_loop(
+                    kad_tcp_firewall_check::KadTcpFirewallCheckOptions {
+                        dht: dht.clone(),
+                        ed2k_listener: Arc::clone(&ed2k_listener),
+                        server_state: Arc::clone(&server_state),
+                        kad_firewall: Arc::clone(&kad_firewall),
+                        network: network.clone(),
+                        shutdown: Arc::clone(&shutdown),
+                    },
+                ),
+            ));
+        }
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
@@ -4149,8 +4174,12 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
 
 /// Evaluate the current "do we need a buddy?" inputs from live state.
 async fn current_buddy_need(runtime: &KadBuddyRuntime) -> BuddyNeedInput {
-    let tcp_firewalled =
-        current_tcp_firewalled(&runtime.ed2k_listener, &runtime.server_state).await;
+    let tcp_firewalled = current_tcp_firewalled(
+        &runtime.ed2k_listener,
+        &runtime.server_state,
+        &runtime.kad_firewall,
+    )
+    .await;
     let udp_firewalled_verified = {
         let firewall = runtime.kad_firewall.lock().await;
         firewall.udp_verified && !firewall.udp_open
@@ -4442,11 +4471,19 @@ async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec
     results
 }
 
-async fn current_tcp_firewalled(
+/// The current TCP-firewalled (LowID) verdict, in oracle priority order:
+/// the eD2k server's authoritative LowID flag first, then the Kad TCP firewall
+/// recheck verdict (so a pure-Kad node with no server still detects it), then a
+/// last-resort "listener port is unusable" fallback.
+pub(crate) async fn current_tcp_firewalled(
     ed2k_listener: &TcpListener,
     server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
 ) -> bool {
     if let Some(tcp_firewalled) = server_state.read().await.tcp_firewalled() {
+        return tcp_firewalled;
+    }
+    if let Some(tcp_firewalled) = kad_firewall.lock().await.tcp_firewalled() {
         return tcp_firewalled;
     }
     ed2k_listener
@@ -4514,6 +4551,12 @@ async fn build_kad_hello_request(
         .context("failed to read eD2K listener address while building Kad HELLO request")?
         .port();
     let firewall = kad_firewall.lock().await;
+    let tcp_firewalled = resolve_tcp_firewalled_with_firewall(
+        ed2k_listener,
+        server_state,
+        firewall.tcp_firewalled(),
+    )
+    .await;
 
     Ok(HelloReq {
         node_id: dht.own_id(),
@@ -4523,10 +4566,31 @@ async fn build_kad_hello_request(
             bind_addr.port(),
             firewall.udp_verified && firewall.udp_open,
             firewall.udp_verified && !firewall.udp_open,
-            current_tcp_firewalled(ed2k_listener, server_state).await,
+            tcp_firewalled,
             request_ack,
         ),
     })
+}
+
+/// Resolve the TCP-firewalled verdict when the Kad firewall verdict has already
+/// been read from a held [`KadFirewallState`] guard, avoiding a re-lock (the
+/// tokio mutex is not reentrant). Same priority as [`current_tcp_firewalled`]:
+/// server first, then the supplied Kad verdict, then the listener fallback.
+async fn resolve_tcp_firewalled_with_firewall(
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_verdict: Option<bool>,
+) -> bool {
+    if let Some(tcp_firewalled) = server_state.read().await.tcp_firewalled() {
+        return tcp_firewalled;
+    }
+    if let Some(tcp_firewalled) = kad_verdict {
+        return tcp_firewalled;
+    }
+    ed2k_listener
+        .local_addr()
+        .map(|addr| addr.port() == 0)
+        .unwrap_or(true)
 }
 
 async fn build_kad_hello_response(
@@ -4542,6 +4606,12 @@ async fn build_kad_hello_response(
         .context("failed to read eD2K listener address while building Kad HELLO response")?
         .port();
     let firewall = kad_firewall.lock().await;
+    let tcp_firewalled = resolve_tcp_firewalled_with_firewall(
+        ed2k_listener,
+        server_state,
+        firewall.tcp_firewalled(),
+    )
+    .await;
 
     Ok(HelloRes {
         node_id: dht.own_id(),
@@ -4550,7 +4620,7 @@ async fn build_kad_hello_response(
         tags: build_kad_hello_response_tags(
             bind_addr.port(),
             firewall.udp_verified && !firewall.udp_open,
-            current_tcp_firewalled(ed2k_listener, server_state).await,
+            tcp_firewalled,
             request_ack,
         ),
     })
@@ -4876,6 +4946,34 @@ async fn handle_kad_local_store_packet(
                 req,
             );
         }
+        KadPacket::FirewalledRes(res) => {
+            // A helper we probed in our TCP firewall recheck reports our
+            // externally observed IP (oracle Process_KADEMLIA_FIREWALLED_RES).
+            // Accept it only from an IP we actually probed (IsKadFirewallCheckIP)
+            // and record it against the active recheck round.
+            let now = Utc::now();
+            let reported_ip = IpAddr::V4(Ipv4Addr::from(res.ip.to_be_bytes()));
+            let outcome = {
+                let mut firewall = kad_firewall.lock().await;
+                if !firewall.is_tcp_firewall_check_ip(from.ip(), now) {
+                    tracing::debug!(
+                        "ignoring unrequested Kad FIREWALLED_RES from {from}"
+                    );
+                    FirewalledResponseOutcome::Ignored
+                } else {
+                    firewall.record_firewalled_response(from.ip(), reported_ip, now)
+                }
+            };
+            match outcome {
+                FirewalledResponseOutcome::Completed => tracing::debug!(
+                    "Kad TCP firewall recheck IP window completed (external IP {reported_ip})"
+                ),
+                FirewalledResponseOutcome::Recorded => tracing::debug!(
+                    "recorded Kad FIREWALLED_RES from {from} (external IP {reported_ip})"
+                ),
+                FirewalledResponseOutcome::Ignored => {}
+            }
+        }
         KadPacket::FirewallUdp(packet) => {
             let outcome = kad_firewall.lock().await.record_firewall_udp_packet(
                 from.ip(),
@@ -5131,10 +5229,11 @@ async fn handle_kad_find_buddy_req(
     // We cannot relay for others while firewalled ourselves (oracle refuses with
     // GetFirewalled() || IsFirewalledUDP(true) || !IsVerified()). IsFirewalledUDP
     // is "verified AND not open"; an unverified UDP status is also a refusal.
-    let self_firewalled = current_tcp_firewalled(ed2k_listener, server_state).await || {
-        let firewall = kad_firewall.lock().await;
-        !firewall.udp_verified || !firewall.udp_open
-    };
+    let self_firewalled = current_tcp_firewalled(ed2k_listener, server_state, kad_firewall).await
+        || {
+            let firewall = kad_firewall.lock().await;
+            !firewall.udp_verified || !firewall.udp_open
+        };
     let tcp_port = ed2k_listener
         .local_addr()
         .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
@@ -7464,6 +7563,8 @@ mod tests {
             kad_hello_intro_fanout: 2,
             kad_udp_firewall_check_enabled: true,
             kad_udp_firewall_check_interval_secs: 600,
+            kad_tcp_firewall_check_enabled: true,
+            kad_tcp_firewall_check_interval_secs: 600,
             kad_buddy_enabled: true,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),

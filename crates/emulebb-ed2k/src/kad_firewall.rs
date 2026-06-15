@@ -115,10 +115,24 @@ pub struct KadFirewallState {
     pub last_external_port_probe_completed_at: Option<DateTime<Utc>>,
     /// Most recent external Kad UDP port candidate reported by a PONG responder.
     pub last_reported_external_udp_port: Option<u16>,
+    /// Whether the most recent completed TCP firewall verdict is "firewalled".
+    /// `None` until a verdict has ever been established (no eD2k server and no
+    /// Kad recheck completed yet), so callers can fall back to other signals.
+    pub tcp_firewalled_verdict: Option<bool>,
     active_round: Option<UdpFirewallCheckRound>,
     active_tcp_round: Option<TcpFirewallCheckRound>,
     active_external_port_discovery: Option<ExternalPortDiscoveryRound>,
     discovered_external_udp_port: Option<u16>,
+    /// Recently probed firewall-check helper IPs with their probe time (oracle
+    /// `listFirewallCheckRequests`). Used to authenticate inbound TCP-check acks
+    /// and `FIREWALLED_RES` replies within `TCP_FIREWALL_CHECK_IP_TTL_SECS`.
+    tcp_firewall_check_ips: HashMap<IpAddr, DateTime<Utc>>,
+    /// Count of helper TCP connect-backs that succeeded this round (oracle
+    /// `m_uFirewalled`); reset when a new recheck starts.
+    tcp_open_acks: u8,
+    /// Snapshot of the previous firewalled verdict taken when a recheck starts
+    /// (oracle `m_bLastFirewallState`), reported while the recheck is in flight.
+    tcp_firewall_last_state: bool,
 }
 
 /// Result of processing a `KADEMLIA2_FIREWALLUDP` packet for the active round.
@@ -554,6 +568,8 @@ fn finalize_round(
         external_udp_port,
     })
 }
+
+mod tcp_recheck;
 
 #[cfg(test)]
 mod tests;

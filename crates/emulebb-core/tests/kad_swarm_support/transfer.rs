@@ -127,6 +127,8 @@ fn test_network_config(
         kad_hello_intro_fanout: 0,
         kad_udp_firewall_check_enabled: false,
         kad_udp_firewall_check_interval_secs: 600,
+        kad_tcp_firewall_check_enabled: false,
+        kad_tcp_firewall_check_interval_secs: 600,
         kad_buddy_enabled: false,
         nat_config: NatConfig {
             enabled: false,

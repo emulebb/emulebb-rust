@@ -211,3 +211,87 @@ fn tcp_firewall_recheck_ignores_untracked_responses() {
     assert_eq!(outcome, FirewalledResponseOutcome::Ignored);
     assert!(state.tcp_recheck_active);
 }
+
+#[test]
+fn tcp_verdict_unknown_before_any_recheck() {
+    let state = KadFirewallState::default();
+    assert_eq!(state.tcp_firewalled(), None);
+}
+
+#[test]
+fn tcp_recheck_settles_open_after_two_open_acks() {
+    let mut state = KadFirewallState::default();
+    let now = Utc.with_ymd_and_hms(2026, 4, 3, 10, 0, 0).unwrap();
+    let helper_a: std::net::IpAddr = "203.0.113.20".parse().unwrap();
+    let helper_b: std::net::IpAddr = "203.0.113.21".parse().unwrap();
+
+    state.begin_tcp_recheck(now);
+    assert!(state.tcp_recheck_in_progress());
+    // Probed helpers are accepted as firewall-check responders.
+    state.add_tcp_firewall_check_ip(helper_a, now);
+    state.add_tcp_firewall_check_ip(helper_b, now);
+
+    // First open ack: not enough yet (threshold is 2), verdict still unknown.
+    assert!(state.record_tcp_open_ack(helper_a, now));
+    assert_eq!(state.tcp_firewalled(), None);
+    // Second open ack: settles "open" (not firewalled) immediately.
+    assert!(state.record_tcp_open_ack(helper_b, now));
+    assert_eq!(state.tcp_firewalled(), Some(false));
+    assert!(!state.tcp_recheck_in_progress());
+}
+
+#[test]
+fn tcp_open_ack_rejected_from_unprobed_ip() {
+    let mut state = KadFirewallState::default();
+    let now = Utc.with_ymd_and_hms(2026, 4, 3, 10, 5, 0).unwrap();
+    state.begin_tcp_recheck(now);
+    // We never probed this IP, so its ack must not count (oracle
+    // IsKadFirewallCheckIP guard).
+    assert!(!state.record_tcp_open_ack("203.0.113.99".parse().unwrap(), now));
+    assert_eq!(state.tcp_firewalled(), None);
+}
+
+#[test]
+fn tcp_firewall_check_ip_expires_after_ttl() {
+    let mut state = KadFirewallState::default();
+    let probed_at = Utc.with_ymd_and_hms(2026, 4, 3, 10, 10, 0).unwrap();
+    let ip: std::net::IpAddr = "203.0.113.30".parse().unwrap();
+    state.add_tcp_firewall_check_ip(ip, probed_at);
+    assert!(state.is_tcp_firewall_check_ip(ip, probed_at + chrono::Duration::seconds(179)));
+    // Past the 180s window the IP is no longer an accepted responder.
+    assert!(!state.is_tcp_firewall_check_ip(ip, probed_at + chrono::Duration::seconds(181)));
+}
+
+#[test]
+fn tcp_recheck_finalizes_firewalled_without_open_acks() {
+    let mut state = KadFirewallState::default();
+    let now = Utc.with_ymd_and_hms(2026, 4, 3, 10, 15, 0).unwrap();
+    state.begin_tcp_recheck(now);
+    // No open acks arrive; finalizing the round yields a firewalled verdict.
+    state.finish_tcp_recheck(now + chrono::Duration::seconds(30));
+    assert_eq!(state.tcp_firewalled(), Some(true));
+    assert!(!state.tcp_recheck_in_progress());
+}
+
+#[test]
+fn tcp_recheck_reports_last_state_while_in_flight() {
+    let mut state = KadFirewallState::default();
+    let t0 = Utc.with_ymd_and_hms(2026, 4, 3, 10, 20, 0).unwrap();
+    let helper_a: std::net::IpAddr = "203.0.113.40".parse().unwrap();
+    let helper_b: std::net::IpAddr = "203.0.113.41".parse().unwrap();
+
+    // First recheck converges open.
+    state.begin_tcp_recheck(t0);
+    state.add_tcp_firewall_check_ip(helper_a, t0);
+    state.add_tcp_firewall_check_ip(helper_b, t0);
+    state.record_tcp_open_ack(helper_a, t0);
+    state.record_tcp_open_ack(helper_b, t0);
+    assert_eq!(state.tcp_firewalled(), Some(false));
+
+    // A new recheck snapshots the prior (open) state and reports it while in
+    // flight, rather than flapping to an unknown/firewalled value mid-check.
+    let t1 = t0 + chrono::Duration::minutes(20);
+    state.begin_tcp_recheck(t1);
+    assert!(state.tcp_recheck_in_progress());
+    assert_eq!(state.tcp_firewalled(), Some(false));
+}
