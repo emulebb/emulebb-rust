@@ -1401,6 +1401,7 @@ impl EmulebbCore {
                 reask_user_hash,
                 4,
                 ed2k_public_ip.clone(),
+                network.ip_filter.clone(),
                 Arc::clone(&shutdown),
             )));
             // Re-engage consumer: when a reask reports a low queue rank, the loop

@@ -32,6 +32,7 @@ use tracing::{debug, trace};
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
 use crate::ed2k_transfer::Ed2kTransferRuntime;
+use crate::ipfilter::IpFilter;
 use crate::reachability::ExternalReachability;
 
 /// A command from a download session to the reask loop: detach a just-queued
@@ -160,6 +161,7 @@ fn hex_preview(bytes: &[u8]) -> String {
 /// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
 /// when `enable_udp_reask` is on (the default); the flag exists so the transport
 /// can be disabled to fall back to the held-TCP path if needed.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
@@ -168,6 +170,7 @@ pub async fn run_ed2k_udp_reask_loop(
     user_hash: [u8; 16],
     udp_version: u8,
     public_ip: ExternalReachability,
+    ip_filter: IpFilter,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut service = ReaskService::new(user_hash, udp_version, public_ip.clone());
@@ -201,6 +204,7 @@ pub async fn run_ed2k_udp_reask_loop(
                     &dht,
                     &transfer_runtime,
                     &events,
+                    &ip_filter,
                     public_ip.octets(),
                     &data,
                     from,
@@ -244,16 +248,36 @@ fn routed_reply_events(
     }
 }
 
+/// Whether an inbound reask datagram's source IP is filtered/banned and must be
+/// dropped (IPv4-only; a non-V4 sender is dropped as a non-client too). Pure so
+/// the IP-filter enforcement is unit-testable without socket I/O.
+fn is_filtered_reask_source(from: SocketAddr, ip_filter: &IpFilter) -> bool {
+    match from {
+        SocketAddr::V4(v4) => ip_filter.is_filtered(*v4.ip()),
+        SocketAddr::V6(_) => true,
+    }
+}
+
 /// Route one inbound datagram through the service and act on the outcome.
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound_datagram(
     service: &mut ReaskService,
     dht: &DhtNode,
     transfer_runtime: &Ed2kTransferRuntime,
     events: &ReaskEventSender,
+    ip_filter: &IpFilter,
     our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
 ) {
+    // Drop datagrams from a filtered/banned IP before any processing (master
+    // ClientUDPSocket.cpp: theApp.ipfilter->IsFiltered() at packet entry). The
+    // foreign-datagram path that delivered this is not covered by core's Kad
+    // IP-filter, so enforce it here.
+    if is_filtered_reask_source(from, ip_filter) {
+        trace!("ed2k udp reask: dropping inbound datagram from filtered IP {from}");
+        return;
+    }
     trace!(
         "ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}",
         data.len(), hex_preview(data),
@@ -529,6 +553,24 @@ mod tests {
         }
         // Source is gone; a second remove returns false (no double release).
         assert!(!svc.remove_source(endpoint.0, endpoint.1));
+    }
+
+    #[test]
+    fn inbound_reask_datagram_from_filtered_ip_is_dropped() {
+        // B3: a banned/filtered source IP must be dropped before processing
+        // (master ClientUDPSocket.cpp IsFiltered at packet entry).
+        let filter = IpFilter::parse("198.51.100.0 - 198.51.100.255 , 100 , banned", 127);
+        let banned: SocketAddr = "198.51.100.7:4672".parse().unwrap();
+        let allowed: SocketAddr = "203.0.113.9:4672".parse().unwrap();
+        assert!(is_filtered_reask_source(banned, &filter));
+        assert!(!is_filtered_reask_source(allowed, &filter));
+    }
+
+    #[test]
+    fn empty_filter_allows_all_reask_sources() {
+        let filter = IpFilter::default();
+        let from: SocketAddr = "198.51.100.7:4672".parse().unwrap();
+        assert!(!is_filtered_reask_source(from, &filter));
     }
 
     #[test]
