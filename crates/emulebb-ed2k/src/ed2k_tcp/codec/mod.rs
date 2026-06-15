@@ -6,8 +6,13 @@ use flate2::read::ZlibDecoder;
 
 use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferState};
 
+mod buddy;
 mod hashset;
 mod upload;
+
+pub(in crate::ed2k_tcp) use buddy::{
+    encode_buddy_ping, encode_buddy_pong, encode_kad_callback_relay,
+};
 
 const MAX_CLIENT_MSG_LEN: usize = 450;
 
