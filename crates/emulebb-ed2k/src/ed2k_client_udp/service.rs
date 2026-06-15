@@ -25,9 +25,14 @@ use crate::public_ip::SharedPublicIp;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaskInboundOutcome {
     /// A downloader-side reply was routed into our source state. The action tells
-    /// the caller whether to also reask over TCP / drop the source; no datagram
-    /// reply is owed.
-    RoutedReply(ReaskAction),
+    /// the caller whether to also reask over TCP / drop the source / re-engage on a
+    /// low rank; `file_hash`/`endpoint` identify the source so the caller can emit a
+    /// loop->core event. No datagram reply is owed.
+    RoutedReply {
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+        action: ReaskAction,
+    },
     /// An inbound `OP_REASKFILEPING` from a peer queued on us — the caller answers
     /// it via `answer_inbound_reask` + an outbound builder (it holds the
     /// upload-queue state this service intentionally does not).
@@ -157,7 +162,11 @@ impl ReaskService {
                 if matches!(action, ReaskAction::DropSource) {
                     self.endpoint_index.remove(&(ip, port));
                 }
-                ReaskInboundOutcome::RoutedReply(action)
+                ReaskInboundOutcome::RoutedReply {
+                    file_hash,
+                    endpoint: (ip, port),
+                    action,
+                }
             }
             None => ReaskInboundOutcome::Ignored, // unsolicited (failed the pending gate)
         }
@@ -268,7 +277,11 @@ mod tests {
         let outcome = svc.handle_inbound(&ack, peer_addr(), now);
         assert_eq!(
             outcome,
-            ReaskInboundOutcome::RoutedReply(ReaskAction::UpdatedRank(12))
+            ReaskInboundOutcome::RoutedReply {
+                file_hash: file_hash(),
+                endpoint: peer_v4(),
+                action: ReaskAction::UpdatedRank(12),
+            }
         );
     }
 
@@ -333,7 +346,14 @@ mod tests {
         // FNF (plaintext OP_EMULEPROT + opcode, empty body).
         let fnf = vec![0xC5u8, 0x92];
         let outcome = svc.handle_inbound(&fnf, peer_addr(), now);
-        assert_eq!(outcome, ReaskInboundOutcome::RoutedReply(ReaskAction::DropSource));
+        assert_eq!(
+            outcome,
+            ReaskInboundOutcome::RoutedReply {
+                file_hash: file_hash(),
+                endpoint: peer_v4(),
+                action: ReaskAction::DropSource,
+            }
+        );
         assert_eq!(svc.source_count(), 0);
         // Routing for the endpoint is gone.
         let again = svc.handle_inbound(&fnf, peer_addr(), now);

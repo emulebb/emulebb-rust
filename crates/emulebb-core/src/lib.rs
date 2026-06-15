@@ -41,8 +41,9 @@ use emulebb_ed2k::{
     ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
     public_ip::SharedPublicIp,
-    reask_command_channel, run_ed2k_udp_reask_loop,
+    reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
+use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
     SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts, metadata_from_publish_snapshot,
@@ -1285,13 +1286,23 @@ impl EmulebbCore {
             // driver detach queued sources onto the loop over the command channel.
             let (reask_handle, reask_commands) = reask_command_channel();
             *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
+            // Typed loop->core event channel (libtorrent-alert style) for re-engage.
+            let (reask_events_tx, reask_events_rx) = reask_event_channel();
             tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
                 dht.clone(),
                 Arc::clone(&self.ed2k_transfers),
                 reask_commands,
+                reask_events_tx,
                 reask_user_hash,
                 4,
                 ed2k_public_ip.clone(),
+                Arc::clone(&shutdown),
+            )));
+            // Re-engage consumer: when a reask reports a low queue rank, the loop
+            // hands the source back and signals here to reconnect over TCP now.
+            tasks.push(tokio::spawn(run_ed2k_reask_reengage(
+                self.clone(),
+                reask_events_rx,
                 Arc::clone(&shutdown),
             )));
         }
@@ -5380,6 +5391,34 @@ async fn run_advertised_udp_port_sync(
             set_advertised_external_udp_port(external);
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// Re-engage consumer: drains [`ReaskEvent`]s the reask loop raises and reconnects
+/// the named transfer over TCP *now*, reusing the normal download attempt (whose
+/// `active_download_attempts` guard debounces duplicates). The loop only raises
+/// `SourceReady` when a source's queue rank is imminent, so this claims the slot
+/// instead of waiting for the periodic download cycle.
+async fn run_ed2k_reask_reengage(
+    core: EmulebbCore,
+    mut events: ReaskEventReceiver,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        let Some(event) = events.recv().await else {
+            break;
+        };
+        match event {
+            ReaskEvent::SourceReady { file_hash } => {
+                let hash = file_hash.to_string();
+                let Some(transfer) = core.transfer(&hash).await else {
+                    continue;
+                };
+                if transfer.state == "downloading" {
+                    core.queue_ed2k_download_attempt(transfer).await;
+                }
+            }
+        }
     }
 }
 

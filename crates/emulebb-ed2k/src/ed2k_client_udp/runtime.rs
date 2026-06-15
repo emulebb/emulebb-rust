@@ -91,6 +91,30 @@ pub fn reask_command_channel() -> (ReaskSourceHandle, ReaskCommandReceiver) {
     (ReaskSourceHandle(tx), rx)
 }
 
+/// A typed event the reask loop raises for core to act on — a libtorrent-alert /
+/// libp2p-`SwarmEvent`-style signal that replaces bespoke per-need channels.
+/// Events flow loop -> core; commands flow core -> loop ([`ReaskCommand`]).
+#[derive(Debug, Clone)]
+pub enum ReaskEvent {
+    /// A queued source for `file_hash` reported a queue rank at/under the
+    /// re-engage threshold: a slot is imminent, so core should reconnect over TCP
+    /// now to claim it instead of waiting for the periodic download cycle. The
+    /// loop has already handed the source back (removed it from reask state).
+    SourceReady { file_hash: Ed2kHash },
+}
+
+/// Receiver end of the reask-event channel, owned by core's re-engage consumer.
+pub type ReaskEventReceiver = mpsc::UnboundedReceiver<ReaskEvent>;
+/// Sender end, held by [`run_ed2k_udp_reask_loop`].
+pub type ReaskEventSender = mpsc::UnboundedSender<ReaskEvent>;
+
+/// Create the reask-event channel: the sender goes to [`run_ed2k_udp_reask_loop`],
+/// the receiver to core's re-engage consumer. Unbounded because events are rare
+/// (only low-rank acks) and the loop must never block raising one.
+pub fn reask_event_channel() -> (ReaskEventSender, ReaskEventReceiver) {
+    mpsc::unbounded_channel()
+}
+
 /// How long to wait for a reask reply before counting it a UDP failure.
 const REASK_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the loop checks for due reasks + drains timed-out ones. Sources
@@ -102,6 +126,11 @@ const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
 /// Bound on the detach-command channel; a full channel just drops the detach
 /// (the source keeps its TCP behaviour), so a modest bound is safe.
 const REASK_COMMAND_CHANNEL_BOUND: usize = 256;
+/// Reconnect a queued source over TCP when an `OP_REASKACK` reports a queue rank
+/// at or below this: a slot is imminent, so claim it now rather than waiting for
+/// the periodic download cycle (eMule reconnects proactively near the front of
+/// the queue). Conservative to avoid premature reconnects on still-deep ranks.
+const REENGAGE_RANK_THRESHOLD: u16 = 4;
 
 /// Hex preview of a datagram for reask packet-trace diagnostics (capped so a
 /// stray large datagram cannot blow up the log line).
@@ -125,6 +154,7 @@ pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     mut commands: ReaskCommandReceiver,
+    events: ReaskEventSender,
     user_hash: [u8; 16],
     udp_version: u8,
     public_ip: SharedPublicIp,
@@ -160,6 +190,7 @@ pub async fn run_ed2k_udp_reask_loop(
                     &mut service,
                     &dht,
                     &transfer_runtime,
+                    &events,
                     public_ip.octets(),
                     &data,
                     from,
@@ -183,6 +214,7 @@ async fn handle_inbound_datagram(
     service: &mut ReaskService,
     dht: &DhtNode,
     transfer_runtime: &Ed2kTransferRuntime,
+    events: &ReaskEventSender,
     our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
@@ -192,10 +224,25 @@ async fn handle_inbound_datagram(
         data.len(), hex_preview(data),
     );
     match service.handle_inbound(data, from, Instant::now()) {
-        ReaskInboundOutcome::RoutedReply(action) => {
-            trace!("ed2k udp reask: routed reply from {from}: {action:?}");
-            // TODO(reask-tcp-fallback): on RetryTcp, ask the download runtime to
-            // reconnect+SETREQFILEID for this source.
+        ReaskInboundOutcome::RoutedReply {
+            file_hash,
+            endpoint,
+            action,
+        } => {
+            trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
+            // Re-engage: a low enough rank means a slot is imminent. Hand the
+            // source back to TCP (remove it from reask state) and signal core to
+            // reconnect now, rather than waiting for the periodic download cycle.
+            if let ReaskAction::UpdatedRank(rank) = action
+                && rank <= REENGAGE_RANK_THRESHOLD
+            {
+                service.remove_source(endpoint.0, endpoint.1);
+                if events.send(ReaskEvent::SourceReady { file_hash }).is_ok() {
+                    trace!(
+                        "ed2k udp reask: re-engage SourceReady for {file_hash} (rank {rank})"
+                    );
+                }
+            }
         }
         ReaskInboundOutcome::AnswerNeeded { ping, from } => {
             // Answer the peer's OP_REASKFILEPING from the global upload-queue +
