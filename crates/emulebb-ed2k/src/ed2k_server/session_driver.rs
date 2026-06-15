@@ -111,6 +111,10 @@ pub(super) async fn run_one_server_session(
         .map(|interval| TokioInstant::now() + interval);
     let mut queued_background_search = None;
     let mut pending_background_search = None;
+    // Outstanding UDP global-server-status challenge (eMule `CServer::SetChallenge`):
+    // set when we send OP_GLOBSERVSTATREQ, validated against the echoed challenge in
+    // the OP_GLOBSERVSTATRES handler, then cleared.
+    let mut server_status_challenge: Option<u32> = None;
 
     loop {
         if context.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -387,6 +391,7 @@ pub(super) async fn run_one_server_session(
                             &packet,
                             &mut pending_background_search,
                             &context.state,
+                            &mut server_status_challenge,
                         )?;
                     }
                     Ok(None) => {}
@@ -412,13 +417,14 @@ pub(super) async fn run_one_server_session(
                         debug!("sent ED2K server keepalive to {}", server.base_endpoint());
                     }
                 }
-                if let Some(socket) = server_udp_socket.as_ref()
-                    && let Err(error) = send_server_udp_status_request(socket, server).await
-                {
-                    warn!(
-                        "failed to send ED2K server UDP status request to {}: {error}",
-                        server.base_endpoint()
-                    );
+                if let Some(socket) = server_udp_socket.as_ref() {
+                    match send_server_udp_status_request(socket, server).await {
+                        Ok(challenge) => server_status_challenge = Some(challenge),
+                        Err(error) => warn!(
+                            "failed to send ED2K server UDP status request to {}: {error}",
+                            server.base_endpoint()
+                        ),
+                    }
                 }
             }
         }

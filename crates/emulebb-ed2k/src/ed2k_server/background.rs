@@ -228,6 +228,7 @@ pub(super) fn handle_background_udp_packet(
     packet: &ServerUdpPacket,
     pending_background_search: &mut Option<PendingBackgroundServerSearch>,
     state: &Arc<RwLock<Ed2kServerState>>,
+    server_status_challenge: &mut Option<u32>,
 ) -> Result<()> {
     if packet.from.ip() != IpAddr::V4(server.ip) {
         return Ok(());
@@ -279,20 +280,31 @@ pub(super) fn handle_background_udp_packet(
             let _ = response.send(Ok(aggregated_results));
         }
         OP_GLOBSERVSTATRES => {
-            if packet.payload.len() >= 8 {
-                let users = u32::from_le_bytes(packet.payload[..4].try_into().unwrap());
-                let files = u32::from_le_bytes(packet.payload[4..8].try_into().unwrap());
-                if let Ok(mut guard) = state.try_write() {
-                    guard.server_users = Some(users);
-                    guard.server_files = Some(files);
+            // eMule discards a status reply whose echoed challenge does not match
+            // the one we issued (replay/unsolicited guard, `UDPSocket.cpp`).
+            let Some(expected) = *server_status_challenge else {
+                return Ok(());
+            };
+            let Some(status) =
+                super::server_status::decode_server_status_response(&packet.payload, expected)
+            else {
+                return Ok(());
+            };
+            *server_status_challenge = None;
+            if let Ok(mut guard) = state.try_write() {
+                guard.server_users = Some(status.users);
+                guard.server_files = Some(status.files);
+                if let Some(udp_flags) = status.udp_flags {
+                    guard.server_udp_flags = Some(udp_flags);
                 }
-                tracing::debug!(
-                    "ED2K server UDP status from {} users={} files={}",
-                    packet.from,
-                    users,
-                    files
-                );
             }
+            tracing::debug!(
+                "ED2K server UDP status from {} users={} files={} udp_flags={:?}",
+                packet.from,
+                status.users,
+                status.files,
+                status.udp_flags
+            );
         }
         _ => {}
     }

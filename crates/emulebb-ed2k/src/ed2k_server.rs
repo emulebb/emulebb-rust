@@ -32,6 +32,7 @@ mod result_decoder;
 mod search_expr;
 mod server_entry;
 mod server_met;
+mod server_status;
 mod session;
 mod session_driver;
 mod source_utils;

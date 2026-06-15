@@ -115,12 +115,84 @@ async fn background_udp_source_search_preserves_responding_server() {
         },
         &mut pending,
         &state,
+        &mut None,
     )
     .unwrap();
 
     let sources = receive_response.await.unwrap().unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_server, Some(server.base_endpoint()));
+}
+
+fn server_status_payload(challenge: u32, users: u32, files: u32, udp_flags: Option<u32>) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&challenge.to_le_bytes());
+    payload.extend_from_slice(&users.to_le_bytes());
+    payload.extend_from_slice(&files.to_le_bytes());
+    if let Some(flags) = udp_flags {
+        payload.extend_from_slice(&0u32.to_le_bytes()); // maxusers@12
+        payload.extend_from_slice(&0u32.to_le_bytes()); // softfiles@16
+        payload.extend_from_slice(&0u32.to_le_bytes()); // hardfiles@20
+        payload.extend_from_slice(&flags.to_le_bytes()); // udpflags@24
+    }
+    payload
+}
+
+#[test]
+fn server_status_matching_challenge_records_users_files_and_udp_flags() {
+    let server = test_udp_obfuscated_server();
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let challenge = 0x55AA_BEEF;
+    let mut outstanding = Some(challenge);
+    let mut pending = None;
+
+    handle_background_udp_packet(
+        &server,
+        &ServerUdpPacket {
+            opcode: OP_GLOBSERVSTATRES,
+            payload: server_status_payload(challenge, 4242, 99000, Some(0x0000_0331)),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server.entry.port)),
+        },
+        &mut pending,
+        &state,
+        &mut outstanding,
+    )
+    .unwrap();
+
+    let guard = state.blocking_read();
+    assert_eq!(guard.server_users, Some(4242));
+    assert_eq!(guard.server_files, Some(99000));
+    assert_eq!(guard.server_udp_flags, Some(0x0000_0331));
+    // The challenge is consumed so a replayed reply is ignored.
+    assert_eq!(outstanding, None);
+}
+
+#[test]
+fn server_status_mismatched_challenge_is_discarded() {
+    let server = test_udp_obfuscated_server();
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let mut outstanding = Some(0x55AA_0001);
+    let mut pending = None;
+
+    handle_background_udp_packet(
+        &server,
+        &ServerUdpPacket {
+            opcode: OP_GLOBSERVSTATRES,
+            // Echoes a different challenge than the one we issued.
+            payload: server_status_payload(0x55AA_0002, 5, 6, None),
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server.entry.port)),
+        },
+        &mut pending,
+        &state,
+        &mut outstanding,
+    )
+    .unwrap();
+
+    let guard = state.blocking_read();
+    assert_eq!(guard.server_users, None);
+    assert_eq!(guard.server_files, None);
+    // The outstanding challenge stays armed until the right reply arrives.
+    assert_eq!(outstanding, Some(0x55AA_0001));
 }
 
 #[tokio::test]

@@ -29,6 +29,10 @@ pub struct Ed2kServerState {
     pub server_users: Option<u32>,
     /// Last reported server file count.
     pub server_files: Option<u32>,
+    /// Last reported live UDP capability flags from `OP_GLOBSERVSTATRES`
+    /// (offset 24); refreshed each time a challenge-validated status reply
+    /// includes them (eMule `CServer::SetUDPFlags`).
+    pub server_udp_flags: Option<u32>,
     /// Last advertised server name, when known.
     pub server_name: Option<String>,
     /// Last advertised server description, when known.

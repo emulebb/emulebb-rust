@@ -8,7 +8,7 @@ use emulebb_kad_proto::Ed2kHash;
 use super::{
     OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry, ServerUdpPacket,
     decode_server_udp_datagram, encode_server_udp_datagram, encode_udp_search_request,
-    encode_udp_source_request,
+    encode_udp_source_request, server_status::server_status_challenge,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -40,11 +40,22 @@ async fn send_server_udp_packet(
     Ok(())
 }
 
+/// Send `OP_GLOBSERVSTATREQ` with a fresh 4-byte challenge and return it so the
+/// caller can store it and validate the echoed challenge in the response, exactly
+/// as eMule's `CServerList::Process` (`SetChallenge`) does.
 pub(super) async fn send_server_udp_status_request(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
-) -> Result<()> {
-    send_server_udp_packet(socket, server, OP_GLOBSERVSTATREQ, &[]).await
+) -> Result<u32> {
+    let challenge = server_status_challenge();
+    send_server_udp_packet(
+        socket,
+        server,
+        OP_GLOBSERVSTATREQ,
+        &challenge.to_le_bytes(),
+    )
+    .await?;
+    Ok(challenge)
 }
 
 pub(super) async fn send_udp_keyword_search(
