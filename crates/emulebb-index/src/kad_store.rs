@@ -17,22 +17,49 @@ use crate::{
     KadSourcePublishSnapshot, matches_restrictive_keyword_payload,
 };
 
+// Stock per-file/per-keyword caps (Opcodes.h KADEMLIAMAXSOURCEPERFILE /
+// KADEMLIAMAXNOTESPERFILE): the maximum entries the index keeps for a *single*
+// target (file/keyword). These bound one file's source/note list, independent
+// of the overall store size.
 const STOCK_MAX_SOURCES_PER_FILE: usize = 1000;
 const STOCK_MAX_NOTES_PER_FILE: usize = 150;
 const STOCK_MAX_KEYWORD_INDEX: usize = 50_000;
+// Stock overall keyword-entry cap (Opcodes.h KADEMLIAMAXENTRIES): the global
+// limit across *all* keywords. eMule keeps an equivalent overall index count
+// (CIndexed m_uTotalIndexSource / m_uTotalIndexKeyword) but only the keyword
+// path has a hard overall cap; for sources/notes the overall store size is
+// bounded here purely to keep memory finite. These defaults are deliberately
+// larger than the per-file caps so the two semantics never coincide.
 const STOCK_MAX_KEYWORD_ENTRIES: usize = 60_000;
+const DEFAULT_MAX_SOURCE_ENTRIES: usize = 100_000;
+const DEFAULT_MAX_NOTE_ENTRIES: usize = 60_000;
 const STOCK_HOT_KEYWORD_REPUBLISH_MARGIN: usize = 5_000;
 
 /// Runtime policy for the local Kad publish cache.
+///
+/// Capacities come in two flavours that must not be conflated:
+/// - `*_per_file_capacity` is the stock per-target cap (per file / per keyword),
+///   bounding how many entries we keep for one target (Opcodes.h
+///   `KADEMLIAMAXSOURCEPERFILE` / `KADEMLIAMAXNOTESPERFILE`).
+/// - `*_capacity` is the global store cap across all targets, bounding total
+///   memory (the keyword global mirrors stock `KADEMLIAMAXENTRIES`; the
+///   source/note globals are our finite-memory extension).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KadLocalStoreConfig {
     pub enabled: bool,
     pub keyword_ttl: Duration,
     pub source_ttl: Duration,
     pub notes_ttl: Duration,
+    /// Global cap on stored keyword entries (stock `KADEMLIAMAXENTRIES`).
     pub keyword_capacity: usize,
+    /// Global cap on stored source entries across all files.
     pub source_capacity: usize,
+    /// Global cap on stored note entries across all files.
     pub notes_capacity: usize,
+    /// Per-file cap on source entries (stock `KADEMLIAMAXSOURCEPERFILE`).
+    pub source_per_file_capacity: usize,
+    /// Per-file cap on note entries (stock `KADEMLIAMAXNOTESPERFILE`).
+    pub notes_per_file_capacity: usize,
 }
 
 impl Default for KadLocalStoreConfig {
@@ -43,8 +70,10 @@ impl Default for KadLocalStoreConfig {
             source_ttl: Duration::from_secs(86_400),
             notes_ttl: Duration::from_secs(86_400),
             keyword_capacity: STOCK_MAX_KEYWORD_ENTRIES,
-            source_capacity: STOCK_MAX_SOURCES_PER_FILE,
-            notes_capacity: STOCK_MAX_NOTES_PER_FILE,
+            source_capacity: DEFAULT_MAX_SOURCE_ENTRIES,
+            notes_capacity: DEFAULT_MAX_NOTE_ENTRIES,
+            source_per_file_capacity: STOCK_MAX_SOURCES_PER_FILE,
+            notes_per_file_capacity: STOCK_MAX_NOTES_PER_FILE,
         }
     }
 }
@@ -177,6 +206,7 @@ impl KadLocalStore {
         let load = stock_source_publish_load(
             &self.source_entries,
             target,
+            self.config.source_per_file_capacity,
             source_ip,
             source_tcp_port,
             source_udp_port,
@@ -184,6 +214,7 @@ impl KadLocalStore {
         let dedup_key = source_dedup_key(target, source_ip, source_tcp_port, source_udp_port);
         upsert_source_entry(
             &mut self.source_entries,
+            self.config.source_per_file_capacity,
             self.config.source_capacity,
             StoredSourcePublish {
                 observed_at,
@@ -214,11 +245,17 @@ impl KadLocalStore {
             return None;
         }
         purge_expired(&mut self.notes_entries, self.config.notes_ttl, observed_at);
-        let load =
-            stock_notes_publish_load(&self.notes_entries, target, publisher_id, publisher_ip);
+        let load = stock_notes_publish_load(
+            &self.notes_entries,
+            target,
+            self.config.notes_per_file_capacity,
+            publisher_id,
+            publisher_ip,
+        );
         let dedup_key = notes_dedup_key(target, publisher_id, publisher_ip);
         upsert_notes_entry(
             &mut self.notes_entries,
+            self.config.notes_per_file_capacity,
             self.config.notes_capacity,
             StoredNotesPublish {
                 observed_at,
@@ -405,6 +442,7 @@ impl KadLocalStore {
             }
             upsert_source_entry(
                 &mut self.source_entries,
+                self.config.source_per_file_capacity,
                 self.config.source_capacity,
                 StoredSourcePublish {
                     observed_at: entry.observed_at,
@@ -431,6 +469,7 @@ impl KadLocalStore {
             }
             upsert_notes_entry(
                 &mut self.notes_entries,
+                self.config.notes_per_file_capacity,
                 self.config.notes_capacity,
                 StoredNotesPublish {
                     observed_at: entry.observed_at,
@@ -832,6 +871,7 @@ where
 
 fn upsert_source_entry(
     entries: &mut Vec<StoredSourcePublish>,
+    per_file_capacity: usize,
     capacity: usize,
     entry: StoredSourcePublish,
 ) {
@@ -845,16 +885,19 @@ fn upsert_source_entry(
         return;
     }
 
+    // Per-file cap (stock KADEMLIAMAXSOURCEPERFILE): evict the oldest entry for
+    // this target so one file cannot exceed its per-target source list.
     if entries
         .iter()
         .filter(|candidate| candidate.target == entry.target)
         .count()
-        > STOCK_MAX_SOURCES_PER_FILE
+        > per_file_capacity
         && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
     {
         entries.remove(oldest_index);
     }
 
+    // Global store cap: bound total memory across all files.
     if entries.len() >= capacity
         && let Some((oldest_index, _)) = entries
             .iter()
@@ -868,6 +911,7 @@ fn upsert_source_entry(
 
 fn upsert_notes_entry(
     entries: &mut Vec<StoredNotesPublish>,
+    per_file_capacity: usize,
     capacity: usize,
     entry: StoredNotesPublish,
 ) {
@@ -880,16 +924,19 @@ fn upsert_notes_entry(
         return;
     }
 
+    // Per-file cap (stock KADEMLIAMAXNOTESPERFILE): evict the oldest note for
+    // this target so one file cannot exceed its per-target note list.
     if entries
         .iter()
         .filter(|candidate| candidate.target == entry.target)
         .count()
-        > STOCK_MAX_NOTES_PER_FILE
+        > per_file_capacity
         && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
     {
         entries.remove(oldest_index);
     }
 
+    // Global store cap: bound total memory across all files.
     if entries.len() >= capacity
         && let Some((oldest_index, _)) = entries
             .iter()
@@ -913,6 +960,7 @@ where
 fn stock_source_publish_load(
     entries: &[StoredSourcePublish],
     target: NodeId,
+    per_file_capacity: usize,
     source_ip: Ipv4Addr,
     source_tcp_port: u16,
     source_udp_port: u16,
@@ -924,12 +972,12 @@ fn stock_source_publish_load(
     if target_count == 0 {
         return 1;
     }
-    if target_count > STOCK_MAX_SOURCES_PER_FILE
+    if target_count > per_file_capacity
         && !source_replacement_matches(entries, target, source_ip, source_tcp_port, source_udp_port)
     {
         return 100;
     }
-    (target_count * 100 / STOCK_MAX_SOURCES_PER_FILE) as u8
+    (target_count * 100 / per_file_capacity.max(1)) as u8
 }
 
 fn source_replacement_matches(
@@ -950,6 +998,7 @@ fn source_replacement_matches(
 fn stock_notes_publish_load(
     entries: &[StoredNotesPublish],
     target: NodeId,
+    per_file_capacity: usize,
     publisher_id: NodeId,
     publisher_ip: Ipv4Addr,
 ) -> u8 {
@@ -960,12 +1009,12 @@ fn stock_notes_publish_load(
     if target_count == 0 {
         return 1;
     }
-    if target_count > STOCK_MAX_NOTES_PER_FILE
+    if target_count > per_file_capacity
         && !notes_replacement_matches(entries, target, publisher_id, publisher_ip)
     {
         return 100;
     }
-    (target_count * 100 / STOCK_MAX_NOTES_PER_FILE) as u8
+    (target_count * 100 / per_file_capacity.max(1)) as u8
 }
 
 fn notes_replacement_matches(
@@ -1150,6 +1199,10 @@ mod tests {
             keyword_capacity: 2,
             source_capacity: 2,
             notes_capacity: 2,
+            // Per-file caps default to the stock constants; the per-file-cap
+            // tests below raise the global caps and rely on these.
+            source_per_file_capacity: super::STOCK_MAX_SOURCES_PER_FILE,
+            notes_per_file_capacity: super::STOCK_MAX_NOTES_PER_FILE,
         }
     }
 
@@ -2149,6 +2202,76 @@ mod tests {
             store.source_entry_count(),
             super::STOCK_MAX_SOURCES_PER_FILE + 1
         );
+    }
+
+    #[test]
+    fn per_file_and_global_source_caps_are_independent() {
+        // Per-file cap is per target; the global cap bounds the whole store.
+        // The per-file cap uses stock `> cap` semantics, so one file settles at
+        // `per_file_capacity + 1` entries (matching the existing stock-load
+        // test). With a larger global cap, a second file fills independently
+        // until the global cap engages across files.
+        let mut config = config();
+        config.source_per_file_capacity = 2; // one file settles at 3 entries
+        config.source_capacity = 5; // global across all files
+        config.source_ttl = std::time::Duration::from_secs(10_000);
+        let mut store = KadLocalStore::new(config);
+        let file_a = NodeId::from_bytes([0xA1; 16]);
+        let file_b = NodeId::from_bytes([0xB2; 16]);
+
+        // Five sources for file A: the per-file cap (2) holds it at cap+1 = 3.
+        for index in 0..5 {
+            store.record_source_publish(
+                file_a,
+                numbered_node_id(index),
+                numbered_ipv4(index),
+                5000 + index as u16,
+                &source_publish_tags(4000 + index as u16),
+                ts(index as i64),
+            );
+        }
+        assert_eq!(store.source_entry_count(), 3, "file A bounded by per-file cap");
+
+        // Two sources for file B: file B settles within its own per-file cap and
+        // the store total (3 + 2 = 5) is exactly the global cap.
+        for index in 100..102 {
+            store.record_source_publish(
+                file_b,
+                numbered_node_id(index),
+                numbered_ipv4(index),
+                5000 + index as u16,
+                &source_publish_tags(4000 + index as u16),
+                ts(index as i64),
+            );
+        }
+        assert_eq!(store.source_entry_count(), 5);
+
+        // A third source for file B is within file B's per-file cap, but would
+        // push the store to 6 entries: the global cap (5) evicts the oldest.
+        store.record_source_publish(
+            file_b,
+            numbered_node_id(102),
+            numbered_ipv4(102),
+            5102,
+            &source_publish_tags(4102),
+            ts(102),
+        );
+        assert_eq!(
+            store.source_entry_count(),
+            5,
+            "global cap bounds the whole store across files"
+        );
+    }
+
+    #[test]
+    fn default_source_caps_do_not_conflate_per_file_and_global() {
+        // Regression for the conflated defaults: the global source cap must be
+        // strictly larger than the per-file cap so the two are distinct.
+        let cfg = KadLocalStoreConfig::default();
+        assert!(cfg.source_capacity > cfg.source_per_file_capacity);
+        assert!(cfg.notes_capacity > cfg.notes_per_file_capacity);
+        assert_eq!(cfg.source_per_file_capacity, super::STOCK_MAX_SOURCES_PER_FILE);
+        assert_eq!(cfg.notes_per_file_capacity, super::STOCK_MAX_NOTES_PER_FILE);
     }
 
     #[test]

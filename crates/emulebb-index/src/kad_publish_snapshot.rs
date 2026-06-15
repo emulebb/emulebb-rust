@@ -422,6 +422,8 @@ mod tests {
             keyword_capacity: 2,
             source_capacity: 2,
             notes_capacity: 2,
+            source_per_file_capacity: 2,
+            notes_per_file_capacity: 2,
         }
     }
 

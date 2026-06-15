@@ -7691,6 +7691,8 @@ mod tests {
             keyword_capacity: 44,
             source_capacity: 55,
             notes_capacity: 66,
+            source_per_file_capacity: 77,
+            notes_per_file_capacity: 88,
         };
         let core = EmulebbCore::new_with_network(
             "test",

@@ -79,6 +79,13 @@ pub struct KadListenerConfig {
     pub local_store_keyword_capacity: usize,
     pub local_store_source_capacity: usize,
     pub local_store_notes_capacity: usize,
+    /// Per-file source cap (stock KADEMLIAMAXSOURCEPERFILE). Distinct from the
+    /// global `local_store_source_capacity` so per-file and overall limits do
+    /// not conflate.
+    pub local_store_source_per_file_capacity: usize,
+    /// Per-file note cap (stock KADEMLIAMAXNOTESPERFILE), distinct from the
+    /// global `local_store_notes_capacity`.
+    pub local_store_notes_per_file_capacity: usize,
     pub publish_shared_files_enabled: bool,
     pub republish_interval_secs: u64,
     pub publish_contact_fanout: usize,
@@ -133,6 +140,10 @@ impl Default for KadListenerConfig {
             local_store_keyword_capacity: 20_000,
             local_store_source_capacity: 20_000,
             local_store_notes_capacity: 5_000,
+            // Stock per-file caps (Opcodes.h KADEMLIAMAXSOURCEPERFILE /
+            // KADEMLIAMAXNOTESPERFILE), well below the global caps above.
+            local_store_source_per_file_capacity: 1_000,
+            local_store_notes_per_file_capacity: 150,
             publish_shared_files_enabled: true,
             republish_interval_secs: 1_800,
             publish_contact_fanout: 4,
@@ -324,6 +335,8 @@ impl KadListenerConfig {
             keyword_capacity: self.local_store_keyword_capacity.max(1),
             source_capacity: self.local_store_source_capacity.max(1),
             notes_capacity: self.local_store_notes_capacity.max(1),
+            source_per_file_capacity: self.local_store_source_per_file_capacity.max(1),
+            notes_per_file_capacity: self.local_store_notes_per_file_capacity.max(1),
         }
     }
 
