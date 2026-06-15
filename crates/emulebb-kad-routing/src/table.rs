@@ -189,6 +189,24 @@ impl RoutingTable {
         self.root.get(id)
     }
 
+    /// Mark a contact as IP-verified after a successful three-way handshake or
+    /// legacy challenge response.
+    ///
+    /// Mirrors the oracle `CRoutingZone::VerifyContact(uID, uIP)`: the contact
+    /// must exist and its stored IP must match the responding peer's IP, which
+    /// proves the peer is not using a spoofed source address. Returns `true`
+    /// when the contact was found with a matching IP (and is now verified),
+    /// `false` otherwise (unknown contact or IP mismatch).
+    pub fn verify_contact(&mut self, id: &NodeId, ip: Ipv4Addr) -> bool {
+        match self.root.get_mut(id) {
+            Some(contact) if contact.ip == ip => {
+                contact.verified = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Snapshot all known contacts ordered by XOR distance from our own ID.
     pub fn all_contacts(&self) -> Vec<Contact> {
         self.get_closest(&self.own_id, self.total_contacts)
@@ -360,6 +378,37 @@ mod tests {
         let c2 = Contact::new(id, "1.1.1.1".parse().unwrap(), 4673, 4662, 9);
         table.add_contact(c2).unwrap();
         assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn test_verify_contact_marks_verified_on_matching_ip() {
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+        let id = NodeId::from_bytes([0xCC; 16]);
+        let c = make_contact([0xCC; 16], "9.8.7.6");
+        table.add_contact(c).unwrap();
+        assert!(!table.get(&id).unwrap().verified);
+
+        // Matching IP -> verified.
+        assert!(table.verify_contact(&id, "9.8.7.6".parse().unwrap()));
+        assert!(table.get(&id).unwrap().verified);
+    }
+
+    #[test]
+    fn test_verify_contact_rejects_ip_mismatch_and_unknown() {
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+        let id = NodeId::from_bytes([0xDD; 16]);
+        let c = make_contact([0xDD; 16], "9.8.7.6");
+        table.add_contact(c).unwrap();
+
+        // Spoofed (mismatched) IP must not verify the contact.
+        assert!(!table.verify_contact(&id, "1.1.1.1".parse().unwrap()));
+        assert!(!table.get(&id).unwrap().verified);
+
+        // Unknown contact ID must not verify anything.
+        let unknown = NodeId::from_bytes([0xEE; 16]);
+        assert!(!table.verify_contact(&unknown, "9.8.7.6".parse().unwrap()));
     }
 
     #[test]

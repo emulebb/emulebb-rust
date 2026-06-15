@@ -60,6 +60,17 @@ impl DhtNode {
         }
     }
 
+    /// Mark a routing contact as IP-verified (three-way handshake / legacy
+    /// challenge completed). Mirrors `CRoutingZone::VerifyContact`: the contact
+    /// must exist with a matching IP. Returns whether a contact was verified.
+    pub async fn verify_contact(&self, id: &NodeId, ip: std::net::Ipv4Addr) -> bool {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .verify_contact(id, ip)
+    }
+
     /// Return the closest known contacts to the target.
     pub async fn closest_contacts(&self, target: &NodeId, limit: usize) -> Vec<Contact> {
         self.inner
@@ -292,6 +303,33 @@ mod tests {
         assert!(!contact.udp_firewalled);
         assert!(contact.tcp_firewalled);
         assert!(contact.requests_hello_res_ack);
+    }
+
+    #[tokio::test]
+    async fn verify_contact_flips_verified_only_on_matching_ip() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let node_id = NodeId::from_bytes([0x77; 16]);
+        let contact = Contact::new(node_id, "203.0.113.7".parse().unwrap(), 42007, 42008, 8);
+        dht.add_contact(contact).await.unwrap();
+
+        // Mismatched IP (spoofed) must not verify.
+        assert!(
+            !dht.verify_contact(&node_id, "198.51.100.9".parse().unwrap())
+                .await
+        );
+        assert!(!dht.routing_contacts().await[0].verified);
+
+        // Matching IP completes the handshake.
+        assert!(
+            dht.verify_contact(&node_id, "203.0.113.7".parse().unwrap())
+                .await
+        );
+        assert!(dht.routing_contacts().await[0].verified);
     }
 
     #[tokio::test]

@@ -160,6 +160,21 @@ impl RoutingZone {
         }
     }
 
+    /// Find a mutable contact by ID.
+    pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Contact> {
+        match &mut self.content {
+            ZoneContent::Leaf(bin) => bin.get_mut(id),
+            ZoneContent::Branch { left, right } => {
+                let bit = id.bit(self.depth);
+                if bit {
+                    right.get_mut(id)
+                } else {
+                    left.get_mut(id)
+                }
+            }
+        }
+    }
+
     /// Count total contacts in this zone and all children.
     pub fn count(&self) -> usize {
         match &self.content {

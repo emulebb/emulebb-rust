@@ -4974,6 +4974,28 @@ async fn handle_kad_local_store_packet(
                 }
             }
         }
+        KadPacket::HelloResAck(ack) => {
+            // Final leg of the three-way handshake (oracle
+            // Process_KADEMLIA2_HELLO_RES_ACK -> VerifyContact). The remote
+            // returns its Kad ID inside a packet that only a node actually
+            // reachable at the source IP could have produced, so the receiver
+            // key must be valid. We then mark the contact verified, proving its
+            // source IP is not spoofed. The receive loop already enforced that we
+            // had sent a HELLO_RES to this IP (HELLO_RES is out-tracked).
+            if !receiver_verify_key_valid {
+                tracing::debug!(
+                    "ignoring Kad HELLO_RES_ACK from {from}: receiver key is invalid"
+                );
+            } else if let IpAddr::V4(ip) = from.ip() {
+                if dht.verify_contact(&ack.node_id, ip).await {
+                    tracing::debug!("verified Kad contact {} via HELLO_RES_ACK", ack.node_id);
+                } else {
+                    tracing::debug!(
+                        "Kad HELLO_RES_ACK from {from}: no matching contact to verify"
+                    );
+                }
+            }
+        }
         KadPacket::Ping => {
             dht.send_packet(
                 from,

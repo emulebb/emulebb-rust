@@ -135,6 +135,11 @@ impl RoutingBin {
         }
     }
 
+    /// Find a mutable contact by ID.
+    pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Contact> {
+        self.contacts.iter_mut().find(|c| &c.id == id)
+    }
+
     /// Iterate over all contacts.
     pub fn iter(&self) -> impl Iterator<Item = &Contact> {
         self.contacts.iter()
