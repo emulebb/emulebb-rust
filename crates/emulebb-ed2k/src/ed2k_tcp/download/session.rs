@@ -38,7 +38,8 @@ use super::super::{
     decode_request_filename_answer_body, decode_secident_state, decode_shared_dirs_answer_payload,
     decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
     decode_shared_files_dir_request_payload, decode_signature_payload, dump_ed2k_tcp_download_meta,
-    dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send, encode_aich_recovery_failure_answer,
+    dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer,
     encode_empty_shared_files_answer, encode_emule_info_answer, encode_packet,
     encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
     is_connection_shutdown_error, try_send_secure_ident_signature,
@@ -1135,15 +1136,32 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             hex::encode(request.master_hash)
                         ),
                     );
-                    let reply = encode_aich_recovery_failure_answer(&request.file_hash);
-                    dump_ed2k_tcp_download_send(
-                        peer_addr,
-                        transport.mode,
-                        "aich_recovery_failure",
-                        &reply,
-                    );
+                    let recovery = transfer_runtime
+                        .create_aich_recovery_data(
+                            &request.file_hash,
+                            request.part,
+                            request.master_hash,
+                        )
+                        .await
+                        .unwrap_or(None);
+                    let (reply, dump_tag) = match recovery {
+                        Some(body) => (
+                            encode_aich_recovery_answer(
+                                &request.file_hash,
+                                request.part,
+                                request.master_hash,
+                                &body,
+                            ),
+                            "aich_recovery_answer",
+                        ),
+                        None => (
+                            encode_aich_recovery_failure_answer(&request.file_hash),
+                            "aich_recovery_failure",
+                        ),
+                    };
+                    dump_ed2k_tcp_download_send(peer_addr, transport.mode, dump_tag, &reply);
                     transport.write_all(&reply).await.with_context(|| {
-                        format!("failed to send OP_AICHANSWER failure to {peer_addr}")
+                        format!("failed to send OP_AICHANSWER to {peer_addr}")
                     })?;
                 }
                 (OP_EMULEPROT, OP_AICHANSWER) => {
