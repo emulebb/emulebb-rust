@@ -551,10 +551,16 @@ pub struct Transfer {
 #[serde(rename_all = "camelCase")]
 pub struct TransferSource {
     pub client_id: String,
+    // The next four are internal-only; not in the eMuleBB `TransferSource`
+    // contract (peer is conveyed via `address`), so they are never serialized.
+    #[serde(skip_serializing)]
     pub hash: String,
+    #[serde(skip_serializing)]
     pub ip: String,
+    #[serde(skip_serializing)]
     pub tcp_port: u16,
     pub port: u16,
+    #[serde(skip_serializing)]
     pub endpoint: String,
     pub user_hash: Option<String>,
     pub user_name: String,
@@ -570,7 +576,10 @@ pub struct TransferSource {
     pub queue_rank: u32,
     pub view_shared_files: bool,
     pub shared_files_request_pending: bool,
+    // Internal-only; not in the contract, so never serialized.
+    #[serde(skip_serializing)]
     pub banned: bool,
+    #[serde(skip_serializing)]
     pub status: String,
 }
 
