@@ -6186,6 +6186,15 @@ async fn run_ed2k_reask_reengage(
             break;
         };
         match event {
+            ReaskEvent::SourceReleased { endpoint } => {
+                // The reask loop dropped a detached source: free the lease it kept
+                // (active_download_peer_endpoints + the registry) so the next
+                // download cycle — or the SourceReady that follows — can re-acquire
+                // and reconnect this endpoint over TCP. Without this the endpoint
+                // stays leased forever and acquire_direct_download_source_leases
+                // defers it, leaking the lease and killing re-engage.
+                core.release_direct_download_source_leases(&[endpoint]).await;
+            }
             ReaskEvent::SourceReady { file_hash } => {
                 let hash = file_hash.to_string();
                 let Some(transfer) = core.transfer(&hash).await else {

@@ -105,11 +105,16 @@ impl ReaskService {
     }
 
     /// Drop a source (e.g. the transfer completed or no longer needs it).
-    pub(crate) fn remove_source(&mut self, ip: Ipv4Addr, udp_port: u16) {
-        if let Some(file_hash) = self.endpoint_index.remove(&(ip, udp_port))
-            && let Some(set) = self.per_file.get_mut(&file_hash)
-        {
-            set.remove(ip, udp_port);
+    /// Returns `true` if a source was actually present and removed, so the caller
+    /// can release the held UDP lease only for endpoints the loop really owned.
+    pub(crate) fn remove_source(&mut self, ip: Ipv4Addr, udp_port: u16) -> bool {
+        if let Some(file_hash) = self.endpoint_index.remove(&(ip, udp_port)) {
+            if let Some(set) = self.per_file.get_mut(&file_hash) {
+                set.remove(ip, udp_port);
+            }
+            true
+        } else {
+            false
         }
     }
 

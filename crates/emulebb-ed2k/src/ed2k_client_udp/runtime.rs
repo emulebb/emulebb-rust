@@ -96,10 +96,20 @@ pub fn reask_command_channel() -> (ReaskSourceHandle, ReaskCommandReceiver) {
 /// Events flow loop -> core; commands flow core -> loop ([`ReaskCommand`]).
 #[derive(Debug, Clone)]
 pub enum ReaskEvent {
+    /// A detached source's UDP lease must be released back to core: its endpoint
+    /// is still held in core's `active_download_peer_endpoints` + download source
+    /// registry (it was filtered out of the lease release when it detached). The
+    /// loop raises this whenever it drops a detached source from reask state, so
+    /// core frees the lease and a subsequent download cycle (or the `SourceReady`
+    /// that follows) can re-acquire and reconnect it over TCP. Must be delivered
+    /// *before* the `SourceReady` for the same source so the re-engage attempt
+    /// sees a free endpoint.
+    SourceReleased { endpoint: (Ipv4Addr, u16) },
     /// A queued source for `file_hash` reported a queue rank at/under the
     /// re-engage threshold: a slot is imminent, so core should reconnect over TCP
     /// now to claim it instead of waiting for the periodic download cycle. The
-    /// loop has already handed the source back (removed it from reask state).
+    /// loop has already handed the source back (removed it from reask state) and
+    /// released its lease via a preceding `SourceReleased`.
     SourceReady { file_hash: Ed2kHash },
 }
 
@@ -199,14 +209,39 @@ pub async fn run_ed2k_udp_reask_loop(
             }
             maybe = commands.recv() => {
                 let Some(command) = maybe else { break };
-                apply_reask_command(&mut service, command);
+                apply_reask_command(&mut service, &events, command);
             }
             _ = ticker.tick() => {
-                drive_reask_tick(&mut service, &dht, &transfer_runtime).await;
+                drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
             }
         }
     }
     debug!("ed2k udp reask loop stopped");
+}
+
+/// Decide the loop->core events for a routed downloader reply. Pure so the
+/// re-engage / lease-release ordering is unit-testable without socket I/O.
+///
+/// Invariant: a `SourceReleased` for the endpoint is always emitted *before* a
+/// `SourceReady`, so core frees the held UDP lease before the re-engage attempt
+/// tries to re-acquire it (otherwise `acquire_direct_download_source_leases`
+/// sees the endpoint still inserted and defers the source forever — the B1 leak).
+fn routed_reply_events(
+    action: ReaskAction,
+    file_hash: Ed2kHash,
+    endpoint: (Ipv4Addr, u16),
+) -> Vec<ReaskEvent> {
+    match action {
+        // Slot imminent: release the lease, then ask core to reconnect over TCP.
+        ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD => vec![
+            ReaskEvent::SourceReleased { endpoint },
+            ReaskEvent::SourceReady { file_hash },
+        ],
+        // Uploader no longer has the file: the source is dropped, free its lease.
+        ReaskAction::DropSource => vec![ReaskEvent::SourceReleased { endpoint }],
+        // Still queued / transient: keep the source on UDP reask, lease unchanged.
+        _ => Vec::new(),
+    }
 }
 
 /// Route one inbound datagram through the service and act on the outcome.
@@ -230,18 +265,18 @@ async fn handle_inbound_datagram(
             action,
         } => {
             trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
-            // Re-engage: a low enough rank means a slot is imminent. Hand the
-            // source back to TCP (remove it from reask state) and signal core to
-            // reconnect now, rather than waiting for the periodic download cycle.
-            if let ReaskAction::UpdatedRank(rank) = action
-                && rank <= REENGAGE_RANK_THRESHOLD
-            {
+            // A re-engageable rank means we hand the source back to TCP first.
+            if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD) {
                 service.remove_source(endpoint.0, endpoint.1);
-                if events.send(ReaskEvent::SourceReady { file_hash }).is_ok() {
-                    trace!(
-                        "ed2k udp reask: re-engage SourceReady for {file_hash} (rank {rank})"
-                    );
+            }
+            // Emit the loop->core events for this reply (lease release ordered
+            // before any re-engage). DropSource already dropped the source in the
+            // service; we only need to release its lease.
+            for event in routed_reply_events(action, file_hash, endpoint) {
+                if let ReaskEvent::SourceReady { file_hash } = &event {
+                    trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
                 }
+                let _ = events.send(event);
             }
         }
         ReaskInboundOutcome::AnswerNeeded { ping, from } => {
@@ -268,7 +303,11 @@ async fn handle_inbound_datagram(
 }
 
 /// Apply a download session's detach command to the reask source state.
-fn apply_reask_command(service: &mut ReaskService, command: ReaskCommand) {
+fn apply_reask_command(
+    service: &mut ReaskService,
+    events: &ReaskEventSender,
+    command: ReaskCommand,
+) {
     match command {
         ReaskCommand::Register {
             file_hash,
@@ -288,7 +327,12 @@ fn apply_reask_command(service: &mut ReaskService, command: ReaskCommand) {
             service.register_source(file_hash, source);
         }
         ReaskCommand::Remove { endpoint } => {
-            service.remove_source(endpoint.0, endpoint.1);
+            // Only release the lease if this endpoint was actually a detached
+            // reask source we held: a Remove for an unknown endpoint is a no-op
+            // and must not free a lease core never handed to the loop.
+            if service.remove_source(endpoint.0, endpoint.1) {
+                let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+            }
         }
     }
 }
@@ -300,6 +344,7 @@ async fn drive_reask_tick(
     service: &mut ReaskService,
     dht: &DhtNode,
     transfer_runtime: &Ed2kTransferRuntime,
+    events: &ReaskEventSender,
 ) {
     // Pre-fetch each registered file's reask info (async manifest read) so the
     // sync `tick` closure can look it up without blocking.
@@ -331,13 +376,17 @@ async fn drive_reask_tick(
     for (addr, action) in out.timed_out {
         trace!("ed2k udp reask: reask to {addr} timed out: {action:?}");
         // On RetryTcp the source has exhausted its UDP-reask budget (failure ratio
-        // tripped). Drop it from reask state so it returns to the normal TCP path:
-        // it stays in the transfer's remembered sources, so core's next download
-        // cycle re-acquires and reconnects it over TCP. (RetryUdp keeps reasking.)
+        // tripped). Drop it from reask state and release its held UDP lease so it
+        // returns to the normal TCP path: it stays in the transfer's remembered
+        // sources, and once the lease is freed core's next download cycle
+        // re-acquires and reconnects it over TCP. (RetryUdp keeps reasking.)
         if matches!(action, ReaskAction::RetryTcp)
             && let SocketAddr::V4(v4) = addr
         {
-            service.remove_source(*v4.ip(), v4.port());
+            let endpoint = (*v4.ip(), v4.port());
+            if service.remove_source(endpoint.0, endpoint.1) {
+                let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+            }
         }
     }
 }
@@ -356,10 +405,12 @@ mod tests {
     #[test]
     fn register_command_adds_a_source_and_remove_drops_it() {
         let mut svc = service();
+        let (events, mut rx) = reask_event_channel();
         let file_hash = Ed2kHash::from_bytes([0xAB; 16]);
         let endpoint = (Ipv4Addr::new(198, 51, 100, 7), 4672);
         apply_reask_command(
             &mut svc,
+            &events,
             ReaskCommand::Register {
                 file_hash,
                 endpoint,
@@ -370,10 +421,114 @@ mod tests {
         );
         assert_eq!(svc.source_count(), 1);
         assert_eq!(svc.registered_file_hashes(), vec![file_hash]);
+        // Register raises no event.
+        assert!(rx.try_recv().is_err());
 
-        apply_reask_command(&mut svc, ReaskCommand::Remove { endpoint });
+        apply_reask_command(&mut svc, &events, ReaskCommand::Remove { endpoint });
         assert_eq!(svc.source_count(), 0);
         assert!(svc.registered_file_hashes().is_empty());
+        // B1: removing a held detached source must release its lease.
+        match rx.try_recv().expect("a SourceReleased event") {
+            ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, endpoint),
+            other => panic!("expected SourceReleased, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_command_for_unknown_endpoint_releases_no_lease() {
+        let mut svc = service();
+        let (events, mut rx) = reask_event_channel();
+        // No source was ever registered for this endpoint: a Remove must NOT free
+        // a lease core never handed to the loop.
+        apply_reask_command(
+            &mut svc,
+            &events,
+            ReaskCommand::Remove {
+                endpoint: (Ipv4Addr::new(203, 0, 113, 1), 4672),
+            },
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reengage_releases_lease_before_signalling_source_ready() {
+        // B1: an imminent-slot rank must release the held UDP lease BEFORE the
+        // re-engage signal, so core frees active_download_peer_endpoints before
+        // the reconnect attempt re-acquires it.
+        let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+        let endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4672);
+        let events = routed_reply_events(
+            ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD),
+            file_hash,
+            endpoint,
+        );
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(*released, endpoint),
+            other => panic!("expected SourceReleased first, got {other:?}"),
+        }
+        match &events[1] {
+            ReaskEvent::SourceReady { file_hash: ready } => assert_eq!(*ready, file_hash),
+            other => panic!("expected SourceReady second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_rank_keeps_source_and_releases_no_lease() {
+        let events = routed_reply_events(
+            ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD + 1),
+            Ed2kHash::from_bytes([0x44; 16]),
+            (Ipv4Addr::new(198, 51, 100, 10), 4672),
+        );
+        assert!(events.is_empty(), "deep rank must keep reasking, lease held");
+    }
+
+    #[test]
+    fn dropped_source_releases_its_lease() {
+        // B1: FileNotFound drops the source in the service, so its held lease must
+        // be released (it can never re-engage).
+        let endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4672);
+        let events = routed_reply_events(
+            ReaskAction::DropSource,
+            Ed2kHash::from_bytes([0x55; 16]),
+            endpoint,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(*released, endpoint),
+            other => panic!("expected SourceReleased, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retry_tcp_timeout_releases_held_lease() {
+        // B1: when a detached source exhausts its UDP budget (RetryTcp), the loop
+        // drops it AND must release its lease so core can re-acquire it over TCP.
+        // Mirror drive_reask_tick's RetryTcp branch over a registered source.
+        let mut svc = service();
+        let (events, mut rx) = reask_event_channel();
+        let file_hash = Ed2kHash::from_bytes([0x66; 16]);
+        let endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4672);
+        apply_reask_command(
+            &mut svc,
+            &events,
+            ReaskCommand::Register {
+                file_hash,
+                endpoint,
+                udp_version: 4,
+                user_hash: None,
+                should_crypt: false,
+            },
+        );
+        // Simulate the RetryTcp branch: remove + release.
+        assert!(svc.remove_source(endpoint.0, endpoint.1));
+        let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+        match rx.try_recv().expect("a SourceReleased event") {
+            ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, endpoint),
+            other => panic!("expected SourceReleased, got {other:?}"),
+        }
+        // Source is gone; a second remove returns false (no double release).
+        assert!(!svc.remove_source(endpoint.0, endpoint.1));
     }
 
     #[test]
