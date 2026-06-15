@@ -52,6 +52,7 @@ impl RoutingZone {
     pub fn add(
         &mut self,
         contact: Contact,
+        own_id: &NodeId,
         total_contacts: usize,
         max_table_size: usize,
     ) -> Result<bool, RoutingError> {
@@ -79,9 +80,9 @@ impl RoutingZone {
                                 max_table_size,
                                 "routing leaf split allowed by oracle can_split rule"
                             );
-                            self.split()?;
+                            self.split(own_id)?;
                             // Retry after split.
-                            self.add(contact, total_contacts, max_table_size)
+                            self.add(contact, own_id, total_contacts, max_table_size)
                         } else {
                             Err(RoutingError::SplitDenied {
                                 reason: split_check.expect_err("checked above"),
@@ -92,13 +93,13 @@ impl RoutingZone {
                 }
             }
             ZoneContent::Branch { left, right } => {
-                let bit = contact.id.bit(self.depth);
-                if bit {
-                    // contact goes right
-                    right.add(contact, total_contacts, max_table_size)
+                // Oracle CRoutingZone::Add branches on the XOR distance bit
+                // (GetDistance().GetBitNumber(level)), not the raw contact-ID bit,
+                // so contacts are placed relative to our own ID.
+                if branch_is_right(&contact.id, own_id, self.depth) {
+                    right.add(contact, own_id, total_contacts, max_table_size)
                 } else {
-                    // contact goes left
-                    left.add(contact, total_contacts, max_table_size)
+                    left.add(contact, own_id, total_contacts, max_table_size)
                 }
             }
         }
@@ -108,7 +109,7 @@ impl RoutingZone {
     ///
     /// For simplicity: recurse into all leaf bins, add contacts to result.
     /// The caller (RoutingTable) sorts by XOR distance.
-    pub fn get_closest(&self, target: &NodeId, n: usize, result: &mut Vec<Contact>) {
+    pub fn get_closest(&self, target: &NodeId, own_id: &NodeId, n: usize, result: &mut Vec<Contact>) {
         match &self.content {
             ZoneContent::Leaf(bin) => {
                 for c in bin.iter() {
@@ -116,18 +117,19 @@ impl RoutingZone {
                 }
             }
             ZoneContent::Branch { left, right } => {
-                // Recurse into the side closer to target first (optimization, but correctness
-                // doesn't depend on order since we collect all and sort).
-                let bit = target.bit(self.depth);
-                if bit {
-                    right.get_closest(target, n, result);
+                // Oracle GetClosestTo recurses into the closer subzone first,
+                // selected by the XOR-distance bit of the target relative to our
+                // own ID. Correctness does not depend on order (the table sorts
+                // and truncates), but matching the traversal keeps retention parity.
+                if branch_is_right(target, own_id, self.depth) {
+                    right.get_closest(target, own_id, n, result);
                     if result.len() < n {
-                        left.get_closest(target, n, result);
+                        left.get_closest(target, own_id, n, result);
                     }
                 } else {
-                    left.get_closest(target, n, result);
+                    left.get_closest(target, own_id, n, result);
                     if result.len() < n {
-                        right.get_closest(target, n, result);
+                        right.get_closest(target, own_id, n, result);
                     }
                 }
             }
@@ -140,6 +142,7 @@ impl RoutingZone {
     pub fn get_closest_max_type(
         &self,
         target: &NodeId,
+        own_id: &NodeId,
         n: usize,
         max_type: u8,
         result: &mut Vec<Contact>,
@@ -153,16 +156,15 @@ impl RoutingZone {
                 }
             }
             ZoneContent::Branch { left, right } => {
-                let bit = target.bit(self.depth);
-                if bit {
-                    right.get_closest_max_type(target, n, max_type, result);
+                if branch_is_right(target, own_id, self.depth) {
+                    right.get_closest_max_type(target, own_id, n, max_type, result);
                     if result.len() < n {
-                        left.get_closest_max_type(target, n, max_type, result);
+                        left.get_closest_max_type(target, own_id, n, max_type, result);
                     }
                 } else {
-                    left.get_closest_max_type(target, n, max_type, result);
+                    left.get_closest_max_type(target, own_id, n, max_type, result);
                     if result.len() < n {
-                        right.get_closest_max_type(target, n, max_type, result);
+                        right.get_closest_max_type(target, own_id, n, max_type, result);
                     }
                 }
             }
@@ -170,41 +172,42 @@ impl RoutingZone {
     }
 
     /// Remove a contact by ID. Returns the removed contact if found.
-    pub fn remove(&mut self, id: &NodeId) -> Option<Contact> {
+    pub fn remove(&mut self, id: &NodeId, own_id: &NodeId) -> Option<Contact> {
         match &mut self.content {
             ZoneContent::Leaf(bin) => bin.remove(id),
             ZoneContent::Branch { left, right } => {
-                let bit = id.bit(self.depth);
-                if bit {
-                    right.remove(id)
+                if branch_is_right(id, own_id, self.depth) {
+                    right.remove(id, own_id)
                 } else {
-                    left.remove(id)
+                    left.remove(id, own_id)
                 }
             }
         }
     }
 
     /// Find a contact by ID.
-    pub fn get(&self, id: &NodeId) -> Option<&Contact> {
+    pub fn get(&self, id: &NodeId, own_id: &NodeId) -> Option<&Contact> {
         match &self.content {
             ZoneContent::Leaf(bin) => bin.iter().find(|c| &c.id == id),
             ZoneContent::Branch { left, right } => {
-                let bit = id.bit(self.depth);
-                if bit { right.get(id) } else { left.get(id) }
+                if branch_is_right(id, own_id, self.depth) {
+                    right.get(id, own_id)
+                } else {
+                    left.get(id, own_id)
+                }
             }
         }
     }
 
     /// Find a mutable contact by ID.
-    pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Contact> {
+    pub fn get_mut(&mut self, id: &NodeId, own_id: &NodeId) -> Option<&mut Contact> {
         match &mut self.content {
             ZoneContent::Leaf(bin) => bin.get_mut(id),
             ZoneContent::Branch { left, right } => {
-                let bit = id.bit(self.depth);
-                if bit {
-                    right.get_mut(id)
+                if branch_is_right(id, own_id, self.depth) {
+                    right.get_mut(id, own_id)
                 } else {
-                    left.get_mut(id)
+                    left.get_mut(id, own_id)
                 }
             }
         }
@@ -241,7 +244,7 @@ impl RoutingZone {
     }
 
     /// Split a leaf into two child zones, redistributing contacts.
-    fn split(&mut self) -> Result<(), RoutingError> {
+    fn split(&mut self, own_id: &NodeId) -> Result<(), RoutingError> {
         let bin = match &mut self.content {
             ZoneContent::Leaf(b) => {
                 let mut drained = RoutingBin::new();
@@ -264,19 +267,27 @@ impl RoutingZone {
         ));
 
         for c in bin.iter() {
-            let bit = c.id.bit(depth);
-            if bit {
+            // Redistribute by the XOR-distance bit (oracle Split), so the side
+            // a contact lands on matches how lookups will later traverse the tree.
+            if branch_is_right(&c.id, own_id, depth) {
                 // Preserve existing contacts exactly during redistribution.
                 // Any failure here means the table already violated its own invariants.
-                right.add(c.clone(), 0, usize::MAX)?;
+                right.add(c.clone(), own_id, 0, usize::MAX)?;
             } else {
-                left.add(c.clone(), 0, usize::MAX)?;
+                left.add(c.clone(), own_id, 0, usize::MAX)?;
             }
         }
 
         self.content = ZoneContent::Branch { left, right };
         Ok(())
     }
+}
+
+/// Choose the branch (right = bit set) for `id` at `depth` using the XOR
+/// distance to our own ID, mirroring the oracle
+/// `GetDistance().GetBitNumber(level)`.
+fn branch_is_right(id: &NodeId, own_id: &NodeId, depth: u32) -> bool {
+    id.distance(own_id).bit(depth)
 }
 
 fn child_zone_index(parent_zone_index: usize, right_child: bool) -> usize {
@@ -292,6 +303,10 @@ mod tests {
     use crate::contact::Contact;
     use emulebb_kad_proto::{K, NodeId};
     use std::net::Ipv4Addr;
+
+    // Tests predate the distance-keyed tree; own_id ZERO makes distance(id, own)
+    // == id, so branching matches the original raw-bit expectations.
+    const OWN: NodeId = NodeId::ZERO;
 
     fn make_contact(id_bytes: [u8; 16], ip: &str) -> Contact {
         Contact::new(
@@ -311,7 +326,7 @@ mod tests {
             id[0] = i + 1;
             // Use distinct /24 subnets to avoid per-bin subnet limit
             let c = make_contact(id, &format!("1.{}.0.1", i + 1));
-            zone.add(c, i as usize, 1000).unwrap();
+            zone.add(c, &OWN, i as usize, 1000).unwrap();
         }
         assert_eq!(zone.count(), 5);
     }
@@ -323,11 +338,11 @@ mod tests {
             let mut id = [0u8; 16];
             id[0] = i;
             let c = make_contact(id, &format!("10.0.0.{}", i));
-            zone.add(c, i as usize, 1000).unwrap();
+            zone.add(c, &OWN, i as usize, 1000).unwrap();
         }
         let mut result = Vec::new();
         let target = NodeId::from_bytes([0x00; 16]);
-        zone.get_closest(&target, 10, &mut result);
+        zone.get_closest(&target, &OWN, 10, &mut result);
         assert_eq!(result.len(), 5);
     }
 
@@ -336,9 +351,9 @@ mod tests {
         let mut zone = RoutingZone::new_root();
         let id = NodeId::from_bytes([0x01; 16]);
         let c = make_contact([0x01; 16], "1.1.1.1");
-        zone.add(c, 0, 1000).unwrap();
+        zone.add(c, &OWN, 0, 1000).unwrap();
         assert_eq!(zone.count(), 1);
-        let removed = zone.remove(&id);
+        let removed = zone.remove(&id, &OWN);
         assert!(removed.is_some());
         assert_eq!(zone.count(), 0);
     }
@@ -354,7 +369,7 @@ mod tests {
             let mut id = [0x00u8; 16];
             id[1] = i + 1; // all have bit 0 = 0
             let c = make_contact(id, &format!("1.{}.0.1", i + 1));
-            zone.add(c, i as usize, 10000).unwrap();
+            zone.add(c, &OWN, i as usize, 10000).unwrap();
         }
         assert_eq!(zone.count(), K);
 
@@ -362,7 +377,7 @@ mod tests {
         let mut extra_id = [0x00u8; 16];
         extra_id[2] = 1;
         let extra = make_contact(extra_id, "1.99.0.1");
-        let result = zone.add(extra, K, 10000);
+        let result = zone.add(extra, &OWN, K, 10000);
         // After split, it should succeed
         assert!(result.is_ok());
         assert_eq!(zone.count(), K + 1);
@@ -373,9 +388,9 @@ mod tests {
         let mut zone = RoutingZone::new_root();
         let id = NodeId::from_bytes([0xAB; 16]);
         let c = make_contact([0xAB; 16], "9.9.9.9");
-        zone.add(c, 0, 1000).unwrap();
-        assert!(zone.get(&id).is_some());
-        assert!(zone.get(&NodeId::ZERO).is_none());
+        zone.add(c, &OWN, 0, 1000).unwrap();
+        assert!(zone.get(&id, &OWN).is_some());
+        assert!(zone.get(&NodeId::ZERO, &OWN).is_none());
     }
 
     fn make_id_with_bit(depth: u32, wanted_bit: bool, discriminator: u8) -> [u8; 16] {
@@ -405,7 +420,7 @@ mod tests {
             let wants_right_child = usize::from(i >= (K - right_contacts) as u8) != 0;
             let id = make_id_with_bit(depth, wants_right_child, i + 1);
             let contact = make_contact(id, &format!("20.{}.0.1", i + 1));
-            let _ = zone.add(contact, i as usize, usize::MAX);
+            let _ = zone.add(contact, &OWN, i as usize, usize::MAX);
         }
         zone
     }
@@ -415,7 +430,7 @@ mod tests {
         let mut zone = make_full_leaf(KBASE as u32, KK - 1, 1);
         let extra = make_contact(make_id_with_bit(KBASE as u32, true, 200), "21.1.0.1");
 
-        let result = zone.add(extra, K, usize::MAX);
+        let result = zone.add(extra, &OWN, K, usize::MAX);
 
         assert!(result.is_ok());
         assert_eq!(zone.count(), K + 1);
@@ -426,7 +441,7 @@ mod tests {
         let mut zone = make_full_leaf(KBASE as u32, KK, 0);
         let extra = make_contact(make_id_with_bit(KBASE as u32, false, 201), "22.1.0.1");
 
-        let result = zone.add(extra, K, usize::MAX);
+        let result = zone.add(extra, &OWN, K, usize::MAX);
 
         assert!(matches!(
             result,
@@ -442,7 +457,7 @@ mod tests {
         let mut zone = make_full_leaf(0, 0, 1);
         let extra = make_contact(make_id_with_bit(0, true, 202), "23.1.0.1");
 
-        let result = zone.add(extra, K, K);
+        let result = zone.add(extra, &OWN, K, K);
 
         assert!(matches!(
             result,

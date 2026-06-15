@@ -46,11 +46,12 @@ impl RoutingTable {
 
     /// Add a contact to the routing table.
     pub fn add_contact(&mut self, contact: Contact) -> Result<(), RoutingError> {
+        let own_id = self.own_id;
         // Global IP uniqueness check.
         let ip_count = self.ip_counts.get(&contact.ip).copied().unwrap_or(0);
         if ip_count > 0 {
             // Allow only if this is an update to an existing contact (same ID).
-            if self.root.get(&contact.id).map(|c| c.ip) != Some(contact.ip) {
+            if self.root.get(&contact.id, &own_id).map(|c| c.ip) != Some(contact.ip) {
                 return Err(RoutingError::IpLimitExceeded { ip: contact.ip });
             }
         }
@@ -60,7 +61,7 @@ impl RoutingTable {
             let subnet = subnet24(contact.ip);
             let subnet_count = self.subnet_counts.get(&subnet).copied().unwrap_or(0);
             // Check if this IP is new (not already in table under this contact)
-            let existing_ip = self.root.get(&contact.id).map(|c| c.ip);
+            let existing_ip = self.root.get(&contact.id, &own_id).map(|c| c.ip);
             let is_new_ip = existing_ip.map(|ip| ip != contact.ip).unwrap_or(true);
             if is_new_ip && subnet_count >= GLOBAL_MAX_PER_SUBNET24 {
                 return Err(RoutingError::SubnetLimitExceeded {
@@ -71,10 +72,12 @@ impl RoutingTable {
         }
 
         // Save old IP if contact already exists (for bookkeeping update).
-        let old_ip = self.root.get(&contact.id).map(|c| c.ip);
+        let old_ip = self.root.get(&contact.id, &own_id).map(|c| c.ip);
         let new_ip = contact.ip;
 
-        let result = self.root.add(contact, self.total_contacts, self.max_size);
+        let result = self
+            .root
+            .add(contact, &own_id, self.total_contacts, self.max_size);
 
         match result {
             Ok(true) => {
@@ -126,7 +129,8 @@ impl RoutingTable {
     /// Get up to `n` contacts closest to `target` by XOR distance.
     pub fn get_closest(&self, target: &NodeId, n: usize) -> Vec<Contact> {
         let mut result = Vec::new();
-        self.root.get_closest(target, usize::MAX, &mut result);
+        self.root
+            .get_closest(target, &self.own_id, usize::MAX, &mut result);
         result.sort_by(|a, b| {
             let da = a.id.distance(target);
             let db = b.id.distance(target);
@@ -145,7 +149,7 @@ impl RoutingTable {
     pub fn get_closest_max_type(&self, target: &NodeId, n: usize, max_type: u8) -> Vec<Contact> {
         let mut result = Vec::new();
         self.root
-            .get_closest_max_type(target, usize::MAX, max_type, &mut result);
+            .get_closest_max_type(target, &self.own_id, usize::MAX, max_type, &mut result);
         result.sort_by(|a, b| {
             let da = a.id.distance(target);
             let db = b.id.distance(target);
@@ -157,7 +161,8 @@ impl RoutingTable {
 
     /// Remove a contact by ID. Returns true if found and removed.
     pub fn remove(&mut self, id: &NodeId) -> bool {
-        if let Some(contact) = self.root.remove(id) {
+        let own_id = self.own_id;
+        if let Some(contact) = self.root.remove(id, &own_id) {
             let ip = contact.ip;
             if let Some(cnt) = self.ip_counts.get_mut(&ip) {
                 if *cnt > 1 {
@@ -205,7 +210,7 @@ impl RoutingTable {
 
     /// Find a contact by ID.
     pub fn get(&self, id: &NodeId) -> Option<&Contact> {
-        self.root.get(id)
+        self.root.get(id, &self.own_id)
     }
 
     /// Mark a contact as IP-verified after a successful three-way handshake or
@@ -217,7 +222,8 @@ impl RoutingTable {
     /// when the contact was found with a matching IP (and is now verified),
     /// `false` otherwise (unknown contact or IP mismatch).
     pub fn verify_contact(&mut self, id: &NodeId, ip: Ipv4Addr) -> bool {
-        match self.root.get_mut(id) {
+        let own_id = self.own_id;
+        match self.root.get_mut(id, &own_id) {
             Some(contact) if contact.ip == ip => {
                 contact.verified = true;
                 true
@@ -321,7 +327,8 @@ mod tests {
         // even the strict max_type 0 filter.
         let aged_id = NodeId::from_bytes([0x01; 16]);
         {
-            let c = table.root.get_mut(&aged_id).unwrap();
+            let own = table.own_id;
+            let c = table.root.get_mut(&aged_id, &own).unwrap();
             c.created_at = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
         }
         assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 0).len(), 1);
@@ -414,6 +421,50 @@ mod tests {
             table.add_contact(c).unwrap();
         }
         assert_eq!(table.len(), K + 1);
+    }
+
+    #[test]
+    fn test_distance_keyed_tree_keeps_contacts_findable_after_split() {
+        // Use a non-zero own_id so distance-based branching diverges from raw
+        // contact-ID branching. If add() and get() disagreed on the branch (the
+        // pre-fix raw-bit bug), some contacts would become unreachable after a
+        // leaf split. Inserting enough contacts to force a split and then
+        // re-finding every one proves add/get/remove all key on XOR distance.
+        let own_id = NodeId::from_bytes([0xF3; 16]);
+        let mut table = RoutingTable::new(own_id);
+
+        let mut ids = Vec::new();
+        for i in 0..(K + 5) {
+            // Spread the top distance bits by varying the most significant ID
+            // byte, so the tree actually splits across both branches instead of
+            // clustering and hitting the zone-index cap.
+            // bit(0) reads the MSB of chunk0, which is byte index 3 in the wire
+            // layout, so vary byte 3 (and below) to spread the top distance bits.
+            let mut id = [0u8; 16];
+            id[3] = ((i as u8).wrapping_mul(101)) ^ 0x5A;
+            id[2] = ((i as u8).wrapping_mul(53)) ^ 0x11;
+            id[1] = i as u8;
+            id[0] = 0xA5;
+            let nid = NodeId::from_bytes(id);
+            let c = make_contact(id, &unique_ip(i + 1));
+            table
+                .add_contact(c)
+                .unwrap_or_else(|e| panic!("add {i} failed: {e:?}"));
+            ids.push(nid);
+        }
+
+        // Every inserted contact must still resolve through the distance-keyed tree.
+        for nid in &ids {
+            assert!(
+                table.get(nid).is_some(),
+                "contact {nid} unreachable after split (branching mismatch)"
+            );
+        }
+
+        // Removal also walks the distance-keyed path.
+        let victim = ids[3];
+        assert!(table.remove(&victim));
+        assert!(table.get(&victim).is_none());
     }
 
     #[test]
