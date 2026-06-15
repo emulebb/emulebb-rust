@@ -55,6 +55,10 @@ pub mod opcode {
     pub const SEARCH_KEY_REQ: u8 = 0x33;
     pub const SEARCH_SOURCE_REQ: u8 = 0x34;
     pub const SEARCH_NOTES_REQ: u8 = 0x35;
+    /// Legacy (pre-Kad2) notes-search request (oracle `KADEMLIA_SEARCH_NOTES_REQ`,
+    /// 0x32). Out-tracked alongside the Kad2 variant so a legacy notes response is
+    /// not dropped as unrequested (oracle `IsTrackedOutListRequestPacket`).
+    pub const SEARCH_NOTES_REQ_LEGACY: u8 = 0x32;
     pub const SEARCH_RES: u8 = 0x3B;
     pub const PUBLISH_KEY_REQ: u8 = 0x43;
     pub const PUBLISH_SOURCE_REQ: u8 = 0x44;

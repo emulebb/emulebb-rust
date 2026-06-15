@@ -1,17 +1,41 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-/// Tracks incoming Kad request counts per IP and opcode family to detect flooding.
+/// Tracks incoming Kad requests per IP and opcode family to detect flooding.
 ///
-/// This mirrors the oracle `PacketTracking.cpp` intent more closely than a
-/// generic packet-per-IP limiter: only request families are throttled here,
-/// while reply validation is handled by [`OutboundRequestTracker`].
+/// This mirrors the oracle `CPacketTracking::InTrackListIsAllowedPacket`
+/// (`PacketTracking.cpp`): a continuous **token bucket** per (IP, opcode) rather
+/// than a fixed counting window. Each bucket holds up to `MIN2MS(1)` (= one
+/// window's worth of) millisecond-tokens; idle time refills tokens 1:1, and each
+/// request spends `window / max_packets` tokens (i.e. `MIN2MS(1) / N` for the
+/// oracle's N-per-minute budgets). A request whose post-spend balance is negative
+/// is dropped; a balance below `-3 * cap` (oracle `MIN2MS(-3)`) is a massive
+/// flood that also bans the source IP. Only request families are throttled here;
+/// reply validation is handled by [`OutboundRequestTracker`].
 pub struct PacketTracker {
-    /// (packet_count, window_start)
-    counts: HashMap<PacketTrackerKey, (u32, Instant)>,
+    /// Per-(IP, bucket) token-bucket state.
+    buckets: HashMap<PacketTrackerKey, TokenBucketState>,
     limits: HashMap<PacketTrackerBucket, PacketTrackerLimit>,
     default_limit: PacketTrackerLimit,
+    /// IPs banned after a massive request flood (oracle
+    /// `theApp.clientlist->AddBannedClient`), with the instant the ban lifts.
+    /// While banned, every inbound Kad packet from the IP is dropped.
+    banned_until: HashMap<IpAddr, Instant>,
+}
+
+/// How long a massive-flood ban holds an IP (oracle client-ban duration,
+/// `CClientList::AddBannedClient` -> `CLIENTBANTIME` = 1 hour).
+const MASSIVE_FLOOD_BAN: Duration = Duration::from_secs(60 * 60);
+
+/// Continuous token-bucket state for one (IP, opcode) request stream (oracle
+/// `TrackedRequestIn_Struct`).
+#[derive(Debug, Clone, Copy)]
+struct TokenBucketState {
+    /// Remaining millisecond-tokens (oracle `m_tokens`); may go negative.
+    tokens: i64,
+    /// When this bucket was last charged (oracle `m_dwLatest`).
+    last_tick: Instant,
 }
 
 /// Flood-tracking key for one inbound packet family.
@@ -194,28 +218,58 @@ impl PacketTracker {
             ),
         ]);
         Self {
-            counts: HashMap::new(),
+            buckets: HashMap::new(),
             limits,
             default_limit,
+            banned_until: HashMap::new(),
         }
     }
 
-    /// Record an incoming packet from this IP.
-    /// Returns the full decision so callers can log the exact bucket budget that applied.
+    /// Whether `ip` is currently flood-banned (oracle banned-client check). A
+    /// banned IP's packets are dropped before any per-bucket accounting.
+    #[must_use]
+    pub fn is_banned(&self, ip: IpAddr) -> bool {
+        self.banned_until
+            .get(&ip)
+            .is_some_and(|&until| Instant::now() < until)
+    }
+
+    /// Record an incoming packet from this IP against its token bucket and return
+    /// the oracle-shaped decision. Mirrors `InTrackListIsAllowedPacket`: refill by
+    /// elapsed time (capped at the bucket cap), spend the per-packet cost, then
+    /// drop on a negative balance (massive-drop + ban below `-3 * cap`).
     pub fn record_and_check(&mut self, key: PacketTrackerKey) -> PacketTrackerDecision {
         let now = Instant::now();
         let limit = self.limit_for_bucket(key.bucket);
-        let entry = self.counts.entry(key).or_insert((0, now));
+        let cap = bucket_cap_ms(limit);
+        let cost = per_packet_token_cost_ms(limit);
+        let massive_floor = -3 * cap;
 
-        // Reset window if expired
-        if now.duration_since(entry.1) >= limit.window {
-            *entry = (0, now);
+        let state = self.buckets.entry(key).or_insert(TokenBucketState {
+            // Oracle: a fresh entry starts at `MIN2MS(1) - token`, i.e. as if it
+            // were full and had just spent one packet's cost.
+            tokens: cap - cost,
+            last_tick: now,
+        });
+
+        if state.last_tick != now || state.tokens != cap - cost {
+            // Existing bucket: refill by elapsed ms (cap at `cap`), then spend.
+            let elapsed_ms = i64::try_from(now.duration_since(state.last_tick).as_millis())
+                .unwrap_or(i64::MAX);
+            state.tokens = (state.tokens.saturating_add(elapsed_ms)).min(cap);
+            state.tokens = state.tokens.saturating_sub(cost);
         }
+        state.last_tick = now;
+        let tokens = state.tokens;
 
-        entry.0 += 1;
-        let action = if entry.0 > limit.max_packets.saturating_mul(4) {
+        // Oracle: a negative balance drops; far below the limit is a massive
+        // flood that also bans the IP (handled by the caller via MassiveDrop).
+        let action = if tokens < massive_floor {
+            // Oracle: a sustained flood far past the limit bans the source IP.
+            self.banned_until
+                .insert(key.ip, now + MASSIVE_FLOOD_BAN);
             PacketTrackerAction::MassiveDrop
-        } else if entry.0 > limit.max_packets {
+        } else if tokens < 0 {
             PacketTrackerAction::Drop
         } else {
             PacketTrackerAction::Allow
@@ -223,21 +277,32 @@ impl PacketTracker {
         PacketTrackerDecision {
             action,
             allowed: matches!(action, PacketTrackerAction::Allow),
-            observed_packets: entry.0,
+            // Surface the token balance as a signed millisecond deficit/credit for
+            // diagnostics. `observed_packets`/`max_packets` are retained for the
+            // dump schema: report the remaining whole-packet allowance and the
+            // per-window budget.
+            observed_packets: max_u32(0, (cap - tokens) / cost.max(1)),
             max_packets: limit.max_packets,
             window: limit.window,
         }
     }
 
-    /// Prune stale entries (call periodically to prevent memory growth).
+    /// Prune idle buckets (call periodically to prevent memory growth). A bucket
+    /// that has been idle long enough to fully refill past its cap carries no
+    /// deficit and can be dropped.
     pub fn prune(&mut self) {
         let now = Instant::now();
         let limits = self.limits.clone();
         let default_limit = self.default_limit;
-        self.counts.retain(|key, (_, window_start)| {
+        self.buckets.retain(|key, state| {
             let limit = limits.get(&key.bucket).copied().unwrap_or(default_limit);
-            now.duration_since(*window_start) < limit.window.saturating_mul(2)
+            let cap = bucket_cap_ms(limit);
+            // Idle for >= one full refill window since last charge: the bucket
+            // would be back at its cap, so it holds no state worth keeping.
+            now.duration_since(state.last_tick) < Duration::from_millis(cap.max(0) as u64)
         });
+        // Drop expired flood bans.
+        self.banned_until.retain(|_, until| now < *until);
     }
 
     fn limit_for_bucket(&self, bucket: PacketTrackerBucket) -> PacketTrackerLimit {
@@ -248,103 +313,26 @@ impl PacketTracker {
     }
 }
 
-/// Tracks outbound Kad requests by IP and opcode for the oracle's "did we ask
-/// for this response?" validation.
-pub struct OutboundRequestTracker {
-    entries: VecDeque<OutboundRequestEntry>,
-    window: Duration,
+/// The token-bucket cap in milliseconds (oracle `MIN2MS(1)` = one window's worth
+/// of tokens). Generalised to the bucket's configured window so non-minute
+/// buckets keep the same "one window of credit" semantics.
+fn bucket_cap_ms(limit: PacketTrackerLimit) -> i64 {
+    i64::try_from(limit.window.as_millis()).unwrap_or(i64::MAX)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct OutboundRequestEntry {
-    inserted_at: Instant,
-    ip: IpAddr,
-    opcode: u8,
+/// Per-packet token cost (oracle `MIN2MS(1) / N` for an N-per-window budget).
+fn per_packet_token_cost_ms(limit: PacketTrackerLimit) -> i64 {
+    let cap = bucket_cap_ms(limit);
+    let max_packets = i64::from(limit.max_packets.max(1));
+    (cap / max_packets).max(1)
 }
 
-impl OutboundRequestTracker {
-    /// Create a new outbound request tracker with the given retention window.
-    #[must_use]
-    pub fn new(window: Duration) -> Self {
-        Self {
-            entries: VecDeque::new(),
-            window,
-        }
-    }
-
-    /// Record an outbound request if the oracle would track it.
-    pub fn record(&mut self, ip: IpAddr, opcode: u8) {
-        self.prune();
-        if !tracks_outbound_request_opcode(opcode) {
-            return;
-        }
-        self.entries.push_front(OutboundRequestEntry {
-            inserted_at: Instant::now(),
-            ip,
-            opcode,
-        });
-    }
-
-    /// Find a matching tracked request by IP and opcode.
-    ///
-    /// When `remove` is true the newest matching request is consumed, mirroring
-    /// the oracle's list walk.
-    #[must_use]
-    pub fn contains(&mut self, ip: IpAddr, opcode: u8, remove: bool) -> bool {
-        self.prune();
-        for index in 0..self.entries.len() {
-            let Some(entry) = self.entries.get(index).copied() else {
-                continue;
-            };
-            if entry.ip == ip && entry.opcode == opcode {
-                if remove {
-                    let _ = self.entries.remove(index);
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Find the first matching opcode from the provided oracle-ordered set.
-    #[must_use]
-    pub fn find_any(&mut self, ip: IpAddr, opcodes: &[u8], remove: bool) -> Option<u8> {
-        for opcode in opcodes {
-            if self.contains(ip, *opcode, remove) {
-                return Some(*opcode);
-            }
-        }
-        None
-    }
-
-    fn prune(&mut self) {
-        let now = Instant::now();
-        while self
-            .entries
-            .back()
-            .is_some_and(|entry| now.duration_since(entry.inserted_at) >= self.window)
-        {
-            let _ = self.entries.pop_back();
-        }
-    }
+const fn max_u32(a: u32, b: i64) -> u32 {
+    if b < a as i64 { a } else { b as u32 }
 }
 
-fn tracks_outbound_request_opcode(opcode: u8) -> bool {
-    matches!(
-        opcode,
-        emulebb_kad_proto::constants::opcode::BOOTSTRAP_REQ
-            | emulebb_kad_proto::constants::opcode::HELLO_REQ
-            | emulebb_kad_proto::constants::opcode::HELLO_RES
-            | emulebb_kad_proto::constants::opcode::REQ
-            | emulebb_kad_proto::constants::opcode::SEARCH_NOTES_REQ
-            | emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ
-            | emulebb_kad_proto::constants::opcode::PUBLISH_SOURCE_REQ
-            | emulebb_kad_proto::constants::opcode::PUBLISH_NOTES_REQ
-            | emulebb_kad_proto::constants::opcode::FINDBUDDY_REQ
-            | emulebb_kad_proto::constants::opcode::CALLBACK_REQ
-            | emulebb_kad_proto::constants::opcode::PING
-    )
-}
+mod outbound;
+pub use outbound::OutboundRequestTracker;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -527,37 +515,58 @@ mod tests {
     }
 
     #[test]
-    fn outbound_request_tracker_matches_newest_request_by_ip_and_opcode() {
-        let mut tracker = OutboundRequestTracker::new(Duration::from_secs(180));
-        let ip = parse_ip("1.2.3.4");
-
-        tracker.record(ip, emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ);
-        tracker.record(ip, emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ);
-
-        assert!(tracker.contains(
-            ip,
-            emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ,
-            true
-        ));
-        assert!(tracker.contains(
-            ip,
-            emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ,
-            true
-        ));
-        assert!(!tracker.contains(
-            ip,
-            emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ,
-            true
-        ));
+    fn token_bucket_refills_continuously_after_partial_idle() {
+        // Short window so the refill is observable in a unit test: max 2 per
+        // 100ms -> cap 100ms, cost 50ms.
+        let mut tracker =
+            PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_millis(100));
+        let addr = key("9.9.9.9", PacketTrackerBucket::BootstrapReq);
+        // Override BootstrapReq to the small window for this test by using the
+        // PingReq-style budget is not possible; instead use the configured
+        // request_window buckets which all share 100ms here. BootstrapReq is 2.
+        // Spend the whole bucket: 2 allowed (tokens 50 -> 0), 3rd drops to -50.
+        assert!(tracker.record_and_check(addr).allowed);
+        assert!(tracker.record_and_check(addr).allowed);
+        assert!(!tracker.record_and_check(addr).allowed);
+        // Idle ~130ms: refills ~130ms (capped at the 100ms cap), clearing the
+        // -50 deficit, so one packet is allowed again (continuous refill, not a
+        // hard window reset).
+        std::thread::sleep(Duration::from_millis(130));
+        assert!(tracker.record_and_check(addr).allowed);
+        // The bucket is back near empty after that spend, so a tight follow-up
+        // drops again (the deficit is continuous, not reset to a full window).
+        assert!(!tracker.record_and_check(addr).allowed);
     }
 
     #[test]
-    fn outbound_request_tracker_ignores_untracked_opcodes() {
-        let mut tracker = OutboundRequestTracker::new(Duration::from_secs(180));
-        let ip = parse_ip("1.2.3.4");
-
-        tracker.record(ip, emulebb_kad_proto::constants::opcode::PUBLISH_RES);
-
-        assert!(!tracker.contains(ip, emulebb_kad_proto::constants::opcode::PUBLISH_RES, false));
+    fn token_bucket_bans_at_massive_flood_threshold() {
+        // CallbackReq: 1 per minute -> cap 60000ms, cost 60000ms. The massive
+        // threshold is tokens < -3*cap = -180000, reached once the deficit
+        // exceeds three full windows.
+        let mut tracker =
+            PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_secs(60));
+        let addr = key("8.8.8.8", PacketTrackerBucket::CallbackReq);
+        // Packet 1: starts at cap-cost = 0 -> Allow.
+        assert_eq!(
+            tracker.record_and_check(addr).action,
+            PacketTrackerAction::Allow
+        );
+        // Packets 2..=4: tokens go -60000, -120000, -180000. -180000 is NOT
+        // strictly below -180000, so still an ordinary drop.
+        for _ in 0..3 {
+            assert_eq!(
+                tracker.record_and_check(addr).action,
+                PacketTrackerAction::Drop
+            );
+        }
+        // Packet 5: tokens -240000 < -180000 -> massive flood, ban the IP.
+        assert_eq!(
+            tracker.record_and_check(addr).action,
+            PacketTrackerAction::MassiveDrop
+        );
+        // The IP is now flood-banned (oracle AddBannedClient), so further
+        // inbound packets from it are dropped wholesale by is_banned.
+        assert!(tracker.is_banned(addr.ip));
+        assert!(!tracker.is_banned(parse_ip("8.8.4.4")));
     }
 }

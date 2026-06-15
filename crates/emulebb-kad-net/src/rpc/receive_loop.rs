@@ -121,6 +121,26 @@ impl RpcManager {
                                 .map_or_else(|| "-".to_string(), |version| version.to_string()),
                         );
 
+                        // Drop everything from an IP previously flood-banned
+                        // (oracle banned-client check), before any per-bucket
+                        // accounting or handler dispatch.
+                        if inner.tracker.lock().unwrap().is_banned(from.ip()) {
+                            inner
+                                .observability
+                                .lock()
+                                .unwrap()
+                                .record_tracker_action(
+                                    inbound.tracker_bucket.unwrap_or(PacketTrackerBucket::Default),
+                                    PacketTrackerAction::MassiveDrop,
+                                );
+                            debug!(
+                                "dropping Kad packet from flood-banned IP {} opcode={}",
+                                from.ip(),
+                                opcode_name(response_opcode),
+                            );
+                            continue;
+                        }
+
                         if let Some(bucket) = inbound.tracker_bucket {
                             let decision =
                                 inner
