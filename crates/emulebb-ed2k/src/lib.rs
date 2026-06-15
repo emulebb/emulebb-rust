@@ -1,3 +1,4 @@
+pub mod advertised_udp_port;
 pub mod config;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;

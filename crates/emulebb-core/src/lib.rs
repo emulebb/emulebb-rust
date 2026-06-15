@@ -14,8 +14,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
-    MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, ReaskSourceHandle,
-    TransportProtocol, built_in_upnp_port_mapping_providers,
+    MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder,
+    ReaskSourceHandle, TransportProtocol,
+    advertised_udp_port::{advertised_udp_port, set_advertised_external_udp_port},
+    built_in_upnp_port_mapping_providers,
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
@@ -1179,6 +1181,14 @@ impl EmulebbCore {
         nat.start().await?;
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
+        // Keep the advertised external eD2k UDP port in sync with the NAT mapping
+        // so peers can locate us for UDP source-reask by (ip, udp_port) even when
+        // the gateway remaps the external port.
+        tasks.push(tokio::spawn(run_advertised_udp_port_sync(
+            Arc::clone(&nat),
+            network.kad_bind_addr.port(),
+            Arc::clone(&shutdown),
+        )));
         if configured_bootstrap_nodes_text.is_some() {
             tasks.push(tokio::spawn(run_configured_kad_bootstrap(
                 dht.clone(),
@@ -2684,7 +2694,7 @@ impl EmulebbCore {
             user_hash: network.user_hash,
             client_id: 0,
             tcp_port: network.listen_port,
-            udp_port: 0,
+            udp_port: advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(config.obfuscation_enabled),
@@ -3430,7 +3440,11 @@ impl EmulebbCore {
             user_hash: network.user_hash,
             client_id: 0,
             tcp_port: network.listen_port,
-            udp_port: 0,
+            // Advertise the externally-reachable eD2k UDP port (UPnP-mapped when
+            // known, else the internal Kad UDP port), like eMule: peers locate us
+            // for UDP source-reask by the (ip, udp_port) we advertise here, and
+            // the gateway can remap the external port (see advertised_udp_port).
+            udp_port: advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(network.config.obfuscation_enabled),
@@ -5340,6 +5354,33 @@ fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
         let _ = validate_server_priority(priority)?;
     }
     Ok(format!("{}:{}", request.address, request.port))
+}
+
+/// Keep the advertised external eD2k UDP port (`advertised_udp_port`) in sync with
+/// the live NAT mapping for the Kad UDP port. eMule advertises the externally
+/// reachable UDP port, not the internal one: a UPnP gateway may grant a different
+/// external port, and a peer answers a UDP source-reask only when it can locate us
+/// by the `(ip, udp_port)` we advertised (matching the reask datagram's source
+/// port, which the gateway rewrites to the external port). Polling the NAT status
+/// reflects a mapping that appears after startup — or is remapped on lease renewal
+/// — into subsequent hellos.
+async fn run_advertised_udp_port_sync(
+    nat: Arc<NatManager>,
+    internal_udp_port: u16,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        let status = nat.status().await;
+        if let Some(external) = status.mappings.iter().find_map(|mapping: &MappedEndpoint| {
+            (mapping.protocol == TransportProtocol::Udp
+                && mapping.local_addr.port() == internal_udp_port)
+                .then(|| mapping.external_addr.port())
+        }) && external != 0
+        {
+            set_advertised_external_udp_port(external);
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
 
 fn ed2k_nat_mappings(network: &Ed2kNetworkConfig) -> Vec<MappingSpec> {
