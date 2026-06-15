@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
@@ -60,7 +60,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                 include_status = true;
             }
             OP_REQUESTSOURCES => {
-                let sources = source_exchange_peers(transfer_runtime, &requested).await?;
+                let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
                 let reply = encode_answer_sources(&requested, &sources);
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
                 transport
@@ -78,7 +78,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                     continue;
                 }
                 let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
-                let sources = source_exchange_peers(transfer_runtime, &requested).await?;
+                let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
                 if source_exchange_entry_count(used_version, &sources) == 0 {
                     continue;
                 }
@@ -326,7 +326,7 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
         } else {
             1
         };
-        let sources = source_exchange_peers(transfer_runtime, &requested).await?;
+        let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
         if source_exchange_entry_count(used_version, &sources) == 0 {
             return Ok(Some(requested));
         }
@@ -373,7 +373,7 @@ async fn answer_source_request_subpacket<'a>(
     } else {
         1
     };
-    let sources = source_exchange_peers(transfer_runtime, requested).await?;
+    let sources = source_exchange_peers(transfer_runtime, requested, peer_addr.ip()).await?;
     if source_exchange_entry_count(used_version, &sources) == 0 {
         return Ok(remaining);
     }
@@ -390,16 +390,38 @@ async fn answer_source_request_subpacket<'a>(
     Ok(remaining)
 }
 
+/// Build the OP_ANSWERSOURCES(2) source list for a shared file, excluding the
+/// requesting peer's own IP (master `CKnownFile::CreateSrcInfoPacket` skips
+/// `forClient` so a requester is never offered itself as a source).
 async fn source_exchange_peers(
     transfer_runtime: &Ed2kTransferRuntime,
     requested: &Ed2kHash,
+    exclude_ip: IpAddr,
+) -> Result<Vec<SourceExchangePeer>> {
+    // The eD2k peer plane is IPv4-only; a non-IPv4 requester (never produced by
+    // this stack) excludes nothing.
+    let IpAddr::V4(exclude_ipv4) = exclude_ip else {
+        return source_exchange_peers_excluding(transfer_runtime, requested, None).await;
+    };
+    source_exchange_peers_excluding(transfer_runtime, requested, Some(exclude_ipv4)).await
+}
+
+async fn source_exchange_peers_excluding(
+    transfer_runtime: &Ed2kTransferRuntime,
+    requested: &Ed2kHash,
+    exclude_ipv4: Option<Ipv4Addr>,
 ) -> Result<Vec<SourceExchangePeer>> {
     let manifest = transfer_runtime.manifest(&requested.to_string()).await?;
     Ok(manifest
         .sources
         .iter()
         .filter_map(|source| {
-            let ip = source.ip.parse::<Ipv4Addr>().ok()?.octets();
+            let parsed_ip = source.ip.parse::<Ipv4Addr>().ok()?;
+            // Never echo the requester back to itself as a source.
+            if exclude_ipv4 == Some(parsed_ip) {
+                return None;
+            }
+            let ip = parsed_ip.octets();
             if source.tcp_port == 0 {
                 return None;
             }

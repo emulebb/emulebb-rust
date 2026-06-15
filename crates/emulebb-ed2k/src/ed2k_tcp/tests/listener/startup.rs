@@ -449,3 +449,119 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn listener_source_exchange_excludes_the_requesting_peer() {
+    // The requester connects from the operator LAN IP; a remembered source on
+    // that same IP must be skipped (master CKnownFile::CreateSrcInfoPacket skips
+    // the requester), while a different-IP source is returned.
+    let payload = b"ubuntu linux source exchange self-exclusion".repeat(512);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let file_hash_hex = file_hash.to_string();
+    let root = unique_test_dir("ed2k-listener-sx-self-exclude");
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let job = new_transfer_job(file_hash, "sx-exclude.txt".to_string(), payload.len() as u64);
+    transfer_runtime.ensure_job(&job).await.unwrap();
+    transfer_runtime
+        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .await
+        .unwrap();
+    transfer_runtime
+        .store_piece_data(&file_hash_hex, 0, &payload)
+        .await
+        .unwrap();
+
+    // Source 1: the requester's own IP (must be excluded).
+    transfer_runtime
+        .remember_source(
+            &file_hash_hex,
+            Ed2kSourceHint {
+                ip: test_bind_ip().to_string(),
+                tcp_port: 5001,
+                user_hash: Some(hex::encode([0x71; 16])),
+            },
+        )
+        .await
+        .unwrap();
+    // Source 2: a different IP (must be returned).
+    transfer_runtime
+        .remember_source(
+            &file_hash_hex,
+            Ed2kSourceHint {
+                ip: "10.20.30.41".to_string(),
+                tcp_port: 4662,
+                user_hash: Some(hex::encode([0x62; 16])),
+            },
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let dht = test_dht().await;
+    let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+    let secure_ident = listener_secure_ident();
+    let hello_identity = Ed2kHelloIdentity {
+        user_hash: [0x31; 16],
+        client_id: 0x1357_2468,
+        tcp_port: 41011,
+        udp_port: 41010,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    };
+    let server = spawn_single_listener_connection(
+        listener,
+        dht,
+        server_state,
+        kad_firewall,
+        secure_ident,
+        Arc::clone(&transfer_runtime),
+        hello_identity,
+    );
+
+    let peer_identity = Ed2kHelloIdentity {
+        user_hash: [0x41; 16],
+        client_id: 0x2468_1357,
+        tcp_port: 4662,
+        udp_port: 4672,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    };
+    let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_identity).await;
+
+    stream
+        .write_all(&super::encode_request_sources2(&file_hash))
+        .await
+        .unwrap();
+    let source_answer =
+        read_until_opcode(&mut stream, OP_EMULEPROT, super::OP_ANSWERSOURCES2).await;
+    assert_eq!(&source_answer[7..23], &file_hash.0);
+    // Exactly one source survives the self-exclusion: the different-IP peer.
+    assert_eq!(
+        u16::from_le_bytes([source_answer[23], source_answer[24]]),
+        1
+    );
+    assert_eq!(&source_answer[25..29], &[41, 30, 20, 10]);
+    assert_eq!(
+        u16::from_le_bytes([source_answer[29], source_answer[30]]),
+        4662
+    );
+
+    stream
+        .write_all(&super::encode_packet(
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD,
+            &file_hash.0,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
