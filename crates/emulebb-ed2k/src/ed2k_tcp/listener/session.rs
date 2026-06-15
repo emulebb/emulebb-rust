@@ -12,9 +12,11 @@ use tokio::{
 use tracing::{debug, info};
 
 use emulebb_kad_dht::DhtNode;
-use emulebb_kad_proto::{Ed2kHash, FirewallUdp, KadPacket};
+use emulebb_kad_proto::{Ed2kHash, FirewallUdp, KadPacket, NodeId};
+use tokio::sync::mpsc;
 
 use crate::{
+    buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
     ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity},
     kad_firewall::KadFirewallState,
@@ -31,7 +33,7 @@ use super::super::codec::{
     decode_reask_callback_tcp_payload, decode_shared_dirs_answer_payload,
     decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
     decode_shared_files_dir_request_payload, encode_aich_recovery_failure_answer,
-    encode_empty_shared_files_answer, encode_file_req_ans_nofil, encode_packet,
+    encode_buddy_pong, encode_empty_shared_files_answer, encode_file_req_ans_nofil, encode_packet,
     encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
 };
 use super::super::download::{
@@ -87,6 +89,9 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
     /// External reachability (advertised external TCP/UDP ports), read at send time.
     pub(in crate::ed2k_tcp) reachability: &'a crate::reachability::ExternalReachability,
+    /// Persistent Kad buddy-socket registry: an inbound buddy holds this session
+    /// open so `handle_kad_callback_req` can relay `OP_CALLBACK` down it.
+    pub(in crate::ed2k_tcp) buddy_registry: &'a BuddySocketRegistry,
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -103,6 +108,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         transfer_runtime,
         hello_identity,
         reachability,
+        buddy_registry,
     } = context;
     let local_addr = stream.local_addr().with_context(|| {
         format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -179,20 +185,67 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let mut peer_supports_file_identifiers = false;
     let mut peer_upload_identity = upload_peer_identity_from_socket(peer_addr);
     let mut upload_queue = ListenerUploadQueue::new();
+    // Inbound Kad buddy hold: set once this connecting peer is recognized as the
+    // firewalled client we agreed to serve as a buddy (oracle KS_INCOMING_BUDDY
+    // -> KS_CONNECTED_BUDDY). While held, we answer OP_BUDDYPING with OP_BUDDYPONG
+    // and forward relayed OP_CALLBACK frames pushed by handle_kad_callback_req.
+    let mut buddy_hold: Option<InboundBuddyHold> = None;
 
     let result = loop {
         let read_timeout = upload_queue.read_timeout();
-        let packet = match tokio::time::timeout(read_timeout, transport.read_packet()).await {
-            Ok(packet) => {
-                packet.with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?
+        // While serving as an inbound buddy, also drain relay frames (OP_CALLBACK)
+        // that handle_kad_callback_req pushes down this held socket.
+        let packet = if let Some(hold) = buddy_hold.as_mut() {
+            tokio::select! {
+                biased;
+                relay = hold.relay_rx.recv() => {
+                    match relay {
+                        Some(frame) => {
+                            dump_ed2k_tcp_listener_send(
+                                peer_addr,
+                                transport.mode,
+                                "buddy_callback_relay",
+                                &frame,
+                            );
+                            transport.write_all(&frame).await.with_context(|| {
+                                format!("failed to relay OP_CALLBACK to buddy {peer_addr}")
+                            })?;
+                            continue;
+                        }
+                        // Registry dropped the sender (buddy relation cleared).
+                        None => {
+                            buddy_hold = None;
+                            continue;
+                        }
+                    }
+                }
+                read = tokio::time::timeout(read_timeout, transport.read_packet()) => {
+                    match read {
+                        Ok(packet) => packet
+                            .with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?,
+                        Err(_) => match upload_queue
+                            .poll_on_timeout(transfer_runtime, &mut transport, peer_addr)
+                            .await?
+                        {
+                            ListenerQueuePoll::Continue => continue,
+                            ListenerQueuePoll::Close => break Ok(()),
+                        },
+                    }
+                }
             }
-            Err(_) => match upload_queue
-                .poll_on_timeout(transfer_runtime, &mut transport, peer_addr)
-                .await?
-            {
-                ListenerQueuePoll::Continue => continue,
-                ListenerQueuePoll::Close => break Ok(()),
-            },
+        } else {
+            match tokio::time::timeout(read_timeout, transport.read_packet()).await {
+                Ok(packet) => {
+                    packet.with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?
+                }
+                Err(_) => match upload_queue
+                    .poll_on_timeout(transfer_runtime, &mut transport, peer_addr)
+                    .await?
+                {
+                    ListenerQueuePoll::Continue => continue,
+                    ListenerQueuePoll::Close => break Ok(()),
+                },
+            }
         };
         let Some(packet) = packet else {
             break Ok(());
@@ -213,6 +266,29 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     transport.mode.as_str(),
                     hello_profile.is_mule_hello,
                 );
+                // If this connecting peer is the firewalled client we agreed to be
+                // a buddy for, hold the session open and register a relay writer so
+                // handle_kad_callback_req can push OP_CALLBACK down it (oracle
+                // KS_INCOMING_BUDDY connecting -> KS_CONNECTED_BUDDY).
+                if buddy_hold.is_none() {
+                    if let IpAddr::V4(peer_ip) = peer_addr.ip() {
+                        if let Some(buddy_id) = buddy_registry
+                            .match_connecting_peer(peer_ip, hello_profile.identity.user_hash)
+                        {
+                            let (relay_tx, relay_rx) = mpsc::unbounded_channel();
+                            if buddy_registry.attach_inbound(buddy_id, relay_tx) {
+                                info!(
+                                    "holding inbound Kad buddy session for {peer_addr} \
+                                     (buddy_id={buddy_id})"
+                                );
+                                buddy_hold = Some(InboundBuddyHold {
+                                    buddy_id,
+                                    relay_rx,
+                                });
+                            }
+                        }
+                    }
+                }
                 for reply in build_hello_responses(&packet.payload, response_identity)? {
                     dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_reply", &reply);
                     transport
@@ -861,12 +937,28 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     "received=true",
                 );
             }
-            (OP_EMULEPROT, OP_BUDDYPING) | (OP_EMULEPROT, OP_BUDDYPONG) => {
+            (OP_EMULEPROT, OP_BUDDYPING) => {
                 dump_ed2k_tcp_listener_meta(
                     peer_addr,
                     Some(transport.mode),
-                    "kad_buddy_ping_pong",
-                    format!("opcode=0x{:02X}", packet.opcode),
+                    "kad_buddy_ping",
+                    format!("held_buddy={}", buddy_hold.is_some()),
+                );
+                // Oracle ListenSocket.cpp: answer OP_BUDDYPING with OP_BUDDYPONG
+                // only when the pinger is the buddy we serve (buddy == client).
+                if buddy_hold.is_some() {
+                    let pong = encode_buddy_pong();
+                    transport.write_all(&pong).await.with_context(|| {
+                        format!("failed to send OP_BUDDYPONG to buddy {peer_addr}")
+                    })?;
+                }
+            }
+            (OP_EMULEPROT, OP_BUDDYPONG) => {
+                dump_ed2k_tcp_listener_meta(
+                    peer_addr,
+                    Some(transport.mode),
+                    "kad_buddy_pong",
+                    format!("held_buddy={}", buddy_hold.is_some()),
                 );
             }
             (OP_EMULEPROT, OP_FILEDESC) => {
@@ -969,7 +1061,19 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     };
 
     upload_queue.release(transfer_runtime).await;
+    // Release the inbound buddy slot when the held session ends so the
+    // buddy-management loop can re-establish on a reconnect (oracle buddy-loss).
+    if let Some(hold) = buddy_hold {
+        buddy_registry.detach_inbound(hold.buddy_id);
+        debug!("released inbound Kad buddy session for {peer_addr}");
+    }
     result
+}
+
+/// Inbound Kad buddy hold state owned by a held listener session.
+struct InboundBuddyHold {
+    buddy_id: NodeId,
+    relay_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
 fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIdentity {

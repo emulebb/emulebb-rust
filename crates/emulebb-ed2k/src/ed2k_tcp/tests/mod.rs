@@ -145,6 +145,7 @@ macro_rules! handle_connection_test {
                 transfer_runtime: $transfer_runtime,
                 hello_identity: $hello_identity,
                 reachability: &crate::reachability::ExternalReachability::new(),
+                buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
             },
         )
     };

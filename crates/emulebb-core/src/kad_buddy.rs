@@ -222,6 +222,15 @@ impl KadBuddyState {
         self.outgoing = Some(buddy);
     }
 
+    /// Drop our acquired buddy when the persistent buddy TCP link is lost, so the
+    /// buddy-management loop re-searches (oracle buddy-loss: `m_pBuddy = NULL` +
+    /// `SetFindBuddy()`). The next [`Self::should_search`] is also forced by
+    /// clearing the search cooldown so the re-search happens promptly.
+    pub fn clear_outgoing_buddy(&mut self) {
+        self.outgoing = None;
+        self.last_search_at = None;
+    }
+
     /// Whether we should launch a buddy search now.
     ///
     /// Mirrors the oracle upkeep: only when we need a buddy, do not already have
@@ -386,6 +395,27 @@ mod tests {
         };
         assert!(state.release_buddies_if_unneeded(firewalled));
         assert!(!state.has_incoming_buddy());
+    }
+
+    #[test]
+    fn clear_outgoing_buddy_reenables_prompt_research() {
+        let need = BuddyNeedInput {
+            tcp_firewalled: true,
+            udp_firewalled_verified: true,
+            kad_connected: true,
+        };
+        let now = Utc::now();
+        let mut state = KadBuddyState::new();
+        state.mark_search_started(now);
+        state.set_outgoing_buddy(outgoing());
+        assert!(state.has_outgoing_buddy());
+        assert!(!state.should_search(need, now));
+
+        // Losing the buddy link drops the buddy and clears the cooldown so the
+        // next upkeep re-searches immediately (oracle buddy-loss SetFindBuddy).
+        state.clear_outgoing_buddy();
+        assert!(!state.has_outgoing_buddy());
+        assert!(state.should_search(need, now));
     }
 
     #[test]

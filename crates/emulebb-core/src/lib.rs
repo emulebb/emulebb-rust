@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder,
     ReaskSourceHandle, TransportProtocol,
+    buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_upnp_port_mapping_providers,
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
@@ -29,8 +30,9 @@ use emulebb_ed2k::{
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-        Ed2kSecureIdent, download_file_from_peer, emule_connect_options, enrich_hello_identity,
-        run_ed2k_listener, send_kad_firewall_tcp_ack, set_publish_rust_identity,
+        Ed2kSecureIdent, OutboundBuddyLinkOptions, download_file_from_peer, emule_connect_options,
+        encode_kad_callback_relay_frame, enrich_hello_identity, run_ed2k_listener,
+        run_outbound_buddy_link, send_kad_firewall_tcp_ack, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kLiveSource, Ed2kResumeManifest, Ed2kSourceHint,
@@ -1192,6 +1194,11 @@ impl EmulebbCore {
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let kad_buddy = Arc::new(Mutex::new(KadBuddyState::new()));
+        // Persistent Kad buddy-socket registry: holds the held inbound buddy
+        // session writer (so callbacks can be relayed) and tracks the outbound
+        // buddy link, shared by the inbound dispatch, the listener, and the
+        // buddy-management loop.
+        let buddy_registry = BuddySocketRegistry::new();
         let shutdown = Arc::new(AtomicBool::new(false));
         let configured_bootstrap_nodes_text =
             configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
@@ -1276,6 +1283,7 @@ impl EmulebbCore {
                     kad_firewall: Arc::clone(&kad_firewall),
                     reachability: self.ed2k_reachability.clone(),
                     kad_buddy: Arc::clone(&kad_buddy),
+                    buddy_registry: buddy_registry.clone(),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -1309,6 +1317,7 @@ impl EmulebbCore {
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
                     kad_buddy: Arc::clone(&kad_buddy),
+                    buddy_registry: buddy_registry.clone(),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -1325,6 +1334,7 @@ impl EmulebbCore {
             shutdown: Arc::clone(&shutdown),
             ip_filter: network.ip_filter.clone(),
             reachability: self.ed2k_reachability.clone(),
+            buddy_registry: buddy_registry.clone(),
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).
@@ -4004,6 +4014,7 @@ struct KadLocalStoreRuntime {
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     reachability: ExternalReachability,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
+    buddy_registry: BuddySocketRegistry,
     network: Ed2kNetworkConfig,
 }
 
@@ -4032,6 +4043,7 @@ struct KadBuddyRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
+    buddy_registry: BuddySocketRegistry,
     network: Ed2kNetworkConfig,
 }
 
@@ -4039,6 +4051,9 @@ struct KadBuddyRuntime {
 /// the oracle-style cooldown inside [`KadBuddyState::should_search`]; this only
 /// bounds how often we re-evaluate the firewall/bootstrap conditions.
 const KAD_BUDDY_TICK_SECS: u64 = 30;
+
+/// Connect/IO timeout for the persistent outbound buddy TCP link.
+const KAD_BUDDY_LINK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Buddy-management driver (oracle `ClientList` buddy upkeep + `Kademlia`
 /// find-buddy timer): when we are TCP-firewalled (LowID) with a verified-
@@ -4061,6 +4076,15 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
             // mirroring the oracle ClientList buddy upkeep.
             if state.release_buddies_if_unneeded(need) {
                 tracing::debug!("released a Kad buddy relationship (conditions changed)");
+                // Mirror the state drop onto the held sockets: if we became
+                // firewalled we can no longer serve an incoming buddy, and if we
+                // became reachable we no longer need our outbound buddy.
+                if need.tcp_firewalled {
+                    runtime.buddy_registry.clear_inbound();
+                }
+                if !need.needs_buddy() {
+                    runtime.buddy_registry.evict_outbound();
+                }
             }
             if !state.should_search(need, now) {
                 continue;
@@ -4731,6 +4755,7 @@ async fn handle_kad_local_store_packet(
     let server_state = &runtime.server_state;
     let kad_firewall = &runtime.kad_firewall;
     let kad_buddy = &runtime.kad_buddy;
+    let buddy_registry = &runtime.buddy_registry;
     let network = &runtime.network;
     let ReceivedKadPacket { packet, from, .. } = received;
     if let IpAddr::V4(ip) = from.ip() {
@@ -5008,6 +5033,7 @@ async fn handle_kad_local_store_packet(
                 server_state,
                 kad_firewall,
                 kad_buddy,
+                buddy_registry,
                 network,
                 from,
                 req,
@@ -5015,10 +5041,19 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::FindBuddyRes(res) => {
-            handle_kad_find_buddy_res(dht, kad_buddy, from, res).await;
+            handle_kad_find_buddy_res(
+                dht,
+                kad_buddy,
+                buddy_registry,
+                &runtime.reachability,
+                network,
+                from,
+                res,
+            )
+            .await;
         }
         KadPacket::CallbackReq(req) => {
-            handle_kad_callback_req(kad_buddy, from, &req).await;
+            handle_kad_callback_req(kad_buddy, buddy_registry, from, &req).await;
         }
         _ => {}
     }
@@ -5037,6 +5072,7 @@ async fn handle_kad_find_buddy_req(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    buddy_registry: &BuddySocketRegistry,
     network: &Ed2kNetworkConfig,
     from: SocketAddr,
     req: FindBuddyReq,
@@ -5087,6 +5123,18 @@ async fn handle_kad_find_buddy_req(
     dht.send_packet(from, &KadPacket::FindBuddyRes(response))
         .await
         .with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"))?;
+
+    // Record the firewalled client we expect to connect to us so the listener
+    // session can recognize it and hold the buddy socket open for callback relay
+    // (oracle KS_INCOMING_BUDDY). We are IPv4-only; a non-IPv4 source cannot be
+    // matched on connect, so skip the expectation in that (unreachable) case.
+    if let IpAddr::V4(buddy_ip) = from.ip() {
+        buddy_registry.set_expected_inbound(ExpectedInboundBuddy {
+            ip: buddy_ip,
+            user_hash: req.client_hash.0,
+            buddy_id: req.buddy_id,
+        });
+    }
     tracing::info!("accepted Kad buddy request from {from}; replied FINDBUDDY_RES");
     Ok(())
 }
@@ -5099,6 +5147,9 @@ async fn handle_kad_find_buddy_req(
 async fn handle_kad_find_buddy_res(
     dht: &DhtNode,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    buddy_registry: &BuddySocketRegistry,
+    reachability: &ExternalReachability,
+    network: &Ed2kNetworkConfig,
     from: SocketAddr,
     res: FindBuddyRes,
 ) {
@@ -5106,46 +5157,137 @@ async fn handle_kad_find_buddy_res(
         tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: buddy_id echo mismatch");
         return;
     }
+    // We are IPv4-only; a non-IPv4 buddy source cannot be connected.
+    let IpAddr::V4(_buddy_ip) = from.ip() else {
+        tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: non-IPv4 buddy source");
+        return;
+    };
+    let connect_options = res.connect_options.unwrap_or(0);
     let buddy = OutgoingBuddy {
         client_hash: res.client_hash,
         tcp_addr: SocketAddr::new(from.ip(), res.tcp_port),
         udp_addr: from,
-        connect_options: res.connect_options.unwrap_or(0),
+        connect_options,
         acquired_at: Utc::now(),
     };
-    kad_buddy.lock().await.set_outgoing_buddy(buddy);
+    {
+        let mut state = kad_buddy.lock().await;
+        // The oracle keeps a single buddy; ignore a second concurrent response.
+        if state.has_outgoing_buddy() {
+            tracing::debug!("ignoring Kad FINDBUDDY_RES from {from}: already hold a buddy");
+            return;
+        }
+        state.set_outgoing_buddy(buddy);
+    }
     tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
+
+    // Establish + hold the persistent buddy TCP link so callbacks can be relayed
+    // back to us, then ping it at the oracle cadence. When the link drops, clear
+    // our acquired buddy so the buddy-management loop re-searches (oracle
+    // buddy-loss SetFindBuddy).
+    let bind_ip = network.bind_ip;
+    let hello_identity = buddy_hello_identity(network, reachability);
+    let buddy_user_hash = res.client_hash.0;
+    let buddy_addr = SocketAddr::new(from.ip(), res.tcp_port);
+    let registry = buddy_registry.clone();
+    let kad_buddy = Arc::clone(kad_buddy);
+    let lost = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn(async move {
+        if let Err(error) = run_outbound_buddy_link(OutboundBuddyLinkOptions {
+            bind_ip,
+            buddy_addr,
+            buddy_user_hash,
+            buddy_connect_options: connect_options,
+            hello_identity,
+            registry,
+            timeout: KAD_BUDDY_LINK_TIMEOUT,
+            lost,
+        })
+        .await
+        {
+            tracing::debug!("outbound Kad buddy link to {buddy_addr} failed: {error:#}");
+        }
+        // On any exit (connect failure or link drop), drop the acquired buddy so
+        // the next upkeep re-searches.
+        kad_buddy.lock().await.clear_outgoing_buddy();
+    });
+}
+
+/// Build the hello identity used by buddy links / callback completion, mirroring
+/// the listener/server hello (advertised external ports + obfuscation options).
+fn buddy_hello_identity(
+    network: &Ed2kNetworkConfig,
+    reachability: &ExternalReachability,
+) -> Ed2kHelloIdentity {
+    Ed2kHelloIdentity {
+        user_hash: network.user_hash,
+        client_id: 0,
+        tcp_port: reachability.advertised_tcp_port(network.listen_port),
+        udp_port: reachability.advertised_udp_port(network.kad_bind_addr.port()),
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(network.config.obfuscation_enabled),
+        direct_udp_callback: false,
+    }
 }
 
 /// Inbound `KADEMLIA_CALLBACK_REQ` (a peer wants us to relay a callback to the
 /// firewalled client we are a buddy for).
 ///
-/// Mirrors `Process_KADEMLIA_CALLBACK_REQ`: the oracle relays an `OP_CALLBACK`
-/// to the buddied client over the persistent buddy TCP connection. The eD2k
-/// client-TCP layer here is connection-per-operation and holds no persistent
-/// peer socket, so the relay leg is a documented omission
-/// (policy/rust-client-omissions.toml: kad_buddy_callback_relay). We still
-/// match + log the request so the buddy bookkeeping and diagnostics are exact.
+/// Mirrors `Process_KADEMLIA_CALLBACK_REQ`: relay an `OP_CALLBACK` to the
+/// buddied client over the persistent buddy TCP connection
+/// (`pBuddy->socket->SendPacket`). We encode the relay frame
+/// `[uCheck u128][uFile u128][uIP u32][uTCP u16]` — `uCheck` is the inbound
+/// check id echoed verbatim, `uIP` is the callback requester's UDP source IP,
+/// `uTCP` its advertised TCP port — and push it down the held inbound buddy
+/// socket via the buddy-socket registry.
 async fn handle_kad_callback_req(
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    buddy_registry: &BuddySocketRegistry,
     from: SocketAddr,
     req: &CallbackReq,
 ) {
-    let state = kad_buddy.lock().await;
-    match state.callback_relay_target(req.buddy_id) {
-        Some(buddy) => {
-            tracing::info!(
-                "Kad CALLBACK_REQ from {from} for buddied client {} (file_hash={}); relay leg \
-                 omitted (no persistent buddy TCP connection)",
-                buddy.tcp_addr,
-                req.file_hash
-            );
+    // Confirm the request is for the firewalled client we serve as a buddy (the
+    // echoed check id must match the buddy we registered). The oracle relays to
+    // its single buddy; matching the registered id is strictly safer.
+    let buddy_tcp_addr = {
+        let state = kad_buddy.lock().await;
+        match state.callback_relay_target(req.buddy_id) {
+            Some(buddy) => buddy.tcp_addr,
+            None => {
+                tracing::debug!(
+                    "dropping Kad CALLBACK_REQ from {from}: no buddied client matches buddy_id"
+                );
+                return;
+            }
         }
-        None => {
-            tracing::debug!(
-                "dropping Kad CALLBACK_REQ from {from}: no buddied client matches buddy_id"
-            );
-        }
+    };
+
+    // The callback requester's IP is the UDP source of this request; we are
+    // IPv4-only.
+    let IpAddr::V4(requester_ip) = from.ip() else {
+        tracing::debug!("dropping Kad CALLBACK_REQ from {from}: non-IPv4 requester");
+        return;
+    };
+
+    let frame = encode_kad_callback_relay_frame(
+        req.buddy_id.0,
+        &req.file_hash,
+        requester_ip,
+        req.tcp_port,
+    );
+    if buddy_registry.relay_to_inbound(req.buddy_id, frame) {
+        tracing::info!(
+            "relayed Kad OP_CALLBACK to buddied client {buddy_tcp_addr} for requester \
+             {requester_ip}:{} (file_hash={})",
+            req.tcp_port,
+            req.file_hash
+        );
+    } else {
+        tracing::debug!(
+            "Kad CALLBACK_REQ from {from} matched buddy {buddy_tcp_addr} but no held buddy socket \
+             is attached yet; dropping (buddy will reconnect)"
+        );
     }
 }
 
@@ -7262,6 +7404,88 @@ mod tests {
             vpn_interface_bound: false,
             ip_filter: IpFilter::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn kad_callback_req_relays_op_callback_down_held_buddy_socket() {
+        use emulebb_ed2k::buddy_socket::BuddySocketRegistry;
+        use tokio::sync::mpsc;
+
+        let buddy_id = NodeId::from_bytes([0x77; 16]);
+        let file_hash = Ed2kHash::from_bytes([0xC4; 16]);
+        let requester_ip = Ipv4Addr::new(203, 0, 113, 9);
+        let requester_tcp = 4662u16;
+        let firewalled_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30)), 4662);
+
+        let mut state = KadBuddyState::new();
+        state
+            .accept_incoming_buddy(
+                false,
+                IncomingBuddy {
+                    client_hash: Ed2kHash::from_bytes([0x11; 16]),
+                    buddy_id,
+                    tcp_addr: firewalled_addr,
+                    udp_addr: firewalled_addr,
+                    registered_at: Utc::now(),
+                },
+            )
+            .unwrap();
+        let kad_buddy = Arc::new(Mutex::new(state));
+
+        // Simulate the held inbound buddy session: attach a relay writer.
+        let registry = BuddySocketRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(registry.attach_inbound(buddy_id, tx));
+
+        // The callback requester (UDP source) wants the firewalled client; its
+        // CALLBACK_REQ echoes the buddy check id (== registered buddy_id).
+        let req = CallbackReq {
+            buddy_id,
+            file_hash,
+            tcp_port: requester_tcp,
+        };
+        let from = SocketAddr::new(IpAddr::V4(requester_ip), 5000);
+
+        handle_kad_callback_req(&kad_buddy, &registry, from, &req).await;
+
+        // The exact OP_CALLBACK relay frame must be pushed down the held socket.
+        let relayed = rx.try_recv().expect("relay frame delivered to held buddy socket");
+        let expected =
+            encode_kad_callback_relay_frame(buddy_id.0, &file_hash, requester_ip, requester_tcp);
+        assert_eq!(relayed, expected);
+    }
+
+    #[tokio::test]
+    async fn kad_callback_req_without_held_socket_does_not_relay() {
+        use emulebb_ed2k::buddy_socket::BuddySocketRegistry;
+
+        let buddy_id = NodeId::from_bytes([0x88; 16]);
+        let firewalled_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31)), 4662);
+        let mut state = KadBuddyState::new();
+        state
+            .accept_incoming_buddy(
+                false,
+                IncomingBuddy {
+                    client_hash: Ed2kHash::from_bytes([0x22; 16]),
+                    buddy_id,
+                    tcp_addr: firewalled_addr,
+                    udp_addr: firewalled_addr,
+                    registered_at: Utc::now(),
+                },
+            )
+            .unwrap();
+        let kad_buddy = Arc::new(Mutex::new(state));
+        // No inbound socket attached -> the matched callback cannot be relayed.
+        let registry = BuddySocketRegistry::new();
+        let req = CallbackReq {
+            buddy_id,
+            file_hash: Ed2kHash::from_bytes([0xC5; 16]),
+            tcp_port: 4662,
+        };
+        let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 5000);
+        // Must not panic and must not relay (no attached socket).
+        handle_kad_callback_req(&kad_buddy, &registry, from, &req).await;
+        assert!(!registry.has_inbound());
     }
 
     #[test]

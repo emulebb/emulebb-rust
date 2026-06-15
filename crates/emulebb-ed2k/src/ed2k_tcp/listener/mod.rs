@@ -15,8 +15,8 @@ use tracing::{debug, warn};
 use emulebb_kad_dht::DhtNode;
 
 use crate::{
-    ed2k_server::Ed2kServerState, ed2k_transfer::Ed2kTransferRuntime,
-    kad_firewall::KadFirewallState,
+    buddy_socket::BuddySocketRegistry, ed2k_server::Ed2kServerState,
+    ed2k_transfer::Ed2kTransferRuntime, kad_firewall::KadFirewallState,
 };
 
 use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
@@ -42,6 +42,9 @@ pub struct Ed2kListenerOptions {
     /// External reachability (advertised external TCP/UDP ports), read per
     /// connection so a mapping learned after startup is reflected in hellos.
     pub reachability: crate::reachability::ExternalReachability,
+    /// Persistent Kad buddy-socket registry: a matching inbound buddy connection
+    /// is held open so the Kad callback handler can relay OP_CALLBACK down it.
+    pub buddy_registry: BuddySocketRegistry,
 }
 
 /// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
@@ -57,6 +60,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         shutdown,
         ip_filter,
         reachability,
+        buddy_registry,
     } = options;
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
@@ -93,6 +97,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 let secure_ident = Arc::clone(&secure_ident);
                 let transfer_runtime = Arc::clone(&transfer_runtime);
                 let reachability = reachability.clone();
+                let buddy_registry = buddy_registry.clone();
                 tokio::spawn(async move {
                     if let Err(error) = session::handle_connection(
                         stream,
@@ -105,6 +110,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                             transfer_runtime: &transfer_runtime,
                             hello_identity,
                             reachability: &reachability,
+                            buddy_registry: &buddy_registry,
                         },
                     )
                     .await

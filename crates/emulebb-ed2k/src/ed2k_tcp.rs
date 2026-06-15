@@ -509,6 +509,23 @@ impl Ed2kPeerConnectMode {
     }
 }
 
+/// Encode an `OP_CALLBACK` relay frame for a buddy to push down its held TCP
+/// connection to the firewalled client (oracle `Process_KADEMLIA_CALLBACK_REQ`).
+///
+/// `check` is the 16-byte check id from the inbound `KADEMLIA_CALLBACK_REQ`
+/// (the firewalled node's `kadID XOR allones`), relayed verbatim; `file_hash`
+/// is the requested file; `requester_ip` / `requester_tcp_port` are the callback
+/// requester's TCP endpoint (its UDP source IP + advertised TCP port).
+#[must_use]
+pub fn encode_kad_callback_relay_frame(
+    check: [u8; 16],
+    file_hash: &Ed2kHash,
+    requester_ip: std::net::Ipv4Addr,
+    requester_tcp_port: u16,
+) -> Vec<u8> {
+    codec::encode_kad_callback_relay(check, file_hash, requester_ip, requester_tcp_port)
+}
+
 pub(crate) fn apply_server_state(
     mut identity: Ed2kHelloIdentity,
     state: &Ed2kServerState,
