@@ -2116,8 +2116,8 @@ fn kad_response(kad: &NetworkStatus, guard: &VpnGuardStatus) -> Value {
         "users": kad.users,
         "files": kad.files,
         "nodes": contact_count,
-        "indexedSources": 0,
-        "indexedKeywords": 0,
+        "indexedSources": kad.indexed_sources.unwrap_or(0),
+        "indexedKeywords": kad.indexed_keywords.unwrap_or(0),
         "operationQueued": kad.operation_queued.unwrap_or(false),
         "alreadyRunning": kad.already_running.unwrap_or(false),
         "blockedByVpnGuard": guard.startup_blocked,
@@ -2517,6 +2517,37 @@ mod tests {
                 api_key: "secret".to_string(),
             },
         )
+    }
+
+    #[test]
+    fn kad_response_surfaces_indexed_counts() {
+        let guard = VpnGuardStatus::default();
+        let mut kad = NetworkStatus {
+            running: true,
+            connected: true,
+            peer_count: 7,
+            firewalled: Some(false),
+            bootstrapping: Some(false),
+            bootstrap_progress: Some(100),
+            contact_count: Some(7),
+            lan_mode: Some(false),
+            users: Some(0),
+            files: Some(0),
+            indexed_sources: Some(42),
+            indexed_keywords: Some(13),
+            operation_queued: None,
+            already_running: None,
+        };
+        let value = kad_response(&kad, &guard);
+        assert_eq!(value["indexedSources"], 42);
+        assert_eq!(value["indexedKeywords"], 13);
+
+        // When Kad is not running the counts are unknown -> reported as 0.
+        kad.indexed_sources = None;
+        kad.indexed_keywords = None;
+        let value = kad_response(&kad, &guard);
+        assert_eq!(value["indexedSources"], 0);
+        assert_eq!(value["indexedKeywords"], 0);
     }
 
     async fn assert_invalid_json_response(

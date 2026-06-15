@@ -448,13 +448,21 @@ impl KadLocalStore {
         }
     }
 
-    #[cfg(test)]
-    fn keyword_entry_count(&self) -> usize {
+    /// Total indexed keyword publish entries held locally — the count this node
+    /// would report as "indexed keywords" (oracle `CIndexed::m_uTotalIndexKeyword`,
+    /// which counts every keyword->source publish entry, not distinct keyword IDs).
+    /// Each [`StoredKeywordPublish`] is exactly one such entry.
+    #[must_use]
+    pub fn keyword_entry_count(&self) -> usize {
         self.keyword_entries.len()
     }
 
-    #[cfg(test)]
-    fn source_entry_count(&self) -> usize {
+    /// Total indexed source publish entries held locally — the count this node
+    /// would report as "indexed sources" (oracle `CIndexed::m_uTotalIndexSource`,
+    /// which counts every file->source publish entry). Each [`StoredSourcePublish`]
+    /// is exactly one such entry.
+    #[must_use]
+    pub fn source_entry_count(&self) -> usize {
         self.source_entries.len()
     }
 

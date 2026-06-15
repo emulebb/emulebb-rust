@@ -220,6 +220,14 @@ pub struct NetworkStatus {
     pub users: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<u64>,
+    /// Local Kad index size: total source publish entries we store (oracle
+    /// `CIndexed::m_uTotalIndexSource`). `None` when Kad is not running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_sources: Option<u64>,
+    /// Local Kad index size: total keyword publish entries we store (oracle
+    /// `CIndexed::m_uTotalIndexKeyword`). `None` when Kad is not running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_keywords: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_queued: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3684,6 +3692,8 @@ impl EmulebbCore {
                     lan_mode: None,
                     users: None,
                     files: None,
+                    indexed_sources: None,
+                    indexed_keywords: None,
                     operation_queued: None,
                     already_running: None,
                 };
@@ -3702,6 +3712,8 @@ impl EmulebbCore {
             lan_mode: None,
             users: None,
             files: None,
+            indexed_sources: None,
+            indexed_keywords: None,
             operation_queued: None,
             already_running: None,
         }
@@ -3719,6 +3731,17 @@ impl EmulebbCore {
         };
         let contact_count = dht.routing_table_size() as u32;
         let connected = dht.is_bootstrapped();
+        // Local Kad index sizes (oracle m_uTotalIndexSource / m_uTotalIndexKeyword).
+        let (indexed_sources, indexed_keywords) = match self.kad_local_store.as_ref() {
+            Some(store) => {
+                let store = store.lock().await;
+                (
+                    store.source_entry_count() as u64,
+                    store.keyword_entry_count() as u64,
+                )
+            }
+            None => (0, 0),
+        };
         NetworkStatus {
             running: true,
             connected,
@@ -3730,6 +3753,8 @@ impl EmulebbCore {
             lan_mode: Some(false),
             users: Some(0),
             files: Some(0),
+            indexed_sources: Some(indexed_sources),
+            indexed_keywords: Some(indexed_keywords),
             operation_queued: None,
             already_running: None,
         }
@@ -5473,6 +5498,8 @@ fn kad_status_from_running(running: bool) -> NetworkStatus {
         lan_mode: Some(false),
         users: if running { Some(0) } else { None },
         files: if running { Some(0) } else { None },
+        indexed_sources: if running { Some(0) } else { None },
+        indexed_keywords: if running { Some(0) } else { None },
         operation_queued: None,
         already_running: None,
     }
