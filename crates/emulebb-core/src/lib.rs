@@ -16,10 +16,6 @@ use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder,
     ReaskSourceHandle, TransportProtocol,
-    advertised_ports::{
-        advertised_tcp_port, advertised_udp_port, set_advertised_external_tcp_port,
-        set_advertised_external_udp_port,
-    },
     built_in_upnp_port_mapping_providers,
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
@@ -43,7 +39,7 @@ use emulebb_ed2k::{
     },
     ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
-    public_ip::SharedPublicIp,
+    reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
@@ -824,6 +820,10 @@ pub struct EmulebbCore {
     /// download driver to detach queued sources. `std::sync::Mutex` so the
     /// download closure can read it without `.await`.
     ed2k_reask_handle: Arc<std::sync::Mutex<Option<ReaskSourceHandle>>>,
+    /// Single source of truth for our external reachability (public IP + advertised
+    /// external eD2k TCP/UDP ports), read at hello/login-encode time. Fed by the
+    /// server (OP_IDCHANGE), the STUN fallback, and the NAT-mapping sync.
+    ed2k_reachability: ExternalReachability,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -905,6 +905,7 @@ impl EmulebbCore {
             kad_snoop_queue,
             ed2k_runtime: Arc::new(Mutex::new(None)),
             ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
+            ed2k_reachability: ExternalReachability::new(),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1192,6 +1193,7 @@ impl EmulebbCore {
         // gateway remaps the external ports.
         tasks.push(tokio::spawn(run_advertised_ports_sync(
             Arc::clone(&nat),
+            self.ed2k_reachability.clone(),
             network.listen_port,
             network.kad_bind_addr.port(),
             Arc::clone(&shutdown),
@@ -1264,10 +1266,11 @@ impl EmulebbCore {
             hello_identity,
             shutdown: Arc::clone(&shutdown),
             ip_filter: network.ip_filter.clone(),
+            reachability: self.ed2k_reachability.clone(),
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).
-        let ed2k_public_ip = SharedPublicIp::new();
+        let ed2k_public_ip = self.ed2k_reachability.clone();
         // Select the advertised eD2k client identity (eMule Community by default,
         // or the real emule-rust mod when the operator opts in). Process-wide;
         // read lazily when each hello is encoded.
@@ -2721,8 +2724,10 @@ impl EmulebbCore {
         let hello_identity = Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: advertised_tcp_port(network.listen_port),
-            udp_port: advertised_udp_port(network.kad_bind_addr.port()),
+            tcp_port: self.ed2k_reachability.advertised_tcp_port(network.listen_port),
+            udp_port: self
+                .ed2k_reachability
+                .advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(config.obfuscation_enabled),
@@ -3472,8 +3477,10 @@ impl EmulebbCore {
             // incoming connections + HighID callback on tcp_port, and locate us for
             // UDP source-reask by the (ip, udp_port) we advertise; the gateway can
             // remap either external port (see advertised_ports).
-            tcp_port: advertised_tcp_port(network.listen_port),
-            udp_port: advertised_udp_port(network.kad_bind_addr.port()),
+            tcp_port: self.ed2k_reachability.advertised_tcp_port(network.listen_port),
+            udp_port: self
+                .ed2k_reachability
+                .advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(network.config.obfuscation_enabled),
@@ -5400,7 +5407,7 @@ const ED2K_PUBLIC_IP_PROBE_KNOWN_SECS: u64 = 600;
 /// per interval, more often only while still unknown.
 async fn run_ed2k_public_ip_probe(
     bind_ip: Ipv4Addr,
-    public_ip: SharedPublicIp,
+    public_ip: ExternalReachability,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
@@ -5431,6 +5438,7 @@ async fn run_ed2k_public_ip_probe(
 /// lease renewal — into subsequent hellos.
 async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
+    reachability: ExternalReachability,
     internal_tcp_port: u16,
     internal_udp_port: u16,
     shutdown: Arc<AtomicBool>,
@@ -5446,10 +5454,10 @@ async fn run_advertised_ports_sync(
             })
         };
         if let Some(external) = external_for(TransportProtocol::Tcp, internal_tcp_port) {
-            set_advertised_external_tcp_port(external);
+            reachability.set_external_tcp_port(external);
         }
         if let Some(external) = external_for(TransportProtocol::Udp, internal_udp_port) {
-            set_advertised_external_udp_port(external);
+            reachability.set_external_udp_port(external);
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }

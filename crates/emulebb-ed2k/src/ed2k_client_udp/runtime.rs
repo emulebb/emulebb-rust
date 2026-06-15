@@ -32,7 +32,7 @@ use tracing::{debug, trace};
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
 use crate::ed2k_transfer::Ed2kTransferRuntime;
-use crate::public_ip::SharedPublicIp;
+use crate::reachability::ExternalReachability;
 
 /// A command from a download session to the reask loop: detach a just-queued
 /// source onto UDP reask, or drop one that no longer needs reasking. Public so
@@ -157,7 +157,7 @@ pub async fn run_ed2k_udp_reask_loop(
     events: ReaskEventSender,
     user_hash: [u8; 16],
     udp_version: u8,
-    public_ip: SharedPublicIp,
+    public_ip: ExternalReachability,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut service = ReaskService::new(user_hash, udp_version, public_ip.clone());
@@ -345,10 +345,10 @@ async fn drive_reask_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_ip::SharedPublicIp;
+    use crate::reachability::ExternalReachability;
 
     fn service() -> ReaskService {
-        let public_ip = SharedPublicIp::new();
+        let public_ip = ExternalReachability::new();
         public_ip.set(std::net::Ipv4Addr::new(203, 0, 113, 9));
         ReaskService::new([0x10; 16], 4, public_ip)
     }

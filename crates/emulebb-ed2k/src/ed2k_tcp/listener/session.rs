@@ -85,6 +85,8 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) secure_ident: &'a Arc<Ed2kSecureIdent>,
     pub(in crate::ed2k_tcp) transfer_runtime: &'a Arc<Ed2kTransferRuntime>,
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
+    /// External reachability (advertised external TCP/UDP ports), read at send time.
+    pub(in crate::ed2k_tcp) reachability: &'a crate::reachability::ExternalReachability,
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -100,6 +102,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         secure_ident,
         transfer_runtime,
         hello_identity,
+        reachability,
     } = context;
     let local_addr = stream.local_addr().with_context(|| {
         format!("failed to resolve local eD2k listener address for {peer_addr}")
@@ -119,8 +122,8 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         // dynamically here so a mapping learned after startup is reflected: peers
         // locate us for UDP source-reask by (ip, udp_port) and reach us for
         // incoming connections on the advertised tcp_port.
-        udp_port: crate::advertised_ports::advertised_udp_port(kad_udp_port),
-        tcp_port: crate::advertised_ports::advertised_tcp_port(hello_identity.tcp_port),
+        udp_port: reachability.advertised_udp_port(kad_udp_port),
+        tcp_port: reachability.advertised_tcp_port(hello_identity.tcp_port),
         ..hello_identity
     };
     let response_identity =
@@ -587,9 +590,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         peer_upload_identity.udp_port = Some(profile.udp_port);
                     }
                 }
-                let reply = encode_emule_info_answer(
-                    crate::advertised_ports::advertised_udp_port(kad_udp_port),
-                );
+                let reply = encode_emule_info_answer(reachability.advertised_udp_port(kad_udp_port));
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
                 transport
                     .write_all(&reply)

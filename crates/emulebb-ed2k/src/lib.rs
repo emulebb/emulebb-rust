@@ -1,4 +1,3 @@
-pub mod advertised_ports;
 pub mod config;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
@@ -16,7 +15,7 @@ pub mod ipfilter;
 pub mod kad_firewall;
 pub mod nat;
 pub mod networking;
-pub mod public_ip;
+pub mod reachability;
 pub mod stun;
 
 #[allow(deprecated)]

@@ -144,6 +144,7 @@ macro_rules! handle_connection_test {
                 secure_ident: $secure_ident,
                 transfer_runtime: $transfer_runtime,
                 hello_identity: $hello_identity,
+                reachability: &crate::reachability::ExternalReachability::new(),
             },
         )
     };

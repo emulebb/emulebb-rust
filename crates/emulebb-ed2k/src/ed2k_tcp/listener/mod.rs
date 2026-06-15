@@ -39,6 +39,9 @@ pub struct Ed2kListenerOptions {
     pub shutdown: Arc<AtomicBool>,
     /// IPv4 range filter; inbound connections from filtered peers are dropped.
     pub ip_filter: crate::ipfilter::IpFilter,
+    /// External reachability (advertised external TCP/UDP ports), read per
+    /// connection so a mapping learned after startup is reflected in hellos.
+    pub reachability: crate::reachability::ExternalReachability,
 }
 
 /// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
@@ -53,6 +56,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         hello_identity,
         shutdown,
         ip_filter,
+        reachability,
     } = options;
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
@@ -88,6 +92,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 let kad_firewall = Arc::clone(&kad_firewall);
                 let secure_ident = Arc::clone(&secure_ident);
                 let transfer_runtime = Arc::clone(&transfer_runtime);
+                let reachability = reachability.clone();
                 tokio::spawn(async move {
                     if let Err(error) = session::handle_connection(
                         stream,
@@ -99,6 +104,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                             secure_ident: &secure_ident,
                             transfer_runtime: &transfer_runtime,
                             hello_identity,
+                            reachability: &reachability,
                         },
                     )
                     .await

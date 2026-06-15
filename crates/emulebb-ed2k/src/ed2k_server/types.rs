@@ -60,7 +60,7 @@ pub(super) struct ServerSessionContext {
     pub(super) shutdown: Arc<AtomicBool>,
     /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
     /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
-    pub(super) public_ip: crate::public_ip::SharedPublicIp,
+    pub(super) public_ip: crate::reachability::ExternalReachability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,5 +139,5 @@ pub struct Ed2kServerLoopOptions {
     pub shutdown: Arc<AtomicBool>,
     /// Learned public-IP cell (eMule `theApp` public IP), set from the HighID
     /// `OP_IDCHANGE`. Created by core and shared with the UDP reask loop.
-    pub public_ip: crate::public_ip::SharedPublicIp,
+    pub public_ip: crate::reachability::ExternalReachability,
 }
