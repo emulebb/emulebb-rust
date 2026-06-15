@@ -23,7 +23,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 #[derive(Debug, Default)]
 struct ReachabilityInner {
@@ -33,6 +33,12 @@ struct ReachabilityInner {
     external_tcp_port: AtomicU16,
     /// Learned external eD2k UDP port; `0` = unknown / same as internal.
     external_udp_port: AtomicU16,
+    /// Whether the current external UDP port was confirmed by a remote peer (the
+    /// Kad UDP firewall check). A peer-observed port is the most authoritative
+    /// source for what the outside world actually sees, so once set it takes
+    /// precedence over the locally-derived UPnP mapping (mirrors eMule preferring
+    /// a firewall-check result over the gateway's announced external port).
+    udp_port_peer_confirmed: AtomicBool,
 }
 
 /// Cheaply-clonable handle to this client's external reachability facts.
@@ -94,10 +100,34 @@ impl ExternalReachability {
         self.inner.external_tcp_port.store(port, Ordering::Relaxed);
     }
 
-    /// Record the externally-reachable eD2k UDP port (UPnP-granted / Kad-discovered).
-    /// `0` clears.
+    /// Record the externally-reachable eD2k UDP port from the UPnP mapping. This
+    /// is the local/derived source, so it must not clobber a port that a remote
+    /// peer already confirmed via the Kad UDP firewall check. `0` clears (only
+    /// when no peer confirmation is in force).
     pub fn set_external_udp_port(&self, port: u16) {
+        if self.inner.udp_port_peer_confirmed.load(Ordering::Relaxed) {
+            return;
+        }
         self.inner.external_udp_port.store(port, Ordering::Relaxed);
+    }
+
+    /// Record the externally-reachable eD2k/Kad UDP port confirmed by a remote
+    /// peer during the Kad UDP firewall check. This is the most authoritative
+    /// source and pins the value so the periodic UPnP sync cannot overwrite it.
+    pub fn set_peer_confirmed_udp_port(&self, port: u16) {
+        if port == 0 {
+            return;
+        }
+        self.inner.external_udp_port.store(port, Ordering::Relaxed);
+        self.inner
+            .udp_port_peer_confirmed
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the external UDP port has been confirmed by a remote peer.
+    #[must_use]
+    pub fn udp_port_is_peer_confirmed(&self) -> bool {
+        self.inner.udp_port_peer_confirmed.load(Ordering::Relaxed)
     }
 
     /// The eD2k TCP port to advertise: the learned external port when known, else
@@ -154,6 +184,26 @@ mod tests {
         assert_eq!(r.advertised_udp_port(4672), 51000);
         r.set_external_udp_port(0);
         assert_eq!(r.advertised_udp_port(4672), 4672);
+    }
+
+    #[test]
+    fn peer_confirmed_udp_port_takes_precedence_over_upnp() {
+        let r = ExternalReachability::new();
+        // UPnP-derived value applies while no peer confirmation is in force.
+        r.set_external_udp_port(45000);
+        assert_eq!(r.advertised_udp_port(4672), 45000);
+        assert!(!r.udp_port_is_peer_confirmed());
+        // A peer-confirmed port pins the value.
+        r.set_peer_confirmed_udp_port(51000);
+        assert!(r.udp_port_is_peer_confirmed());
+        assert_eq!(r.advertised_udp_port(4672), 51000);
+        // Subsequent UPnP syncs (including a clear) must not clobber it.
+        r.set_external_udp_port(46000);
+        r.set_external_udp_port(0);
+        assert_eq!(r.advertised_udp_port(4672), 51000);
+        // A zero peer confirmation is a no-op.
+        r.set_peer_confirmed_udp_port(0);
+        assert_eq!(r.advertised_udp_port(4672), 51000);
     }
 
     #[test]
