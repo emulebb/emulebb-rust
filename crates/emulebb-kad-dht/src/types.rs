@@ -1,5 +1,26 @@
-use emulebb_kad_proto::{Ed2kHash, Tag, TagName, TagValue, tag_name};
+use emulebb_kad_proto::{Ed2kHash, NodeId, Tag, TagName, TagValue, tag_name};
 use std::net::Ipv4Addr;
+
+/// One peer chosen to run an outbound Kad UDP firewall check against us.
+///
+/// The oracle (`CUDPFirewallTester::QueryNextClient`) only asks contacts that
+/// support the UDP firewall check (Kad version > 5 / `>` `KADEMLIA_VERSION5_48a`)
+/// and that are not themselves UDP firewalled, then opens an eD2k TCP session to
+/// each and sends `OP_FWCHECKUDPREQ`. This struct carries exactly the endpoints
+/// and identity that outbound path needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirewallCheckHelper {
+    /// Peer Kad node id.
+    pub id: NodeId,
+    /// Peer IPv4 address.
+    pub ip: Ipv4Addr,
+    /// Peer Kad UDP port (where its firewall reply originates).
+    pub udp_port: u16,
+    /// Peer eD2k TCP port (where we open the firewall-check session).
+    pub tcp_port: u16,
+    /// Highest Kad version observed for the peer.
+    pub kad_version: u8,
+}
 
 fn read_u16_tag_value(value: &TagValue) -> Option<u16> {
     match value {

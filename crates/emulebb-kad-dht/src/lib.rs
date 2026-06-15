@@ -13,4 +13,4 @@ pub use emulebb_kad_net::{
 pub use error::DhtError;
 pub use node::{DhtConfig, DhtNode};
 pub use publish::PublishAttemptStats;
-pub use types::{NoteResult, SearchResult, SourceResult};
+pub use types::{FirewallCheckHelper, NoteResult, SearchResult, SourceResult};

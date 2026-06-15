@@ -1,6 +1,6 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
-use crate::types::{HelloPeerMetadata, parse_hello_peer_metadata};
+use crate::types::{FirewallCheckHelper, HelloPeerMetadata, parse_hello_peer_metadata};
 use emulebb_kad_proto::{KadUdpKey, NodeId, Tag};
 use emulebb_kad_routing::{
     Contact, RoutingError, RoutingSplitDeniedReason, RoutingSubnetLimitScope,
@@ -67,6 +67,49 @@ impl DhtNode {
             .lock()
             .await
             .get_closest(target, limit)
+    }
+
+    /// Select up to `limit` contacts suitable as Kad UDP firewall-check helpers.
+    ///
+    /// Mirrors `CUDPFirewallTester::QueryNextClient`: only contacts that support
+    /// the UDP firewall check (Kad version > 5, i.e. `>= 6`) and are not
+    /// themselves UDP firewalled qualify, and we never test ourselves. We also
+    /// require a usable UDP and eD2k TCP port. Returned newest-first so a fresh
+    /// lookup's contacts are preferred, matching the oracle's `AddHead` ordering.
+    pub async fn firewall_check_helpers(&self, limit: usize) -> Vec<FirewallCheckHelper> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let own_id = self.own_id();
+        // The Kad socket is IPv4-only; capture the bound IPv4 to skip ourselves.
+        let local_ip = self.bind_addr().ok().and_then(|addr| {
+            addr.ip()
+                .to_string()
+                .parse::<std::net::Ipv4Addr>()
+                .ok()
+        });
+        let mut contacts = self.inner.routing_table.lock().await.all_contacts();
+        // Newest contacts first (oracle prepends fresh candidates).
+        contacts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        contacts
+            .into_iter()
+            .filter(|contact| {
+                contact.kad_version >= 6
+                    && !contact.udp_firewalled
+                    && contact.udp_port != 0
+                    && contact.tcp_port != 0
+                    && contact.id != own_id
+                    && local_ip != Some(contact.ip)
+            })
+            .take(limit)
+            .map(|contact| FirewallCheckHelper {
+                id: contact.id,
+                ip: contact.ip,
+                udp_port: contact.udp_port,
+                tcp_port: contact.tcp_port,
+                kad_version: contact.kad_version,
+            })
+            .collect()
     }
 
     /// Record a contact learned from a Kad HELLO request or response.
@@ -249,5 +292,64 @@ mod tests {
         assert!(!contact.udp_firewalled);
         assert!(contact.tcp_firewalled);
         assert!(contact.requests_hello_res_ack);
+    }
+
+    #[tokio::test]
+    async fn firewall_check_helpers_filter_to_supported_open_contacts() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+
+        // Eligible: kad v6, open, real ports.
+        let mut good = Contact::new(
+            NodeId::from_bytes([0x11; 16]),
+            "198.51.100.10".parse().unwrap(),
+            42010,
+            42011,
+            6,
+        );
+        good.udp_firewalled = false;
+        dht.add_contact(good).await.unwrap();
+
+        // Ineligible: kad version too low.
+        let old = Contact::new(
+            NodeId::from_bytes([0x22; 16]),
+            "203.0.113.11".parse().unwrap(),
+            42020,
+            42021,
+            5,
+        );
+        dht.add_contact(old).await.unwrap();
+
+        // Ineligible: peer is itself UDP firewalled.
+        let mut fw = Contact::new(
+            NodeId::from_bytes([0x33; 16]),
+            "192.0.2.12".parse().unwrap(),
+            42030,
+            42031,
+            8,
+        );
+        fw.udp_firewalled = true;
+        dht.add_contact(fw).await.unwrap();
+
+        // Ineligible: no eD2k TCP port advertised.
+        let no_tcp = Contact::new(
+            NodeId::from_bytes([0x44; 16]),
+            "198.18.0.13".parse().unwrap(),
+            42040,
+            0,
+            8,
+        );
+        dht.add_contact(no_tcp).await.unwrap();
+
+        let helpers = dht.firewall_check_helpers(8).await;
+        assert_eq!(helpers.len(), 1);
+        assert_eq!(helpers[0].ip, "198.51.100.10".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(helpers[0].tcp_port, 42011);
+
+        assert!(dht.firewall_check_helpers(0).await.is_empty());
     }
 }
