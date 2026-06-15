@@ -516,3 +516,77 @@ async fn upload_queue_low_id_friend_slot_does_not_bypass_high_id_waiter() {
         Ed2kUploadSessionStatus::Waiting { rank: 1 }
     );
 }
+
+#[tokio::test]
+async fn upload_queue_rejects_fourth_waiter_from_same_ip() {
+    use super::upload_queue_support::same_ip_upload_peer;
+    let root = unique_test_dir("ed2k-upload-queue-per-ip-cap");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+
+    // One peer takes the single slot; subsequent same-IP peers queue as waiters.
+    let (_slot_handle, slot_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x60, 0x0A00_0060), &file_hash)
+        .await;
+    assert_eq!(slot_status, Ed2kUploadSessionStatus::Granted);
+
+    // Three waiters from the shared IP are admitted (master cSameIP < 3).
+    for port_marker in 0..3u8 {
+        let (_handle, status) = runtime
+            .begin_upload_session(same_ip_upload_peer(port_marker), &file_hash)
+            .await;
+        assert!(
+            matches!(status, Ed2kUploadSessionStatus::Waiting { .. }),
+            "waiter {port_marker} should be admitted, got {status:?}"
+        );
+    }
+
+    // The fourth same-IP waiter is refused (cSameIP >= 3).
+    let (_handle, status) = runtime
+        .begin_upload_session(same_ip_upload_peer(3), &file_hash)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Rejected);
+}
+
+#[tokio::test]
+async fn upload_queue_friend_slot_bypasses_soft_limit_gate() {
+    let root = unique_test_dir("ed2k-upload-queue-soft-limit-friend");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    // soft_queue_size 0 puts every would-be waiter past the soft limit. With an
+    // empty queue the average is 0, so a default-priority candidate's positive
+    // combined score is admitted; once waiters exist the friend-slot bypass is
+    // the deterministic admit path past the soft gate (the score-comparison
+    // rejection itself is covered by the admission unit tests).
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            active_slots: 1,
+            soft_queue_size: 0,
+            ..one_slot_config()
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x34; 16]);
+
+    let (_slot_handle, slot_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x70, 0x0A00_0070), &file_hash)
+        .await;
+    assert_eq!(slot_status, Ed2kUploadSessionStatus::Granted);
+
+    // First waiter: positive score beats the empty-queue average of 0.
+    let (_first_waiter, first_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x71, 0x0A00_0071), &file_hash)
+        .await;
+    assert!(matches!(
+        first_status,
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+
+    // A friend-slot waiter is admitted past the soft limit regardless of score.
+    let mut friend = upload_peer(3, 0x72, 0x0A00_0072);
+    friend.friend_slot = true;
+    let (_friend_handle, friend_status) = runtime.begin_upload_session(friend, &file_hash).await;
+    assert!(matches!(
+        friend_status,
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+}

@@ -36,6 +36,22 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
     }
 }
 
+/// A peer on a fixed shared IP with a distinct port and user hash, used to
+/// exercise the per-IP waiter cap (master `cSameIP`).
+pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
+    Ed2kUploadPeerIdentity {
+        ip: IpAddr::V4(Ipv4Addr::new(10, 9, 9, 9)),
+        tcp_port: 5000 + u16::from(port_marker),
+        udp_port: None,
+        udp_version: 0,
+        should_crypt: false,
+        user_hash: Some([port_marker; 16]),
+        client_id: Some(0x0A09_0900 + u32::from(port_marker)),
+        friend_slot: false,
+        ident_verified: true,
+    }
+}
+
 /// Like [`upload_peer`] but with the secure-ident verification state spelled out,
 /// so a test can model an unverified (spoofable) peer whose credit ratio must
 /// stay neutral (eMule `GetScoreRatio` IS_IDENTIFIED gating).

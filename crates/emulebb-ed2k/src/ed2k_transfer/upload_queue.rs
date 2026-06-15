@@ -143,6 +143,11 @@ pub(crate) enum Ed2kUploadSessionStatus {
     Granted,
     /// The session expired, was cancelled, or was replaced by a reconnect.
     Stale,
+    /// Admission was refused (queue full at the hard limit, a low-score
+    /// candidate past the soft limit, or too many waiters from the same IP),
+    /// mirroring the master `CUploadQueue::AddClientToQueue` early returns. The
+    /// listener treats this like `Stale` and closes the session.
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +318,12 @@ impl Ed2kUploadQueueState {
         let phase = if self.active_session_count() < self.effective_active_slot_limit(now) {
             Ed2kUploadSessionPhase::Granted
         } else {
+            // No free slot: this peer would join the waiting queue, so apply the
+            // master AddClientToQueue admission gates (per-IP cap + soft/hard
+            // combined-score limit) before accepting it.
+            if self.reject_queue_admission(&key, file_priority_score, credit_score_permille, now) {
+                return Ed2kUploadSessionStatus::Rejected;
+            }
             self.waiting_order.push(key.clone());
             Ed2kUploadSessionPhase::Waiting
         };
@@ -567,6 +578,61 @@ impl Ed2kUploadQueueState {
         }
     }
 
+    /// Apply the master `AddClientToQueue` waiting-admission gates: the per-IP
+    /// waiter cap and the soft/hard combined-score queue limit. Returns `true`
+    /// when the candidate must be refused.
+    fn reject_queue_admission(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        file_priority_score: i128,
+        credit_score_permille: i128,
+        now: Instant,
+    ) -> bool {
+        // Per-IP cap: count existing waiters from the same IP (different
+        // port/hash), mirroring `cSameIP`.
+        let candidate_ip = key.peer.ip;
+        let same_ip_waiters = self
+            .waiting_order
+            .iter()
+            .filter(|queued| queued.peer.ip == candidate_ip && **queued != *key)
+            .count();
+        if admission::reject_per_ip_cap(same_ip_waiters) {
+            return true;
+        }
+
+        let candidate_combined =
+            admission::combined_file_prio_and_credit(file_priority_score, credit_score_permille);
+        admission::reject_soft_queue_candidate(admission::SoftQueueAdmission {
+            waiting_count: self.waiting_session_count() as u64,
+            soft_queue_size: self.config.soft_queue_size,
+            has_friend_slot: key.peer.friend_slot,
+            candidate_combined_score: candidate_combined,
+            average_combined_score: self.average_combined_waiting_score(now),
+        })
+    }
+
+    /// Average combined file-priority-and-credit score across current waiters
+    /// (master `GetAverageCombinedFilePrioAndCredit`). Returns 0 with no waiters.
+    fn average_combined_waiting_score(&self, now: Instant) -> i128 {
+        let _ = now;
+        let mut sum: i128 = 0;
+        let mut count: i128 = 0;
+        for queued in &self.waiting_order {
+            let Some(session) = self.sessions.get(queued) else {
+                continue;
+            };
+            if session.phase != Ed2kUploadSessionPhase::Waiting {
+                continue;
+            }
+            sum = sum.saturating_add(admission::combined_file_prio_and_credit(
+                session.file_priority_score,
+                session.credit_score_permille,
+            ));
+            count += 1;
+        }
+        if count == 0 { 0 } else { sum / count }
+    }
+
     fn trim_waiting_queue(&mut self, now: Instant) {
         while self.waiting_order.len() > self.config.waiting_capacity {
             let Some(evicted) = self.worst_waiting_key(now) else {
@@ -751,6 +817,7 @@ fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duratio
     Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
 }
 
+mod admission;
 mod helpers;
 pub(super) use helpers::{credit_score_permille, upload_priority_score};
 use helpers::{

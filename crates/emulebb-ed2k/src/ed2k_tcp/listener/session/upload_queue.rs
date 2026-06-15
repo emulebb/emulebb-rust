@@ -84,7 +84,9 @@ impl ListenerUploadQueue {
                 }
                 Ok(ListenerQueuePoll::Continue)
             }
-            Ed2kUploadSessionStatus::Stale => Ok(ListenerQueuePoll::Close),
+            Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
+                Ok(ListenerQueuePoll::Close)
+            }
         }
     }
 
@@ -107,8 +109,12 @@ impl ListenerUploadQueue {
             let (session_handle, status) = transfer_runtime
                 .begin_upload_session(peer_identity, requested)
                 .await;
-            self.session = Some(session_handle);
-            self.file_hash = Some(*requested);
+            // A rejected candidate was never enqueued, so do not retain a
+            // dangling session handle for it.
+            if status != Ed2kUploadSessionStatus::Rejected {
+                self.session = Some(session_handle);
+                self.file_hash = Some(*requested);
+            }
             status
         };
         match status {
@@ -119,6 +125,14 @@ impl ListenerUploadQueue {
             Ed2kUploadSessionStatus::Waiting { rank } => {
                 self.mark_waiting(rank);
                 encode_queue_ranking(rank)
+            }
+            // Admission refused (master AddClientToQueue returned without
+            // queuing): signal a full queue so the peer backs off. eMule sends
+            // OP_QUEUEFULL on the UDP reask path; on this TCP path it simply
+            // does not admit, so report the maximum queue rank.
+            Ed2kUploadSessionStatus::Rejected => {
+                self.mark_waiting(u16::MAX);
+                encode_queue_ranking(u16::MAX)
             }
             Ed2kUploadSessionStatus::Stale => {
                 self.mark_waiting(1);
@@ -151,9 +165,13 @@ impl ListenerUploadQueue {
         let (session_handle, status) = transfer_runtime
             .begin_upload_session(peer_identity, requested)
             .await;
-        self.session = Some(session_handle);
-        self.file_hash = Some(*requested);
-        self.granted_sent = false;
+        // A rejected candidate was never enqueued; do not retain a dangling
+        // session handle for it.
+        if status != Ed2kUploadSessionStatus::Rejected {
+            self.session = Some(session_handle);
+            self.file_hash = Some(*requested);
+            self.granted_sent = false;
+        }
         self.send_status(transport, peer_addr, status).await
     }
 
@@ -213,7 +231,9 @@ impl ListenerUploadQueue {
                     .await?;
                 Ok(ListenerQueueDecision::Waiting)
             }
-            Ed2kUploadSessionStatus::Stale => Ok(ListenerQueueDecision::Stale),
+            Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
+                Ok(ListenerQueueDecision::Stale)
+            }
         }
     }
 
