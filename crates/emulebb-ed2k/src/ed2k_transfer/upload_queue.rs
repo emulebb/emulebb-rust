@@ -12,6 +12,10 @@ const HIGH_FILE_PRIORITY_SCORE: i128 = 9;
 const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
 pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
+/// eMule default LowID score divisor (`PreferenceValidationSeams::kDefaultLowIDDivisor`):
+/// a LowID waiter's score is divided by this to deprioritise unreachable peers
+/// (master `inputs.uLowIdDivisor`, applied when `HasLowID() && divisor > 1`).
+const LOW_ID_SCORE_DIVISOR: i128 = 2;
 
 /// eMule default soft queue size (`PreferenceValidationSeams::kDefaultQueueSize`),
 /// the threshold the reask QUEUEFULL margin compares against.
@@ -228,6 +232,9 @@ struct UploadScoreInputs {
     friend_slot: bool,
     file_priority_score: i128,
     credit_score_permille: i128,
+    /// Whether the peer is a LowID client (master `HasLowID()`); applies the
+    /// LowID score divisor below the friend-slot fast path.
+    low_id: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,9 +242,16 @@ struct UploadScorePolicy;
 
 impl UploadScorePolicy {
     fn waiting_score(inputs: UploadScoreInputs) -> i128 {
-        inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
-            / DEFAULT_CREDIT_SCORE_PERMILLE
-            + friend_slot_score(inputs.friend_slot)
+        let base = inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
+            / DEFAULT_CREDIT_SCORE_PERMILLE;
+        // Master applies the LowID divisor to the working score (below the
+        // friend-slot fast path, which already excludes LowID at the caller).
+        let base = if inputs.low_id {
+            base / LOW_ID_SCORE_DIVISOR
+        } else {
+            base
+        };
+        base + friend_slot_score(inputs.friend_slot)
     }
 }
 
@@ -730,12 +744,13 @@ impl Ed2kUploadQueueState {
         session: &Ed2kUploadSessionEntry,
         now: Instant,
     ) -> i128 {
+        let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
         UploadScorePolicy::waiting_score(UploadScoreInputs {
             waiting_seconds: now.saturating_duration_since(session.queued_at).as_secs() as i128,
-            friend_slot: key.peer.friend_slot
-                && !key.peer.client_id.is_some_and(is_low_id_client_id),
+            friend_slot: key.peer.friend_slot && !low_id,
             file_priority_score: session.file_priority_score,
             credit_score_permille: session.credit_score_permille,
+            low_id,
         })
     }
 
