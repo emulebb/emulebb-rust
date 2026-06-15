@@ -156,6 +156,20 @@ impl DhtNode {
         let IpAddr::V4(ip) = from.ip() else {
             return Ok(metadata);
         };
+
+        // Oracle AddContact_KADEMLIA2 (KademliaUDPListener.cpp:510-511): do not
+        // add (or update) UDP-firewalled sources to the routing table — they
+        // cannot serve as reachable Kad contacts. Still return the parsed
+        // metadata so the caller's handshake logic can run.
+        if metadata.udp_firewalled {
+            debug!(
+                target: "kad_routing",
+                %node_id,
+                contact_ip = %ip,
+                "skipping UDP-firewalled Kad contact from HELLO"
+            );
+            return Ok(metadata);
+        }
         let mut contact = Contact::new(
             node_id,
             ip,
@@ -319,6 +333,32 @@ mod tests {
         assert!(!contact.udp_firewalled);
         assert!(contact.tcp_firewalled);
         assert!(contact.requests_hello_res_ack);
+    }
+
+    #[tokio::test]
+    async fn hello_skips_udp_firewalled_contact_but_returns_metadata() {
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+
+        // KADMISCOPTIONS bit0 set => UDP firewalled.
+        let metadata = dht
+            .add_contact_from_hello(
+                "198.51.100.30:42030".parse().unwrap(),
+                NodeId::from_bytes([0x55; 16]),
+                42031,
+                8,
+                &[Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x01))],
+            )
+            .await
+            .unwrap();
+
+        assert!(metadata.udp_firewalled);
+        // The firewalled peer must NOT be added to the routing table.
+        assert!(dht.routing_contacts().await.is_empty());
     }
 
     #[tokio::test]

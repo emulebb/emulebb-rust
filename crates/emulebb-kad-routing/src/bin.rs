@@ -76,6 +76,15 @@ impl RoutingBin {
 
         // Check if contact already exists (update it).
         if let Some(pos) = existing_pos {
+            // Oracle CRoutingZone::Add (RoutingZone.cpp:519-555): once a contact
+            // has a non-zero UDP sender key, an update must present the SAME key
+            // (anti-hijack protection). A mismatching or empty key on an entry
+            // that already holds one is rejected: the table is left untouched.
+            let stored_key = self.contacts[pos].udp_key;
+            if stored_key != KadUdpKey::ZERO && contact.udp_key != stored_key {
+                return Ok(false);
+            }
+
             let existing = &mut self.contacts[pos];
             existing.ip = contact.ip;
             existing.udp_port = contact.udp_port;
@@ -195,30 +204,66 @@ mod tests {
     }
 
     #[test]
-    fn test_update_existing_keeps_highest_version_and_learned_udp_key() {
+    fn test_update_with_matching_key_keeps_highest_version() {
         let mut bin = RoutingBin::new();
         let mut seeded = make_contact(1, "1.2.3.4".parse().unwrap());
         seeded.kad_version = 10;
         seeded.udp_key = KadUdpKey::new(0xAABB_CCDD);
         assert!(bin.try_add(seeded).unwrap());
 
-        let mut thin_bootstrap_entry = make_contact(1, "1.2.3.5".parse().unwrap());
-        thin_bootstrap_entry.kad_version = 2;
-        thin_bootstrap_entry.udp_key = KadUdpKey::ZERO;
-        assert!(!bin.try_add(thin_bootstrap_entry).unwrap());
-
-        assert_eq!(bin.contacts[0].ip, "1.2.3.5".parse::<Ipv4Addr>().unwrap());
-        assert_eq!(bin.contacts[0].kad_version, 10);
-        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0xAABB_CCDD));
-
+        // A legitimate re-HELLO from the same peer carries the SAME sender key,
+        // so the update applies and the highest version is kept.
         let mut refreshed = make_contact(1, "1.2.3.6".parse().unwrap());
         refreshed.kad_version = 11;
-        refreshed.udp_key = KadUdpKey::new(0x1122_3344);
+        refreshed.udp_key = KadUdpKey::new(0xAABB_CCDD);
         assert!(!bin.try_add(refreshed).unwrap());
 
         assert_eq!(bin.contacts[0].ip, "1.2.3.6".parse::<Ipv4Addr>().unwrap());
         assert_eq!(bin.contacts[0].kad_version, 11);
-        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0x1122_3344));
+        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0xAABB_CCDD));
+    }
+
+    #[test]
+    fn test_update_rejected_when_key_mismatches_stored_non_zero_key() {
+        // Oracle anti-hijack: once a non-zero UDP sender key is stored, an
+        // update with a different key (or an empty key) leaves the entry intact.
+        let mut bin = RoutingBin::new();
+        let mut seeded = make_contact(1, "1.2.3.4".parse().unwrap());
+        seeded.kad_version = 10;
+        seeded.udp_key = KadUdpKey::new(0xAABB_CCDD);
+        assert!(bin.try_add(seeded).unwrap());
+
+        // Empty-key update is denied.
+        let mut thin = make_contact(1, "1.2.3.5".parse().unwrap());
+        thin.kad_version = 2;
+        thin.udp_key = KadUdpKey::ZERO;
+        assert!(!bin.try_add(thin).unwrap());
+        assert_eq!(bin.contacts[0].ip, "1.2.3.4".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(bin.contacts[0].kad_version, 10);
+        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0xAABB_CCDD));
+
+        // Mismatched-key (hijack) update is denied.
+        let mut hijack = make_contact(1, "1.2.3.6".parse().unwrap());
+        hijack.kad_version = 11;
+        hijack.udp_key = KadUdpKey::new(0x1122_3344);
+        assert!(!bin.try_add(hijack).unwrap());
+        assert_eq!(bin.contacts[0].ip, "1.2.3.4".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0xAABB_CCDD));
+    }
+
+    #[test]
+    fn test_update_allowed_when_no_key_stored_yet() {
+        // Before any key is learned, updates (including key-less ones) apply, so
+        // a first-HELLO can still refresh a bootstrap-only entry.
+        let mut bin = RoutingBin::new();
+        let seeded = make_contact(1, "1.2.3.4".parse().unwrap());
+        assert!(bin.try_add(seeded).unwrap());
+
+        let mut learned = make_contact(1, "1.2.3.5".parse().unwrap());
+        learned.udp_key = KadUdpKey::new(0xDEAD_BEEF);
+        assert!(!bin.try_add(learned).unwrap());
+        assert_eq!(bin.contacts[0].ip, "1.2.3.5".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(bin.contacts[0].udp_key, KadUdpKey::new(0xDEAD_BEEF));
     }
 
     #[test]
