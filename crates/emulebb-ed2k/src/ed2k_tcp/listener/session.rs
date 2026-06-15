@@ -63,7 +63,7 @@ use super::super::{
     OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
     OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
-    OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state,
+    OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, connect_callback_peer,
 };
 
 mod shared_file;
@@ -746,6 +746,48 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         callback.trailing_len
                     ),
                 );
+                // Firewalled-callback completion (oracle: CUpDownClient receives
+                // OP_CALLBACK over its buddy connection and TCP-connects out to
+                // the requesting peer). Our buddy relayed this to us because we
+                // are the firewalled LowID source; connect out so the requester
+                // can reach us. Skip obviously invalid endpoints.
+                if callback.peer_tcp_port != 0 && !callback.peer_ip.is_unspecified() {
+                    let bind_ip = match local_addr.ip() {
+                        IpAddr::V4(ip) => ip,
+                        IpAddr::V6(_) => {
+                            debug!(
+                                "skipping Kad callback connect-out for {peer_addr}: IPv6 bind \
+                                 address unsupported"
+                            );
+                            continue;
+                        }
+                    };
+                    let callback_peer =
+                        SocketAddr::new(IpAddr::V4(callback.peer_ip), callback.peer_tcp_port);
+                    let callback_identity = response_identity;
+                    tokio::spawn(async move {
+                        match connect_callback_peer(
+                            bind_ip,
+                            callback_peer,
+                            callback_identity,
+                            None,
+                            None,
+                            ED2K_CONNECTION_IDLE_TIMEOUT,
+                        )
+                        .await
+                        {
+                            Ok(mode) => info!(
+                                "Kad firewalled-callback connect-out to {callback_peer} completed \
+                                 transport={}",
+                                mode.as_str()
+                            ),
+                            Err(error) => debug!(
+                                "Kad firewalled-callback connect-out to {callback_peer} failed: \
+                                 {error:#}"
+                            ),
+                        }
+                    });
+                }
             }
             (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
                 let reask = decode_reask_callback_tcp_payload(&packet.payload)?;
