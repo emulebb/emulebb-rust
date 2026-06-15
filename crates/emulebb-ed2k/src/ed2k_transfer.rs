@@ -55,7 +55,7 @@ pub(crate) use hashset::decode_aich_hash_hex;
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
-pub(crate) use model::{Ed2kAichHashset, Ed2kClaimedPart};
+pub(crate) use model::{Ed2kAichHashset, Ed2kClaimedPart, PieceWriteOutcome};
 pub use model::{
     Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kSourceHint,
     Ed2kTransferJob, Ed2kTransferState,

@@ -281,6 +281,7 @@ async fn flush_download_blocks(blocks: FlushDownloadBlocks<'_>) -> Result<()> {
         session_payload_down: &mut session_state.session_payload_down,
         part_response_deadline: &mut session_state.part_response_deadline,
         peer_user_hash: session_state.peer_user_hash,
+        aich_recovery_parts: &mut session_state.pending_aich_recovery_parts,
     })
     .await
 }

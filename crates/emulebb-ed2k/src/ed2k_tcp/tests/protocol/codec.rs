@@ -331,6 +331,16 @@ fn aich_recovery_packets_decode_stock_shapes() {
     assert_eq!(request.part, 3);
     assert_eq!(request.master_hash, master_hash);
 
+    // The request encoder mirrors the stock OP_AICHREQUEST wire shape exactly.
+    let encoded_request = encode_aich_recovery_request(&file_hash, 3, master_hash);
+    assert_eq!(encoded_request[0], OP_EMULEPROT);
+    assert_eq!(encoded_request[5], OP_AICHREQUEST);
+    assert_eq!(&encoded_request[6..], &request_payload[..]);
+    let reencoded = decode_aich_recovery_request_payload(&encoded_request[6..]).unwrap();
+    assert_eq!(reencoded.file_hash, file_hash);
+    assert_eq!(reencoded.part, 3);
+    assert_eq!(reencoded.master_hash, master_hash);
+
     let failure = encode_aich_recovery_failure_answer(&file_hash);
     assert_eq!(failure[0], OP_EMULEPROT);
     assert_eq!(failure[5], OP_AICHANSWER);

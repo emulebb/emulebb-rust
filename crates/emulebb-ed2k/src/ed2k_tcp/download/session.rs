@@ -46,8 +46,9 @@ use super::super::{
     validate_file_status_part_count, verify_peer_secure_ident_signature,
 };
 use super::{
-    ActiveDownloadPiece, DownloadRequestWindowState, PendingCompressedPart, PendingPartRequest,
-    flush_buffered_download_prefixes, next_download_read_timeout, pump_download_request_window,
+    ActiveDownloadPiece, AichRecoveryRequestState, DownloadRequestWindowState,
+    PendingCompressedPart, PendingPartRequest, flush_buffered_download_prefixes,
+    next_download_read_timeout, pump_aich_recovery_requests, pump_download_request_window,
     reconcile_download_manifest_metadata,
 };
 mod parts;
@@ -1184,6 +1185,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             answer.recovery_payload_len
                         ),
                     );
+                    // Clear the in-flight marker so this part can be re-requested
+                    // later if the salvage still leaves it corrupt.
+                    if let Some(answered_part) = answer.part {
+                        session_state
+                            .aich_requests_inflight
+                            .retain(|part| *part != answered_part);
+                    }
                     handle_aich_recovery_answer(
                         transfer_runtime,
                         file_hash_hex,
@@ -1234,6 +1242,25 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 _ => {}
             }
+
+            // A part that just failed MD4 verification needs AICH/ICH recovery
+            // (master CPartFile::HashSinglePart failure -> RequestAICHRecovery).
+            // Solicit recovery from this peer when it supports AICH and we hold
+            // a trusted AICH root, so only the corrupt blocks are re-downloaded.
+            pump_aich_recovery_requests(
+                transport,
+                peer_addr,
+                &file_hash,
+                file_hash_hex,
+                &manifest,
+                AichRecoveryRequestState {
+                    pending: &mut session_state.pending_aich_recovery_parts,
+                    inflight: &mut session_state.aich_requests_inflight,
+                    peer_part_bitmap: session_state.peer_part_bitmap.as_deref(),
+                    remote_supports_aich: session_state.remote_supports_aich,
+                },
+            )
+            .await?;
         }
     }
     .await;
@@ -1242,6 +1269,9 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         &session_result,
         Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete)
     ) {
+        // The session is ending; any part that fails MD4 here cannot be
+        // recovered over this connection, so the recovery queue is discarded.
+        let mut teardown_recovery_parts = Vec::new();
         flush_buffered_download_prefixes(
             transfer_runtime,
             file_hash_hex,
@@ -1251,6 +1281,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             peer_addr,
             transport.mode,
             session_state.peer_user_hash,
+            &mut teardown_recovery_parts,
         )
         .await?;
     }

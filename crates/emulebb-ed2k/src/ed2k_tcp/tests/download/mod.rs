@@ -1,4 +1,5 @@
 use super::*;
+mod aich_recovery;
 mod frame_compressed;
 mod frame_sending_part;
 mod hashset_fallback;

@@ -10,7 +10,7 @@ use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
     Ed2kClaimedPart, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME,
-    expected_piece_length,
+    PieceWriteOutcome, expected_piece_length,
 };
 
 impl Ed2kTransferRuntime {
@@ -187,14 +187,14 @@ impl Ed2kTransferRuntime {
     /// eMule-sized `OP_REQUESTPARTS` block ranges instead of one whole-file
     /// range. The method only accepts strictly contiguous writes for the
     /// claimed piece and verifies the full piece once the final block arrives.
-    pub async fn append_piece_block(
+    pub(crate) async fn append_piece_block(
         &self,
         file_hash: &str,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<bool> {
+    ) -> Result<PieceWriteOutcome> {
         let _guard = self.manifest_io.lock().await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let block_received_at = Instant::now();
@@ -231,7 +231,7 @@ impl Ed2kTransferRuntime {
         file.write_all(data).await?;
 
         let next_piece_bytes_written = current_piece_bytes_written + data_len;
-        let mut piece_completed = false;
+        let mut outcome = PieceWriteOutcome::Incomplete;
         let mut checkpoint_reason = None;
         if next_piece_bytes_written == expected_piece_len {
             file.flush().await?;
@@ -257,11 +257,12 @@ impl Ed2kTransferRuntime {
             if verified {
                 piece.bytes_written = expected_piece_len;
                 piece.state = Ed2kTransferState::Verified;
-                piece_completed = true;
+                outcome = PieceWriteOutcome::Verified;
                 checkpoint_reason = Some("piece_verified");
             } else {
                 piece.state = Ed2kTransferState::Missing;
                 piece.bytes_written = 0;
+                outcome = PieceWriteOutcome::VerificationFailed { part_index: piece_index };
                 checkpoint_reason = Some("piece_verification_failed");
             }
             rebuild_verified_ranges(&mut manifest);
@@ -272,7 +273,7 @@ impl Ed2kTransferRuntime {
                     &mut manifest,
                 )?;
             }
-            if piece_completed {
+            if outcome.is_completed() {
                 self.upsert_verified_catalog_entry(&manifest).await;
             }
         } else {
@@ -302,7 +303,7 @@ impl Ed2kTransferRuntime {
                     should_checkpoint,
                     checkpoint_reason,
                 });
-                return Ok(piece_completed);
+                return Ok(outcome);
             }
 
             drop(file);
@@ -316,7 +317,7 @@ impl Ed2kTransferRuntime {
                 should_checkpoint,
                 checkpoint_reason,
             });
-            return Ok(piece_completed);
+            return Ok(outcome);
         }
 
         let should_checkpoint = true;
@@ -330,24 +331,24 @@ impl Ed2kTransferRuntime {
             should_checkpoint,
             checkpoint_reason,
         });
-        Ok(piece_completed)
+        Ok(outcome)
     }
 
     /// Append a block and return the refreshed manifest snapshot used by
     /// downloader orchestration after a persistence boundary.
-    pub async fn append_piece_block_with_manifest(
+    pub(crate) async fn append_piece_block_with_manifest(
         &self,
         file_hash: &str,
         piece_index: u32,
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<(bool, Ed2kResumeManifest)> {
-        let piece_completed = self
+    ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
+        let outcome = self
             .append_piece_block(file_hash, piece_index, start, end, data)
             .await?;
         let manifest = self.manifest(file_hash).await?;
-        Ok((piece_completed, manifest))
+        Ok((outcome, manifest))
     }
 
     /// Read a fully verified range for upload serving.

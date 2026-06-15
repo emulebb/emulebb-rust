@@ -538,7 +538,7 @@ async fn release_piece_request_preserves_partial_piece_progress() {
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
-    assert!(!completed);
+    assert!(!completed.is_completed());
 
     runtime
         .release_piece_request(&job.file_hash, 0)
@@ -585,7 +585,7 @@ async fn append_piece_block_keeps_partial_progress_in_memory_until_checkpoint() 
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
-    assert!(!piece_completed);
+    assert!(!piece_completed.is_completed());
 
     let cached_manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(
@@ -662,7 +662,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         .append_piece_block(&job.file_hash, 0, 0, split as u64, &payload[..split])
         .await
         .unwrap();
-    assert!(!first_completed);
+    assert!(!first_completed.is_completed());
 
     let final_completed = runtime
         .append_piece_block(
@@ -674,7 +674,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         )
         .await
         .unwrap();
-    assert!(final_completed);
+    assert!(final_completed.is_completed());
 
     let persisted_manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert!(persisted_manifest.completed);

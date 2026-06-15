@@ -23,7 +23,8 @@ use super::block_bitmap::PartBlockBitmap;
 use super::hashset::decode_aich_hash_hex;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
-    Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME, expected_piece_length,
+    Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME, PieceWriteOutcome,
+    expected_piece_length,
 };
 
 /// Outcome of starting ICH salvage on one corrupt part.
@@ -150,7 +151,7 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<bool> {
+    ) -> Result<PieceWriteOutcome> {
         let _guard = self.manifest_io.lock().await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let part_index = u32::from(part);
@@ -225,17 +226,22 @@ impl Ed2kTransferRuntime {
             .iter_mut()
             .find(|piece| piece.piece_index == part_index)
             .with_context(|| format!("missing piece index {part_index} in {file_hash}"))?;
+        let mut outcome = PieceWriteOutcome::Incomplete;
         if verified {
             piece.bytes_written = part_len;
             piece.block_bitmap = None;
             piece.state = Ed2kTransferState::Verified;
+            outcome = PieceWriteOutcome::Verified;
         } else {
             piece.apply_block_bitmap(&bitmap);
             piece.state = if bitmap.all_present() {
                 // All blocks present but MD4 still failed: the salvage could not
-                // reconstruct the part. Drop back to a clean re-download.
+                // reconstruct the part. Drop back to a clean re-download and
+                // signal the verification failure so the session can re-request
+                // AICH recovery (a fresh, possibly different, recovery answer).
                 piece.bytes_written = 0;
                 piece.block_bitmap = None;
+                outcome = PieceWriteOutcome::VerificationFailed { part_index };
                 Ed2kTransferState::Missing
             } else {
                 Ed2kTransferState::Requested
@@ -254,7 +260,7 @@ impl Ed2kTransferRuntime {
             self.upsert_verified_catalog_entry(&manifest).await;
         }
         self.store_manifest_unlocked(&manifest).await?;
-        Ok(verified)
+        Ok(outcome)
     }
 
     /// Write a downloaded block, dispatching to the ICH salvage path when the
@@ -270,7 +276,7 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
         data: &[u8],
-    ) -> Result<(bool, super::Ed2kResumeManifest)> {
+    ) -> Result<(PieceWriteOutcome, super::Ed2kResumeManifest)> {
         let is_salvage = {
             let _guard = self.manifest_io.lock().await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
@@ -284,11 +290,11 @@ impl Ed2kTransferRuntime {
         if is_salvage {
             let part = u16::try_from(piece_index)
                 .map_err(|_| anyhow::anyhow!("salvage part index {piece_index} exceeds u16"))?;
-            let completed = self
+            let outcome = self
                 .write_salvage_block(file_hash, part, start, end, data)
                 .await?;
             let manifest = self.manifest(file_hash).await?;
-            Ok((completed, manifest))
+            Ok((outcome, manifest))
         } else {
             self.append_piece_block_with_manifest(file_hash, piece_index, start, end, data)
                 .await

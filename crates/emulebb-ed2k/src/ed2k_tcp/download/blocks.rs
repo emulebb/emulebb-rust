@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use flate2::Decompress;
 
-use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime};
+use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferRuntime, PieceWriteOutcome};
 
 use super::super::{Ed2kFileIdentifier, Ed2kTransportMode, dump_ed2k_tcp_download_meta};
 use super::window::{ActiveDownloadPiece, PendingPartRequest};
@@ -36,6 +36,9 @@ pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {
     pub(in crate::ed2k_tcp) session_payload_down: &'a mut u64,
     pub(in crate::ed2k_tcp) part_response_deadline: &'a mut Option<tokio::time::Instant>,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
+    /// Parts whose MD4 verification just failed; the session drains these to
+    /// solicit AICH/ICH recovery from the peer (master `RequestAICHRecovery`).
+    pub(in crate::ed2k_tcp) aich_recovery_parts: &'a mut Vec<u16>,
 }
 
 pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
@@ -53,13 +56,14 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         session_payload_down,
         part_response_deadline,
         peer_user_hash,
+        aich_recovery_parts,
     } = blocks;
     while pending_part_requests
         .first()
         .is_some_and(|request| request.queued && request.is_ready())
     {
         let request = pending_part_requests.remove(0);
-        let (piece_completed, refreshed_manifest) = transfer_runtime
+        let (outcome, refreshed_manifest) = transfer_runtime
             .append_or_salvage_block_with_manifest(
                 file_hash_hex,
                 request.piece_index,
@@ -69,8 +73,12 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             )
             .await?;
         *manifest = refreshed_manifest;
-        if piece_completed {
+        if outcome.is_completed() {
             *active_piece_request = None;
+        }
+        if let Some(failed_part) = verification_failed_part(outcome) {
+            *active_piece_request = None;
+            push_unique(aich_recovery_parts, failed_part);
         }
         dump_ed2k_tcp_download_meta(
             peer_addr,
@@ -101,6 +109,24 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
     Ok(())
 }
 
+/// Map a write outcome to a verification-failed part index (as a u16 part) so
+/// the session can request AICH recovery for it.
+fn verification_failed_part(outcome: PieceWriteOutcome) -> Option<u16> {
+    outcome
+        .verification_failed_part()
+        .and_then(|part| u16::try_from(part).ok())
+}
+
+/// Append a part to the recovery queue only if it is not already pending, so a
+/// part is not re-requested while an answer is still outstanding (master
+/// `IsClientRequestPending`).
+fn push_unique(parts: &mut Vec<u16>, part: u16) {
+    if !parts.contains(&part) {
+        parts.push(part);
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
 pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
@@ -110,6 +136,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     peer_user_hash: Option<[u8; 16]>,
+    aich_recovery_parts: &mut Vec<u16>,
 ) -> Result<()> {
     loop {
         let Some(first_request) = pending_part_requests.first() else {
@@ -146,12 +173,16 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             )
         };
 
-        let (piece_completed, refreshed_manifest) = transfer_runtime
+        let (outcome, refreshed_manifest) = transfer_runtime
             .append_piece_block_with_manifest(file_hash_hex, piece_index, start, end, &bytes)
             .await?;
         *manifest = refreshed_manifest;
-        if piece_completed {
+        if outcome.is_completed() {
             *active_piece_request = None;
+        }
+        if let Some(failed_part) = verification_failed_part(outcome) {
+            *active_piece_request = None;
+            push_unique(aich_recovery_parts, failed_part);
         }
         if let Some(user_hash) = peer_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;

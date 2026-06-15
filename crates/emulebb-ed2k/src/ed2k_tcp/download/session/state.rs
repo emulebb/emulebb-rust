@@ -40,6 +40,14 @@ pub(super) struct DownloadSessionState {
     /// until a status frame is seen. Gates part picking so we only request parts
     /// the peer holds (master `sender->IsPartAvailable`).
     pub(super) peer_part_bitmap: Option<Vec<bool>>,
+    /// Parts whose MD4 verification just failed and which need an OP_AICHREQUEST
+    /// to drive ICH block salvage. Drained by the session once a trusted AICH
+    /// root is known and the peer supports AICH.
+    pub(super) pending_aich_recovery_parts: Vec<u16>,
+    /// Parts with an OP_AICHREQUEST already sent and awaiting an OP_AICHANSWER,
+    /// so a part is not re-requested while a request is outstanding (master
+    /// `CAICHRecoveryHashSet::IsClientRequestPending`).
+    pub(super) aich_requests_inflight: Vec<u16>,
 }
 
 impl DownloadSessionState {
@@ -84,6 +92,8 @@ impl DownloadSessionState {
             peer_udp_port: 0,
             peer_udp_version: 0,
             peer_part_bitmap: None,
+            pending_aich_recovery_parts: Vec::new(),
+            aich_requests_inflight: Vec::new(),
         }
     }
 

@@ -158,7 +158,10 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
         .write_salvage_block(&job.file_hash, 0, cb_start as u64, cb_end as u64, good_block)
         .await
         .unwrap();
-    assert!(verified, "part must MD4-verify after the last block is re-supplied");
+    assert!(
+        verified.is_completed(),
+        "part must MD4-verify after the last block is re-supplied"
+    );
 
     let manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
@@ -255,7 +258,8 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
                 &first_piece[pos as usize..(pos + len) as usize],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .is_completed();
         pos += len;
     }
     assert!(completed, "contiguous part completes on the final block");

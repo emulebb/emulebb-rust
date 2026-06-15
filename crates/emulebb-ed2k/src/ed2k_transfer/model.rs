@@ -27,6 +27,40 @@ pub enum Ed2kTransferState {
     Verified,
 }
 
+/// Result of writing the final block of a part into the piece store.
+///
+/// Surfaces an MD4 verification failure to the download session so it can
+/// solicit AICH/ICH block-level recovery (master `CPartFile::HashSinglePart`
+/// failure path -> `RequestAICHRecovery`) instead of silently re-downloading
+/// the whole part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PieceWriteOutcome {
+    /// The part is not yet fully written, or a non-final block landed.
+    Incomplete,
+    /// The full part was written and MD4-verified.
+    Verified,
+    /// The full part was written but failed MD4 verification. Carries the part
+    /// index so the session can request AICH recovery for it.
+    VerificationFailed { part_index: u32 },
+}
+
+impl PieceWriteOutcome {
+    /// `true` when the part is now complete and verified (legacy `bool` form).
+    #[must_use]
+    pub(crate) fn is_completed(self) -> bool {
+        matches!(self, PieceWriteOutcome::Verified)
+    }
+
+    /// The part index whose MD4 verification just failed, if any.
+    #[must_use]
+    pub(crate) fn verification_failed_part(self) -> Option<u32> {
+        match self {
+            PieceWriteOutcome::VerificationFailed { part_index } => Some(part_index),
+            _ => None,
+        }
+    }
+}
+
 /// One claimed download piece plus the already persisted byte prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kClaimedPart {

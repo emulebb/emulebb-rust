@@ -1,10 +1,12 @@
 //! Active eD2k peer download support.
 
+pub(in crate::ed2k_tcp) mod aich_request;
 pub(in crate::ed2k_tcp) mod blocks;
 pub(in crate::ed2k_tcp) mod session;
 pub(in crate::ed2k_tcp) mod startup;
 pub(in crate::ed2k_tcp) mod window;
 
+pub(in crate::ed2k_tcp) use aich_request::{AichRecoveryRequestState, pump_aich_recovery_requests};
 pub(in crate::ed2k_tcp) use blocks::{
     PendingCompressedPart, ReadyDownloadBlocks, flush_buffered_download_prefixes,
     flush_ready_download_blocks, reconcile_download_manifest_metadata,

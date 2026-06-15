@@ -18,7 +18,8 @@ const MAX_CLIENT_MSG_LEN: usize = 450;
 
 use super::{
     ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kFileIdentifier, MAX_PEER_DECOMPRESSED_PACKET_LEN,
-    OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_ANSWERSOURCES,
+    OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_AICHREQUEST,
+    OP_ANSWERSOURCES,
     OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT,
     OP_EMULEPROT, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_MULTIPACKET, OP_MULTIPACKET_EXT,
     OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER, OP_MULTIPACKETANSWER_EXT2, OP_PACKEDPROT,
@@ -353,6 +354,21 @@ pub(super) struct AichRecoveryRequest {
     pub(super) file_hash: Ed2kHash,
     pub(super) part: u16,
     pub(super) master_hash: [u8; 20],
+}
+
+/// Encode an OP_AICHREQUEST soliciting ICH block recovery for one corrupt part,
+/// mirroring `CUpDownClient::SendAICHRequest`:
+/// `<file hash 16><part u16 LE><master hash 20>`.
+pub(super) fn encode_aich_recovery_request(
+    file_hash: &Ed2kHash,
+    part: u16,
+    master_hash: [u8; 20],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + 2 + 20);
+    payload.extend_from_slice(&file_hash.0);
+    payload.extend_from_slice(&part.to_le_bytes());
+    payload.extend_from_slice(&master_hash);
+    encode_packet(OP_EMULEPROT, OP_AICHREQUEST, &payload)
 }
 
 pub(super) fn decode_aich_recovery_request_payload(payload: &[u8]) -> Result<AichRecoveryRequest> {
