@@ -42,6 +42,11 @@ fn reasking_peer(udp_port: u16) -> Ed2kUploadPeerIdentity {
         client_id: Some(0x0A00_0007),
         friend_slot: false,
         ident_verified: false,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0x99,
+        is_emule_client: true,
     }
 }
 

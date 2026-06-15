@@ -65,12 +65,14 @@ impl Ed2kTransferRuntime {
         let credit_score_permille = self.peer_credit_score_permille(&peer);
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let file_priority_score = self.file_priority_score(file_hash);
+        let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
         let status = self.upload_queue.lock().await.begin_session(
             handle.key().clone(),
             connection_id,
             now,
             file_priority_score,
             credit_score_permille,
+            all_time_upload_ratio_permille,
         );
         (handle, status)
     }
@@ -214,6 +216,38 @@ impl Ed2kTransferRuntime {
             .flatten()
             .map(|manifest| upload_priority_score(&manifest.upload_priority))
             .unwrap_or_else(|| upload_priority_score("normal"))
+    }
+
+    /// The requested file's all-time upload ratio in permille (eMule
+    /// `CKnownFile::GetAllTimeUploadRatio`), feeding the upload-queue low-ratio
+    /// score bonus. Returns the master neutral sentinel
+    /// `LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE` (at/above the threshold, so the
+    /// bonus is off) for an unknown file: eMule's `GetScoreBreakdown` only reaches
+    /// the bonus for a known requested file (`pRequestedFile != NULL`).
+    fn file_all_time_upload_ratio_permille(&self, file_hash: &Ed2kHash) -> i128 {
+        match self
+            .metadata
+            .file_all_time_upload_ratio_permille_opt(&file_hash.to_string())
+        {
+            Ok(Some(ratio)) => ratio,
+            _ => super::upload_queue::LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE,
+        }
+    }
+
+    /// Credit the lifetime-uploaded byte counter for a served file (eMule
+    /// all-time transferred accounting); best-effort, failures do not abort an
+    /// upload.
+    pub(crate) fn add_file_all_time_uploaded(
+        &self,
+        file_hash: &Ed2kHash,
+        delta: u64,
+    ) -> anyhow::Result<()> {
+        if delta == 0 {
+            return Ok(());
+        }
+        self.metadata
+            .add_file_all_time_uploaded(&file_hash.to_string(), delta)?;
+        Ok(())
     }
 
     fn peer_credit_score_permille(&self, peer: &Ed2kUploadPeerIdentity) -> i128 {

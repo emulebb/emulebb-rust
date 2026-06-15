@@ -129,6 +129,11 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 0,
             )?;
         }
+        // Credit the served file's lifetime-uploaded counter so its all-time
+        // upload ratio (eMule CKnownFile::GetAllTimeUploadRatio) reflects served
+        // bytes, feeding the upload-queue low-ratio score bonus.
+        transfer_runtime
+            .add_file_all_time_uploaded(&requested, u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
         upload_queue
             .note_payload_sent(
                 transfer_runtime,

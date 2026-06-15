@@ -98,6 +98,10 @@ CREATE TABLE known_files (
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
     availability_score INTEGER NOT NULL DEFAULT 0,
+    -- Lifetime bytes we have uploaded to other peers for this file (eMule
+    -- CStatisticFile all-time transferred), used to derive the all-time upload
+    -- ratio that feeds the upload-queue low-ratio score bonus.
+    all_time_uploaded_bytes INTEGER NOT NULL DEFAULT 0,
     first_seen_ms INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL

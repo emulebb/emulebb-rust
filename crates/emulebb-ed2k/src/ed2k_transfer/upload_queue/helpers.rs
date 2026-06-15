@@ -5,17 +5,9 @@ use std::time::Instant;
 use super::{
     DEFAULT_CREDIT_SCORE_PERMILLE, DEFAULT_FILE_PRIORITY_SCORE, Ed2kUploadPeerIdentity,
     Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionEntry, Ed2kUploadSessionPhase,
-    Ed2kUploadSessionPhaseSnapshot, FRIEND_SLOT_SCORE_BONUS, HIGH_FILE_PRIORITY_SCORE,
-    LOW_FILE_PRIORITY_SCORE, RELEASE_FILE_PRIORITY_SCORE, VERY_LOW_FILE_PRIORITY_SCORE,
+    Ed2kUploadSessionPhaseSnapshot, HIGH_FILE_PRIORITY_SCORE, LOW_FILE_PRIORITY_SCORE,
+    RELEASE_FILE_PRIORITY_SCORE, VERY_LOW_FILE_PRIORITY_SCORE,
 };
-
-pub(super) fn friend_slot_score(friend_slot: bool) -> i128 {
-    if friend_slot {
-        FRIEND_SLOT_SCORE_BONUS
-    } else {
-        0
-    }
-}
 
 pub(crate) fn upload_priority_score(priority: &str) -> i128 {
     match priority {

@@ -16,6 +16,17 @@ pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
 /// a LowID waiter's score is divided by this to deprioritise unreachable peers
 /// (master `inputs.uLowIdDivisor`, applied when `HasLowID() && divisor > 1`).
 const LOW_ID_SCORE_DIVISOR: i128 = 2;
+/// eMule old-client score penalty: the effective working score is multiplied by
+/// 0.5 (`UploadScoreSeams::BuildUploadScoreBreakdown` `fWorkingScore *= 0.5f`)
+/// for an old eMule client (`m_byEmuleVersion <= 0x19`).
+const OLD_CLIENT_PENALTY_NUMERATOR: i128 = 1;
+const OLD_CLIENT_PENALTY_DENOMINATOR: i128 = 2;
+
+/// Sentinel all-time upload ratio (permille) used for an unknown requested file:
+/// at/above the low-ratio threshold so the low-ratio score bonus is NOT applied,
+/// mirroring eMule's `GetScoreBreakdown` early return for `pRequestedFile ==
+/// NULL` (an unknown file never reaches the bonus).
+pub(super) const LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE: i128 = 1_000;
 
 /// eMule default soft queue size (`PreferenceValidationSeams::kDefaultQueueSize`),
 /// the threshold the reask QUEUEFULL margin compares against.
@@ -90,6 +101,28 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     /// `IS_IDENTIFIED`); only a verified peer's credit ratio benefits its score
     /// (`GetScoreRatio` neutral 1.0 otherwise). Excluded from identity eq/hash.
     pub ident_verified: bool,
+    /// Whether the peer presented a secure-ident public key + signature that
+    /// FAILED RSA verification (eMule `IS_IDBADGUY`): its upload score is zeroed
+    /// (`GetScoreBreakdown` early return). Distinct from `!ident_verified`, which
+    /// merely denies the credit benefit; a bad-guy is actively penalised.
+    /// Excluded from identity eq/hash.
+    pub ident_bad_guy: bool,
+    /// Whether the peer's advertised mod-version matches the known GPL-breaker
+    /// blacklist (eMule `m_bGPLEvildoer`, `CheckForGPLEvilDoer`): its upload
+    /// score is zeroed. Excluded from identity eq/hash.
+    pub gpl_evildoer: bool,
+    /// Whether the peer is on the local ban list (eMule `IsBanned()`): its upload
+    /// score is zeroed. Excluded from identity eq/hash.
+    pub banned: bool,
+    /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, from the
+    /// OP_EMULEINFO leading byte; `0x99` for a CT_EMULE_VERSION-only mule hello,
+    /// `0` for a non-mule client). Feeds the old-client score penalty. Excluded
+    /// from identity eq/hash.
+    pub emule_version: u8,
+    /// Whether the peer identified as an eMule-family client (sent a mule hello /
+    /// OP_EMULEINFO). Part of the old-client penalty predicate (eMule
+    /// `IsEmuleClient() || GetClientSoft() < 10`). Excluded from identity eq/hash.
+    pub is_emule_client: bool,
 }
 
 impl PartialEq for Ed2kUploadPeerIdentity {
@@ -204,6 +237,9 @@ struct Ed2kUploadSessionEntry {
     waiting_sequence: u64,
     file_priority_score: i128,
     credit_score_permille: i128,
+    /// Per-session upload-score modifiers (LowID, bad-guy/banned/GPL zeroing,
+    /// old-client penalty, low-ratio bonus), captured at admission.
+    score_modifiers: UploadScoreModifiers,
     uploaded_bytes: u64,
     upload_started_at: Option<Instant>,
 }
@@ -224,35 +260,6 @@ pub struct Ed2kUploadQueueCapacitySnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ed2kUploadThrottleReservation {
     pub delay: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UploadScoreInputs {
-    waiting_seconds: i128,
-    friend_slot: bool,
-    file_priority_score: i128,
-    credit_score_permille: i128,
-    /// Whether the peer is a LowID client (master `HasLowID()`); applies the
-    /// LowID score divisor below the friend-slot fast path.
-    low_id: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UploadScorePolicy;
-
-impl UploadScorePolicy {
-    fn waiting_score(inputs: UploadScoreInputs) -> i128 {
-        let base = inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
-            / DEFAULT_CREDIT_SCORE_PERMILLE;
-        // Master applies the LowID divisor to the working score (below the
-        // friend-slot fast path, which already excludes LowID at the caller).
-        let base = if inputs.low_id {
-            base / LOW_ID_SCORE_DIVISOR
-        } else {
-            base
-        };
-        base + friend_slot_score(inputs.friend_slot)
-    }
 }
 
 #[derive(Debug)]
@@ -311,8 +318,15 @@ impl Ed2kUploadQueueState {
         now: Instant,
         file_priority_score: i128,
         credit_score_permille: i128,
+        all_time_upload_ratio_permille: i128,
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
+        let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
+        let score_modifiers = UploadScoreModifiers::from_peer(
+            &key.peer,
+            low_id,
+            all_time_upload_ratio_permille,
+        );
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
             let Some(mut session) = self.sessions.remove(&existing_key) else {
                 unreachable!("existing peer queue key missing from session map");
@@ -324,6 +338,7 @@ impl Ed2kUploadQueueState {
             session.last_activity = now;
             session.file_priority_score = file_priority_score;
             session.credit_score_permille = credit_score_permille;
+            session.score_modifiers = score_modifiers;
             self.sessions.insert(key.clone(), session);
             return self.status_for_key(&key, now);
         }
@@ -352,6 +367,7 @@ impl Ed2kUploadQueueState {
                 waiting_sequence,
                 file_priority_score,
                 credit_score_permille,
+                score_modifiers,
                 uploaded_bytes: 0,
                 upload_started_at: None,
             },
@@ -745,12 +761,14 @@ impl Ed2kUploadQueueState {
         now: Instant,
     ) -> i128 {
         let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
-        UploadScorePolicy::waiting_score(UploadScoreInputs {
+        score::waiting_score(score::UploadScoreInputs {
             waiting_seconds: now.saturating_duration_since(session.queued_at).as_secs() as i128,
+            // Master friend-slot fast path excludes LowID; the friend-slot bonus
+            // is added by the score function, the zeroing modifiers take priority.
             friend_slot: key.peer.friend_slot && !low_id,
             file_priority_score: session.file_priority_score,
             credit_score_permille: session.credit_score_permille,
-            low_id,
+            modifiers: session.score_modifiers,
         })
     }
 
@@ -834,8 +852,33 @@ fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duratio
 
 mod admission;
 mod helpers;
+mod score;
 pub(super) use helpers::{credit_score_permille, upload_priority_score};
 use helpers::{
-    friend_slot_score, is_low_id_client_id, phase_snapshot, upload_client_id_matches,
-    upload_snapshot_sort_key, upload_speed_bytes_per_sec,
+    is_low_id_client_id, phase_snapshot, upload_client_id_matches, upload_snapshot_sort_key,
+    upload_speed_bytes_per_sec,
 };
+use score::UploadScoreModifiers;
+
+/// Construct a minimal default upload peer identity for the score module's unit
+/// tests (all flags false / zero, no LowID).
+#[cfg(test)]
+pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
+    use std::net::Ipv4Addr;
+    Ed2kUploadPeerIdentity {
+        ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        tcp_port: 4662,
+        udp_port: None,
+        udp_version: 0,
+        should_crypt: false,
+        user_hash: Some([1; 16]),
+        client_id: Some(0x0102_0304),
+        friend_slot: false,
+        ident_verified: false,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0,
+        is_emule_client: false,
+    }
+}

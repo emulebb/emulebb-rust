@@ -33,6 +33,12 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         // Verified ident by default so credit-scoring fixtures exercise the real
         // ratio math; A4 has a dedicated test for the unverified neutral path.
         ident_verified: true,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        // Modern mule client by default (not old-client penalised).
+        emule_version: 0x99,
+        is_emule_client: true,
     }
 }
 
@@ -49,6 +55,11 @@ pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
         client_id: Some(0x0A09_0900 + u32::from(port_marker)),
         friend_slot: false,
         ident_verified: true,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0x99,
+        is_emule_client: true,
     }
 }
 

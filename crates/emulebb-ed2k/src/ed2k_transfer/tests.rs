@@ -21,6 +21,7 @@ mod salvage;
 mod upload_queue;
 mod upload_queue_credit;
 mod upload_queue_priority;
+mod upload_queue_score_modifiers;
 mod upload_queue_support;
 
 fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {

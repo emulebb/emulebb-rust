@@ -44,7 +44,7 @@ use super::super::dump::{
     dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
 };
 use super::super::hello::{
-    DecodedHelloIdentity, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
+    DecodedHelloProfile, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
     encode_emule_info_answer,
 };
 use super::super::identity::{
@@ -260,7 +260,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 peer_supports_aich = hello_profile.supports_aich;
                 peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
                 peer_upload_identity =
-                    upload_peer_identity_from_hello(peer_addr, &hello_profile.identity);
+                    upload_peer_identity_from_hello(peer_addr, &hello_profile);
                 // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
                 peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
                 debug!(
@@ -669,6 +669,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     if peer_upload_identity.udp_port.is_none() && profile.udp_port != 0 {
                         peer_upload_identity.udp_port = Some(profile.udp_port);
                     }
+                    // OP_EMULEINFO carries the real eMule compatibility version
+                    // byte (eMule m_byEmuleVersion), used for the old-client
+                    // upload-score penalty; an OP_EMULEINFO sender is an eMule
+                    // client (IsEmuleClient()).
+                    peer_upload_identity.emule_version = profile.emule_version;
+                    peer_upload_identity.is_emule_client = true;
                 }
                 let reply = encode_emule_info_answer(reachability.advertised_udp_port(kad_udp_port));
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
@@ -788,6 +794,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     // Sync ident state so the credit score only benefits a
                     // verified peer (eMule IS_IDENTIFIED gating GetScoreRatio).
                     peer_upload_identity.ident_verified = verified;
+                    // A peer that presented a public key + signature that FAILED
+                    // verification is IS_IDBADGUY (eMule GetCurrentIdentState):
+                    // its upload score is zeroed, not merely denied the credit
+                    // benefit. A later successful verify clears the verdict.
+                    peer_upload_identity.ident_bad_guy = !verified;
                 }
                 Err(error) => {
                     dump_ed2k_tcp_listener_meta(
@@ -1175,13 +1186,19 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         client_id: None,
         friend_slot: false,
         ident_verified: false,
+        ident_bad_guy: false,
+        gpl_evildoer: false,
+        banned: false,
+        emule_version: 0,
+        is_emule_client: false,
     }
 }
 
 fn upload_peer_identity_from_hello(
     peer_addr: SocketAddr,
-    remote_hello: &DecodedHelloIdentity,
+    profile: &DecodedHelloProfile,
 ) -> Ed2kUploadPeerIdentity {
+    let remote_hello = &profile.identity;
     Ed2kUploadPeerIdentity {
         ip: peer_addr.ip(),
         tcp_port: if remote_hello.tcp_port == 0 {
@@ -1198,6 +1215,15 @@ fn upload_peer_identity_from_hello(
         client_id: Some(remote_hello.client_id),
         friend_slot: false,
         ident_verified: false,
+        ident_bad_guy: false,
+        // GPL-breaker mod-version verdict (eMule CheckForGPLEvilDoer), parsed from
+        // the hello CT_MOD_VERSION string.
+        gpl_evildoer: profile.gpl_evildoer,
+        banned: false,
+        // eMule sets m_byEmuleVersion = 0x99 for a CT_EMULE_VERSION mule hello; a
+        // real (older) version byte arrives later via OP_EMULEINFO.
+        emule_version: if profile.is_mule_hello { 0x99 } else { 0 },
+        is_emule_client: profile.is_mule_hello,
     }
 }
 

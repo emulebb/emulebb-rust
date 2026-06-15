@@ -261,6 +261,9 @@ pub(super) struct DecodedEmuleInfoProfile {
     pub(super) accepts_comments: bool,
     pub(super) supports_secure_ident: bool,
     pub(super) supports_preview: bool,
+    /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, the
+    /// leading byte of OP_EMULEINFO). Feeds the old-client upload-score penalty.
+    pub(super) emule_version: u8,
 }
 
 struct DecodedHelloTag<'a> {
@@ -401,6 +404,9 @@ pub(super) struct DecodedHelloProfile {
     pub(super) supports_source_exchange: bool,
     pub(super) supports_source_exchange2: bool,
     pub(super) supports_file_identifiers: bool,
+    /// Peer advertised a known GPL-breaker mod-version (eMule
+    /// `CUpDownClient::CheckForGPLEvilDoer`): its upload score is zeroed.
+    pub(super) gpl_evildoer: bool,
 }
 
 fn decode_hello_tag_u32(tag: &DecodedHelloTag<'_>) -> Option<u32> {
@@ -416,15 +422,24 @@ pub(super) fn decode_emule_info_profile(payload: &[u8]) -> Result<DecodedEmuleIn
     if payload.len() < 2 + 4 {
         anyhow::bail!("short eMule info payload {}", payload.len());
     }
+    // eMule ProcessMuleInfoPacket: the leading byte is m_byEmuleVersion, with the
+    // 0x2B -> 0x22 legacy normalisation; it is read before the protocol check.
+    let emule_version = if payload[0] == 0x2B { 0x22 } else { payload[0] };
     if payload[1] != EMULE_PROTOCOL_VERSION {
-        return Ok(DecodedEmuleInfoProfile::default());
+        return Ok(DecodedEmuleInfoProfile {
+            emule_version,
+            ..DecodedEmuleInfoProfile::default()
+        });
     }
     let mut cursor = &payload[2..];
     let tag_count = usize::try_from(u32::from_le_bytes(cursor[..4].try_into().unwrap()))
         .context("eMule info tag count overflow")?;
     cursor = &cursor[4..];
 
-    let mut profile = DecodedEmuleInfoProfile::default();
+    let mut profile = DecodedEmuleInfoProfile {
+        emule_version,
+        ..DecodedEmuleInfoProfile::default()
+    };
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
         if let Some(value) = decode_hello_tag_u32(&tag) {
@@ -489,10 +504,17 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut supports_source_exchange = false;
     let mut supports_source_exchange2 = false;
     let mut supports_file_identifiers = false;
+    let mut gpl_evildoer = false;
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
         if tag.tag_name == Some(CT_EMULE_VERSION) {
             is_mule_hello = true;
+        }
+        if tag.tag_name == Some(CT_MOD_VERSION)
+            && let Ok(mod_version) = std::str::from_utf8(tag.value)
+            && super::hello_gpl::is_gpl_evildoer_mod_version(mod_version)
+        {
+            gpl_evildoer = true;
         }
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS2)
             && let Some(misc_options2) = decode_hello_tag_u32(&tag)
@@ -530,6 +552,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         supports_source_exchange,
         supports_source_exchange2,
         supports_file_identifiers,
+        gpl_evildoer,
     })
 }
 

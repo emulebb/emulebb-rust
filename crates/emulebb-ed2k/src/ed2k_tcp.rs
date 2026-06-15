@@ -39,6 +39,7 @@ mod dump;
 mod firewall_helper;
 mod hello;
 mod hello_buddy;
+mod hello_gpl;
 mod identity;
 mod listener;
 mod obfuscation;
