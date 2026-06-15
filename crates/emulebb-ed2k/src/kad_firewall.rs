@@ -35,6 +35,10 @@ pub struct UdpFirewallCheckSummary {
     pub started_at: DateTime<Utc>,
     /// Timestamp when the round finished.
     pub completed_at: DateTime<Utc>,
+    /// External UDP port the helpers actually observed, when it differs from the
+    /// internal port. `None` when the open result came in on the internal port
+    /// (or the round did not open). Mirrors the oracle's `SetUseExternKadPort`.
+    pub external_udp_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,12 +52,22 @@ enum HelperOutcome {
 
 const TCP_FIREWALL_RECHECK_LIMIT: usize = 4;
 const EXTERNAL_PORT_DISCOVERY_REPORTERS: usize = 3;
+/// Unique helpers that must report the same off-list incoming UDP port before we
+/// trust it as our real external port (one report could be a NAT fluke).
+const FIREWALL_UDP_PORT_DISCOVERY_REPORTERS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UdpFirewallCheckRound {
     started_at: DateTime<Utc>,
     expected_ports: HashSet<u16>,
     helper_outcomes: HashMap<IpAddr, HelperOutcome>,
+    /// Off-list incoming ports reported with a positive result, keyed by port to
+    /// the unique helper IPs that reported them. A NAT remaps our source UDP port
+    /// so the helper observes (and echoes) a port we did not predict; once enough
+    /// distinct helpers agree, that port is our real external UDP port.
+    discovered_port_reporters: HashMap<u16, HashSet<IpAddr>>,
+    /// The off-list port that reached the corroboration threshold, if any.
+    discovered_external_udp_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +357,8 @@ impl KadFirewallState {
             started_at,
             expected_ports,
             helper_outcomes,
+            discovered_port_reporters: HashMap::new(),
+            discovered_external_udp_port: None,
         });
         true
     }
@@ -390,6 +406,38 @@ impl KadFirewallState {
             .expect("active round disappeared while marking success");
             self.last_error = None;
             return FirewallUdpPacketOutcome::Open(summary);
+        }
+
+        if error_code == 0 && incoming_port != 0 {
+            // A positive result on a port we did not predict means a NAT remapped
+            // our source UDP port: the helper observed (and echoed) our real
+            // external port. Treat it as a discovery candidate and only trust it
+            // once enough distinct helpers corroborate the same port, matching the
+            // oracle preferring a corroborated open external port over a guess.
+            let reporters = round
+                .discovered_port_reporters
+                .entry(incoming_port)
+                .or_default();
+            reporters.insert(helper_ip);
+            if reporters.len() >= FIREWALL_UDP_PORT_DISCOVERY_REPORTERS {
+                *outcome = HelperOutcome::Succeeded;
+                round.discovered_external_udp_port = Some(incoming_port);
+                self.discovered_external_udp_port = Some(incoming_port);
+                let summary = finalize_round(
+                    &mut self.active_round,
+                    true,
+                    observed_at,
+                    &mut self.udp_open,
+                    &mut self.udp_verified,
+                    &mut self.last_udp_check_succeeded_at,
+                    &mut self.last_udp_check_failed_at,
+                )
+                .expect("active round disappeared while marking discovery success");
+                self.last_error = None;
+                return FirewallUdpPacketOutcome::Open(summary);
+            }
+            *outcome = HelperOutcome::WrongPort;
+            return FirewallUdpPacketOutcome::Recorded;
         }
 
         *outcome = if error_code == 0 {
@@ -489,6 +537,12 @@ fn finalize_round(
         *last_failed_at = Some(completed_at);
     }
 
+    let external_udp_port = if open {
+        round.discovered_external_udp_port
+    } else {
+        None
+    };
+
     Some(UdpFirewallCheckSummary {
         open,
         helpers_selected,
@@ -497,6 +551,7 @@ fn finalize_round(
         helpers_failed,
         started_at: round.started_at,
         completed_at,
+        external_udp_port,
     })
 }
 
