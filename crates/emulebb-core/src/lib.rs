@@ -74,6 +74,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod download_source_registry;
+mod kad_buddy;
 mod kad_snoop_entry;
 mod kad_udp_firewall_check;
 mod profile_state;
