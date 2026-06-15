@@ -24,6 +24,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         kad_firewall,
         shutdown,
         public_ip,
+        reconnect_signal,
     } = options;
     let reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
     let session_context = ServerSessionContext {
@@ -40,6 +41,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             .then(|| Duration::from_secs(config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),
         public_ip,
+        reconnect_signal,
     };
 
     let configured_servers = match configured_server_entries(&config) {

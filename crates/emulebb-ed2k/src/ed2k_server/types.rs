@@ -61,6 +61,10 @@ pub(super) struct ServerSessionContext {
     /// Learned public IP (eMule `theApp.SetPublicIP`): set from the HighID
     /// `OP_IDCHANGE` client_id, cleared on disconnect/LowID.
     pub(super) public_ip: crate::reachability::ExternalReachability,
+    /// "Reconnect now" signal: notified when the advertised external port changes
+    /// (UPnP became ready / was remapped) so the session drops and re-logs in with
+    /// the new HighID callback port instead of waiting for a natural reconnect.
+    pub(super) reconnect_signal: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,4 +144,7 @@ pub struct Ed2kServerLoopOptions {
     /// Learned public-IP cell (eMule `theApp` public IP), set from the HighID
     /// `OP_IDCHANGE`. Created by core and shared with the UDP reask loop.
     pub public_ip: crate::reachability::ExternalReachability,
+    /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
+    /// when the external port changes so the session re-logs in promptly.
+    pub reconnect_signal: Arc<tokio::sync::Notify>,
 }

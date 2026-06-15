@@ -150,6 +150,24 @@ pub(super) async fn run_one_server_session(
                 clear_server_connection_state(&context.state).await;
                 return Ok(());
             }
+            _ = context.reconnect_signal.notified() => {
+                // "upnp ready": the advertised external port changed, so drop the
+                // session and reconnect to re-login with the new HighID callback port.
+                fail_background_search_request(
+                    &mut queued_background_search,
+                    "ED2K background session reconnecting (external port changed) before search dispatch",
+                );
+                fail_pending_background_search(
+                    &mut pending_background_search,
+                    "ED2K background session reconnecting (external port changed) before search completion",
+                );
+                info!(
+                    "re-login requested for ED2K server {} (advertised external port changed); dropping session to reconnect",
+                    server.base_endpoint(),
+                );
+                clear_server_connection_state(&context.state).await;
+                return Ok(());
+            }
             request = search_inbox.receiver.recv(), if queued_background_search.is_none() && pending_background_search.is_none() => {
                 if let Some(request) = request {
                     if session.login_accepted {

@@ -1187,6 +1187,10 @@ impl EmulebbCore {
         nat.start().await?;
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
+        // "Reconnect now" signal: the advertised-ports sync fires it when the
+        // external port changes (UPnP ready / remapped) so the server loop re-logs
+        // in with the new HighID callback port instead of waiting for a reconnect.
+        let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
         // Keep the advertised external eD2k TCP + UDP ports in sync with the NAT
         // mappings so peers/servers can reach us (incoming TCP + HighID callback)
         // and locate us for UDP source-reask by (ip, udp_port) even when the
@@ -1194,6 +1198,7 @@ impl EmulebbCore {
         tasks.push(tokio::spawn(run_advertised_ports_sync(
             Arc::clone(&nat),
             self.ed2k_reachability.clone(),
+            Arc::clone(&server_reconnect_signal),
             network.listen_port,
             network.kad_bind_addr.port(),
             Arc::clone(&shutdown),
@@ -1288,6 +1293,7 @@ impl EmulebbCore {
             kad_firewall,
             shutdown: Arc::clone(&shutdown),
             public_ip: ed2k_public_ip.clone(),
+            reconnect_signal: server_reconnect_signal,
         })));
         if enable_udp_reask {
             // Off by default; wire-validate before enabling. udp_version 4 matches
@@ -5397,6 +5403,10 @@ const ED2K_PUBLIC_IP_PROBE_UNKNOWN_SECS: u64 = 120;
 /// Re-check cadence once a public IP is known (in case it clears / the tunnel
 /// rotates), so the fallback can refill it.
 const ED2K_PUBLIC_IP_PROBE_KNOWN_SECS: u64 = 600;
+/// Minimum spacing between reactive server re-logins triggered by an advertised
+/// external-port change, so a flapping UPnP mapping cannot spam server reconnects
+/// (server-ban-safe, in the spirit of the live-wire ≤1-connect/5min guard).
+const ED2K_RELOGIN_MIN_INTERVAL: Duration = Duration::from_secs(300);
 
 /// STUN-probe the data-plane egress and record the reflexive public IP when it is
 /// otherwise unknown. The reask obfuscation key is our public IP (eMule
@@ -5439,10 +5449,16 @@ async fn run_ed2k_public_ip_probe(
 async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
     reachability: ExternalReachability,
+    reconnect_signal: Arc<tokio::sync::Notify>,
     internal_tcp_port: u16,
     internal_udp_port: u16,
     shutdown: Arc<AtomicBool>,
 ) {
+    // Baseline = the internal port the first login used before UPnP was ready; a
+    // later external port (or a remap) is a change worth re-logging for to refresh
+    // HighID, rate-limited so a flapping mapping cannot spam server reconnects.
+    let mut last_advertised_tcp = internal_tcp_port;
+    let mut last_relogin: Option<std::time::Instant> = None;
     while !shutdown.load(Ordering::Relaxed) {
         let status = nat.status().await;
         let external_for = |proto: TransportProtocol, internal: u16| -> Option<u16> {
@@ -5458,6 +5474,22 @@ async fn run_advertised_ports_sync(
         }
         if let Some(external) = external_for(TransportProtocol::Udp, internal_udp_port) {
             reachability.set_external_udp_port(external);
+        }
+        // Reactive re-login: if the advertised TCP port (the HighID callback port)
+        // changed and the rate limit allows, signal the server loop to reconnect.
+        let advertised_tcp = reachability.advertised_tcp_port(internal_tcp_port);
+        if advertised_tcp != last_advertised_tcp {
+            let now = std::time::Instant::now();
+            let allowed = last_relogin
+                .is_none_or(|previous| now.duration_since(previous) >= ED2K_RELOGIN_MIN_INTERVAL);
+            if allowed {
+                tracing::info!(
+                    "ED2K advertised TCP port changed {last_advertised_tcp} -> {advertised_tcp}; requesting server re-login"
+                );
+                reconnect_signal.notify_one();
+                last_relogin = Some(now);
+                last_advertised_tcp = advertised_tcp;
+            }
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
