@@ -5147,7 +5147,7 @@ async fn handle_kad_find_buddy_req(
 
     {
         let mut state = kad_buddy.lock().await;
-        match state.accept_incoming_buddy(self_firewalled, buddy) {
+        match state.accept_incoming_buddy(self_firewalled, buddy.clone()) {
             Ok(()) => {}
             Err(FindBuddyReqRefusal::SelfFirewalled) => {
                 tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: we are firewalled");
@@ -5168,9 +5168,18 @@ async fn handle_kad_find_buddy_req(
         tcp_port,
         connect_options: Some(emule_connect_options(network.config.obfuscation_enabled)),
     };
-    dht.send_packet(from, &KadPacket::FindBuddyRes(response))
+    // The oracle establishes the buddy relationship only as part of replying;
+    // if the send fails, release the slot we optimistically claimed (and skip
+    // the registry expectation) so the buddy is not held forever (later requests
+    // would hit `AlreadyHaveBuddy` with no callback path to ever satisfy it).
+    if let Err(error) = dht
+        .send_packet(from, &KadPacket::FindBuddyRes(response))
         .await
-        .with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"))?;
+    {
+        kad_buddy.lock().await.release_incoming_buddy(&buddy);
+        return Err(error)
+            .with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"));
+    }
 
     // Record the firewalled client we expect to connect to us so the listener
     // session can recognize it and hold the buddy socket open for callback relay

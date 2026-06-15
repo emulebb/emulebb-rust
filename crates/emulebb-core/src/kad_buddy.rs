@@ -203,6 +203,22 @@ impl KadBuddyState {
         Ok(())
     }
 
+    /// Roll back a just-accepted incoming buddy when the `FINDBUDDY_RES` reply
+    /// could not be sent.
+    ///
+    /// The oracle's `Process_KADEMLIA_FINDBUDDY_REQ` only establishes the buddy
+    /// relationship as part of sending the response; if our `?`-propagated send
+    /// fails we must release the slot we optimistically claimed, otherwise the
+    /// buddy is held forever (later requests hit `AlreadyHaveBuddy`) with no
+    /// registry expectation to ever satisfy the callback. Only releases when the
+    /// stored buddy still matches the one we accepted, so a concurrent reset is
+    /// never clobbered.
+    pub fn release_incoming_buddy(&mut self, buddy: &IncomingBuddy) {
+        if self.incoming.as_ref() == Some(buddy) {
+            self.incoming = None;
+        }
+    }
+
     /// Look up the incoming buddy a `CALLBACK_REQ` should be relayed to.
     ///
     /// The oracle relays any callback to its single current buddy
@@ -325,6 +341,40 @@ mod tests {
             .unwrap();
         let result = state.accept_incoming_buddy(false, incoming(NodeId::from_bytes([0x33; 16])));
         assert_eq!(result, Err(FindBuddyReqRefusal::AlreadyHaveBuddy));
+    }
+
+    #[test]
+    fn release_incoming_buddy_frees_slot_after_failed_send() {
+        // Mirrors the lib.rs FINDBUDDY_RES send-failure rollback: an accepted
+        // buddy whose response could not be sent must be released so the slot is
+        // reusable instead of permanently held.
+        let mut state = KadBuddyState::new();
+        let buddy = incoming(NodeId::from_bytes([0x22; 16]));
+        state.accept_incoming_buddy(false, buddy.clone()).unwrap();
+        assert!(state.has_incoming_buddy());
+
+        state.release_incoming_buddy(&buddy);
+        assert!(!state.has_incoming_buddy());
+
+        // A later request can now be accepted again.
+        assert!(
+            state
+                .accept_incoming_buddy(false, incoming(NodeId::from_bytes([0x33; 16])))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn release_incoming_buddy_keeps_a_different_buddy() {
+        // A rollback must not clobber a buddy slot that was meanwhile re-claimed
+        // by a different relationship.
+        let mut state = KadBuddyState::new();
+        let stale = incoming(NodeId::from_bytes([0x22; 16]));
+        let current = incoming(NodeId::from_bytes([0x33; 16]));
+        state.accept_incoming_buddy(false, current.clone()).unwrap();
+        state.release_incoming_buddy(&stale);
+        assert!(state.has_incoming_buddy());
+        assert!(state.callback_relay_target(current.buddy_id).is_some());
     }
 
     #[test]
