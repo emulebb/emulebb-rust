@@ -43,7 +43,9 @@ use emulebb_ed2k::{
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
-use emulebb_ed2k::stun::{DEFAULT_STUN_TIMEOUT, stun_probe};
+use emulebb_ed2k::stun::{
+    DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
+};
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
     SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts, metadata_from_publish_snapshot,
@@ -1329,6 +1331,13 @@ impl EmulebbCore {
             tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
                 network.bind_ip,
                 ed2k_public_ip.clone(),
+                Arc::clone(&shutdown),
+            )));
+            // One-shot NAT-type health signal (STUN mapping-behavior): logs whether
+            // our advertised UDP port will match what peers observe (cone) or is
+            // fragile (symmetric). Informational; reask degrades to TCP either way.
+            tasks.push(tokio::spawn(run_ed2k_nat_type_probe(
+                network.bind_ip,
                 Arc::clone(&shutdown),
             )));
         }
@@ -5434,6 +5443,30 @@ async fn run_ed2k_public_ip_probe(
             ED2K_PUBLIC_IP_PROBE_UNKNOWN_SECS
         };
         tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
+}
+
+/// One-shot NAT mapping-behavior probe (STUN, two servers) logged as a reachability
+/// health signal at startup. Endpoint-independent (cone) → our advertised UDP port
+/// matches what peers observe, so eD2k reask/HighID reachability is solid; symmetric
+/// → each peer sees a different source port, so inbound reask is fragile and peers
+/// fall back to TCP. Informational only (no behavior change): STUN reports the probe
+/// socket's source-port mapping, not a listen port, so it is never used to advertise
+/// a port — the advertised port stays UPnP-mapped / Kad-observed.
+async fn run_ed2k_nat_type_probe(bind_ip: Ipv4Addr, shutdown: Arc<AtomicBool>) {
+    if shutdown.load(Ordering::Relaxed) {
+        return;
+    }
+    match stun_probe_mapping_behavior(bind_ip, DEFAULT_STUN_TIMEOUT).await {
+        NatMappingBehavior::EndpointIndependent => tracing::info!(
+            "NAT mapping behavior: endpoint-independent (cone) — eD2k reask/HighID reachability is solid"
+        ),
+        NatMappingBehavior::Symmetric => tracing::warn!(
+            "NAT mapping behavior: symmetric — peers see a varying UDP source port; inbound reask is fragile (TCP fallback) and HighID may be unreliable"
+        ),
+        NatMappingBehavior::Inconclusive => tracing::debug!(
+            "NAT mapping behavior: inconclusive (STUN mapping-behavior probe incomplete)"
+        ),
     }
 }
 
