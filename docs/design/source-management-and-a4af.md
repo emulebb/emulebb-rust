@@ -1,8 +1,54 @@
 # Source Management & A4AF — Design Sketch
 
-**Status:** Proposed · post-parity · **out of RC2 scope**
+**Status:** **PARKED** (operator decision 2026-06-15) · not strictly necessary ·
+revisit only on observed real-network need · post-parity · **out of RC2 scope**
 **Area:** ed2k download manager (`emulebb-ed2k`)
 **Audience:** anyone implementing multi-file download source scheduling in emulebb-rust
+
+---
+
+## 0. Decision (2026-06-15): parked, revisit-on-observation
+
+A4AF is **not strictly necessary** for the rust client and stays parked. It is an
+**optimization, not correctness**: without it every download still works, just
+less efficiently when many concurrent transfers share the same peers.
+
+**2026 re-assessment (why parked, not built):**
+
+- **The connection-cost rationale is obsolete.** A4AF's heaviest machinery —
+  *hijacking a live TCP connection* from one transfer to another — existed because
+  in ~2001 sockets/connections were scarce (slow CPUs, the Windows XP SP2
+  half-open cap). In 2026 opening a connection is cheap, so the "full" A4AF
+  (cross-task live-connection dirottamento, which is exactly the part that does
+  not fit rust's independent per-transfer task model) buys little.
+- **What still holds:** A4AF's real driver was never connection count — it is
+  (1) the **structural one-relationship-per-peer** fact (eMule keeps one
+  `CUpDownClient` per peer requesting one `m_reqfile`; the other wanted files sit
+  in `m_OtherRequests_list`), (2) the **queue position** being expensive (earned
+  in hours, bounded by the remote uploader's upload bandwidth — protocol economy,
+  not hardware), and (3) **NNP** (a peer with no needed parts for X may have them
+  for Y). On the **shrunken 2026 eD2K network** with scarce sources, squeezing
+  each peer arguably matters *more*, not less.
+- **The UDP source-reask we shipped** ([[udp-source-reask-foundation]], commit
+  f60fc3c) already makes holding many queue positions cheap (one datagram / ~29
+  min), which erodes one A4AF benefit but not the per-peer-relationship or NNP
+  ones.
+
+**If revisited, build the "lite" version only** (≈80% of the benefit, fits the
+per-transfer model): registry-driven **source-selection bias** + **NNP swap** +
+**cross-transfer peer dedup**, using the already-built read-only
+`crates/emulebb-core/src/download_source_registry.rs` (peer→files index,
+`a4af_candidate_count`, `lease_best_for_file`; has unit tests). **Do not** build
+the live-connection hijacking (the obsolete socket-cost part). Two hook points
+remain: (a) source selection at engagement, (b) NNP reaction in the download
+driver.
+
+**Revisit triggers (watch on the real network):** the rust client running
+*dozens* of concurrent eD2K downloads (the operator's expected ceiling) and
+observably (a) wasting scarce sources it could reuse, or (b) opening many
+redundant simultaneous connections to the same overlapping peer, or (c)
+mishandling NNP sources (dropping peers that have needed parts for another wanted
+file). Until such behavior is observed, the lite scaffold stays dormant.
 
 ---
 
