@@ -8,10 +8,13 @@
 mod bootstrap;
 mod config;
 mod contact_helpers;
+mod legacy_challenge;
 mod publish;
 mod routing;
 mod search;
 mod transport;
+
+use legacy_challenge::LegacyChallengeTracker;
 
 pub use config::DhtConfig;
 use contact_helpers::expire_contact_for_massive_flood;
@@ -37,6 +40,9 @@ struct DhtInner {
     #[allow(dead_code)]
     semaphore: Semaphore,
     bootstrapped: std::sync::atomic::AtomicBool,
+    /// Pending pre-v8 contact-verification challenges (oracle
+    /// `CPacketTracking::listChallengeRequests`).
+    legacy_challenges: Mutex<LegacyChallengeTracker>,
 }
 
 /// The top-level DHT node. Clone-able (backed by Arc).
@@ -106,6 +112,7 @@ impl DhtNode {
                 config,
                 semaphore,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
+                legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
             }),
         })
     }

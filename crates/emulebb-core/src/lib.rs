@@ -4512,6 +4512,15 @@ pub(crate) async fn current_tcp_firewalled(
         .unwrap_or(true)
 }
 
+/// Kad version at/above which a contact supports the receiver-key three-way
+/// handshake (oracle `KADEMLIA_VERSION8_49b` = 8). Below this a contact must be
+/// IP-verified with a legacy challenge instead.
+const LEGACY_VERIFY_VERSION_THRESHOLD: u8 = 8;
+/// Kad version 7 (oracle `KADEMLIA_VERSION7_49a`): supports sender/receiver keys
+/// but not `HELLO_RES_ACK`, so on a HELLO_REQ it is verified with a PING
+/// challenge, and it is not challenged at all on the HELLO_RES leg.
+const KAD_VERSION_7: u8 = 7;
+
 /// Decide whether an inbound Kad HELLO (req/res) should request a
 /// `HELLO_RES_ACK` to complete the three-way IP-verification handshake.
 ///
@@ -4979,26 +4988,62 @@ async fn handle_kad_local_store_packet(
             .await?;
             dht.send_packet(from, &KadPacket::HelloRes(response))
                 .await?;
+            // Oracle Process_KADEMLIA2_HELLO_REQ: a pre-v8 contact that was
+            // added/updated without a valid receiver key supports no three-way
+            // handshake, so verify its source IP with a legacy challenge
+            // (v7 -> PING, <v7 -> REQ). send_legacy_challenge enforces the
+            // one-challenge-per-IP guard and picks the opcode by version.
+            if added_or_updated
+                && !receiver_verify_key_valid
+                && req.version < LEGACY_VERIFY_VERSION_THRESHOLD
+            {
+                if let Err(error) = dht
+                    .send_legacy_challenge(req.node_id, req.version, from)
+                    .await
+                {
+                    tracing::debug!(
+                        "failed to send legacy Kad challenge to {from}: {error:#}"
+                    );
+                }
+            }
         }
         KadPacket::HelloRes(res) => {
+            let mut added_or_updated = false;
             match dht
                 .add_contact_from_hello(from, res.node_id, res.tcp_port, res.version, &res.tags)
                 .await
             {
-                Ok(metadata) if metadata.requests_hello_res_ack => {
-                    dht.send_packet(
-                        from,
-                        &KadPacket::HelloResAck(HelloResAck {
-                            node_id: dht.own_id(),
-                            tags: Vec::new(),
-                        }),
-                    )
-                    .await?;
+                Ok(metadata) => {
+                    added_or_updated = true;
+                    if metadata.requests_hello_res_ack {
+                        dht.send_packet(
+                            from,
+                            &KadPacket::HelloResAck(HelloResAck {
+                                node_id: dht.own_id(),
+                                tags: Vec::new(),
+                            }),
+                        )
+                        .await?;
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     tracing::debug!(
                         "failed to record Kad HELLO_RES contact from {from}: {error:#}"
+                    );
+                }
+            }
+            // Oracle Process_KADEMLIA2_HELLO_RES: a pre-0.49a (version < 7)
+            // contact answered our HELLO_REQ but supports no keys, and the
+            // response could still be spoofed, so verify it with a legacy REQ
+            // challenge. (Version 7 relies on receiver keys here and is not
+            // challenged on the HELLO_RES leg.)
+            if added_or_updated && !receiver_verify_key_valid && res.version < KAD_VERSION_7 {
+                if let Err(error) = dht
+                    .send_legacy_challenge(res.node_id, res.version, from)
+                    .await
+                {
+                    tracing::debug!(
+                        "failed to send legacy Kad challenge to {from}: {error:#}"
                     );
                 }
             }
@@ -5361,6 +5406,39 @@ async fn handle_kad_local_store_packet(
         }
         KadPacket::CallbackReq(req) => {
             handle_kad_callback_req(kad_buddy, buddy_registry, from, &req).await;
+        }
+        KadPacket::Res(res) => {
+            // Oracle Process_KADEMLIA2_RES top check: a KADEMLIA2_RES whose target
+            // echoes one of our pending legacy challenges verifies that pre-v8
+            // contact (its source IP is not spoofed). Other RES packets are
+            // search/lookup responses consumed by the traversal layer, so a
+            // non-match here is a no-op.
+            if let IpAddr::V4(ip) = from.ip()
+                && dht
+                    .resolve_legacy_challenge(res.target, ip, emulebb_kad_proto::opcode::RES)
+                    .await
+            {
+                tracing::debug!(
+                    "verified Kad contact via legacy challenge (KADEMLIA2_RES) from {from}"
+                );
+            }
+        }
+        KadPacket::Pong(_) => {
+            // Oracle Process_KADEMLIA2_PONG top check: a PONG answering one of our
+            // pending legacy PING challenges verifies that version-7 contact.
+            if let IpAddr::V4(ip) = from.ip()
+                && dht
+                    .resolve_legacy_challenge(
+                        emulebb_kad_proto::NodeId::ZERO,
+                        ip,
+                        emulebb_kad_proto::opcode::PONG,
+                    )
+                    .await
+            {
+                tracing::debug!(
+                    "verified Kad contact via legacy challenge (KADEMLIA2_PONG) from {from}"
+                );
+            }
         }
         _ => {}
     }
