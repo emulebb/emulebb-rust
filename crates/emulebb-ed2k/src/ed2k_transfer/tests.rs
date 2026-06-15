@@ -20,6 +20,7 @@ mod reask_reciprocity;
 mod salvage;
 mod upload_queue;
 mod upload_queue_credit;
+mod upload_queue_firewalled_callback;
 mod upload_queue_priority;
 mod upload_queue_score_modifiers;
 mod upload_queue_support;

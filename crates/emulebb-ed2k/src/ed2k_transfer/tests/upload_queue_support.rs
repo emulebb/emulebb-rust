@@ -39,6 +39,8 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         // Modern mule client by default (not old-client penalised).
         emule_version: 0x99,
         is_emule_client: true,
+        kad_port: 0,
+        firewall_context: Default::default(),
     }
 }
 
@@ -60,6 +62,8 @@ pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
         banned: false,
         emule_version: 0x99,
         is_emule_client: true,
+        kad_port: 0,
+        firewall_context: Default::default(),
     }
 }
 

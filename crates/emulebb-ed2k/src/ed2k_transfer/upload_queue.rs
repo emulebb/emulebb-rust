@@ -123,6 +123,16 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     /// OP_EMULEINFO). Part of the old-client penalty predicate (eMule
     /// `IsEmuleClient() || GetClientSoft() < 10`). Excluded from identity eq/hash.
     pub is_emule_client: bool,
+    /// Peer's Kad UDP port (eMule `GetKadPort()`, high 16 of CT_EMULE_UDPPORTS);
+    /// `0` when not Kad-reachable. A Kad-reachable peer is exempt from the
+    /// firewalled-LowID callback admission guard. Excluded from identity eq/hash.
+    pub kad_port: u16,
+    /// Our-side firewalled-LowID callback admission context, set per-connection by
+    /// the listener from the live server/Kad firewall state (master
+    /// `AddClientToQueue` opening guard). Transient; excluded from identity
+    /// eq/hash. Defaults to a non-firewalled state, so the guard never fires until
+    /// the listener supplies real state.
+    pub firewall_context: Ed2kUploadFirewallContext,
 }
 
 impl PartialEq for Ed2kUploadPeerIdentity {
@@ -262,6 +272,17 @@ pub struct Ed2kUploadThrottleReservation {
     pub delay: Duration,
 }
 
+/// Our-side network state for the firewalled-LowID callback admission guard
+/// (master `AddClientToQueue` opening check). Plumbed from the listener: whether
+/// we are connected to any network, whether we are TCP-firewalled (LowID), and
+/// whether the candidate peer is on the same server we are connected to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Ed2kUploadFirewallContext {
+    pub we_are_connected: bool,
+    pub we_are_firewalled: bool,
+    pub peer_on_same_server: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct Ed2kUploadQueueState {
     config: Ed2kUploadQueueConfig,
@@ -348,8 +369,12 @@ impl Ed2kUploadQueueState {
             Ed2kUploadSessionPhase::Granted
         } else {
             // No free slot: this peer would join the waiting queue, so apply the
-            // master AddClientToQueue admission gates (per-IP cap + soft/hard
-            // combined-score limit) before accepting it.
+            // master AddClientToQueue admission gates. First the firewalled-LowID
+            // callback guard (opening check), then the per-IP cap + soft/hard
+            // combined-score limit.
+            if self.reject_firewalled_callback_admission(&key) {
+                return Ed2kUploadSessionStatus::Rejected;
+            }
             if self.reject_queue_admission(&key, file_priority_score, credit_score_permille, now) {
                 return Ed2kUploadSessionStatus::Rejected;
             }
@@ -606,6 +631,25 @@ impl Ed2kUploadQueueState {
                 return;
             }
         }
+    }
+
+    /// Apply the master `AddClientToQueue` firewalled-LowID callback guard
+    /// (`UploadQueue.cpp:1815-1825`): when we are connected and firewalled, reject
+    /// a non-Kad, non-downloading, non-friend, different-server candidate once the
+    /// waiting queue already exceeds 50, to limit LowID-callback abuse.
+    fn reject_firewalled_callback_admission(&self, key: &Ed2kUploadSessionKey) -> bool {
+        let firewall_context = key.peer.firewall_context;
+        admission::reject_firewalled_callback(admission::FirewalledCallbackAdmission {
+            we_are_connected: firewall_context.we_are_connected,
+            we_are_firewalled: firewall_context.we_are_firewalled,
+            peer_has_kad_port: key.peer.kad_port != 0,
+            // An inbound queued uploader is requesting from us, not downloading
+            // from us, so it is never DS_NONE-exempt here (master DS_NONE check).
+            peer_is_downloading_from_us: false,
+            peer_is_friend: key.peer.friend_slot,
+            peer_on_same_server: firewall_context.peer_on_same_server,
+            waiting_count: self.waiting_session_count() as u64,
+        })
     }
 
     /// Apply the master `AddClientToQueue` waiting-admission gates: the per-IP
@@ -880,5 +924,7 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         banned: false,
         emule_version: 0,
         is_emule_client: false,
+        kad_port: 0,
+        firewall_context: Ed2kUploadFirewallContext::default(),
     }
 }

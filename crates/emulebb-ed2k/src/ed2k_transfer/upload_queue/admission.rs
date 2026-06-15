@@ -14,6 +14,9 @@
 
 /// Per-IP waiting cap (master `cSameIP >= 3`).
 const MAX_WAITERS_PER_IP: usize = 3;
+/// Master waiting-queue length above which the firewalled-LowID callback guard
+/// engages (`GetWaitingUserCount() > 50`).
+const FIREWALLED_CALLBACK_QUEUE_THRESHOLD: u64 = 50;
 /// Floor used by the hard-limit margin (master `max(softQueueLimit, 800)`).
 const HARD_LIMIT_MARGIN_FLOOR: u64 = 800;
 
@@ -72,6 +75,47 @@ pub(super) fn combined_file_prio_and_credit(
 #[must_use]
 pub(super) fn reject_per_ip_cap(same_ip_waiters: usize) -> bool {
     same_ip_waiters >= MAX_WAITERS_PER_IP
+}
+
+/// Inputs for the firewalled-LowID callback admission guard (master
+/// `CUploadQueue::AddClientToQueue` opening check, `UploadQueue.cpp:1815-1825`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FirewalledCallbackAdmission {
+    /// We are connected to any network (`theApp.IsConnected()`).
+    pub(super) we_are_connected: bool,
+    /// We are firewalled / LowID (`theApp.IsFirewalled()`).
+    pub(super) we_are_firewalled: bool,
+    /// The candidate peer is Kad-reachable (`client->GetKadPort()` non-zero); a
+    /// Kad-reachable peer is exempt (all Kad callbacks are allowed).
+    pub(super) peer_has_kad_port: bool,
+    /// The candidate peer is currently downloading from us (`GetDownloadState()
+    /// != DS_NONE`); a peer that helps us is exempt. An inbound queued uploader
+    /// is requesting, not downloading, so this is normally `false`.
+    pub(super) peer_is_downloading_from_us: bool,
+    /// The candidate peer is a friend (`IsFriend()`); friends are exempt.
+    pub(super) peer_is_friend: bool,
+    /// The candidate peer is on the same server we are connected to
+    /// (`serverconnect->IsLocalServer(...)`); same-server TCP LowID callbacks are
+    /// allowed. An inbound peer whose server we do not know is treated as a
+    /// different server (master `GetServerIP()` 0 -> `IsLocalServer` false).
+    pub(super) peer_on_same_server: bool,
+    /// Current number of waiting clients (`GetWaitingUserCount()`).
+    pub(super) waiting_count: u64,
+}
+
+/// Returns `true` when the firewalled-LowID callback guard blocks the candidate
+/// (master `AddClientToQueue` early `return`): we are connected AND firewalled,
+/// the peer is not Kad-reachable, not downloading from us, not a friend, not on
+/// our server, and the waiting queue already holds more than 50 clients.
+#[must_use]
+pub(super) fn reject_firewalled_callback(admission: FirewalledCallbackAdmission) -> bool {
+    admission.we_are_connected
+        && admission.we_are_firewalled
+        && !admission.peer_has_kad_port
+        && !admission.peer_is_downloading_from_us
+        && !admission.peer_is_friend
+        && !admission.peer_on_same_server
+        && admission.waiting_count > FIREWALLED_CALLBACK_QUEUE_THRESHOLD
 }
 
 #[cfg(test)]
@@ -147,5 +191,53 @@ mod tests {
         assert!(!reject_per_ip_cap(2));
         assert!(reject_per_ip_cap(3));
         assert!(reject_per_ip_cap(4));
+    }
+
+    fn firewalled_callback_blocking() -> FirewalledCallbackAdmission {
+        FirewalledCallbackAdmission {
+            we_are_connected: true,
+            we_are_firewalled: true,
+            peer_has_kad_port: false,
+            peer_is_downloading_from_us: false,
+            peer_is_friend: false,
+            peer_on_same_server: false,
+            waiting_count: 51,
+        }
+    }
+
+    #[test]
+    fn firewalled_callback_blocks_when_all_conditions_hold() {
+        assert!(reject_firewalled_callback(firewalled_callback_blocking()));
+    }
+
+    #[test]
+    fn firewalled_callback_requires_more_than_fifty_waiters() {
+        let mut admission = firewalled_callback_blocking();
+        admission.waiting_count = 50;
+        assert!(!reject_firewalled_callback(admission));
+        admission.waiting_count = 51;
+        assert!(reject_firewalled_callback(admission));
+    }
+
+    #[test]
+    fn firewalled_callback_exempts_when_not_firewalled() {
+        let mut admission = firewalled_callback_blocking();
+        admission.we_are_firewalled = false;
+        assert!(!reject_firewalled_callback(admission));
+    }
+
+    #[test]
+    fn firewalled_callback_exempts_kad_friend_same_server_and_downloader() {
+        for tweak in [
+            |a: &mut FirewalledCallbackAdmission| a.peer_has_kad_port = true,
+            |a: &mut FirewalledCallbackAdmission| a.peer_is_friend = true,
+            |a: &mut FirewalledCallbackAdmission| a.peer_on_same_server = true,
+            |a: &mut FirewalledCallbackAdmission| a.peer_is_downloading_from_us = true,
+            |a: &mut FirewalledCallbackAdmission| a.we_are_connected = false,
+        ] {
+            let mut admission = firewalled_callback_blocking();
+            tweak(&mut admission);
+            assert!(!reject_firewalled_callback(admission));
+        }
     }
 }

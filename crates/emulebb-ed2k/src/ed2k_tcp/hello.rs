@@ -390,6 +390,10 @@ pub(super) struct DecodedHelloIdentity {
     /// (eMule `m_nUDPPort`); `0` when not advertised. Threaded into the upload
     /// queue to correlate inbound UDP source-reask by `(ip, udp_port)`.
     pub(super) udp_port: u16,
+    /// Peer's Kad UDP port, from the high 16 bits of `CT_EMULE_UDPPORTS` (eMule
+    /// `m_nKadPort`); `0` when the peer is not Kad-reachable. Feeds the
+    /// firewalled-LowID callback admission guard (`!client->GetKadPort()`).
+    pub(super) kad_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +492,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         ]),
         tcp_port: u16::from_le_bytes([type_payload[20], type_payload[21]]),
         udp_port: 0,
+        kad_port: 0,
     };
 
     let mut cursor = &type_payload[22..];
@@ -537,6 +542,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         {
             // eMule CT_EMULE_UDPPORTS: high 16 = Kad port, low 16 = eD2k UDP port.
             identity.udp_port = udp_ports as u16;
+            identity.kad_port = (udp_ports >> 16) as u16;
         }
         cursor = tag.remaining;
     }

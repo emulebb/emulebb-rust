@@ -402,12 +402,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     decode_exact_file_hash_payload(&packet.payload, "OP_STARTUPLOADREQ")?;
                 requested_file_hash = Some(requested);
                 let reply = if transfer_runtime.local_entry(&requested).await?.is_some() {
+                    let mut peer_identity = peer_upload_identity.clone();
+                    peer_identity.firewall_context =
+                        upload_firewall_context(server_state, kad_firewall).await;
                     upload_queue
-                        .start_upload_reply(
-                            transfer_runtime,
-                            peer_upload_identity.clone(),
-                            &requested,
-                        )
+                        .start_upload_reply(transfer_runtime, peer_identity, &requested)
                         .await
                 } else {
                     encode_file_req_ans_nofil(&requested)
@@ -636,10 +635,13 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 .await?;
             }
             (OP_EDONKEYPROT, OP_REQUESTPARTS) | (OP_EMULEPROT, OP_REQUESTPARTS_I64) => {
+                let mut peer_identity = peer_upload_identity.clone();
+                peer_identity.firewall_context =
+                    upload_firewall_context(server_state, kad_firewall).await;
                 match serve_upload_payload(UploadPayloadRequest {
                     transfer_runtime,
                     upload_queue: &mut upload_queue,
-                    peer_upload_identity: peer_upload_identity.clone(),
+                    peer_upload_identity: peer_identity,
                     peer_ident_verified: peer_secure_ident.peer_ident_verified,
                     transport: &mut transport,
                     peer_addr,
@@ -1191,6 +1193,8 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         banned: false,
         emule_version: 0,
         is_emule_client: false,
+        kad_port: 0,
+        firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
     }
 }
 
@@ -1224,6 +1228,12 @@ fn upload_peer_identity_from_hello(
         // real (older) version byte arrives later via OP_EMULEINFO.
         emule_version: if profile.is_mule_hello { 0x99 } else { 0 },
         is_emule_client: profile.is_mule_hello,
+        // Peer Kad port (high 16 of CT_EMULE_UDPPORTS): a Kad-reachable peer is
+        // exempt from the firewalled-LowID callback admission guard.
+        kad_port: remote_hello.kad_port,
+        // Set per-request by the OP_STARTUPLOADREQ / OP_REQUESTPARTS handlers from
+        // the live server/Kad firewall state; defaults to non-firewalled here.
+        firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
     }
 }
 
@@ -1293,6 +1303,37 @@ async fn enrich_hello_identity(
         && firewall.udp_verified
         && firewall.udp_open;
     identity
+}
+
+/// Build the firewalled-LowID callback admission context (master
+/// `AddClientToQueue` opening guard) from our live server + Kad firewall state.
+///
+/// `we_are_connected` mirrors `theApp.IsConnected()` (an eD2k server session or a
+/// firewall-verified open Kad UDP path), and `we_are_firewalled` mirrors
+/// `theApp.IsFirewalled()` (server-assigned LowID or a Kad TCP-firewalled
+/// verdict). `peer_on_same_server` is `false`: an inbound peer's server is not
+/// known at the listener, and the master treats an unknown peer server
+/// (`GetServerIP()` 0) as a different server (`IsLocalServer` false).
+async fn upload_firewall_context(
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+) -> crate::ed2k_transfer::Ed2kUploadFirewallContext {
+    let (server_connected, server_low_id) = {
+        let state = server_state.read().await;
+        (state.connected, state.tcp_firewalled().unwrap_or(false))
+    };
+    let (kad_connected, kad_tcp_firewalled) = {
+        let firewall = kad_firewall.lock().await;
+        (
+            firewall.udp_verified && firewall.udp_open,
+            firewall.tcp_firewalled().unwrap_or(false),
+        )
+    };
+    crate::ed2k_transfer::Ed2kUploadFirewallContext {
+        we_are_connected: server_connected || kad_connected,
+        we_are_firewalled: server_low_id || kad_tcp_firewalled,
+        peer_on_same_server: false,
+    }
 }
 
 #[cfg(test)]
