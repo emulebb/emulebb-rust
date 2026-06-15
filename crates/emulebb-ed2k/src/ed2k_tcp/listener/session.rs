@@ -49,7 +49,7 @@ use super::super::hello::{
 use super::super::identity::{
     Ed2kPeerSecureIdentState, begin_secure_ident_probe, decode_public_key_payload,
     decode_secident_state, decode_signature_payload, encode_secident_state, random_nonzero_u32,
-    try_send_secure_ident_signature,
+    try_send_secure_ident_signature, verify_peer_secure_ident_signature,
 };
 use super::super::{
     ED2K_CONNECTION_IDLE_TIMEOUT, ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
@@ -638,6 +638,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     transfer_runtime,
                     upload_queue: &mut upload_queue,
                     peer_upload_identity: peer_upload_identity.clone(),
+                    peer_ident_verified: peer_secure_ident.peer_ident_verified,
                     transport: &mut transport,
                     peer_addr,
                     opcode: packet.opcode,
@@ -758,12 +759,23 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             }
             (OP_EMULEPROT, OP_SIGNATURE) => match decode_signature_payload(&packet.payload) {
                 Ok(signature) => {
+                    let verified = verify_peer_secure_ident_signature(
+                        secure_ident,
+                        &mut peer_secure_ident,
+                        &signature,
+                        peer_addr,
+                        reachability.get(),
+                    );
                     dump_ed2k_tcp_listener_meta(
                         peer_addr,
                         Some(transport.mode),
-                        "secure_ident_signature",
+                        if verified {
+                            "secure_ident_signature_verified"
+                        } else {
+                            "secure_ident_signature_unverified"
+                        },
                         format!(
-                            "signature_len={} challenge_ip_kind={}",
+                            "signature_len={} challenge_ip_kind={} verified={verified}",
                             signature.signature_len,
                             signature
                                 .challenge_ip_kind

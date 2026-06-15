@@ -260,6 +260,52 @@ pub(super) async fn connect_peer_and_exchange_hello(
     stream
 }
 
+/// Drive the peer side of a full mutual secure-ident exchange against the
+/// listener so the listener RSA-verifies the peer (eMule `IS_IDENTIFIED`): the
+/// peer answers the listener's challenge with a real signature over the
+/// listener's public key, which is the prerequisite for credit attribution.
+/// Must be called immediately after the hello, before any upload requests.
+pub(super) async fn complete_peer_secure_ident_with_listener(
+    stream: &mut TcpStream,
+    peer_secure_ident: &Ed2kSecureIdent,
+) {
+    // 1) Listener probes us with KEY_AND_SIGNATURE_NEEDED + its challenge.
+    let probe = read_until_opcode(stream, OP_EMULEPROT, OP_SECIDENTSTATE).await;
+    let (_state, listener_challenge) = decode_secident_state(&probe[6..]).unwrap();
+
+    // 2) Send our public key, then challenge the listener for its key+signature.
+    stream
+        .write_all(&encode_packet(
+            OP_EMULEPROT,
+            OP_PUBLICKEY,
+            &peer_secure_ident.public_key_payload().unwrap(),
+        ))
+        .await
+        .unwrap();
+    let peer_challenge = 0x1357_9BDFu32;
+    stream
+        .write_all(&encode_secident_state(
+            ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
+            peer_challenge,
+        ))
+        .await
+        .unwrap();
+
+    // 3) Listener answers with its public key; sign it + the listener challenge.
+    let listener_public_key = read_until_opcode(stream, OP_EMULEPROT, OP_PUBLICKEY).await;
+    let listener_public_key = decode_public_key_payload(&listener_public_key[6..]).unwrap();
+    stream
+        .write_all(&encode_packet(
+            OP_EMULEPROT,
+            OP_SIGNATURE,
+            &peer_secure_ident
+                .signature_payload(&listener_public_key, listener_challenge)
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+}
+
 pub(super) async fn connect_obfuscated_peer_and_exchange_hello(
     peer_addr: SocketAddr,
     listener_user_hash: [u8; 16],
@@ -571,6 +617,49 @@ pub(super) async fn read_transport_upload_bytes(
         }
     }
     (reconstructed, saw_compressed)
+}
+
+/// Obfuscated-transport counterpart of [`complete_peer_secure_ident_with_listener`].
+pub(super) async fn complete_peer_secure_ident_with_listener_transport(
+    transport: &mut Ed2kTransport,
+    peer_secure_ident: &Ed2kSecureIdent,
+) {
+    let probe = read_transport_until_opcode(transport, OP_EMULEPROT, OP_SECIDENTSTATE).await;
+    let (_state, listener_challenge) = decode_secident_state(&probe.payload).unwrap();
+
+    transport
+        .write_all(
+            &encode_packed_packet(
+                OP_PUBLICKEY,
+                &peer_secure_ident.public_key_payload().unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let peer_challenge = 0x1357_9BDFu32;
+    transport
+        .write_all(&encode_secident_state(
+            ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
+            peer_challenge,
+        ))
+        .await
+        .unwrap();
+
+    let listener_public_key = read_transport_until_opcode(transport, OP_EMULEPROT, OP_PUBLICKEY).await;
+    let listener_public_key = decode_public_key_payload(&listener_public_key.payload).unwrap();
+    transport
+        .write_all(
+            &encode_packed_packet(
+                OP_SIGNATURE,
+                &peer_secure_ident
+                    .signature_payload(&listener_public_key, listener_challenge)
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
 }
 
 pub(super) async fn read_transport_until_opcode(

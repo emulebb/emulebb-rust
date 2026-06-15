@@ -42,7 +42,7 @@ use super::super::{
     encode_empty_shared_files_answer, encode_emule_info_answer, encode_packet,
     encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
     is_connection_shutdown_error, try_send_secure_ident_signature,
-    validate_file_status_part_count,
+    validate_file_status_part_count, verify_peer_secure_ident_signature,
 };
 use super::{
     ActiveDownloadPiece, DownloadRequestWindowState, PendingCompressedPart, PendingPartRequest,
@@ -492,13 +492,29 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EMULEPROT, OP_SIGNATURE) => {
                     match decode_signature_payload(&packet.payload) {
                         Ok(signature) => {
-                            session_state.peer_secure_ident.peer_signature_received = true;
+                            // RSA-verify the uploader's identity (we issued the
+                            // challenge in our OP_PUBLICKEY exchange). We have no
+                            // learned external IP on this outbound path, so a V2
+                            // REMOTECLIENT signature verifies only when the peer
+                            // could know its own IP (eMule behaves the same when
+                            // LocalIP is unknown).
+                            let verified = verify_peer_secure_ident_signature(
+                                secure_ident,
+                                &mut session_state.peer_secure_ident,
+                                &signature,
+                                peer_addr,
+                                None,
+                            );
                             dump_ed2k_tcp_download_meta(
                                 peer_addr,
                                 Some(transport.mode),
-                                "secure_ident_signature",
+                                if verified {
+                                    "secure_ident_signature_verified"
+                                } else {
+                                    "secure_ident_signature_unverified"
+                                },
                                 format!(
-                                    "signature_len={} challenge_ip_kind={}",
+                                    "signature_len={} challenge_ip_kind={} verified={verified}",
                                     signature.signature_len,
                                     signature
                                         .challenge_ip_kind

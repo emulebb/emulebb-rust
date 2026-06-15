@@ -83,6 +83,10 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
     );
 
     let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_hello_identity()).await;
+    // RSA-verify our identity to the listener so it credits our user hash
+    // (B2: credits are attributed only to a verified secure-ident peer).
+    let peer_secure_ident = test_peer_secure_ident();
+    complete_peer_secure_ident_with_listener(&mut stream, &peer_secure_ident).await;
 
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     stream
@@ -199,6 +203,9 @@ async fn listener_obfuscated_upload_session_serves_verified_file_via_compressed_
         },
     )
     .await;
+    // RSA-verify our identity so the listener credits our user hash (B2).
+    let peer_secure_ident = test_peer_secure_ident();
+    complete_peer_secure_ident_with_listener_transport(&mut transport, &peer_secure_ident).await;
 
     transport
         .write_all(&encode_start_upload_req(&file.file_hash))
