@@ -38,6 +38,7 @@ mod download;
 mod dump;
 mod firewall_helper;
 mod hello;
+mod hello_buddy;
 mod identity;
 mod listener;
 mod obfuscation;
@@ -119,6 +120,7 @@ pub(in crate::ed2k_tcp) use identity::{
 };
 pub(crate) use listener::reply_with_firewall_udp;
 pub use hello::set_publish_rust_identity;
+pub use hello_buddy::{HelloBuddySnapshot, set_hello_buddy_snapshot};
 #[cfg(test)]
 use listener::{Ed2kConnectionContext, handle_connection};
 pub use listener::{Ed2kListenerOptions, run_ed2k_listener};
@@ -247,6 +249,10 @@ const CT_MOD_VERSION: u8 = 0x55;
 const CT_EMULE_UDPPORTS: u8 = 0xF9;
 const CT_EMULE_MISCOPTIONS1: u8 = 0xFA;
 const CT_EMULE_VERSION: u8 = 0xFB;
+/// Buddy IP advertised by a firewalled client that holds a buddy (`opcodes.h`).
+const CT_EMULE_BUDDYIP: u8 = 0xFC;
+/// Buddy UDP port (low 16 bits) advertised alongside `CT_EMULE_BUDDYIP`.
+const CT_EMULE_BUDDYUDP: u8 = 0xFD;
 const CT_EMULE_MISCOPTIONS2: u8 = 0xFE;
 
 const ET_COMPRESSION: u8 = 0x20;

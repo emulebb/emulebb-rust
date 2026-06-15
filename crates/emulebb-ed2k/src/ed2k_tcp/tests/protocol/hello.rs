@@ -1,5 +1,10 @@
 use super::*;
 
+/// Serializes tests that read the exact hello tag count or mutate the
+/// process-wide hello buddy snapshot, so a concurrent buddy advertisement does
+/// not change another test's observed tag count.
+static HELLO_TAG_COUNT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn hello_request_encoding_matches_ed2k_framing() {
     let packet = encode_hello_request(Ed2kHelloIdentity {
@@ -28,6 +33,8 @@ fn hello_request_encoding_matches_ed2k_framing() {
 
 #[test]
 fn hello_answer_advertises_emule_style_tags() {
+    let _guard = HELLO_TAG_COUNT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    set_hello_buddy_snapshot(None);
     let packet = encode_hello_answer(Ed2kHelloIdentity {
         user_hash: [0x22; 16],
         client_id: 0x521B_5895,
@@ -467,4 +474,81 @@ async fn enrich_hello_identity_keeps_direct_udp_callback_off_for_high_id() {
 
     assert!(!identity.direct_udp_callback);
     assert_eq!(identity.client_id, 0x521B_5895);
+}
+
+#[test]
+fn hello_advertises_buddy_tags_when_firewalled_with_buddy() {
+    let _guard = HELLO_TAG_COUNT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+    let buddy_ip = std::net::Ipv4Addr::new(203, 0, 113, 50);
+    let buddy_udp_port = 4665u16;
+    set_hello_buddy_snapshot(Some(HelloBuddySnapshot {
+        ip: buddy_ip,
+        udp_port: buddy_udp_port,
+    }));
+
+    let packet = encode_hello_answer(Ed2kHelloIdentity {
+        user_hash: [0x33; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    });
+
+    // The tag count bumps from the stock 6 to 8 (CT_EMULE_BUDDYIP + BUDDYUDP).
+    assert_eq!(
+        u32::from_le_bytes([packet[28], packet[29], packet[30], packet[31]]),
+        8,
+        "buddy advertisement must add two hello tags"
+    );
+
+    let buddy_ip_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_EMULE_BUDDYIP];
+    let buddy_udp_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_EMULE_BUDDYUDP];
+    let buddy_ip_pos = packet
+        .windows(buddy_ip_header.len())
+        .position(|window| window == buddy_ip_header)
+        .expect("CT_EMULE_BUDDYIP tag present");
+    let buddy_udp_pos = packet
+        .windows(buddy_udp_header.len())
+        .position(|window| window == buddy_udp_header)
+        .expect("CT_EMULE_BUDDYUDP tag present");
+
+    // BUDDYIP value == the buddy octets read little-endian (network in_addr).
+    let ip_value_off = buddy_ip_pos + buddy_ip_header.len();
+    assert_eq!(
+        u32::from_le_bytes(packet[ip_value_off..ip_value_off + 4].try_into().unwrap()),
+        u32::from_le_bytes(buddy_ip.octets())
+    );
+    // BUDDYUDP low 16 bits == buddy UDP port; high 16 reserved zero.
+    let udp_value_off = buddy_udp_pos + buddy_udp_header.len();
+    assert_eq!(
+        u32::from_le_bytes(packet[udp_value_off..udp_value_off + 4].try_into().unwrap()),
+        u32::from(buddy_udp_port)
+    );
+
+    // When no buddy is held, neither tag is advertised and the count is back to 6.
+    set_hello_buddy_snapshot(None);
+    let plain = encode_hello_answer(Ed2kHelloIdentity {
+        user_hash: [0x33; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    });
+    assert_eq!(
+        u32::from_le_bytes([plain[28], plain[29], plain[30], plain[31]]),
+        6
+    );
+    assert!(
+        !plain
+            .windows(buddy_ip_header.len())
+            .any(|window| window == buddy_ip_header),
+        "no buddy tag without a buddy"
+    );
 }

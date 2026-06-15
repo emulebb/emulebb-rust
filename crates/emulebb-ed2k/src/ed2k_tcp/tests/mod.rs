@@ -1,6 +1,7 @@
 use super::dump;
 use super::{
-    CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2, CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME,
+    CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
+    CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME,
     CT_VERSION, DownloadSessionOptions, DownloadWindowLimits, ED2K_EMBLOCK_SIZE,
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SOURCE_EXCHANGE2_VERSION, EDONKEY_VERSION,
     EMULE_CRYPT_REQUESTS, EMULE_CRYPT_SUPPORTS, EMULE_ENCRYPTION_METHOD_OBFUSCATION,
@@ -22,7 +23,8 @@ use super::{
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
     OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
     OP_SECIDENTSTATE, OP_SENDINGPART, OP_SETREQFILEID, OP_SIGNATURE, OP_STARTUPLOADREQ,
-    PeerSourceExchangeRequest, PendingCompressedPart, SourceExchangePeer, TAGTYPE_UINT32,
+    HelloBuddySnapshot, PeerSourceExchangeRequest, PendingCompressedPart, SourceExchangePeer,
+    TAGTYPE_UINT32, set_hello_buddy_snapshot,
     begin_secure_ident_probe, build_hello_responses, build_upload_part_packets,
     connect_callback_peer, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,

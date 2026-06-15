@@ -30,9 +30,9 @@ use emulebb_ed2k::{
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-        Ed2kSecureIdent, OutboundBuddyLinkOptions, download_file_from_peer, emule_connect_options,
-        encode_kad_callback_relay_frame, enrich_hello_identity, run_ed2k_listener,
-        run_outbound_buddy_link, send_kad_firewall_tcp_ack, set_publish_rust_identity,
+        Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions, download_file_from_peer, emule_connect_options,
+        encode_kad_callback_relay_frame, enrich_hello_identity, run_ed2k_listener, run_outbound_buddy_link,
+        send_kad_firewall_tcp_ack, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kLiveSource, Ed2kResumeManifest, Ed2kSourceHint,
@@ -4175,6 +4175,7 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
                 }
                 if !need.needs_buddy() {
                     runtime.buddy_registry.evict_outbound();
+                    set_hello_buddy_snapshot(None); // no outgoing buddy: stop advertising
                 }
             }
             if !state.should_search(need, now) {
@@ -5334,7 +5335,7 @@ async fn handle_kad_find_buddy_res(
         return;
     }
     // We are IPv4-only; a non-IPv4 buddy source cannot be connected.
-    let IpAddr::V4(_buddy_ip) = from.ip() else {
+    let IpAddr::V4(buddy_ip) = from.ip() else {
         tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: non-IPv4 buddy source");
         return;
     };
@@ -5355,6 +5356,7 @@ async fn handle_kad_find_buddy_res(
         }
         state.set_outgoing_buddy(buddy);
     }
+    set_hello_buddy_snapshot(Some(HelloBuddySnapshot { ip: buddy_ip, udp_port: from.port() }));
     tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
 
     // Establish + hold the persistent buddy TCP link so callbacks can be relayed
@@ -5390,6 +5392,7 @@ async fn handle_kad_find_buddy_res(
         // On any exit (connect failure or link drop), drop the acquired buddy so
         // the next upkeep re-searches.
         kad_buddy.lock().await.clear_outgoing_buddy();
+        set_hello_buddy_snapshot(None);
     });
 }
 

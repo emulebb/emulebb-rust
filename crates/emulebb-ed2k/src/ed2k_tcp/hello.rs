@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::hello_buddy::hello_buddy_snapshot;
 use super::{
-    CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2, CT_EMULE_UDPPORTS, CT_EMULE_VERSION,
-    CT_MOD_VERSION, CT_NAME,
+    CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
+    CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_MOD_VERSION, CT_NAME,
     CT_VERSION, EDONKEY_VERSION, EMULE_ADVERTISED_KAD_VERSION, EMULE_CRYPT_REQUESTS,
     EMULE_CRYPT_SUPPORTS, EMULE_INFO_FEATURES, EMULE_PROTOCOL_VERSION, EMULE_SECURE_IDENT_VERSION,
     EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR, EMULE_VERSION_SHORT, EMULE_VERSION_UPDATE,
@@ -168,7 +169,14 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
     // stock eMule Community 0.7-series client. Only when the operator opts in do
     // we append a CT_MOD_VERSION="emule-rust" tag to publish the real identity.
     let publish_rust = PUBLISH_RUST_IDENTITY.load(Ordering::Relaxed);
-    let tag_count: u32 = if publish_rust { 7 } else { 6 };
+    // Advertise the buddy link only while firewalled with a buddy (the snapshot
+    // is `Some` exactly then), mirroring `buddySnapshot.bShouldAdvertise` and the
+    // matching `GetHelloTagCount` +2 bump (CT_EMULE_BUDDYIP + CT_EMULE_BUDDYUDP).
+    let buddy = hello_buddy_snapshot();
+    let mut tag_count: u32 = if publish_rust { 7 } else { 6 };
+    if buddy.is_some() {
+        tag_count += 2;
+    }
     payload.extend_from_slice(&tag_count.to_le_bytes());
     push_ed2k_string_tag(payload, CT_NAME, HELLO_NICKNAME);
     push_ed2k_u32_tag(payload, CT_VERSION, EDONKEY_VERSION);
@@ -182,6 +190,18 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
         CT_EMULE_UDPPORTS,
         (u32::from(identity.udp_port) << 16) | u32::from(identity.udp_port),
     );
+    if let Some(buddy) = buddy {
+        // eMule stores GetIP() (network-byte-order in_addr); the tag value is that
+        // uint32, which equals the octets read little-endian (matching how the
+        // server source/client-id IPs are encoded elsewhere in the protocol).
+        push_ed2k_u32_tag(
+            payload,
+            CT_EMULE_BUDDYIP,
+            u32::from_le_bytes(buddy.ip.octets()),
+        );
+        // Low 16 bits = buddy UDP port; high 16 reserved (eMule writes 0).
+        push_ed2k_u32_tag(payload, CT_EMULE_BUDDYUDP, u32::from(buddy.udp_port));
+    }
     push_ed2k_u32_tag(payload, CT_EMULE_MISCOPTIONS1, emule_misc_options1());
     push_ed2k_u32_tag(
         payload,
