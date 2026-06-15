@@ -31,6 +31,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info};
 
 use crate::buddy_socket::BuddySocketRegistry;
+use crate::ed2k_transfer::Ed2kTransferRuntime;
 
 use super::codec::decode_kad_callback_payload;
 use super::firewall_helper::{connect_callback_peer, is_connection_shutdown_error};
@@ -64,6 +65,12 @@ pub struct OutboundBuddyLinkOptions {
     pub buddy_connect_options: u8,
     /// Our hello identity, so the buddy recognizes us as its incoming buddy.
     pub hello_identity: Ed2kHelloIdentity,
+    /// Our own Kad id, used to validate the `uCheck` field of a relayed
+    /// OP_CALLBACK (oracle ListenSocket.cpp: `check XOR allones == GetKadID()`).
+    pub own_kad_id: [u8; 16],
+    /// Transfer runtime, used to confirm the relayed callback file is one we
+    /// share or download before connecting out (oracle GetFileByID guard).
+    pub transfer_runtime: Arc<Ed2kTransferRuntime>,
     /// The shared buddy-socket registry (outbound slot).
     pub registry: BuddySocketRegistry,
     /// Connect/IO timeout.
@@ -84,6 +91,8 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         buddy_user_hash,
         buddy_connect_options,
         hello_identity,
+        own_kad_id,
+        transfer_runtime,
         registry,
         timeout,
         lost,
@@ -122,6 +131,8 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         bind_ip,
         buddy_addr,
         hello_identity,
+        own_kad_id,
+        &transfer_runtime,
     )
     .await;
 
@@ -140,6 +151,8 @@ async fn drive_buddy_link(
     bind_ip: Ipv4Addr,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
+    own_kad_id: [u8; 16],
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
 ) -> Result<()> {
     loop {
         let read = tokio::time::timeout(BUDDY_READ_POLL, transport.read_packet());
@@ -164,6 +177,8 @@ async fn drive_buddy_link(
                             bind_ip,
                             buddy_addr,
                             hello_identity,
+                            own_kad_id,
+                            transfer_runtime,
                             packet,
                         )
                         .await?
@@ -188,6 +203,8 @@ async fn handle_buddy_packet(
     bind_ip: Ipv4Addr,
     buddy_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,
+    own_kad_id: [u8; 16],
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
     packet: EmuleTcpPacket,
 ) -> Result<bool> {
     match (packet.protocol, packet.opcode) {
@@ -197,6 +214,24 @@ async fn handle_buddy_packet(
                 "buddy {buddy_addr} relayed OP_CALLBACK file_hash={} requester={}:{}",
                 callback.file_hash, callback.peer_ip, callback.peer_tcp_port
             );
+            // Validate the relayed callback before connecting out, mirroring the
+            // oracle ListenSocket.cpp OP_CALLBACK guard so a malicious buddy
+            // cannot induce spurious connect-outs:
+            //   (a) uCheck XOR allones must equal our own Kad id, and
+            //   (b) the file must be one we share or download.
+            if !buddy_callback_check_matches(callback.buddy_check, own_kad_id) {
+                debug!(
+                    "dropping buddy {buddy_addr} OP_CALLBACK: uCheck does not match our Kad id"
+                );
+                return Ok(true);
+            }
+            if !transfer_runtime.owns_file(&callback.file_hash).await {
+                debug!(
+                    "dropping buddy {buddy_addr} OP_CALLBACK: file {} is neither shared nor downloaded",
+                    callback.file_hash
+                );
+                return Ok(true);
+            }
             // Firewalled callback completion: connect out to the requester so it
             // can reach us (oracle CUpDownClient buddy-callback path). Skip
             // obviously invalid endpoints.
@@ -261,6 +296,19 @@ async fn handle_buddy_packet(
     }
 }
 
+/// Validate a relayed OP_CALLBACK `uCheck` against our own Kad id.
+///
+/// The oracle (ListenSocket.cpp OP_CALLBACK) reads `uCheck`, XORs it with the
+/// all-ones CUInt128, and only proceeds when the result equals its own Kad id.
+/// XOR with all-ones is the bitwise complement, so this is equivalent to
+/// `!uCheck[i] == own_kad_id[i]` for every byte.
+fn buddy_callback_check_matches(buddy_check: [u8; 16], own_kad_id: [u8; 16]) -> bool {
+    buddy_check
+        .iter()
+        .zip(own_kad_id.iter())
+        .all(|(check, own)| !check == *own)
+}
+
 /// Connect out to the buddy and complete the hello side channel so the buddy
 /// recognizes us as its incoming buddy, returning the held transport.
 async fn connect_and_hello_buddy(
@@ -322,4 +370,30 @@ async fn connect_and_hello_buddy(
     }
 
     Ok(transport)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::buddy_callback_check_matches;
+
+    #[test]
+    fn callback_check_accepts_complement_of_our_kad_id() {
+        let own = [0xABu8; 16];
+        // The requester places `own XOR allones` (= complement) into uCheck.
+        let check = own.map(|byte| !byte);
+        assert!(buddy_callback_check_matches(check, own));
+    }
+
+    #[test]
+    fn callback_check_rejects_mismatched_check_value() {
+        let own = [0xABu8; 16];
+        // Echoing our id verbatim (not the complement) must be rejected.
+        assert!(!buddy_callback_check_matches(own, own));
+        // An unrelated value is rejected.
+        assert!(!buddy_callback_check_matches([0x00u8; 16], own));
+        // A single flipped byte breaks the match.
+        let mut almost = own.map(|byte| !byte);
+        almost[7] ^= 0x01;
+        assert!(!buddy_callback_check_matches(almost, own));
+    }
 }

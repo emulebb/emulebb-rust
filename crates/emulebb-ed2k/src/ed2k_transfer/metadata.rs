@@ -318,6 +318,19 @@ impl Ed2kTransferRuntime {
             .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
     }
 
+    /// Whether we share or are downloading the file with this hash.
+    ///
+    /// A manifest exists for both shared files and in-progress downloads, so a
+    /// present manifest mirrors the oracle ListenSocket.cpp OP_CALLBACK guard
+    /// (`sharedfiles->GetFileByID(...) != NULL || downloadqueue->GetFileByID(...)
+    /// != NULL`). Used to reject buddy-relayed callbacks for files we do not own.
+    pub async fn owns_file(&self, file_hash: &Ed2kHash) -> bool {
+        self.local_entry(file_hash)
+            .await
+            .map(|entry| entry.is_some())
+            .unwrap_or(false)
+    }
+
     /// Return the canonical MD4 hashset for this file when known.
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();

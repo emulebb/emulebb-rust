@@ -1304,6 +1304,7 @@ impl EmulebbCore {
                     reachability: self.ed2k_reachability.clone(),
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
+                    transfer_runtime: Arc::clone(&self.ed2k_transfers),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -4063,6 +4064,7 @@ struct KadLocalStoreRuntime {
     reachability: ExternalReachability,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     buddy_registry: BuddySocketRegistry,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
     network: Ed2kNetworkConfig,
 }
 
@@ -5094,6 +5096,7 @@ async fn handle_kad_local_store_packet(
                 kad_buddy,
                 buddy_registry,
                 &runtime.reachability,
+                &runtime.transfer_runtime,
                 network,
                 from,
                 res,
@@ -5206,6 +5209,7 @@ async fn handle_kad_find_buddy_res(
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
     buddy_registry: &BuddySocketRegistry,
     reachability: &ExternalReachability,
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
     network: &Ed2kNetworkConfig,
     from: SocketAddr,
     res: FindBuddyRes,
@@ -5248,6 +5252,8 @@ async fn handle_kad_find_buddy_res(
     let buddy_addr = SocketAddr::new(from.ip(), res.tcp_port);
     let registry = buddy_registry.clone();
     let kad_buddy = Arc::clone(kad_buddy);
+    let own_kad_id = dht.own_id().0;
+    let transfer_runtime = Arc::clone(transfer_runtime);
     let lost = Arc::new(tokio::sync::Notify::new());
     tokio::spawn(async move {
         if let Err(error) = run_outbound_buddy_link(OutboundBuddyLinkOptions {
@@ -5256,6 +5262,8 @@ async fn handle_kad_find_buddy_res(
             buddy_user_hash,
             buddy_connect_options: connect_options,
             hello_identity,
+            own_kad_id,
+            transfer_runtime,
             registry,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
             lost,
