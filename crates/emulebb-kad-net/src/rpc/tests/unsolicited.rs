@@ -176,6 +176,43 @@ async fn test_unrequested_response_is_counted_and_dropped() {
 }
 
 #[tokio::test]
+async fn test_firewalled_res_reaches_handler_without_outbound_tracking() {
+    // The oracle deliberately does NOT out-track FIREWALLED_REQ, validating the
+    // response against the firewall-check-IP list inside the handler instead. So
+    // a FIREWALLED_RES must reach the unsolicited path (where lib.rs validates the
+    // sender IP) rather than being dropped as an unrequested response.
+    let transport = MockTransport::new(make_local_addr());
+    let inject_tx = transport.injector();
+    let rpc = make_rpc_with_transport(transport);
+    let mut subscriber = rpc.subscribe();
+    let _handle = rpc.start();
+
+    let peer_addr = make_peer_addr();
+    let firewalled_res = KadPacket::FirewalledRes(emulebb_kad_proto::FirewalledRes {
+        ip: 0x0102_0304,
+    });
+    let encoded = firewalled_res.encode().unwrap();
+    let _ = inject_tx.send((encoded, peer_addr)).await;
+
+    let received = tokio::time::timeout(Duration::from_secs(1), subscriber.recv())
+        .await
+        .expect("FIREWALLED_RES timed out instead of reaching the handler")
+        .unwrap();
+    assert!(matches!(received.packet, KadPacket::FirewalledRes(_)));
+    assert_eq!(received.from, peer_addr);
+
+    let snapshot = rpc.observability();
+    let stats = snapshot
+        .response_opcodes
+        .iter()
+        .find(|opcode| opcode.opcode == "KADEMLIA2_FIREWALLED_RES");
+    // It must NOT be counted as a dropped-unrequested response.
+    if let Some(stats) = stats {
+        assert_eq!(stats.dropped_unrequested, 0);
+    }
+}
+
+#[tokio::test]
 async fn test_tracked_response_without_pending_request_is_broadcast_and_counted() {
     let transport = MockTransport::new(make_local_addr());
     let inject_tx = transport.injector();

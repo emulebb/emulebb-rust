@@ -138,6 +138,15 @@ pub(super) fn should_log_unsolicited_opcode(opcode_value: u8) -> bool {
 }
 
 pub(super) fn is_tracked_response_opcode(opcode_value: u8) -> bool {
+    // NOTE: FIREWALLED_RES / FIREWALLED_ACK_RES are intentionally excluded.
+    // The oracle deliberately does NOT out-track firewall-check requests
+    // (PacketTracking.cpp IsTrackedOutListRequestPacket omits FIREWALLED_REQ /
+    // FIREWALLED2_REQ); instead Process_KADEMLIA_FIREWALLED_RES validates the
+    // response against the firewall-check-IP list (IsKadFirewallCheckIP). If we
+    // treated them as out-tracked responses here, they would be dropped as
+    // unrequested before the handler ran, leaving the TCP firewall recheck inert.
+    // Letting them fall through to the unsolicited path delivers them to the
+    // handler, which performs the IP-list validation itself.
     matches!(
         opcode_value,
         opcode::BOOTSTRAP_RES
@@ -146,8 +155,6 @@ pub(super) fn is_tracked_response_opcode(opcode_value: u8) -> bool {
             | opcode::RES
             | opcode::PUBLISH_RES
             | opcode::PUBLISH_RES_ACK
-            | opcode::FIREWALLED_RES
-            | opcode::FIREWALLED_ACK_RES
             | opcode::FINDBUDDY_RES
             | opcode::PONG
     )
@@ -279,9 +286,9 @@ pub(super) fn tracked_request_opcode_for_response(
             let _ = tracker.contains(ip, matched, true);
             Some(matched)
         }
-        opcode::FIREWALLED_RES | opcode::FIREWALLED_ACK_RES => {
-            tracker.find_any(ip, &[opcode::FIREWALLED_REQ, opcode::FIREWALLED2_REQ], true)
-        }
+        // FIREWALLED_RES / FIREWALLED_ACK_RES are deliberately not out-tracked
+        // (the oracle validates them against the firewall-check-IP list instead),
+        // so there is never a matching tracked request here.
         opcode::FINDBUDDY_RES => tracker.find_any(ip, &[opcode::FINDBUDDY_REQ], true),
         opcode::PONG => tracker.find_any(ip, &[opcode::PING], true),
         _ => None,
