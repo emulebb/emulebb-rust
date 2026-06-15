@@ -56,9 +56,10 @@ use emulebb_kad_dht::{
     RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
-    Ed2kHash, Firewalled2Req, FirewalledRes, HelloReq, HelloRes, HelloResAck, KAD_VERSION,
-    KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry,
-    SearchSourceReq, Tag, TagValue, constants::K, packet::ContactEntry, tag_name,
+    CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, Firewalled2Req, FirewalledRes, HelloReq,
+    HelloRes, HelloResAck, KAD_VERSION, KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq,
+    SearchRes, SearchResultEntry, SearchSourceReq, Tag, TagValue, constants::K,
+    packet::ContactEntry, tag_name,
 };
 use emulebb_metadata::MetadataStore;
 use md4::{Digest, Md4};
@@ -82,6 +83,10 @@ mod search_query;
 mod search_state;
 mod shared_directories;
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
+use kad_buddy::{
+    BuddyNeedInput, FindBuddyReqRefusal, IncomingBuddy, KadBuddyState, OutgoingBuddy,
+    buddy_search_target, find_buddy_res_matches,
+};
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
@@ -682,6 +687,10 @@ pub struct Ed2kNetworkConfig {
     pub kad_udp_firewall_check_enabled: bool,
     /// Seconds between Kad UDP firewall self-check rounds (gentle cadence).
     pub kad_udp_firewall_check_interval_secs: u64,
+    /// Whether the Kad LowID buddy/firewalled-callback subsystem is active.
+    /// Default on (per operator policy): when we are firewalled we seek a buddy,
+    /// and we answer buddy requests from firewalled peers when we are reachable.
+    pub kad_buddy_enabled: bool,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
     /// Configured VPN-binding guard.
@@ -1182,6 +1191,7 @@ impl EmulebbCore {
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+        let kad_buddy = Arc::new(Mutex::new(KadBuddyState::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let configured_bootstrap_nodes_text =
             configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
@@ -1265,6 +1275,7 @@ impl EmulebbCore {
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
                     reachability: self.ed2k_reachability.clone(),
+                    kad_buddy: Arc::clone(&kad_buddy),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -1284,6 +1295,23 @@ impl EmulebbCore {
                 Arc::clone(&self.ed2k_transfers),
                 Arc::clone(&shutdown),
                 PassiveReplayWorker::General,
+            )));
+        }
+        // Kad LowID buddy/firewalled-callback driver (default on). It seeks a
+        // buddy when we are firewalled; inbound FINDBUDDY/CALLBACK packets are
+        // dispatched by the local-store loop above, which owns the same
+        // `kad_buddy` state.
+        if network.kad_buddy_enabled {
+            tasks.push(tokio::spawn(run_kad_buddy_loop(
+                KadBuddyRuntime {
+                    dht: dht.clone(),
+                    ed2k_listener: Arc::clone(&ed2k_listener),
+                    server_state: Arc::clone(&server_state),
+                    kad_firewall: Arc::clone(&kad_firewall),
+                    kad_buddy: Arc::clone(&kad_buddy),
+                    network: network.clone(),
+                },
+                Arc::clone(&shutdown),
             )));
         }
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
@@ -3975,6 +4003,7 @@ struct KadLocalStoreRuntime {
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     reachability: ExternalReachability,
+    kad_buddy: Arc<Mutex<KadBuddyState>>,
     network: Ed2kNetworkConfig,
 }
 
@@ -3994,6 +4023,108 @@ async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<A
             Err(_) => {}
         }
     }
+}
+
+/// Shared inputs for the buddy-management task.
+struct KadBuddyRuntime {
+    dht: DhtNode,
+    ed2k_listener: Arc<TcpListener>,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    kad_buddy: Arc<Mutex<KadBuddyState>>,
+    network: Ed2kNetworkConfig,
+}
+
+/// Poll cadence for the buddy-management task. The actual search rate is gated by
+/// the oracle-style cooldown inside [`KadBuddyState::should_search`]; this only
+/// bounds how often we re-evaluate the firewall/bootstrap conditions.
+const KAD_BUDDY_TICK_SECS: u64 = 30;
+
+/// Buddy-management driver (oracle `ClientList` buddy upkeep + `Kademlia`
+/// find-buddy timer): when we are TCP-firewalled (LowID) with a verified-
+/// firewalled UDP status and Kad is bootstrapped, search Kad near our derived
+/// buddy target and ask a reachable candidate to be our buddy
+/// (`KADEMLIA_FINDBUDDY_REQ`). The `FINDBUDDY_RES` reply is recorded by the
+/// inbound dispatch. Re-search resumes automatically after a buddy is lost.
+async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_secs(KAD_BUDDY_TICK_SECS)).await;
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let need = current_buddy_need(&runtime).await;
+        let now = Utc::now();
+        {
+            let mut state = runtime.kad_buddy.lock().await;
+            // Drop buddies we no longer need (became reachable / firewalled),
+            // mirroring the oracle ClientList buddy upkeep.
+            if state.release_buddies_if_unneeded(need) {
+                tracing::debug!("released a Kad buddy relationship (conditions changed)");
+            }
+            if !state.should_search(need, now) {
+                continue;
+            }
+            state.mark_search_started(now);
+        }
+        if let Err(error) = run_kad_buddy_search(&runtime).await {
+            tracing::debug!("Kad buddy search failed: {error:#}");
+        }
+    }
+}
+
+/// Evaluate the current "do we need a buddy?" inputs from live state.
+async fn current_buddy_need(runtime: &KadBuddyRuntime) -> BuddyNeedInput {
+    let tcp_firewalled =
+        current_tcp_firewalled(&runtime.ed2k_listener, &runtime.server_state).await;
+    let udp_firewalled_verified = {
+        let firewall = runtime.kad_firewall.lock().await;
+        firewall.udp_verified && !firewall.udp_open
+    };
+    BuddyNeedInput {
+        tcp_firewalled,
+        udp_firewalled_verified,
+        kad_connected: runtime.dht.is_bootstrapped(),
+    }
+}
+
+/// Run one buddy search: look up Kad nodes near our derived buddy target and
+/// send `KADEMLIA_FINDBUDDY_REQ` to the closest reachable candidate.
+async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
+    let own_id = runtime.dht.own_id();
+    let target = buddy_search_target(own_id);
+    let candidates = runtime
+        .dht
+        .lookup_nodes(&target)
+        .await
+        .context("Kad buddy lookup failed")?;
+
+    let our_tcp_port = runtime
+        .ed2k_listener
+        .local_addr()
+        .context("failed to read eD2K listener address for Kad buddy request")?
+        .port();
+    let request = FindBuddyReq {
+        buddy_id: target,
+        client_hash: Ed2kHash::from_bytes(runtime.network.user_hash),
+        tcp_port: our_tcp_port,
+    };
+
+    // The buddy must not be ourselves; pick the closest other candidate.
+    let Some(candidate) = candidates.into_iter().find(|contact| contact.id != own_id) else {
+        tracing::debug!("Kad buddy search found no candidate near {target}");
+        return Ok(());
+    };
+    runtime
+        .dht
+        .send_packet(candidate.addr, &KadPacket::FindBuddyReq(request))
+        .await
+        .with_context(|| format!("failed to send Kad FINDBUDDY_REQ to {}", candidate.addr))?;
+    tracing::info!(
+        "sent Kad FINDBUDDY_REQ to candidate {} (we are firewalled, seeking a buddy)",
+        candidate.addr
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4599,6 +4730,7 @@ async fn handle_kad_local_store_packet(
     let ed2k_listener = &runtime.ed2k_listener;
     let server_state = &runtime.server_state;
     let kad_firewall = &runtime.kad_firewall;
+    let kad_buddy = &runtime.kad_buddy;
     let network = &runtime.network;
     let ReceivedKadPacket { packet, from, .. } = received;
     if let IpAddr::V4(ip) = from.ip() {
@@ -4869,9 +5001,152 @@ async fn handle_kad_local_store_packet(
                     .await;
             }
         }
+        KadPacket::FindBuddyReq(req) => {
+            handle_kad_find_buddy_req(
+                dht,
+                ed2k_listener,
+                server_state,
+                kad_firewall,
+                kad_buddy,
+                network,
+                from,
+                req,
+            )
+            .await?;
+        }
+        KadPacket::FindBuddyRes(res) => {
+            handle_kad_find_buddy_res(dht, kad_buddy, from, res).await;
+        }
+        KadPacket::CallbackReq(req) => {
+            handle_kad_callback_req(kad_buddy, from, &req).await;
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// Inbound `KADEMLIA_FINDBUDDY_REQ` (a firewalled peer asks us to be its buddy).
+///
+/// Mirrors `Process_KADEMLIA_FINDBUDDY_REQ`: only answer when we are reachable
+/// (not TCP- or UDP-firewalled) and do not already serve a buddy. On acceptance
+/// we register the requester and reply `FINDBUDDY_RES` echoing its `buddy_id`,
+/// our eD2k client hash, and our TCP port (plus our connect options).
+async fn handle_kad_find_buddy_req(
+    dht: &DhtNode,
+    ed2k_listener: &TcpListener,
+    server_state: &Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    network: &Ed2kNetworkConfig,
+    from: SocketAddr,
+    req: FindBuddyReq,
+) -> Result<()> {
+    // We cannot relay for others while firewalled ourselves (oracle refuses with
+    // GetFirewalled() || IsFirewalledUDP(true) || !IsVerified()). IsFirewalledUDP
+    // is "verified AND not open"; an unverified UDP status is also a refusal.
+    let self_firewalled = current_tcp_firewalled(ed2k_listener, server_state).await || {
+        let firewall = kad_firewall.lock().await;
+        !firewall.udp_verified || !firewall.udp_open
+    };
+    let tcp_port = ed2k_listener
+        .local_addr()
+        .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
+        .port();
+
+    let buddy = IncomingBuddy {
+        client_hash: req.client_hash,
+        buddy_id: req.buddy_id,
+        tcp_addr: SocketAddr::new(from.ip(), req.tcp_port),
+        udp_addr: from,
+        registered_at: Utc::now(),
+    };
+
+    {
+        let mut state = kad_buddy.lock().await;
+        match state.accept_incoming_buddy(self_firewalled, buddy) {
+            Ok(()) => {}
+            Err(FindBuddyReqRefusal::SelfFirewalled) => {
+                tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: we are firewalled");
+                return Ok(());
+            }
+            Err(FindBuddyReqRefusal::AlreadyHaveBuddy) => {
+                tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: already serving a buddy");
+                return Ok(());
+            }
+        }
+    }
+
+    let response = FindBuddyRes {
+        // Echo the requester's buddy-search id so it can verify the response
+        // against its own Kad id (it XORs with all-ones).
+        buddy_id: req.buddy_id,
+        client_hash: Ed2kHash::from_bytes(network.user_hash),
+        tcp_port,
+        connect_options: Some(emule_connect_options(network.config.obfuscation_enabled)),
+    };
+    dht.send_packet(from, &KadPacket::FindBuddyRes(response))
+        .await
+        .with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"))?;
+    tracing::info!("accepted Kad buddy request from {from}; replied FINDBUDDY_RES");
+    Ok(())
+}
+
+/// Inbound `KADEMLIA_FINDBUDDY_RES` (a candidate accepted our buddy request).
+///
+/// Mirrors `Process_KADEMLIA_FINDBUDDY_RES`: verify the echoed `buddy_id`
+/// against our own Kad id, then record the buddy (oracle `RequestBuddy`). The
+/// buddy-management task keeps the TCP connection.
+async fn handle_kad_find_buddy_res(
+    dht: &DhtNode,
+    kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    from: SocketAddr,
+    res: FindBuddyRes,
+) {
+    if !find_buddy_res_matches(dht.own_id(), res.buddy_id) {
+        tracing::debug!("dropping Kad FINDBUDDY_RES from {from}: buddy_id echo mismatch");
+        return;
+    }
+    let buddy = OutgoingBuddy {
+        client_hash: res.client_hash,
+        tcp_addr: SocketAddr::new(from.ip(), res.tcp_port),
+        udp_addr: from,
+        connect_options: res.connect_options.unwrap_or(0),
+        acquired_at: Utc::now(),
+    };
+    kad_buddy.lock().await.set_outgoing_buddy(buddy);
+    tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
+}
+
+/// Inbound `KADEMLIA_CALLBACK_REQ` (a peer wants us to relay a callback to the
+/// firewalled client we are a buddy for).
+///
+/// Mirrors `Process_KADEMLIA_CALLBACK_REQ`: the oracle relays an `OP_CALLBACK`
+/// to the buddied client over the persistent buddy TCP connection. The eD2k
+/// client-TCP layer here is connection-per-operation and holds no persistent
+/// peer socket, so the relay leg is a documented omission
+/// (policy/rust-client-omissions.toml: kad_buddy_callback_relay). We still
+/// match + log the request so the buddy bookkeeping and diagnostics are exact.
+async fn handle_kad_callback_req(
+    kad_buddy: &Arc<Mutex<KadBuddyState>>,
+    from: SocketAddr,
+    req: &CallbackReq,
+) {
+    let state = kad_buddy.lock().await;
+    match state.callback_relay_target(req.buddy_id) {
+        Some(buddy) => {
+            tracing::info!(
+                "Kad CALLBACK_REQ from {from} for buddied client {} (file_hash={}); relay leg \
+                 omitted (no persistent buddy TCP connection)",
+                buddy.tcp_addr,
+                req.file_hash
+            );
+        }
+        None => {
+            tracing::debug!(
+                "dropping Kad CALLBACK_REQ from {from}: no buddied client matches buddy_id"
+            );
+        }
+    }
 }
 
 async fn persist_kad_publish_cache(
@@ -6980,6 +7255,7 @@ mod tests {
             kad_hello_intro_fanout: 2,
             kad_udp_firewall_check_enabled: true,
             kad_udp_firewall_check_interval_secs: 600,
+            kad_buddy_enabled: true,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
             vpn_guard: VpnGuardConfig::default(),

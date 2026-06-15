@@ -26,12 +26,6 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId};
 
-/// How long after the last firewall verdict change a freshly-firewalled node
-/// waits before its first buddy search, mirroring the oracle's 5-minute guard
-/// (`Kademlia.cpp`: `m_tNextFindBuddy` is pushed to at least firewall-check +
-/// 5 min) so a transient firewalled status does not trigger a needless search.
-pub const FIND_BUDDY_INITIAL_DELAY_SECS: i64 = 300;
-
 /// Interval between buddy searches while we still need a buddy, mirroring the
 /// oracle `MIN2S(20)` cadence on `m_tNextFindBuddy`.
 pub const FIND_BUDDY_RETRY_SECS: i64 = 1_200;
@@ -151,18 +145,6 @@ impl KadBuddyState {
         Self::default()
     }
 
-    /// The client we are currently a buddy for, if any.
-    #[must_use]
-    pub fn incoming(&self) -> Option<&IncomingBuddy> {
-        self.incoming.as_ref()
-    }
-
-    /// The buddy we acquired for ourselves, if any.
-    #[must_use]
-    pub fn outgoing(&self) -> Option<&OutgoingBuddy> {
-        self.outgoing.as_ref()
-    }
-
     /// True when we already serve a client as its buddy.
     #[must_use]
     pub fn has_incoming_buddy(&self) -> bool {
@@ -173,6 +155,26 @@ impl KadBuddyState {
     #[must_use]
     pub fn has_outgoing_buddy(&self) -> bool {
         self.outgoing.is_some()
+    }
+
+    /// Release any buddy relationships that are no longer warranted, mirroring
+    /// the oracle `ClientList` upkeep: when we are no longer firewalled we do not
+    /// need a buddy of our own (the oracle drops `m_pBuddy`), and we stop
+    /// serving as a buddy for others once we ourselves become firewalled (the
+    /// oracle refuses new buddy requests in that state). Returns `true` when a
+    /// relationship was dropped so the caller can log/refresh.
+    pub fn release_buddies_if_unneeded(&mut self, need: BuddyNeedInput) -> bool {
+        let mut changed = false;
+        if !need.needs_buddy() && self.has_outgoing_buddy() {
+            self.outgoing = None;
+            changed = true;
+        }
+        // If we became firewalled we can no longer relay for an incoming buddy.
+        if need.tcp_firewalled && self.has_incoming_buddy() {
+            self.incoming = None;
+            changed = true;
+        }
+        changed
     }
 
     /// Decide whether to accept an inbound `FINDBUDDY_REQ` and become this
@@ -201,11 +203,6 @@ impl KadBuddyState {
         Ok(())
     }
 
-    /// Drop the incoming-buddy relationship (the relayed client went away).
-    pub fn clear_incoming_buddy(&mut self) {
-        self.incoming = None;
-    }
-
     /// Look up the incoming buddy a `CALLBACK_REQ` should be relayed to.
     ///
     /// The oracle relays any callback to its single current buddy
@@ -225,18 +222,12 @@ impl KadBuddyState {
         self.outgoing = Some(buddy);
     }
 
-    /// Drop our own buddy (connection lost). The oracle immediately schedules a
-    /// new search in this case; the caller does so via [`Self::should_search`].
-    pub fn clear_outgoing_buddy(&mut self) {
-        self.outgoing = None;
-    }
-
     /// Whether we should launch a buddy search now.
     ///
     /// Mirrors the oracle upkeep: only when we need a buddy, do not already have
-    /// one, and the per-search cooldown has elapsed. The initial delay is longer
-    /// (`FIND_BUDDY_INITIAL_DELAY_SECS`) than the retry cadence so a freshly
-    /// firewalled node does not chase a transient verdict.
+    /// one, and the per-search cooldown ([`FIND_BUDDY_RETRY_SECS`]) has elapsed.
+    /// A buddy is only sought once the firewalled verdict is *verified*, so a
+    /// transient status never triggers a search.
     #[must_use]
     pub fn should_search(&self, need: BuddyNeedInput, now: DateTime<Utc>) -> bool {
         if !need.needs_buddy() || self.outgoing.is_some() {
@@ -365,11 +356,36 @@ mod tests {
         state.set_outgoing_buddy(outgoing());
         assert!(!state.should_search(need, now));
 
-        state.clear_outgoing_buddy();
+        // Becoming reachable releases our buddy and re-enables searching when we
+        // are firewalled again.
+        let not_needed = BuddyNeedInput { tcp_firewalled: false, udp_firewalled_verified: false, ..need };
+        assert!(state.release_buddies_if_unneeded(not_needed));
+        assert!(!state.has_outgoing_buddy());
         assert!(state.should_search(need, now));
-
-        let not_needed = BuddyNeedInput { tcp_firewalled: false, ..need };
         assert!(!state.should_search(not_needed, now));
+    }
+
+    #[test]
+    fn release_drops_incoming_buddy_when_we_become_firewalled() {
+        let mut state = KadBuddyState::new();
+        state
+            .accept_incoming_buddy(false, incoming(NodeId::from_bytes([0x22; 16])))
+            .unwrap();
+        let reachable = BuddyNeedInput {
+            tcp_firewalled: false,
+            udp_firewalled_verified: false,
+            kad_connected: true,
+        };
+        assert!(!state.release_buddies_if_unneeded(reachable));
+        assert!(state.has_incoming_buddy());
+
+        let firewalled = BuddyNeedInput {
+            tcp_firewalled: true,
+            udp_firewalled_verified: true,
+            kad_connected: true,
+        };
+        assert!(state.release_buddies_if_unneeded(firewalled));
+        assert!(!state.has_incoming_buddy());
     }
 
     #[test]

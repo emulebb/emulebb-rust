@@ -86,6 +86,8 @@ pub struct KadListenerConfig {
     pub hello_intro_fanout: usize,
     pub udp_firewall_check_enabled: bool,
     pub udp_firewall_check_interval_secs: u64,
+    /// Kad LowID buddy/firewalled-callback subsystem (default on).
+    pub buddy_enabled: bool,
     pub snoop_queue_dedup_window_secs: u64,
     pub snoop_queue_general_max_queries_per_600s: u32,
     pub snoop_queue_general_drain_cooldown_secs: u64,
@@ -138,6 +140,7 @@ impl Default for KadListenerConfig {
             hello_intro_fanout: 2,
             udp_firewall_check_enabled: true,
             udp_firewall_check_interval_secs: 600,
+            buddy_enabled: true,
             snoop_queue_dedup_window_secs: 28_800,
             snoop_queue_general_max_queries_per_600s: 24,
             snoop_queue_general_drain_cooldown_secs: 900,
@@ -212,6 +215,7 @@ impl DaemonConfig {
             kad_hello_intro_fanout: self.kad.hello_intro_fanout,
             kad_udp_firewall_check_enabled: self.kad.udp_firewall_check_enabled,
             kad_udp_firewall_check_interval_secs: self.kad.udp_firewall_check_interval_secs.max(60),
+            kad_buddy_enabled: self.kad.buddy_enabled,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
             vpn_guard: VpnGuardConfig {
