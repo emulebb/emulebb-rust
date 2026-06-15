@@ -1,6 +1,6 @@
 # eD2K UDP Source Reask & Queue-Slot Persistence — Design Sketch
 
-**Status:** **Implemented behind `enable_udp_reask` (off by default)** · post-parity · out of RC2 scope · pending live validation before the flag is flipped on
+**Status:** **Implemented behind `enable_udp_reask` (on by default)** · post-parity · out of RC2 scope · live validation still recommended
 **Area:** ed2k download/upload client (`emulebb-ed2k`)
 **Audience:** anyone implementing client↔client UDP reask in emulebb-rust
 **Backlog item:** [`FEAT-001`](../active/items/FEAT-001.md)
@@ -124,11 +124,11 @@ vs Kad-first). The Kad NodeID/RecvKey paths remain `emulebb-kad-net`'s concern.
 
 emulebb-rust (and its upstream `p2p-overlord-agents`, from which the eD2K stack
 was copied verbatim) originally inherited **none** of the client↔client UDP
-transport. As of 2026-06-14 the **full transport is implemented and unit-tested
-but gated OFF by default** behind `Ed2kConfig.enable_udp_reask` (see §2.1–§2.2);
-the only remaining step is gentle live validation before the flag is enabled. The
-**shipped default behaviour is still the held-TCP queued model below**, so the
-consequences table describes the flag-off default.
+transport. As of 2026-06-14 the **full transport is implemented, unit-tested, and
+ON by default** behind `Ed2kConfig.enable_udp_reask` (see §2.1–§2.2); gentle live
+validation is still recommended. The held-TCP queued model below is the
+**flag-off fallback** (set `enable_udp_reask=false` to restore it), so the
+consequences table describes the flag-off behaviour for contrast.
 
 When the flag is off, the rust downloader uses a **held-TCP queued** model
 (`crates/emulebb-ed2k/src/ed2k_tcp/download/session.rs`):
@@ -177,7 +177,7 @@ The **design decision is taken**: shared Kad UDP port (eMule-faithful — rust
 advertises `kad_udp_port` as its eD2k UDP port via hello `ET_UDPPORT`, so peers
 reask there). See §2.2 for the transport built on top of this foundation.
 
-### 2.2 Transport wired, gated off (2026-06-14)
+### 2.2 Transport wired, on by default (2026-06-14)
 
 The transport integration (§4) is now implemented behind `enable_udp_reask`:
 
@@ -190,8 +190,9 @@ The transport integration (§4) is now implemented behind `enable_udp_reask`:
 | Per-file ticker info | `ed2k_transfer/reask_reciprocity.rs` | `reask_transfer_info`: real partfile bitmap + complete-source count for outbound reask pings |
 | TCP fallback | `ed2k_client_udp/runtime.rs` | on `RetryTcp` (UDP failure-ratio tripped) the source is dropped from reask state so core's next download cycle re-acquires it over TCP |
 
-**Only remaining step: live validation** (operator-gated, gentle Rust↔Rust then
-Rust↔stock) before flipping `enable_udp_reask` on.
+`enable_udp_reask` ships **on by default**; gentle live validation (Rust↔Rust
+then Rust↔stock) is still recommended, and the flag can be set to `false` to
+fall back to the held-TCP queued model.
 
 #### Known first-cut limitations (watch during live validation)
 
@@ -446,8 +447,8 @@ What remains is the wiring, and the safe hook is precise:
   downloader detach hook (queued source → `ReaskSourceHandle` command channel →
   `QueuedDetachedForUdpReask`), the per-file ticker info (`reask_transfer_info`,
   real partfile bitmap + complete-source count), and the `RetryTcp` fallback are
-  all wired behind `enable_udp_reask` (off by default). **Only live validation
-  remains** before the flag is enabled.
+  all wired behind `enable_udp_reask` (on by default). **Gentle live validation
+  is still recommended.**
 - **Phase 2:** LowID buddy reask (`OP_REASKCALLBACKUDP` — **codec done**, buddy-
   relay transport pending) and `OP_DIRECTCALLBACKREQ`.
 - New code lands as new modules within the per-module size budget
