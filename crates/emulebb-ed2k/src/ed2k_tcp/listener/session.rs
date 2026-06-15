@@ -284,6 +284,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                                 buddy_hold = Some(InboundBuddyHold {
                                     buddy_id,
                                     relay_rx,
+                                    last_buddy_pingpong_at: None,
                                 });
                             }
                         }
@@ -945,12 +946,21 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     format!("held_buddy={}", buddy_hold.is_some()),
                 );
                 // Oracle ListenSocket.cpp: answer OP_BUDDYPING with OP_BUDDYPONG
-                // only when the pinger is the buddy we serve (buddy == client).
-                if buddy_hold.is_some() {
-                    let pong = encode_buddy_pong();
-                    transport.write_all(&pong).await.with_context(|| {
-                        format!("failed to send OP_BUDDYPONG to buddy {peer_addr}")
-                    })?;
+                // only when the pinger is the buddy we serve (buddy == client) and
+                // not too soon (AllowIncomingBuddyPingPong, MIN2MS(3)); after a
+                // reply record the time (SetLastBuddyPingPongTime).
+                if let Some(hold) = buddy_hold.as_mut() {
+                    if hold.allow_incoming_buddy_pingpong() {
+                        let pong = encode_buddy_pong();
+                        transport.write_all(&pong).await.with_context(|| {
+                            format!("failed to send OP_BUDDYPONG to buddy {peer_addr}")
+                        })?;
+                        hold.last_buddy_pingpong_at = Some(std::time::Instant::now());
+                    } else {
+                        debug!(
+                            "ignoring OP_BUDDYPING from buddy {peer_addr}: within pingpong cooldown"
+                        );
+                    }
                 }
             }
             (OP_EMULEPROT, OP_BUDDYPONG) => {
@@ -1070,10 +1080,39 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     result
 }
 
+/// Oracle `AllowIncomingBuddyPingPong()` cadence: an incoming `OP_BUDDYPING` is
+/// only answered with `OP_BUDDYPONG` at most once every three minutes
+/// (`MIN2MS(3)`, ListenSocket.cpp / UpDownClient.h).
+const BUDDY_PINGPONG_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
 /// Inbound Kad buddy hold state owned by a held listener session.
 struct InboundBuddyHold {
     buddy_id: NodeId,
     relay_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// When we last answered/observed a buddy ping/pong, gating the next allowed
+    /// reply (oracle `SetLastBuddyPingPongTime` / `AllowIncomingBuddyPingPong`).
+    /// `None` means no reply has been sent yet, so the first ping is answered.
+    last_buddy_pingpong_at: Option<std::time::Instant>,
+}
+
+impl InboundBuddyHold {
+    /// Whether an incoming `OP_BUDDYPING` may be answered now, mirroring the
+    /// oracle `AllowIncomingBuddyPingPong()` 3-minute minimum interval.
+    fn allow_incoming_buddy_pingpong(&self) -> bool {
+        allow_buddy_pingpong_at(self.last_buddy_pingpong_at, std::time::Instant::now())
+    }
+}
+
+/// Pure 3-minute buddy ping/pong gate (oracle `AllowIncomingBuddyPingPong`),
+/// split out so the cadence is deterministically unit-testable.
+fn allow_buddy_pingpong_at(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.saturating_duration_since(last) >= BUDDY_PINGPONG_MIN_INTERVAL,
+    }
 }
 
 fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIdentity {
@@ -1177,4 +1216,30 @@ async fn enrich_hello_identity(
         && firewall.udp_verified
         && firewall.udp_open;
     identity
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUDDY_PINGPONG_MIN_INTERVAL, allow_buddy_pingpong_at};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn buddy_pingpong_allows_first_ping_then_rate_limits() {
+        let now = Instant::now();
+        // No prior reply: the first ping is always answered.
+        assert!(allow_buddy_pingpong_at(None, now));
+
+        let last = now;
+        // Within the 3-minute window: suppressed (oracle AllowIncomingBuddyPingPong).
+        assert!(!allow_buddy_pingpong_at(
+            Some(last),
+            last + BUDDY_PINGPONG_MIN_INTERVAL - Duration::from_secs(1)
+        ));
+        // Exactly at the boundary and beyond: allowed again.
+        assert!(allow_buddy_pingpong_at(Some(last), last + BUDDY_PINGPONG_MIN_INTERVAL));
+        assert!(allow_buddy_pingpong_at(
+            Some(last),
+            last + BUDDY_PINGPONG_MIN_INTERVAL + Duration::from_secs(1)
+        ));
+    }
 }
