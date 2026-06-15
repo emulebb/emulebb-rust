@@ -200,6 +200,52 @@ fn verify_without_issued_challenge_errors() {
 }
 
 #[test]
+fn emitted_public_key_is_pkcs1_within_stock_cap() {
+    // A1: stock eMule (`CClientCredits::SetSecureIdent`) rejects any key longer
+    // than MAXPUBKEYSIZE (80 bytes) and parses it as a bare PKCS#1 RSAPublicKey,
+    // so our emitted OP_PUBLICKEY bytes must be PKCS#1 DER and fit the cap.
+    let us = ident();
+    let payload = us.public_key_payload().expect("public-key payload");
+    let key_len = payload[0] as usize;
+    assert_eq!(key_len, payload.len() - 1, "length prefix must match key bytes");
+    let key_bytes = &payload[1..];
+    assert_eq!(key_bytes, us.public_key_der(), "wire bytes == public_key_der");
+    assert!(
+        key_bytes.len() <= 80,
+        "emitted key {} bytes must fit MAXPUBKEYSIZE",
+        key_bytes.len()
+    );
+
+    // The emitted bytes must round-trip as a bare PKCS#1 RSAPublicKey (what
+    // stock eMule feeds to its Crypto++ verifier), not an SPKI wrapper.
+    let parsed = RsaPublicKey::from_pkcs1_der(key_bytes)
+        .expect("emitted key must decode as PKCS#1 RSAPublicKey");
+    assert_eq!(
+        parsed,
+        RsaPublicKey::from(&us.private_key),
+        "round-tripped key must equal our own public key"
+    );
+
+    // A signature produced over the PKCS#1 bytes must verify against the same
+    // PKCS#1 bytes (sign -> verify parity over the on-wire key form).
+    let peer = ident();
+    let challenge = 0x4242_4242;
+    let sig = peer_sign(&peer, us.public_key_der(), challenge, None);
+    assert!(
+        verify_inbound_signature(
+            us.public_key_der(),
+            challenge,
+            peer.public_key_der(),
+            &sig,
+            Ipv4Addr::new(198, 51, 100, 7),
+            None,
+        )
+        .expect("verify ran"),
+        "sign->verify must pass over the PKCS#1 public-key bytes"
+    );
+}
+
+#[test]
 fn helper_sets_verified_only_on_valid_signature() {
     let us = ident();
     let peer = ident();
