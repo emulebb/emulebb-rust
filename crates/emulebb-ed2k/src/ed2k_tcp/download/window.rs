@@ -250,7 +250,18 @@ pub(in crate::ed2k_tcp) fn select_download_window_limits(
             (3usize, 1usize)
         }
     } else if completed_block_count >= 3 && download_rate > 75.0 * 1024.0 {
-        (6usize, 2usize)
+        // Mirror master DownloadRequestSeams::SelectDownloadBlockRequestReserve:
+        // the pending-block reserve scales with the measured download rate in
+        // four tiers (6 / 9 / 12 / 18 at 75K / 150K / 512K / 1M B/s).
+        if download_rate >= 1024.0 * 1024.0 {
+            (18usize, 6usize)
+        } else if download_rate >= 512.0 * 1024.0 {
+            (12usize, 4usize)
+        } else if download_rate > 150.0 * 1024.0 {
+            (9usize, 3usize)
+        } else {
+            (6usize, 2usize)
+        }
     } else {
         (3usize, 1usize)
     };

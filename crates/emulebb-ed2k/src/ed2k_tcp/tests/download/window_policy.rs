@@ -81,6 +81,40 @@ fn download_window_grows_for_fast_large_transfer() {
 }
 
 #[test]
+fn download_window_scales_to_master_rate_tiers() {
+    let job = new_transfer_job(
+        Ed2kHash::from_bytes([0x32; 16]),
+        "window.iso".to_string(),
+        ED2K_PART_SIZE * 32,
+    );
+    let manifest = Ed2kResumeManifest::new(&job);
+    // Mirror master DownloadRequestSeams::SelectDownloadBlockRequestReserve:
+    // 9 / 12 / 18 at >150K / >=512K / >=1M B/s. Each case keeps
+    // completed_block_count >= 3 and a large remaining transfer.
+    let cases = [
+        (200 * 1024, 9usize, 6usize),
+        (600 * 1024, 12usize, 8usize),
+        (2 * 1024 * 1024, 18usize, 12usize),
+    ];
+    for (rate, expected_max, expected_min) in cases {
+        let limits = select_download_window_limits(
+            &manifest,
+            3,
+            rate,
+            tokio::time::Instant::now() - Duration::from_secs(1),
+        );
+        assert_eq!(
+            limits,
+            DownloadWindowLimits {
+                max_pending_blocks: expected_max,
+                min_pending_blocks: expected_min,
+            },
+            "rate {rate} B/s should map to {expected_max}/{expected_min}"
+        );
+    }
+}
+
+#[test]
 fn download_window_stays_small_for_slow_endgame_transfer() {
     let job = new_transfer_job(
         Ed2kHash::from_bytes([0x41; 16]),
