@@ -237,6 +237,7 @@ CREATE TABLE transfer_pieces (
     piece_index INTEGER NOT NULL,
     state TEXT NOT NULL,
     bytes_written INTEGER NOT NULL DEFAULT 0,
+    block_bitmap TEXT,
     updated_at_ms INTEGER NOT NULL,
     UNIQUE(transfer_id, piece_index)
 );

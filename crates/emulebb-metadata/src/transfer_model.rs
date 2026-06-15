@@ -26,6 +26,10 @@ pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,
     pub bytes_written: u64,
+    /// Lowercase-hex packed per-part block presence bitmap, or `None` when the
+    /// part's present blocks are simply the contiguous prefix up to
+    /// `bytes_written` (legacy / contiguous fast path).
+    pub block_bitmap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -320,14 +320,15 @@ fn replace_transfer_children(
     for piece in &manifest.pieces {
         tx.execute(
             r#"
-            INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 transfer_id,
                 i64::from(piece.piece_index),
                 piece.state,
                 piece.bytes_written as i64,
+                piece.block_bitmap,
                 now,
             ],
         )?;
@@ -435,7 +436,7 @@ fn read_pieces(
 ) -> Result<Vec<MetadataTransferPiece>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT piece_index, state, bytes_written
+        SELECT piece_index, state, bytes_written, block_bitmap
         FROM transfer_pieces
         WHERE transfer_id = ?1
         ORDER BY piece_index
@@ -446,6 +447,7 @@ fn read_pieces(
             piece_index: row.get::<_, i64>(0)? as u32,
             state: row.get(1)?,
             bytes_written: row.get::<_, i64>(2)? as u64,
+            block_bitmap: row.get::<_, Option<String>>(3)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

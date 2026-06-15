@@ -23,6 +23,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             piece_index: 0,
             state: "Verified".to_string(),
             bytes_written: 1024,
+            block_bitmap: Some("ab".to_string()),
         }],
         sources: vec![MetadataTransferSource {
             ip: "192.0.2.10".to_string(),
@@ -66,6 +67,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
             piece_index: 0,
             state: "Missing".to_string(),
             bytes_written: 0,
+            block_bitmap: None,
         }],
         sources: Vec::new(),
         upload_priority: "normal".to_string(),
@@ -113,6 +115,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
             piece_index: 0,
             state: "Missing".to_string(),
             bytes_written: 0,
+            block_bitmap: None,
         }],
         sources: Vec::new(),
         upload_priority: "normal".to_string(),
