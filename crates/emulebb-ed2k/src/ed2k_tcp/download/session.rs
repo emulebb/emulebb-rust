@@ -42,7 +42,7 @@ use super::super::{
     encode_aich_recovery_failure_answer,
     encode_empty_shared_files_answer, encode_emule_info_answer, encode_packet,
     encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
-    is_connection_shutdown_error, try_send_secure_ident_signature,
+    handle_aich_recovery_answer, is_connection_shutdown_error, try_send_secure_ident_signature,
     validate_file_status_part_count, verify_peer_secure_ident_signature,
 };
 use super::{
@@ -1181,6 +1181,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             answer.recovery_payload_len
                         ),
                     );
+                    handle_aich_recovery_answer(
+                        transfer_runtime,
+                        file_hash_hex,
+                        &answer,
+                        &packet.payload,
+                        peer_addr,
+                        transport.mode,
+                    )
+                    .await?;
                 }
                 (OP_EDONKEYPROT, OP_FILEREQANSNOFIL) => {
                     let missing_hash =

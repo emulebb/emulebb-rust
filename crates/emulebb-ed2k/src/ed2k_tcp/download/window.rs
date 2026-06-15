@@ -136,6 +136,11 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
             let Some(active_piece) = active_piece_request.as_mut() else {
                 break;
             };
+            // Skip over blocks already present in this part's salvage bitmap so
+            // an ICH-recovered part re-requests only the corrupt (gap) blocks.
+            // For a normal contiguous part the bitmap is the contiguous prefix
+            // up to `bytes_written`, so this advance is a no-op.
+            advance_over_present_blocks(manifest, active_piece);
             if active_piece.next_offset >= active_piece.piece_end {
                 break;
             }
@@ -187,6 +192,35 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         ),
     );
     Ok(Some(tokio::time::Instant::now() + part_response_grace))
+}
+
+/// Advance `active_piece.next_offset` past any blocks already marked present in
+/// the part's salvage bitmap, so re-download targets only the missing (gap)
+/// blocks. A no-op for contiguous parts (the bitmap is the prefix up to
+/// `bytes_written`, which `next_offset` already starts beyond).
+fn advance_over_present_blocks(
+    manifest: &Ed2kResumeManifest,
+    active_piece: &mut ActiveDownloadPiece,
+) {
+    let Some(piece) = manifest
+        .pieces
+        .iter()
+        .find(|piece| piece.piece_index == active_piece.piece_index)
+    else {
+        return;
+    };
+    if !piece.has_block_bitmap() {
+        return;
+    }
+    let piece_start = u64::from(active_piece.piece_index) * ED2K_PART_SIZE;
+    let part_len = active_piece.piece_end - piece_start;
+    while active_piece.next_offset < active_piece.piece_end {
+        let rel = active_piece.next_offset - piece_start;
+        match piece.present_block_end(part_len, rel) {
+            Some(block_end_rel) => active_piece.next_offset = piece_start + block_end_rel,
+            None => break,
+        }
+    }
 }
 
 #[must_use]

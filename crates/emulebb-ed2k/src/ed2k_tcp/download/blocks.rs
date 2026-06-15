@@ -60,7 +60,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
     {
         let request = pending_part_requests.remove(0);
         let (piece_completed, refreshed_manifest) = transfer_runtime
-            .append_piece_block_with_manifest(
+            .append_or_salvage_block_with_manifest(
                 file_hash_hex,
                 request.piece_index,
                 request.start,
@@ -116,6 +116,18 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             break;
         };
         if !first_request.queued || first_request.response_bytes.is_empty() {
+            break;
+        }
+        // The contiguous prefix flush only applies to non-salvage parts: a part
+        // mid ICH salvage tracks presence by whole-block bitmap and rejects
+        // partial-block writes, so leave its incomplete request to be
+        // re-requested by the gap-aware window next session.
+        if manifest
+            .pieces
+            .iter()
+            .find(|piece| piece.piece_index == first_request.piece_index)
+            .is_some_and(|piece| piece.has_block_bitmap())
+        {
             break;
         }
 

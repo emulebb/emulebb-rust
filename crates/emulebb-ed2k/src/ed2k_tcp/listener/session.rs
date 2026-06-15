@@ -67,6 +67,7 @@ use super::super::{
     OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
     OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
     OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, connect_callback_peer,
+    handle_aich_recovery_answer,
 };
 
 mod shared_file;
@@ -1087,6 +1088,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         answer.recovery_payload_len
                     ),
                 );
+                let answer_file_hash = answer.file_hash.to_string();
+                handle_aich_recovery_answer(
+                    transfer_runtime,
+                    &answer_file_hash,
+                    &answer,
+                    &packet.payload,
+                    peer_addr,
+                    transport.mode,
+                )
+                .await?;
             }
             _ => {
                 if let Some(requested_file_hash) = requested_file_hash {
