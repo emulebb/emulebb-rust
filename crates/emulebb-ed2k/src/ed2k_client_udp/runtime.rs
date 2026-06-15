@@ -1,7 +1,7 @@
 //! The client-to-client UDP source-reask runtime loop (`docs/design/udp-source-reask.md`
 //! §4.2-§4.6). Lives in `emulebb-ed2k` because it composes the crate-internal
 //! [`super::ReaskService`] with the shared Kad UDP socket via [`DhtNode`]; core
-//! spawns it (off by default, gated by `Ed2kConfig.enable_udp_reask`).
+//! spawns it (on by default, gated by `Ed2kConfig.enable_udp_reask`).
 //!
 //! It registers a foreign-datagram handler on the shared socket (inbound reask
 //! packets that fail Kad decode arrive here), forwards them to an async task over
@@ -148,8 +148,8 @@ fn hex_preview(bytes: &[u8]) -> String {
 }
 
 /// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
-/// when `enable_udp_reask` is on; off by default because the transport must be
-/// wire-validated before it is trusted.
+/// when `enable_udp_reask` is on (the default); the flag exists so the transport
+/// can be disabled to fall back to the held-TCP path if needed.
 pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
