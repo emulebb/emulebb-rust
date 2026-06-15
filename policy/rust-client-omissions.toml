@@ -31,6 +31,14 @@ reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the
 compatibility = "Does not affect eD2K or Kad wire compatibility; unsupported OP_MESSAGE from peers is simply not surfaced."
 
 [[omissions]]
+id = "ed2k-reask-callback-udp"
+area = "ed2k"
+stock_behavior = "When a downloader cannot reach a LowID source directly over client UDP, eMule sends OP_REASKCALLBACKUDP to the source's Kad buddy, which (as the buddy) verifies the leading buddy-id against its served buddy and relays the request to that buddy over TCP as OP_REASKCALLBACKTCP (ClientUDPSocket.cpp / DownloadClient.cpp)."
+rust_behavior = "The Rust client has a complete, unit-tested OP_REASKCALLBACKUDP wire codec (encode/decode in ed2k_client_udp/codec.rs) but does not act on it: the inbound reask path returns Ignored for the callback relay, and there is no outbound OP_REASKCALLBACKUDP send. The OP_REASKCALLBACKTCP frame is decoded/logged on the download session only."
+reason = "OP_REASKCALLBACKUDP is part of the client-UDP source-reask transport, which is gated off by default and not yet live-validated (docs/design/udp-source-reask.md Phase-2 scaffold). Both halves depend on the deferred reask transport: the buddy-relay half would need the BuddySocketRegistry threaded into the off-by-default reask runtime, and the downloader half is part of the unimplemented outbound reask transport. Wiring only one half into an off-by-default loop without live validation would be half-wired behavior; it is deliberately deferred as a pure documented codec scaffold until the reask transport is enabled and validated."
+compatibility = "Does not affect eD2K or Kad wire compatibility: the Rust client never advertises or relies on UDP buddy reask callbacks; sources remain reachable over the normal TCP source-acquisition path, so an unrelayed reask callback simply falls back to TCP exactly as when a buddy is unavailable."
+
+[[omissions]]
 id = "ed2k-preview"
 area = "ed2k"
 stock_behavior = "Classic eMule can request a media preview from a peer (OP_REQUESTPREVIEW) and answer one (OP_PREVIEWANSWER) by extracting and sending a few decoded video/image frames, viewed in the UI."
