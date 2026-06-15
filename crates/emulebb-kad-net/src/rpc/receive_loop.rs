@@ -121,10 +121,18 @@ impl RpcManager {
                                 .map_or_else(|| "-".to_string(), |version| version.to_string()),
                         );
 
+                        // LAN/loopback peers are exempt from the inbound flood
+                        // guard: the anti-flood + per-IP ban is a public-network
+                        // DoS protection (oracle treats LAN as trusted), and on a
+                        // single host every local node shares one loopback IP, so
+                        // throttling/banning by IP there would collapse all of
+                        // them together. Public peers are still fully throttled.
+                        let flood_exempt = is_lan_ip(from.ip());
+
                         // Drop everything from an IP previously flood-banned
                         // (oracle banned-client check), before any per-bucket
                         // accounting or handler dispatch.
-                        if inner.tracker.lock().unwrap().is_banned(from.ip()) {
+                        if !flood_exempt && inner.tracker.lock().unwrap().is_banned(from.ip()) {
                             inner
                                 .observability
                                 .lock()
@@ -141,7 +149,7 @@ impl RpcManager {
                             continue;
                         }
 
-                        if let Some(bucket) = inbound.tracker_bucket {
+                        if let Some(bucket) = inbound.tracker_bucket.filter(|_| !flood_exempt) {
                             let decision =
                                 inner
                                     .tracker
@@ -389,5 +397,35 @@ impl RpcManager {
                 }
             }
         })
+    }
+}
+
+/// Whether `ip` is a LAN/local address exempt from the public-network anti-flood
+/// guard (loopback, RFC1918 private, link-local, or unspecified). On a single
+/// host all local Kad nodes share one loopback IP, so per-IP throttling/banning
+/// must not apply to them; only public peers are flood-tracked.
+fn is_lan_ip(ip: std::net::IpAddr) -> bool {
+    // IPv4-only client: a non-IPv4 source (never expected) is treated as public
+    // and stays flood-tracked.
+    if let std::net::IpAddr::V4(v4) = ip {
+        v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod lan_exempt_tests {
+    use super::is_lan_ip;
+    use std::net::IpAddr;
+
+    #[test]
+    fn loopback_and_private_are_lan_public_is_not() {
+        assert!(is_lan_ip("127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_ip("192.168.1.10".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_ip("10.0.0.5".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_ip("169.254.1.1".parse::<IpAddr>().unwrap()));
+        assert!(!is_lan_ip("8.8.8.8".parse::<IpAddr>().unwrap()));
+        assert!(!is_lan_ip("45.82.80.155".parse::<IpAddr>().unwrap()));
     }
 }
