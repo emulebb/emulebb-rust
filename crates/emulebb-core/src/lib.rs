@@ -16,7 +16,10 @@ use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder,
     ReaskSourceHandle, TransportProtocol,
-    advertised_udp_port::{advertised_udp_port, set_advertised_external_udp_port},
+    advertised_ports::{
+        advertised_tcp_port, advertised_udp_port, set_advertised_external_tcp_port,
+        set_advertised_external_udp_port,
+    },
     built_in_upnp_port_mapping_providers,
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
@@ -1182,11 +1185,13 @@ impl EmulebbCore {
         nat.start().await?;
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
-        // Keep the advertised external eD2k UDP port in sync with the NAT mapping
-        // so peers can locate us for UDP source-reask by (ip, udp_port) even when
-        // the gateway remaps the external port.
-        tasks.push(tokio::spawn(run_advertised_udp_port_sync(
+        // Keep the advertised external eD2k TCP + UDP ports in sync with the NAT
+        // mappings so peers/servers can reach us (incoming TCP + HighID callback)
+        // and locate us for UDP source-reask by (ip, udp_port) even when the
+        // gateway remaps the external ports.
+        tasks.push(tokio::spawn(run_advertised_ports_sync(
             Arc::clone(&nat),
+            network.listen_port,
             network.kad_bind_addr.port(),
             Arc::clone(&shutdown),
         )));
@@ -2704,7 +2709,7 @@ impl EmulebbCore {
         let hello_identity = Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: network.listen_port,
+            tcp_port: advertised_tcp_port(network.listen_port),
             udp_port: advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
@@ -3450,11 +3455,12 @@ impl EmulebbCore {
         Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: network.listen_port,
-            // Advertise the externally-reachable eD2k UDP port (UPnP-mapped when
-            // known, else the internal Kad UDP port), like eMule: peers locate us
-            // for UDP source-reask by the (ip, udp_port) we advertise here, and
-            // the gateway can remap the external port (see advertised_udp_port).
+            // Advertise the externally-reachable ports (UPnP-mapped when known,
+            // else the internal port), like eMule: peers/servers reach us for
+            // incoming connections + HighID callback on tcp_port, and locate us for
+            // UDP source-reask by the (ip, udp_port) we advertise; the gateway can
+            // remap either external port (see advertised_ports).
+            tcp_port: advertised_tcp_port(network.listen_port),
             udp_port: advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
@@ -5367,27 +5373,35 @@ fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
     Ok(format!("{}:{}", request.address, request.port))
 }
 
-/// Keep the advertised external eD2k UDP port (`advertised_udp_port`) in sync with
-/// the live NAT mapping for the Kad UDP port. eMule advertises the externally
-/// reachable UDP port, not the internal one: a UPnP gateway may grant a different
-/// external port, and a peer answers a UDP source-reask only when it can locate us
-/// by the `(ip, udp_port)` we advertised (matching the reask datagram's source
-/// port, which the gateway rewrites to the external port). Polling the NAT status
-/// reflects a mapping that appears after startup — or is remapped on lease renewal
-/// — into subsequent hellos.
-async fn run_advertised_udp_port_sync(
+/// Keep the advertised external eD2k TCP + UDP ports (`advertised_ports`) in sync
+/// with the live NAT mappings. eMule advertises the externally reachable ports,
+/// not the internal ones: a UPnP gateway may grant different external ports, and
+/// (a) a peer answers a UDP source-reask only when it can locate us by the
+/// `(ip, udp_port)` we advertised (matching the reask datagram's source port, which
+/// the gateway rewrites to the external port), and (b) peers/servers reach us for
+/// incoming TCP connections + HighID callback on the advertised tcp_port. Polling
+/// the NAT status reflects a mapping that appears after startup — or is remapped on
+/// lease renewal — into subsequent hellos.
+async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
+    internal_tcp_port: u16,
     internal_udp_port: u16,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         let status = nat.status().await;
-        if let Some(external) = status.mappings.iter().find_map(|mapping: &MappedEndpoint| {
-            (mapping.protocol == TransportProtocol::Udp
-                && mapping.local_addr.port() == internal_udp_port)
-                .then(|| mapping.external_addr.port())
-        }) && external != 0
-        {
+        let external_for = |proto: TransportProtocol, internal: u16| -> Option<u16> {
+            status.mappings.iter().find_map(|mapping: &MappedEndpoint| {
+                (mapping.protocol == proto
+                    && mapping.local_addr.port() == internal
+                    && mapping.external_addr.port() != 0)
+                    .then(|| mapping.external_addr.port())
+            })
+        };
+        if let Some(external) = external_for(TransportProtocol::Tcp, internal_tcp_port) {
+            set_advertised_external_tcp_port(external);
+        }
+        if let Some(external) = external_for(TransportProtocol::Udp, internal_udp_port) {
             set_advertised_external_udp_port(external);
         }
         tokio::time::sleep(Duration::from_secs(10)).await;

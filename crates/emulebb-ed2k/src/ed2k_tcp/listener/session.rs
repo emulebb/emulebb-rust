@@ -115,9 +115,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         .context("failed to resolve Kad bind address for eD2k hello response")?
         .port();
     let response_identity = Ed2kHelloIdentity {
-        // Advertise the externally-reachable UDP port (UPnP-mapped when known) so
-        // inbound peers locate us for UDP source-reask by (ip, udp_port).
-        udp_port: crate::advertised_udp_port::advertised_udp_port(kad_udp_port),
+        // Advertise the externally-reachable ports (UPnP-mapped when known), read
+        // dynamically here so a mapping learned after startup is reflected: peers
+        // locate us for UDP source-reask by (ip, udp_port) and reach us for
+        // incoming connections on the advertised tcp_port.
+        udp_port: crate::advertised_ports::advertised_udp_port(kad_udp_port),
+        tcp_port: crate::advertised_ports::advertised_tcp_port(hello_identity.tcp_port),
         ..hello_identity
     };
     let response_identity =
@@ -585,7 +588,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     }
                 }
                 let reply = encode_emule_info_answer(
-                    crate::advertised_udp_port::advertised_udp_port(kad_udp_port),
+                    crate::advertised_ports::advertised_udp_port(kad_udp_port),
                 );
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);
                 transport
