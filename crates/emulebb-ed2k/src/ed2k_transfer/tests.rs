@@ -17,6 +17,7 @@ use std::{
 
 mod aich_tree;
 mod reask_reciprocity;
+mod salvage;
 mod upload_queue;
 mod upload_queue_credit;
 mod upload_queue_priority;
