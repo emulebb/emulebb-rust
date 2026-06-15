@@ -30,5 +30,23 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         user_hash: Some([user_marker; 16]),
         client_id: Some(client_id),
         friend_slot: false,
+        // Verified ident by default so credit-scoring fixtures exercise the real
+        // ratio math; A4 has a dedicated test for the unverified neutral path.
+        ident_verified: true,
+    }
+}
+
+/// Like [`upload_peer`] but with the secure-ident verification state spelled out,
+/// so a test can model an unverified (spoofable) peer whose credit ratio must
+/// stay neutral (eMule `GetScoreRatio` IS_IDENTIFIED gating).
+pub(super) fn upload_peer_with_ident(
+    octet: u8,
+    user_marker: u8,
+    client_id: u32,
+    ident_verified: bool,
+) -> Ed2kUploadPeerIdentity {
+    Ed2kUploadPeerIdentity {
+        ident_verified,
+        ..upload_peer(octet, user_marker, client_id)
     }
 }

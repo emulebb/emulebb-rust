@@ -785,6 +785,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                                 .unwrap_or_else(|| "none".to_string())
                         ),
                     );
+                    // Sync ident state so the credit score only benefits a
+                    // verified peer (eMule IS_IDENTIFIED gating GetScoreRatio).
+                    peer_upload_identity.ident_verified = verified;
                 }
                 Err(error) => {
                     dump_ed2k_tcp_listener_meta(
@@ -1171,6 +1174,7 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         user_hash: None,
         client_id: None,
         friend_slot: false,
+        ident_verified: false,
     }
 }
 
@@ -1186,13 +1190,14 @@ fn upload_peer_identity_from_hello(
             remote_hello.tcp_port
         },
         udp_port: (remote_hello.udp_port != 0).then_some(remote_hello.udp_port),
-        // udp_version is learned later from OP_EMULEINFO; should_crypt is set by the
-        // caller from the live transport mode.
+        // udp_version is learned later from OP_EMULEINFO; should_crypt + ident_verified
+        // are set by the caller (live transport mode / verified secure-ident signature).
         udp_version: 0,
         should_crypt: false,
         user_hash: Some(remote_hello.user_hash),
         client_id: Some(remote_hello.client_id),
         friend_slot: false,
+        ident_verified: false,
     }
 }
 

@@ -220,7 +220,13 @@ impl Ed2kTransferRuntime {
         peer.user_hash
             .map(hex::encode)
             .and_then(|user_hash| self.metadata.peer_credit_by_hash(&user_hash).ok().flatten())
-            .map(|credit| credit_score_permille(credit.uploaded_bytes, credit.downloaded_bytes))
+            .map(|credit| {
+                credit_score_permille(
+                    credit.uploaded_bytes,
+                    credit.downloaded_bytes,
+                    peer.ident_verified,
+                )
+            })
             .unwrap_or(DEFAULT_CREDIT_SCORE_PERMILLE)
     }
 }

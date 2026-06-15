@@ -28,9 +28,20 @@ pub(crate) fn upload_priority_score(priority: &str) -> i128 {
     }
 }
 
-pub(crate) fn credit_score_permille(uploaded_bytes: u64, downloaded_bytes: u64) -> i128 {
+pub(crate) fn credit_score_permille(
+    uploaded_bytes: u64,
+    downloaded_bytes: u64,
+    ident_verified: bool,
+) -> i128 {
     const CREDIT_THRESHOLD_BYTES: u64 = 1_048_576;
     const CREDIT_LINEAR_CAP_BYTES: u64 = 9_646_899;
+    // eMule `CClientCredits::GetScoreRatio`: with crypto available (we always
+    // have a secure ident) a peer that is not IS_IDENTIFIED gets the neutral 1.0
+    // ratio (no credit benefit), since its user-hash-keyed stored bytes are
+    // spoofable until the secure-ident signature is verified.
+    if !ident_verified {
+        return DEFAULT_CREDIT_SCORE_PERMILLE;
+    }
     if downloaded_bytes < CREDIT_THRESHOLD_BYTES {
         return DEFAULT_CREDIT_SCORE_PERMILLE;
     }

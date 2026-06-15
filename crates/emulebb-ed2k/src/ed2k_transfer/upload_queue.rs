@@ -82,6 +82,10 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     pub client_id: Option<u32>,
     /// Whether local policy has granted this peer the stock friend-slot fast path.
     pub friend_slot: bool,
+    /// Whether the peer's secure-ident signature was RSA-verified (eMule
+    /// `IS_IDENTIFIED`); only a verified peer's credit ratio benefits its score
+    /// (`GetScoreRatio` neutral 1.0 otherwise). Excluded from identity eq/hash.
+    pub ident_verified: bool,
 }
 
 impl PartialEq for Ed2kUploadPeerIdentity {
