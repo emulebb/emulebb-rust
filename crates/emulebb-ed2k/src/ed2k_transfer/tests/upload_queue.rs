@@ -19,6 +19,10 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
         &Ed2kConfig {
             upload_queue: Ed2kUploadQueuePolicyConfig {
                 active_slots: 2,
+                elastic_percent: 0,
+                upload_limit_bytes_per_sec: 0,
+                elastic_underfill_bytes_per_sec: 0,
+                elastic_underfill_secs: 10,
                 waiting_capacity: 8,
                 waiting_timeout_secs: 180,
                 granted_timeout_secs: 30,
@@ -64,6 +68,10 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
     runtime
         .apply_upload_queue_policy(&Ed2kUploadQueuePolicyConfig {
             active_slots: 2,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill_secs: 10,
             waiting_capacity: 8,
             waiting_timeout_secs: 180,
             granted_timeout_secs: 30,
@@ -75,6 +83,135 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
         runtime.poll_upload_session(&waiting_handle, true).await,
         Ed2kUploadSessionStatus::Granted
     );
+}
+
+#[tokio::test]
+async fn upload_queue_opens_elastic_slot_after_sustained_underfill() {
+    let root = unique_test_dir("ed2k-upload-queue-elastic-underfill");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            active_slots: 1,
+            elastic_percent: 100,
+            upload_limit_bytes_per_sec: 128 * 1024,
+            elastic_underfill_bytes_per_sec: 32 * 1024,
+            elastic_underfill: std::time::Duration::from_secs(10),
+            waiting_capacity: 8,
+            waiting_timeout: std::time::Duration::from_secs(60),
+            granted_timeout: std::time::Duration::from_secs(60),
+            upload_timeout: std::time::Duration::from_secs(60),
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x41; 16]);
+    let now = std::time::Instant::now();
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x41, 0x0A00_0041), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(2, 0x42, 0x0A00_0042),
+            &file_hash,
+            now + std::time::Duration::from_secs(1),
+        )
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &waiting_handle,
+                true,
+                now + std::time::Duration::from_secs(11)
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    let capacity = runtime.upload_queue_capacity_snapshot().await;
+    assert_eq!(capacity.base_slots, 1);
+    assert_eq!(capacity.elastic_slots, 1);
+}
+
+#[tokio::test]
+async fn upload_queue_keeps_elastic_slot_closed_when_upload_budget_is_full() {
+    let root = unique_test_dir("ed2k-upload-queue-elastic-full-rate");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            active_slots: 1,
+            elastic_percent: 100,
+            upload_limit_bytes_per_sec: 128 * 1024,
+            elastic_underfill_bytes_per_sec: 32 * 1024,
+            elastic_underfill: std::time::Duration::from_secs(10),
+            waiting_capacity: 8,
+            waiting_timeout: std::time::Duration::from_secs(60),
+            granted_timeout: std::time::Duration::from_secs(60),
+            upload_timeout: std::time::Duration::from_secs(60),
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x42; 16]);
+    let now = std::time::Instant::now();
+
+    let (active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x51, 0x0A00_0051), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        runtime
+            .note_upload_payload_sent_at(
+                &active_handle,
+                256 * 1024,
+                now + std::time::Duration::from_secs(1),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(2, 0x52, 0x0A00_0052),
+            &file_hash,
+            now + std::time::Duration::from_secs(2),
+        )
+        .await;
+
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &waiting_handle,
+                true,
+                now + std::time::Duration::from_secs(12),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+}
+
+#[tokio::test]
+async fn upload_queue_reserves_global_payload_budget() {
+    let root = unique_test_dir("ed2k-upload-queue-throttle-budget");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            active_slots: 1,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 1024,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill: std::time::Duration::from_secs(10),
+            waiting_capacity: 8,
+            waiting_timeout: std::time::Duration::from_secs(60),
+            granted_timeout: std::time::Duration::from_secs(60),
+            upload_timeout: std::time::Duration::from_secs(60),
+        })
+        .await;
+    let now = std::time::Instant::now();
+
+    let first = runtime.reserve_upload_payload_budget_at(1024, now).await;
+    let second = runtime.reserve_upload_payload_budget_at(1024, now).await;
+
+    assert_eq!(first.delay, std::time::Duration::ZERO);
+    assert_eq!(second.delay, std::time::Duration::from_secs(1));
 }
 
 #[tokio::test]

@@ -35,9 +35,9 @@ pub struct Ed2kConfig {
     pub kad_source_supplement_max_existing_sources: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
     pub upload_queue: Ed2kUploadQueuePolicyConfig,
-    /// Enable client-to-client UDP source reask on the shared Kad UDP port
-    /// (FEAT-001). Off by default: the reask transport must be wire-validated
-    /// before it is trusted (see `docs/design/udp-source-reask.md`).
+    /// Enable client-to-client UDP source reask on the shared Kad UDP port.
+    /// The Rust client's experimental transfer profile keeps queued sources warm
+    /// over UDP and falls back to TCP when a peer cannot be reasked reliably.
     pub enable_udp_reask: bool,
     /// Publish the real `emule-rust` mod identity in the eD2k hello instead of
     /// the default "eMule Community" (0.7-series) identity used to blend in.
@@ -48,6 +48,10 @@ pub struct Ed2kConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct Ed2kUploadQueuePolicyConfig {
     pub active_slots: usize,
+    pub elastic_percent: u32,
+    pub upload_limit_bytes_per_sec: u64,
+    pub elastic_underfill_bytes_per_sec: u64,
+    pub elastic_underfill_secs: u64,
     pub waiting_capacity: usize,
     pub waiting_timeout_secs: u64,
     pub granted_timeout_secs: u64,
@@ -87,7 +91,7 @@ impl Default for Ed2kConfig {
             source_server_attempt_budget: 3,
             kad_source_supplement_max_existing_sources: 2,
             upload_queue: Ed2kUploadQueuePolicyConfig::default(),
-            enable_udp_reask: false,
+            enable_udp_reask: true,
             publish_emule_rust_identity: false,
         }
     }
@@ -97,6 +101,10 @@ impl Default for Ed2kUploadQueuePolicyConfig {
     fn default() -> Self {
         Self {
             active_slots: 3,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill_secs: 10,
             waiting_capacity: 512,
             waiting_timeout_secs: 180,
             granted_timeout_secs: 30,
@@ -119,5 +127,6 @@ mod tests {
         assert_eq!(config.exact_hash_keyword_server_attempt_budget, 4);
         assert_eq!(config.source_server_attempt_budget, 3);
         assert_eq!(config.kad_source_supplement_max_existing_sources, 2);
+        assert!(config.enable_udp_reask);
     }
 }

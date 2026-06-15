@@ -472,6 +472,54 @@ What remains is the wiring, and the safe hook is precise:
 
 ---
 
+## 8.5 Live-validation findings (2026-06-14)
+
+Diagnosing why real-network reask pings drew no `OP_REASKACK`, the reask was
+audited byte-for-byte against the `emulebb-main` master and the silence was
+attributed to peer-side queue/NAT mechanics, **not** a rust framing defect:
+
+- **Reask body is byte-identical to stock.** `ed2k_client_udp/codec.rs`
+  `encode_reask_file_ping` produces exactly what `CUpDownClient::UDPReaskForDownload`
+  builds: `hash16` + (`udp_version>3`: `WritePartStatus` = `u16 count` +
+  LSB-first bitfield) + (`udp_version>2`: `u16` complete-source count). The
+  partstatus bit order matches `CPartFile::WritePartStatus` (`towrite |= 1<<i`).
+- **Reciprocity answer is byte-identical.** `reciprocity.rs` `answer_inbound_reask`
+  mirrors the `ClientUDPSocket.cpp` `OP_REASKFILEPING` reaction table exactly
+  (FileNotFound / Ack+rank / Silent / QueueFull, incl. the `+50` queue margin).
+- **Obfuscation key scheme matches.** Client-UDP send keys on
+  `MD5(receiver_userhash16 || sender_PublicIP4 || MAGICVALUE_UDP || randomKey2)`
+  (`EncryptSendClient`, `!bKad`); the receiver re-derives it from the **packet's
+  source IP**. So an obfuscated reask only decrypts if the sender's advertised
+  public IP equals the source IP the peer observes. Over the hide.me tunnel rust
+  detects `149.88.27.87` (the tunnel exit) correctly, so this matches *iff* the
+  VPN preserves the source address end-to-end.
+- **The ack returns to the packet source `ip:port`** (`SendPacket(response, ip,
+  port, …)` with `ip,port` = the inbound datagram's source), **not** the
+  advertised UDP port — so a conntrack/UPnP return path is NAT-friendly for the
+  immediate reply.
+- **Root cause of real-network silence (most likely):** a peer answers a reask
+  **only** when the requester is a *known waiting client located by
+  `(ip, udp_port)`* (`GetWaitingClientByIP_UDP`); otherwise it stays **silent**
+  (only `OP_QUEUEFULL` when its queue is near-full). Two ways this fails over VPN:
+  (a) the peer dropped us from its waiting queue, or (b) the VPN rewrites our
+  **outbound** UDP source port so the peer sees a port ≠ our advertised
+  `CT_EMULE_UDPPORTS`, breaking the `(ip, udp_port)` match. (b) is the leading
+  hypothesis and is the right next live measurement (compare rust's advertised
+  UDP port vs the external source port a witness observes).
+- **Cadence reality:** stock UDP-reasks a queued source only in the 2-min window
+  before `FILEREASKTIME` (29 min) **and** only ≥20 min after the last TCP connect
+  (`PartFile.cpp` Process / `DownloadClient.cpp`). So the *first* eMuleBB reask to
+  a freshly-queued source is ~27 min out — a controlled capture of eMuleBB's reask
+  must budget for it. rust's own 30 s reask cadence is far more aggressive (fine —
+  the downloader only needs one ack to refresh its slot).
+
+**Capture harness:** `emulebb-build-tests/scripts/emulebb-rust-reask-capture-emulebb.py`
+runs the inverse topology (rust uploader with `uploadQueue.activeSlots=0` +
+plaintext + `enableUdpReask`; eMuleBB the queued downloader) so eMuleBB UDP-reasks
+rust and rust logs the inbound datagram verbatim (`PKT-IN … hex=`). Plaintext
+(rust advertises no UDP-crypt) means eMuleBB sends the reask unobfuscated, giving
+a clean wire body to diff against rust's `PKT-OUT`.
+
 ## 9. Summary
 
 eMule keeps queue positions alive for hours by **disconnecting and UDP-reasking**

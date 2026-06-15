@@ -92,6 +92,10 @@ fn test_network_config(
         kad_source_supplement_max_existing_sources: 2,
         upload_queue: Ed2kUploadQueuePolicyConfig {
             active_slots: 2,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill_secs: 10,
             waiting_capacity: 8,
             waiting_timeout_secs: 5,
             granted_timeout_secs: 10,

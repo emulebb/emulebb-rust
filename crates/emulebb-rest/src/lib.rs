@@ -13,7 +13,8 @@ use emulebb_core::{
     AppInfo, AppLifecycle, CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare,
     LocalShareCreate, NetworkStatus, PreferencesUpdate, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedDirectoriesUpdate,
-    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate, VpnGuardStatus,
+    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate, UploadPolicyMetrics,
+    VpnGuardStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -598,7 +599,9 @@ async fn status(State(state): State<RestState>) -> impl IntoResponse {
 }
 
 async fn stats(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(stats_response(&state.core.status().await))
+    let status = state.core.status().await;
+    let upload_policy = state.core.upload_policy_metrics().await;
+    api_ok(stats_response(&status, &upload_policy))
 }
 
 async fn snapshot(
@@ -711,9 +714,7 @@ async fn kad_bootstrap(State(state): State<RestState>, body: Bytes) -> impl Into
         .bootstrap_kad(&request.address, request.port)
         .await
     {
-        Ok(status) => {
-            api_ok(kad_response(&status, &state.core.vpn_guard_status())).into_response()
-        }
+        Ok(status) => api_ok(kad_response(&status, &state.core.vpn_guard_status())).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -2007,20 +2008,20 @@ fn app_info_response(app: AppInfo) -> Value {
     })
 }
 
-fn stats_response(status: &Status) -> Value {
+fn stats_response(status: &Status, upload_policy: &UploadPolicyMetrics) -> Value {
     let ed2k_connected = status.ed2k.connected;
     let kad_connected = status.kad.connected;
     json!({
         "connected": ed2k_connected || kad_connected,
         "downloadSpeedKiBps": 0.0,
-        "uploadSpeedKiBps": 0.0,
+        "uploadSpeedKiBps": upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
         "sessionDownloadedBytes": 0,
         "sessionUploadedBytes": 0,
         "totalDownloadedBytes": 0,
         "totalUploadedBytes": 0,
         "activeDownloads": status.transfers.active,
-        "activeUploads": 0,
-        "waitingUploads": 0,
+        "activeUploads": upload_policy.active_sessions,
+        "waitingUploads": upload_policy.waiting_sessions,
         "downloadCount": status.transfers.active + status.transfers.completed,
         "sharedHashingActive": false,
         "sharedHashingCount": 0,
@@ -2036,11 +2037,13 @@ fn stats_response(status: &Status) -> Value {
 async fn status_response(state: &RestState) -> Value {
     let status = state.core.status().await;
     let guard = state.core.vpn_guard_status();
+    let upload_policy = state.core.upload_policy_metrics().await;
+    let download_sources = state.core.download_source_metrics().await;
     let shared_file_count = state.core.shares().await.len();
     let download_file_count = status.transfers.active + status.transfers.completed;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
-        "stats": stats_response(&status),
+        "stats": stats_response(&status, &upload_policy),
         "servers": server_status_response(state).await,
         "kad": kad_response(&status.kad, &guard),
         "network": network_response(&guard),
@@ -2064,8 +2067,10 @@ async fn status_response(state: &RestState) -> Value {
             "sharedFileCount": shared_file_count,
             "sharedHashingCount": 0,
             "downloadFileCount": download_file_count,
-            "activeUploads": 0,
-            "waitingUploads": 0,
+            "activeUploads": upload_policy.active_sessions,
+            "waitingUploads": upload_policy.waiting_sessions,
+            "uploadPolicy": upload_policy,
+            "downloadSources": download_sources,
             "geolocation": null
         }
     })

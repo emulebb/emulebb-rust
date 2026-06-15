@@ -16,8 +16,16 @@ pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kUploadQueueConfig {
-    /// Maximum number of concurrently granted upload sessions.
+    /// Baseline number of concurrently granted upload sessions.
     pub active_slots: usize,
+    /// Percent of additional elastic slots allowed above the baseline.
+    pub elastic_percent: u32,
+    /// Global upload payload budget. Zero disables rate-aware elasticity.
+    pub upload_limit_bytes_per_sec: u64,
+    /// Required spare upload budget before opening elastic slots.
+    pub elastic_underfill_bytes_per_sec: u64,
+    /// Sustained underfill window before elastic slots may open.
+    pub elastic_underfill: Duration,
     /// Maximum number of queued waiters retained at once.
     pub waiting_capacity: usize,
     /// Maximum idle time for a queued waiter before it is discarded.
@@ -32,6 +40,10 @@ impl Default for Ed2kUploadQueueConfig {
     fn default() -> Self {
         Self {
             active_slots: 3,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill: Duration::from_secs(10),
             waiting_capacity: 512,
             waiting_timeout: Duration::from_secs(180),
             granted_timeout: Duration::from_secs(30),
@@ -173,6 +185,24 @@ struct Ed2kUploadSessionEntry {
     upload_started_at: Option<Instant>,
 }
 
+/// Rate-aware upload slot capacity state for diagnostics and policy tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kUploadQueueCapacitySnapshot {
+    pub base_slots: usize,
+    pub elastic_slots: usize,
+    pub active_slots: usize,
+    pub active_sessions: usize,
+    pub waiting_sessions: usize,
+    pub upload_rate_bytes_per_sec: u64,
+    pub elastic_underfill: bool,
+}
+
+/// Global upload-rate reservation result for listener payload writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kUploadThrottleReservation {
+    pub delay: Duration,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UploadScoreInputs {
     waiting_seconds: i128,
@@ -198,6 +228,8 @@ pub(super) struct Ed2kUploadQueueState {
     sessions: HashMap<Ed2kUploadSessionKey, Ed2kUploadSessionEntry>,
     waiting_order: Vec<Ed2kUploadSessionKey>,
     next_waiting_sequence: u64,
+    underfill_since: Option<Instant>,
+    throttle_next_send_at: Option<Instant>,
 }
 
 impl Ed2kUploadQueueState {
@@ -207,11 +239,14 @@ impl Ed2kUploadQueueState {
             sessions: HashMap::new(),
             waiting_order: Vec::new(),
             next_waiting_sequence: 1,
+            underfill_since: None,
+            throttle_next_send_at: None,
         }
     }
 
     pub(super) fn configure(&mut self, config: Ed2kUploadQueueConfig) {
         self.config = config;
+        self.throttle_next_send_at = None;
         let now = Instant::now();
         self.reap_expired_sessions(now);
         self.trim_waiting_queue(now);
@@ -220,6 +255,20 @@ impl Ed2kUploadQueueState {
 
     pub(super) const fn config(&self) -> Ed2kUploadQueueConfig {
         self.config
+    }
+
+    pub(super) fn capacity_snapshot(&mut self, now: Instant) -> Ed2kUploadQueueCapacitySnapshot {
+        self.reap_expired_sessions(now);
+        self.refresh_elastic_underfill(now);
+        Ed2kUploadQueueCapacitySnapshot {
+            base_slots: self.config.active_slots.max(1),
+            elastic_slots: self.elastic_slot_allowance(),
+            active_slots: self.effective_active_slot_limit(now),
+            active_sessions: self.active_session_count(),
+            waiting_sessions: self.waiting_session_count(),
+            upload_rate_bytes_per_sec: self.upload_rate_bytes_per_sec(now),
+            elastic_underfill: self.elastic_underfill_ready(now),
+        }
     }
 
     pub(super) fn begin_session(
@@ -246,7 +295,8 @@ impl Ed2kUploadQueueState {
             return self.status_for_key(&key, now);
         }
 
-        let phase = if self.active_session_count() < self.config.active_slots {
+        self.refresh_elastic_underfill(now);
+        let phase = if self.active_session_count() < self.effective_active_slot_limit(now) {
             Ed2kUploadSessionPhase::Granted
         } else {
             self.waiting_order.push(key.clone());
@@ -331,6 +381,8 @@ impl Ed2kUploadQueueState {
             session.upload_started_at.get_or_insert(now);
         }
         session.uploaded_bytes = session.uploaded_bytes.saturating_add(byte_count);
+        self.refresh_elastic_underfill(now);
+        self.promote_waiters(now);
         self.status_for_key(&handle.key, now)
     }
 
@@ -428,6 +480,27 @@ impl Ed2kUploadQueueState {
         }
     }
 
+    pub(super) fn reserve_upload_payload(
+        &mut self,
+        byte_count: u64,
+        now: Instant,
+    ) -> Ed2kUploadThrottleReservation {
+        if byte_count == 0 || self.config.upload_limit_bytes_per_sec == 0 {
+            return Ed2kUploadThrottleReservation {
+                delay: Duration::ZERO,
+            };
+        }
+        let interval = upload_payload_interval(byte_count, self.config.upload_limit_bytes_per_sec);
+        let scheduled_at = self
+            .throttle_next_send_at
+            .filter(|next_send_at| *next_send_at > now)
+            .unwrap_or(now);
+        self.throttle_next_send_at = Some(scheduled_at + interval);
+        Ed2kUploadThrottleReservation {
+            delay: scheduled_at.saturating_duration_since(now),
+        }
+    }
+
     fn status_for_key(&self, key: &Ed2kUploadSessionKey, now: Instant) -> Ed2kUploadSessionStatus {
         match self.sessions.get(key).map(|session| session.phase) {
             Some(Ed2kUploadSessionPhase::Waiting) => Ed2kUploadSessionStatus::Waiting {
@@ -510,7 +583,8 @@ impl Ed2kUploadQueueState {
     }
 
     fn promote_waiters(&mut self, now: Instant) {
-        while self.active_session_count() < self.config.active_slots {
+        self.refresh_elastic_underfill(now);
+        while self.active_session_count() < self.effective_active_slot_limit(now) {
             let Some(next_key) = self.best_waiting_key(now) else {
                 break;
             };
@@ -590,6 +664,77 @@ impl Ed2kUploadQueueState {
         self.next_waiting_sequence = self.next_waiting_sequence.saturating_add(1);
         sequence
     }
+
+    fn waiting_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+            .count()
+    }
+
+    fn elastic_slot_allowance(&self) -> usize {
+        let percent = self.config.elastic_percent.min(100) as usize;
+        self.config
+            .active_slots
+            .max(1)
+            .saturating_mul(percent)
+            .div_ceil(100)
+    }
+
+    fn effective_active_slot_limit(&self, now: Instant) -> usize {
+        let base_slots = self.config.active_slots.max(1);
+        if self.elastic_underfill_ready(now) {
+            base_slots.saturating_add(self.elastic_slot_allowance())
+        } else {
+            base_slots
+        }
+    }
+
+    fn elastic_underfill_ready(&self, now: Instant) -> bool {
+        self.elastic_slot_allowance() != 0
+            && self.underfill_since.is_some_and(|underfill_since| {
+                now.saturating_duration_since(underfill_since) >= self.config.elastic_underfill
+            })
+    }
+
+    fn refresh_elastic_underfill(&mut self, now: Instant) {
+        if self.elastic_slot_allowance() == 0 || self.config.upload_limit_bytes_per_sec == 0 {
+            self.underfill_since = None;
+            return;
+        }
+        let spare_budget = self
+            .config
+            .upload_limit_bytes_per_sec
+            .saturating_sub(self.upload_rate_bytes_per_sec(now));
+        if spare_budget >= self.config.elastic_underfill_bytes_per_sec {
+            self.underfill_since.get_or_insert(now);
+        } else {
+            self.underfill_since = None;
+        }
+    }
+
+    fn upload_rate_bytes_per_sec(&self, now: Instant) -> u64 {
+        self.sessions
+            .values()
+            .filter_map(|session| {
+                let elapsed = session
+                    .upload_started_at
+                    .map(|started_at| now.saturating_duration_since(started_at).as_secs())
+                    .unwrap_or(0);
+                if elapsed == 0 {
+                    None
+                } else {
+                    Some(session.uploaded_bytes / elapsed)
+                }
+            })
+            .sum()
+    }
+}
+
+fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duration {
+    let nanos = (u128::from(byte_count) * 1_000_000_000u128)
+        .div_ceil(u128::from(limit_bytes_per_sec.max(1)));
+    Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
 }
 
 mod helpers;

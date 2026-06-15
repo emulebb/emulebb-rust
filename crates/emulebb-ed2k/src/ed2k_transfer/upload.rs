@@ -8,8 +8,9 @@ use emulebb_metadata::MetadataPeerCredit;
 use crate::config::Ed2kUploadQueuePolicyConfig;
 
 use super::{
-    Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueSnapshotEntry,
-    Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
+    Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueCapacitySnapshot,
+    Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
+    Ed2kUploadThrottleReservation,
     upload_queue::{DEFAULT_CREDIT_SCORE_PERMILLE, credit_score_permille, upload_priority_score},
     upload_queue_config_from_policy, upload_queue_policy_from_config,
 };
@@ -26,6 +27,14 @@ impl Ed2kTransferRuntime {
     /// Return the currently active inbound uploader queue policy.
     pub async fn upload_queue_policy_snapshot(&self) -> Ed2kUploadQueuePolicyConfig {
         upload_queue_policy_from_config(self.upload_queue.lock().await.config())
+    }
+
+    /// Return the current rate-aware upload slot capacity state.
+    pub async fn upload_queue_capacity_snapshot(&self) -> Ed2kUploadQueueCapacitySnapshot {
+        self.upload_queue
+            .lock()
+            .await
+            .capacity_snapshot(Instant::now())
     }
 
     /// Override inbound uploader queue policy for controlled scenarios and tests.
@@ -118,6 +127,25 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .note_uploaded_bytes(handle, byte_count, now)
+    }
+
+    pub(crate) async fn reserve_upload_payload_budget(
+        &self,
+        byte_count: u64,
+    ) -> Ed2kUploadThrottleReservation {
+        self.reserve_upload_payload_budget_at(byte_count, Instant::now())
+            .await
+    }
+
+    pub(crate) async fn reserve_upload_payload_budget_at(
+        &self,
+        byte_count: u64,
+        now: Instant,
+    ) -> Ed2kUploadThrottleReservation {
+        self.upload_queue
+            .lock()
+            .await
+            .reserve_upload_payload(byte_count, now)
     }
 
     /// Release one upload slot or waiting entry after disconnect or explicit cancel.

@@ -96,6 +96,14 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             is_i64,
         )? {
             dump_ed2k_tcp_listener_send(peer_addr, transport.mode, reply.phase, &reply.packet);
+            let reservation = transfer_runtime
+                .reserve_upload_payload_budget(
+                    u64::try_from(reply.packet.len()).unwrap_or(u64::MAX),
+                )
+                .await;
+            if !reservation.delay.is_zero() {
+                tokio::time::sleep(reservation.delay).await;
+            }
             transport
                 .write_all(&reply.packet)
                 .await

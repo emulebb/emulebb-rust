@@ -14,17 +14,17 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{
-    MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, TransportProtocol,
-    built_in_upnp_port_mapping_providers,
+    MappingExposure, MappingSpec, NatConfig, NatManager, NatManagerBuilder, ReaskSourceHandle,
+    TransportProtocol, built_in_upnp_port_mapping_providers,
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions, Ed2kSearchFile,
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
-        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel,
+        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_on_server,
-        parse_server_met, request_callback_via_background_session, run_ed2k_server_loop,
-        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
-        search_source_udp_servers, search_source_via_background_session,
+        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
+        search_keyword_via_background_session, search_source_servers, search_source_udp_servers,
+        search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -33,13 +33,13 @@ use emulebb_ed2k::{
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kLiveSource, Ed2kResumeManifest, Ed2kSourceHint,
-        Ed2kTransferRuntime, Ed2kTransferState, Ed2kUploadQueueSnapshotEntry,
-        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        Ed2kTransferRuntime, Ed2kTransferState, Ed2kUploadQueueCapacitySnapshot,
+        Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     ipfilter::IpFilter,
     kad_firewall::{FirewallUdpPacketOutcome, KadFirewallState},
     public_ip::SharedPublicIp,
-    reask_command_channel, run_ed2k_udp_reask_loop, ReaskSourceHandle,
+    reask_command_channel, run_ed2k_udp_reask_loop,
 };
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
@@ -68,11 +68,13 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod download_source_registry;
 mod kad_snoop_entry;
 mod profile_state;
 mod search_query;
 mod search_state;
 mod shared_directories;
+use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
@@ -633,6 +635,26 @@ pub struct UploadScoreBreakdown {
     pub cooldown_remaining_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadPolicyMetrics {
+    pub base_slots: usize,
+    pub elastic_slots: usize,
+    pub active_slots: usize,
+    pub active_sessions: usize,
+    pub waiting_sessions: usize,
+    pub upload_rate_bytes_per_sec: u64,
+    pub elastic_underfill: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadSourceMetrics {
+    pub candidates: usize,
+    pub a4af_candidates: usize,
+    pub leased_peers: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
@@ -762,6 +784,7 @@ struct CoreState {
     banned_source_clients: HashSet<String>,
     active_download_attempts: HashSet<String>,
     active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
+    download_source_registry: DownloadSourceRegistry,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
     kad_running: bool,
@@ -1462,11 +1485,16 @@ impl EmulebbCore {
             Ok(ed2k_results) => {
                 if let Some(mut ed2k_results) = ed2k_results {
                     apply_search_filters(&mut ed2k_results, &request);
-                    let seen: std::collections::HashSet<String> =
-                        search.results.iter().map(|result| result.hash.clone()).collect();
-                    search
+                    let seen: std::collections::HashSet<String> = search
                         .results
-                        .extend(ed2k_results.into_iter().filter(|result| !seen.contains(&result.hash)));
+                        .iter()
+                        .map(|result| result.hash.clone())
+                        .collect();
+                    search.results.extend(
+                        ed2k_results
+                            .into_iter()
+                            .filter(|result| !seen.contains(&result.hash)),
+                    );
                 }
                 search.status = "completed".to_string();
             }
@@ -1904,6 +1932,21 @@ impl EmulebbCore {
 
     pub async fn upload_queue(&self) -> Vec<Upload> {
         self.uploads_by_queue_state(true).await
+    }
+
+    pub async fn upload_policy_metrics(&self) -> UploadPolicyMetrics {
+        upload_policy_metrics_from_capacity(
+            self.ed2k_transfers.upload_queue_capacity_snapshot().await,
+        )
+    }
+
+    pub async fn download_source_metrics(&self) -> DownloadSourceMetrics {
+        let state = self.state.lock().await;
+        DownloadSourceMetrics {
+            candidates: state.download_source_registry.candidate_count(),
+            a4af_candidates: state.download_source_registry.a4af_candidate_count(),
+            leased_peers: state.download_source_registry.leased_peer_count(),
+        }
     }
 
     pub async fn upload(&self, client_id: &str, waiting_queue: bool) -> Option<Upload> {
@@ -2721,6 +2764,8 @@ impl EmulebbCore {
         if sources.is_empty() {
             return Ok(Some("downloading"));
         }
+        self.register_download_source_candidates(&transfer, &sources)
+            .await;
         let hello_identity = self.ed2k_hello_identity(network);
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         let callback_timeout = Duration::from_secs(network.config.connect_timeout_secs.max(30));
@@ -2821,7 +2866,7 @@ impl EmulebbCore {
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
             had_direct_sources |= !candidate_direct_sources.is_empty();
             let (direct_sources, deferred_count) = self
-                .acquire_direct_download_source_leases(&candidate_direct_sources)
+                .acquire_direct_download_source_leases(&transfer.hash, &candidate_direct_sources)
                 .await;
             deferred_active_direct_sources |= deferred_count != 0;
             for source in &direct_sources {
@@ -2879,7 +2924,8 @@ impl EmulebbCore {
                 // UDP reask loop: the loop now owns re-engagement for them, so
                 // releasing the lease would let the next cycle re-connect them over
                 // TCP (the reask churn). On error, detached is empty -> release all.
-                let detached_endpoints: std::collections::HashSet<(Ipv4Addr, u16)> = match &outcome {
+                let detached_endpoints: std::collections::HashSet<(Ipv4Addr, u16)> = match &outcome
+                {
                     Ok(outcome) => outcome.detached_reask_endpoints.iter().copied().collect(),
                     Err(_) => std::collections::HashSet::new(),
                 };
@@ -2944,6 +2990,8 @@ impl EmulebbCore {
                     Ok(refreshed_sources) => {
                         let refreshed_source_count = refreshed_sources.len();
                         let previous_source_count = sources.len();
+                        self.register_download_source_candidates(&transfer, &refreshed_sources)
+                            .await;
                         merge_download_sources(&mut sources, refreshed_sources);
                         let added_source_count =
                             sources.len().saturating_sub(previous_source_count);
@@ -3006,6 +3054,7 @@ impl EmulebbCore {
 
     async fn acquire_direct_download_source_leases(
         &self,
+        file_hash: &str,
         sources: &[Ed2kFoundSource],
     ) -> (Vec<Ed2kFoundSource>, usize) {
         let mut state = self.state.lock().await;
@@ -3013,9 +3062,13 @@ impl EmulebbCore {
         let mut deferred = 0usize;
         for source in sources {
             let endpoint = source_endpoint_key(source);
-            if state.active_download_peer_endpoints.insert(endpoint) {
+            let registry_lease = state
+                .download_source_registry
+                .lease_best_for_file(source, file_hash);
+            if registry_lease.is_some() && state.active_download_peer_endpoints.insert(endpoint) {
                 acquired.push(source.clone());
             } else {
+                state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
             }
         }
@@ -3026,6 +3079,28 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         for endpoint in endpoints {
             state.active_download_peer_endpoints.remove(endpoint);
+            state.download_source_registry.release_endpoint(*endpoint);
+        }
+    }
+
+    async fn register_download_source_candidates(
+        &self,
+        transfer: &Transfer,
+        sources: &[Ed2kFoundSource],
+    ) {
+        let mut state = self.state.lock().await;
+        let file_priority = download_priority_score(&transfer.priority);
+        let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
+        for source in sources {
+            state
+                .download_source_registry
+                .add_candidate(DownloadSourceCandidate {
+                    file_hash: transfer.hash.clone(),
+                    file_priority,
+                    needed_parts,
+                    rare_parts: 0,
+                    source: source.clone(),
+                });
         }
     }
 
@@ -4923,6 +4998,17 @@ fn validate_transfer_priority(priority: &str) -> Result<&str> {
     }
 }
 
+fn download_priority_score(priority: &str) -> u32 {
+    match priority {
+        "verylow" => 1,
+        "low" => 3,
+        "high" => 7,
+        "veryhigh" => 9,
+        "auto" | "normal" => 5,
+        _ => 5,
+    }
+}
+
 fn normalize_transfer_name(name: Option<String>) -> Result<String> {
     let Some(name) = name else {
         anyhow::bail!("name must be a string");
@@ -5037,8 +5123,7 @@ fn enrich_sources_with_live(
         let Some(live_source) = live_by_endpoint.get(&source.endpoint) else {
             continue;
         };
-        source.download_speed_ki_bps =
-            live_source.download_speed_bytes_per_sec as f64 / 1024.0;
+        source.download_speed_ki_bps = live_source.download_speed_bytes_per_sec as f64 / 1024.0;
         source.available_parts = live_source.available_parts;
         source.part_count = part_count;
         let state = if live_source.transferring {
@@ -5368,6 +5453,20 @@ fn upload_from_snapshot(
         requested_parts_total,
         requested_parts_progress_text,
         queue_rank: entry.queue_rank,
+    }
+}
+
+fn upload_policy_metrics_from_capacity(
+    capacity: Ed2kUploadQueueCapacitySnapshot,
+) -> UploadPolicyMetrics {
+    UploadPolicyMetrics {
+        base_slots: capacity.base_slots,
+        elastic_slots: capacity.elastic_slots,
+        active_slots: capacity.active_slots,
+        active_sessions: capacity.active_sessions,
+        waiting_sessions: capacity.waiting_sessions,
+        upload_rate_bytes_per_sec: capacity.upload_rate_bytes_per_sec,
+        elastic_underfill: capacity.elastic_underfill,
     }
 }
 
@@ -6108,7 +6207,7 @@ fn default_preferences() -> Preferences {
         max_sources_per_file: 400,
         upload_client_data_rate: 32,
         max_upload_slots: 8,
-        upload_slot_elastic_percent: 25,
+        upload_slot_elastic_percent: 80,
         queue_size: 5000,
         auto_connect: false,
         new_auto_up: true,
@@ -6227,6 +6326,11 @@ fn ed2k_upload_queue_policy_from_preferences(
 ) -> Ed2kUploadQueuePolicyConfig {
     let mut policy = base.cloned().unwrap_or_default();
     policy.active_slots = preferences.max_upload_slots as usize;
+    policy.elastic_percent = preferences.upload_slot_elastic_percent.min(100);
+    policy.upload_limit_bytes_per_sec = u64::from(preferences.upload_limit_ki_bps) * 1024;
+    policy.elastic_underfill_bytes_per_sec =
+        u64::from(preferences.upload_client_data_rate.max(1)) * 1024;
+    policy.elastic_underfill_secs = policy.elastic_underfill_secs.max(10);
     policy.waiting_capacity = preferences.queue_size as usize;
     policy
 }
@@ -6615,6 +6719,10 @@ mod tests {
         preferences.queue_size = 6_000;
         let base = Ed2kUploadQueuePolicyConfig {
             active_slots: 3,
+            elastic_percent: 15,
+            upload_limit_bytes_per_sec: 512 * 1024,
+            elastic_underfill_bytes_per_sec: 16 * 1024,
+            elastic_underfill_secs: 10,
             waiting_capacity: 512,
             waiting_timeout_secs: 44,
             granted_timeout_secs: 22,
@@ -6624,6 +6732,18 @@ mod tests {
         let policy = ed2k_upload_queue_policy_from_preferences(Some(&base), &preferences);
 
         assert_eq!(policy.active_slots, 11);
+        assert_eq!(
+            policy.elastic_percent,
+            preferences.upload_slot_elastic_percent
+        );
+        assert_eq!(
+            policy.upload_limit_bytes_per_sec,
+            u64::from(preferences.upload_limit_ki_bps) * 1024
+        );
+        assert_eq!(
+            policy.elastic_underfill_bytes_per_sec,
+            u64::from(preferences.upload_client_data_rate) * 1024
+        );
         assert_eq!(policy.waiting_capacity, 6_000);
         assert_eq!(policy.waiting_timeout_secs, 44);
         assert_eq!(policy.granted_timeout_secs, 22);
@@ -6635,6 +6755,10 @@ mod tests {
         let preferences = default_preferences();
         let base = Ed2kUploadQueuePolicyConfig {
             active_slots: 3,
+            elastic_percent: 15,
+            upload_limit_bytes_per_sec: 512 * 1024,
+            elastic_underfill_bytes_per_sec: 16 * 1024,
+            elastic_underfill_secs: 10,
             waiting_capacity: 512,
             waiting_timeout_secs: 44,
             granted_timeout_secs: 22,
@@ -8176,6 +8300,53 @@ mod tests {
         );
 
         assert_eq!(candidates, vec![next_endpoint]);
+    }
+
+    #[tokio::test]
+    async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let lower_hash = Ed2kHash::from_bytes([0x48; 16]).to_string();
+        let higher_hash = Ed2kHash::from_bytes([0x49; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x48; 16]),
+            Ipv4Addr::new(192, 0, 2, 12),
+            41003,
+        );
+        {
+            let mut state = core.state.lock().await;
+            state
+                .download_source_registry
+                .add_candidate(DownloadSourceCandidate {
+                    file_hash: lower_hash.clone(),
+                    file_priority: 1,
+                    needed_parts: 8,
+                    rare_parts: 0,
+                    source: source.clone(),
+                });
+            state
+                .download_source_registry
+                .add_candidate(DownloadSourceCandidate {
+                    file_hash: higher_hash.clone(),
+                    file_priority: 9,
+                    needed_parts: 1,
+                    rare_parts: 0,
+                    source: source.clone(),
+                });
+        }
+
+        let (lower_sources, lower_deferred) = core
+            .acquire_direct_download_source_leases(&lower_hash, std::slice::from_ref(&source))
+            .await;
+        let (higher_sources, higher_deferred) = core
+            .acquire_direct_download_source_leases(&higher_hash, std::slice::from_ref(&source))
+            .await;
+
+        assert!(lower_sources.is_empty());
+        assert_eq!(lower_deferred, 1);
+        assert_eq!(higher_sources, vec![source.clone()]);
+        assert_eq!(higher_deferred, 0);
+        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
+            .await;
     }
 
     #[test]

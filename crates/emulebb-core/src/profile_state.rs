@@ -65,6 +65,8 @@ pub(crate) fn load_core_state(
         banned_source_clients: HashSet::new(),
         active_download_attempts: HashSet::new(),
         active_download_peer_endpoints: HashSet::new(),
+        download_source_registry: crate::download_source_registry::DownloadSourceRegistry::default(
+        ),
         shared_directories,
         unshared_hashes: metadata.load_unshared_file_hashes()?.into_iter().collect(),
         kad_running: false,

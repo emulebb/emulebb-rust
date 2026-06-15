@@ -111,6 +111,10 @@ impl ListenerTestRuntime {
         self.transfer_runtime
             .configure_upload_queue(Ed2kUploadQueueConfig {
                 active_slots: 1,
+                elastic_percent: 0,
+                upload_limit_bytes_per_sec: 0,
+                elastic_underfill_bytes_per_sec: 0,
+                elastic_underfill: Duration::from_secs(10),
                 waiting_capacity: 8,
                 waiting_timeout: Duration::from_secs(30),
                 granted_timeout: Duration::from_secs(30),

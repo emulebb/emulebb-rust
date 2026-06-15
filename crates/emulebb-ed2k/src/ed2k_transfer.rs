@@ -42,8 +42,8 @@ mod upload;
 mod upload_queue;
 
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
-use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
 pub use download_activity::Ed2kLiveSource;
+use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
@@ -59,6 +59,7 @@ use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::{
     Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
+pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
 pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
 
 /// Canonical ED2K part size used by eMule-compatible file hashing.
@@ -197,6 +198,10 @@ pub(super) fn upload_queue_config_from_policy(
 ) -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
         active_slots: policy.active_slots.max(1),
+        elastic_percent: policy.elastic_percent.min(100),
+        upload_limit_bytes_per_sec: policy.upload_limit_bytes_per_sec,
+        elastic_underfill_bytes_per_sec: policy.elastic_underfill_bytes_per_sec,
+        elastic_underfill: Duration::from_secs(policy.elastic_underfill_secs.max(1)),
         waiting_capacity: policy.waiting_capacity,
         waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
         granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
@@ -209,6 +214,10 @@ pub(super) fn upload_queue_policy_from_config(
 ) -> Ed2kUploadQueuePolicyConfig {
     Ed2kUploadQueuePolicyConfig {
         active_slots: config.active_slots,
+        elastic_percent: config.elastic_percent,
+        upload_limit_bytes_per_sec: config.upload_limit_bytes_per_sec,
+        elastic_underfill_bytes_per_sec: config.elastic_underfill_bytes_per_sec,
+        elastic_underfill_secs: config.elastic_underfill.as_secs(),
         waiting_capacity: config.waiting_capacity,
         waiting_timeout_secs: config.waiting_timeout.as_secs(),
         granted_timeout_secs: config.granted_timeout.as_secs(),
