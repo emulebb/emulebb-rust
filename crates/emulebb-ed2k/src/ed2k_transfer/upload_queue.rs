@@ -13,6 +13,10 @@ const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
 pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
 
+/// eMule default soft queue size (`PreferenceValidationSeams::kDefaultQueueSize`),
+/// the threshold the reask QUEUEFULL margin compares against.
+pub(crate) const DEFAULT_SOFT_QUEUE_SIZE: u32 = 10_000;
+
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kUploadQueueConfig {
@@ -26,8 +30,13 @@ pub(crate) struct Ed2kUploadQueueConfig {
     pub elastic_underfill_bytes_per_sec: u64,
     /// Sustained underfill window before elastic slots may open.
     pub elastic_underfill: Duration,
-    /// Maximum number of queued waiters retained at once.
+    /// Maximum number of queued waiters retained at once (structural cap).
     pub waiting_capacity: usize,
+    /// Configured soft queue size (`thePrefs.GetQueueSize()`, eMule default
+    /// 10000): the threshold the reask QUEUEFULL margin compares against
+    /// (`GetWaitingUserCount() + 50 > GetQueueSize()`). Distinct from the
+    /// structural `waiting_capacity`, which is a much smaller retention bound.
+    pub soft_queue_size: u32,
     /// Maximum idle time for a queued waiter before it is discarded.
     pub waiting_timeout: Duration,
     /// Maximum stall time after grant before the peer requests data.
@@ -45,6 +54,7 @@ impl Default for Ed2kUploadQueueConfig {
             elastic_underfill_bytes_per_sec: 0,
             elastic_underfill: Duration::from_secs(10),
             waiting_capacity: 512,
+            soft_queue_size: DEFAULT_SOFT_QUEUE_SIZE,
             waiting_timeout: Duration::from_secs(180),
             granted_timeout: Duration::from_secs(30),
             upload_timeout: Duration::from_secs(90),

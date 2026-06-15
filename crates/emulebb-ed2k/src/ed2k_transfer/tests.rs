@@ -99,6 +99,30 @@ async fn download_activity_reports_average_speed_until_stale() {
 }
 
 #[tokio::test]
+async fn download_speed_tracks_sliding_window_not_whole_transfer() {
+    // B4: the reported rate must be a short sliding-window average (master
+    // CalculateDownloadRate), so a recent burst is not diluted by an early
+    // slow start the way a whole-transfer average would be.
+    let root = unique_test_dir("ed2k-transfer-sliding-window");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let file_hash = "0011223344556677889900aabbccddee";
+
+    // A small early sample, then a long gap, then a recent burst.
+    runtime.note_download_payload_bytes_at(file_hash, 1_000, now);
+    // Two recent samples 2s apart, 1 MiB each, observed at +21s/+23s.
+    runtime.note_download_payload_bytes_at(file_hash, 1_048_576, now + Duration::from_secs(21));
+    runtime.note_download_payload_bytes_at(file_hash, 1_048_576, now + Duration::from_secs(23));
+
+    // Whole-transfer average over 23s would be ~91 KiB/s; the window only sees
+    // the two recent samples (the early one fell out of the 10s window).
+    let windowed = runtime.download_speed_bytes_per_sec_at(file_hash, now + Duration::from_secs(23));
+    // span from oldest retained sample (+21s) to now (+23s) = 2s, 2 MiB total.
+    assert_eq!(windowed, 2 * 1_048_576 * 1_000 / 2_000);
+    assert!(windowed > 500_000, "windowed rate reflects the recent burst");
+}
+
+#[tokio::test]
 async fn aggregate_download_speed_and_session_counters_roll_up() {
     let root = unique_test_dir("ed2k-transfer-aggregate-speed");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

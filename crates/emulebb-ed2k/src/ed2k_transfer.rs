@@ -56,6 +56,7 @@ pub use model::{
     Ed2kTransferJob, Ed2kTransferState,
 };
 use upload_queue::Ed2kUploadQueueState;
+use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;
 pub(crate) use upload_queue::{
     Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
@@ -210,6 +211,7 @@ pub(super) fn upload_queue_config_from_policy(
         elastic_underfill_bytes_per_sec: policy.elastic_underfill_bytes_per_sec,
         elastic_underfill: Duration::from_secs(policy.elastic_underfill_secs.max(1)),
         waiting_capacity: policy.waiting_capacity,
+        soft_queue_size: DEFAULT_SOFT_QUEUE_SIZE,
         waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
         granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
         upload_timeout: Duration::from_secs(policy.upload_timeout_secs.max(1)),

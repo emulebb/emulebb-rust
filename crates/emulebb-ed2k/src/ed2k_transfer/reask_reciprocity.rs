@@ -53,7 +53,9 @@ impl Ed2kTransferRuntime {
         let (snapshot, queue_size) = {
             let mut queue = self.upload_queue.lock().await;
             let snapshot = queue.snapshot(Instant::now());
-            (snapshot, queue.config().waiting_capacity as u32)
+            // eMule QUEUEFULL margin compares against the configured soft queue
+            // size (thePrefs.GetQueueSize()), not the structural waiting_capacity.
+            (snapshot, queue.config().soft_queue_size)
         };
 
         // Among clients sharing the sender IP, locate the one on this UDP port

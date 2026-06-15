@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -8,12 +9,55 @@ const DOWNLOAD_ACTIVITY_STALE_AFTER: Duration = Duration::from_secs(30);
 /// this window. Shorter than the live-source window so "transferring" reflects
 /// genuinely active peers, not merely recently-seen ones.
 const SOURCE_TRANSFERRING_AFTER: Duration = Duration::from_secs(10);
+/// Sliding-window span for the reported data rate (master
+/// `CUpDownClient::CalculateDownloadRate`, which divides the summed history by
+/// the elapsed time of the oldest retained sample). ~10s keeps the rate tracking
+/// current throughput rather than the whole-transfer average.
+const DATARATE_WINDOW: Duration = Duration::from_secs(10);
+
+/// A short ring of recent `(timestamp, bytes)` payload samples used to compute a
+/// sliding-window data rate (eMule `m_AverageDDR_hist`). Samples older than
+/// [`DATARATE_WINDOW`] are pruned; the rate is summed bytes over the span from
+/// the oldest retained sample, so it reflects current throughput.
+#[derive(Debug, Clone, Default)]
+struct DatarateWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl DatarateWindow {
+    fn record(&mut self, now: Instant, byte_count: u64) {
+        self.samples.push_back((now, byte_count));
+        self.prune(now);
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some(&(ts, _)) = self.samples.front() {
+            if now.saturating_duration_since(ts) > DATARATE_WINDOW {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Bytes/sec over the window: summed bytes / span since the oldest retained
+    /// sample (eMule divides the summed history by `now - head.timestamp`). The
+    /// divisor is floored at 1ms so a burst whose samples collapse onto one
+    /// instant still reports a rate rather than zero. Returns 0 with no samples.
+    fn rate_bytes_per_sec(&self, now: Instant) -> u64 {
+        let Some(&(oldest_ts, _)) = self.samples.front() else {
+            return 0;
+        };
+        let span_ms = now.saturating_duration_since(oldest_ts).as_millis().max(1);
+        let total: u128 = self.samples.iter().map(|&(_, bytes)| u128::from(bytes)).sum();
+        u64::try_from((total * 1_000) / span_ms).unwrap_or(u64::MAX)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct Ed2kDownloadActivity {
-    started_at: Instant,
     last_seen_at: Instant,
-    downloaded_bytes: u64,
+    window: DatarateWindow,
 }
 
 /// Live per-source download state for one peer of one file. In-memory only.
@@ -21,10 +65,9 @@ pub(super) struct Ed2kDownloadActivity {
 pub(super) struct Ed2kSourceActivity {
     endpoint: SocketAddr,
     user_hash: Option<[u8; 16]>,
-    first_seen_at: Instant,
     last_seen_at: Instant,
     last_payload_at: Option<Instant>,
-    downloaded_bytes: u64,
+    window: DatarateWindow,
     /// Per-part availability advertised by the peer (OP_FILESTATUS). `None`
     /// until a status frame is seen.
     part_bitmap: Option<Vec<bool>>,
@@ -63,12 +106,11 @@ impl Ed2kTransferRuntime {
         let entry = activity
             .entry(file_hash.to_string())
             .or_insert_with(|| Ed2kDownloadActivity {
-                started_at: now,
                 last_seen_at: now,
-                downloaded_bytes: 0,
+                window: DatarateWindow::default(),
             });
         entry.last_seen_at = now;
-        entry.downloaded_bytes = entry.downloaded_bytes.saturating_add(byte_count);
+        entry.window.record(now, byte_count);
     }
 
     /// Record live payload from a specific peer for the per-source registry.
@@ -101,10 +143,9 @@ impl Ed2kTransferRuntime {
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
                 user_hash,
-                first_seen_at: now,
                 last_seen_at: now,
                 last_payload_at: None,
-                downloaded_bytes: 0,
+                window: DatarateWindow::default(),
                 part_bitmap: None,
             });
         entry.endpoint = peer;
@@ -114,7 +155,7 @@ impl Ed2kTransferRuntime {
         entry.last_seen_at = now;
         if byte_count > 0 {
             entry.last_payload_at = Some(now);
-            entry.downloaded_bytes = entry.downloaded_bytes.saturating_add(byte_count);
+            entry.window.record(now, byte_count);
         }
     }
 
@@ -137,10 +178,9 @@ impl Ed2kTransferRuntime {
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
                 user_hash,
-                first_seen_at: now,
                 last_seen_at: now,
                 last_payload_at: None,
-                downloaded_bytes: 0,
+                window: DatarateWindow::default(),
                 part_bitmap: None,
             });
         entry.endpoint = peer;
@@ -273,14 +313,7 @@ impl Ed2kTransferRuntime {
             .filter(|(_, entry)| {
                 now.saturating_duration_since(entry.last_seen_at) <= DOWNLOAD_ACTIVITY_STALE_AFTER
             })
-            .map(|(_, entry)| {
-                let elapsed_ms = now
-                    .saturating_duration_since(entry.started_at)
-                    .as_millis()
-                    .max(1);
-                u64::try_from((u128::from(entry.downloaded_bytes) * 1_000) / elapsed_ms)
-                    .unwrap_or(u64::MAX)
-            })
+            .map(|(_, entry)| entry.window.rate_bytes_per_sec(now))
             .fold(0u64, |acc, rate| acc.saturating_add(rate))
     }
 
@@ -317,13 +350,7 @@ impl Ed2kTransferRuntime {
         if now.saturating_duration_since(entry.last_seen_at) > DOWNLOAD_ACTIVITY_STALE_AFTER {
             return 0;
         }
-        let elapsed_ms = now
-            .saturating_duration_since(entry.started_at)
-            .as_millis()
-            .max(1);
-        ((u128::from(entry.downloaded_bytes) * 1_000) / elapsed_ms)
-            .try_into()
-            .unwrap_or(u64::MAX)
+        entry.window.rate_bytes_per_sec(now)
     }
 }
 
@@ -340,11 +367,5 @@ fn source_speed_bytes_per_sec(peer: &Ed2kSourceActivity, now: Instant) -> u64 {
     if !is_transferring(peer, now) {
         return 0;
     }
-    let elapsed_ms = now
-        .saturating_duration_since(peer.first_seen_at)
-        .as_millis()
-        .max(1);
-    ((u128::from(peer.downloaded_bytes) * 1_000) / elapsed_ms)
-        .try_into()
-        .unwrap_or(u64::MAX)
+    peer.window.rate_bytes_per_sec(now)
 }

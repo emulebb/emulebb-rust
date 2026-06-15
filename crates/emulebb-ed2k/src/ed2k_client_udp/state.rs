@@ -86,22 +86,27 @@ impl ReaskSource {
         self.next_reask = now + reask_interval(self.no_needed_parts);
     }
 
-    /// Records a successful reask reply with our updated queue rank.
+    /// Records a successful reask reply with our updated queue rank. Re-evaluates
+    /// the TCP-fallback verdict so a recovering source (its failure ratio now back
+    /// under threshold) returns to UDP reask, matching the master's per-cycle
+    /// `UDPReaskForDownload` re-check rather than a permanent latch.
     pub(crate) fn record_success(&mut self, rank: u16, now: Instant) {
         self.udp_total = self.udp_total.saturating_add(1);
         self.last_rank = Some(rank);
         self.remote_queue_full = false;
+        self.fallback_tcp_only = should_fall_back_to_tcp(self.udp_total, self.udp_failed);
         self.schedule_next(now);
     }
 
-    /// Records a reask with no reply; flips to TCP fallback once the failure
-    /// ratio is bad. Returns whether UDP is now disqualified for this source.
+    /// Records a reask with no reply and re-evaluates the TCP-fallback verdict
+    /// (`total>3 && failed/total>0.3`) each cycle — not a permanent latch — so the
+    /// source flips back to UDP once its ratio recovers (master
+    /// `UDPReaskForDownload` re-checks the ratio every cycle). Returns whether UDP
+    /// is currently disqualified for this source.
     pub(crate) fn record_failure(&mut self, now: Instant) -> bool {
         self.udp_total = self.udp_total.saturating_add(1);
         self.udp_failed = self.udp_failed.saturating_add(1);
-        if should_fall_back_to_tcp(self.udp_total, self.udp_failed) {
-            self.fallback_tcp_only = true;
-        }
+        self.fallback_tcp_only = should_fall_back_to_tcp(self.udp_total, self.udp_failed);
         self.schedule_next(now);
         self.fallback_tcp_only
     }
@@ -278,6 +283,36 @@ mod tests {
         assert!(source.record_failure(now)); // 4th failure trips the backoff
         assert!(source.fallback_tcp_only);
         assert_eq!(source.udp_failed, 4);
+    }
+
+    #[test]
+    fn reask_source_tcp_fallback_is_re_evaluated_not_latched() {
+        // B4: fallback must be re-evaluated each cycle (master UDPReaskForDownload),
+        // so a recovering source returns to UDP once its ratio drops back under
+        // the threshold instead of being permanently disqualified.
+        let now = Instant::now();
+        let mut source = ReaskSource::new((Ipv4Addr::new(198, 51, 100, 20), 4672), hash(), 4, now);
+        // Trip the latch: 4 attempts all failed (ratio 1.0 > 0.3).
+        for _ in 0..4 {
+            source.record_failure(now);
+        }
+        assert!(source.fallback_tcp_only, "ratio 4/4 disqualifies UDP");
+
+        // Enough successes pull the ratio back under 0.3 -> re-qualified for UDP.
+        // After 10 more successes: total 14, failed 4 -> 0.286 <= 0.3.
+        for _ in 0..10 {
+            source.record_success(5, now);
+        }
+        assert!(
+            !source.fallback_tcp_only,
+            "a recovered ratio re-enables UDP reask"
+        );
+
+        // A fresh run of failures re-trips it (still re-evaluated, not sticky-clear).
+        for _ in 0..20 {
+            source.record_failure(now);
+        }
+        assert!(source.fallback_tcp_only);
     }
 
     #[test]

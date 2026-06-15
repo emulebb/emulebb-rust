@@ -13,6 +13,7 @@ pub(super) fn one_slot_config() -> Ed2kUploadQueueConfig {
         elastic_underfill_bytes_per_sec: 0,
         elastic_underfill: Duration::from_secs(10),
         waiting_capacity: 8,
+        soft_queue_size: 10_000,
         waiting_timeout: Duration::from_secs(30),
         granted_timeout: Duration::from_secs(30),
         upload_timeout: Duration::from_secs(30),

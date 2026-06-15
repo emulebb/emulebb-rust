@@ -51,8 +51,8 @@ rationale = "frozen legacy upload listener session; split negotiation, queue, an
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_transfer/upload_queue.rs"
-hard_limit_lines = 745
-rationale = "frozen legacy upload-queue policy/state; split queue admission, scoring, and snapshot as touched. Allowlisted when the modern transfer queue policies (elastic upload slots + upload-rate throttle: elastic_percent, upload_limit_bytes_per_sec, elastic_underfill_*) grew the config + admission past the 600 budget."
+hard_limit_lines = 755
+rationale = "frozen legacy upload-queue policy/state; split queue admission, scoring, and snapshot as touched. Allowlisted when the modern transfer queue policies (elastic upload slots + upload-rate throttle: elastic_percent, upload_limit_bytes_per_sec, elastic_underfill_*) grew the config + admission past the 600 budget. Bumped again (+10) for B4: a soft_queue_size config field (eMule thePrefs.GetQueueSize default 10000) so the reask QUEUEFULL margin compares against the real configured queue size instead of the structural waiting_capacity (512)."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
