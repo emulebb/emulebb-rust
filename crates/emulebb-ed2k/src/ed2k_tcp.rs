@@ -31,6 +31,7 @@ use crate::ed2k_transfer::{
 use crate::kad_firewall::KadFirewallState;
 use emulebb_kad_proto::Ed2kHash;
 
+mod buddy_link;
 mod codec;
 mod download;
 mod dump;
@@ -81,6 +82,7 @@ use codec::{
     encode_request_filename_answer, encode_request_sources2_subpayload, encode_sending_part,
     skip_request_filename_ext_info,
 };
+pub use buddy_link::{OutboundBuddyLinkOptions, run_outbound_buddy_link};
 pub(in crate::ed2k_tcp) use download::PendingCompressedPart;
 #[cfg(test)]
 pub(in crate::ed2k_tcp) use download::{DownloadSessionOptions, drive_download_session};
