@@ -47,6 +47,7 @@ use emulebb_ed2k::{
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
+use emulebb_ed2k::stun::{DEFAULT_STUN_TIMEOUT, stun_probe};
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, KadLocalStoreConfig, ScheduledSnoopRequest, SnoopEntry,
     SnoopQueue, SnoopQueueConfig, SnoopQueueFamilyCounts, metadata_from_publish_snapshot,
@@ -1308,6 +1309,17 @@ impl EmulebbCore {
             tasks.push(tokio::spawn(run_ed2k_reask_reengage(
                 self.clone(),
                 reask_events_rx,
+                Arc::clone(&shutdown),
+            )));
+            // Public-IP fallback (H2): the reask obfuscation key is our public IP
+            // (eMule EncryptSendClient). It is normally learned from the server
+            // (OP_IDCHANGE), but in Kad-only / pre-connect / LowID it is unknown,
+            // which would block obfuscated reasks. STUN-probe the data-plane egress
+            // and fill it only when still unknown (set_if_unset), so the server
+            // path keeps precedence (eMule GetPublicIP order: server, then Kad/STUN).
+            tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
+                network.bind_ip,
+                ed2k_public_ip.clone(),
                 Arc::clone(&shutdown),
             )));
         }
@@ -5371,6 +5383,41 @@ fn server_endpoint_from_create(request: &ServerCreate) -> Result<String> {
         let _ = validate_server_priority(priority)?;
     }
     Ok(format!("{}:{}", request.address, request.port))
+}
+
+/// Re-probe public IP via STUN while still unknown (gentle cadence).
+const ED2K_PUBLIC_IP_PROBE_UNKNOWN_SECS: u64 = 120;
+/// Re-check cadence once a public IP is known (in case it clears / the tunnel
+/// rotates), so the fallback can refill it.
+const ED2K_PUBLIC_IP_PROBE_KNOWN_SECS: u64 = 600;
+
+/// STUN-probe the data-plane egress and record the reflexive public IP when it is
+/// otherwise unknown. The reask obfuscation key is our public IP (eMule
+/// `EncryptSendClient`), normally learned from the server `OP_IDCHANGE`; in
+/// Kad-only / pre-connect / LowID it is unknown, which blocks obfuscated reasks.
+/// `set_if_unset` keeps the server path authoritative (eMule `GetPublicIP` order:
+/// cached server/peer value, then the Kad/STUN fallback). Gentle: one STUN race
+/// per interval, more often only while still unknown.
+async fn run_ed2k_public_ip_probe(
+    bind_ip: Ipv4Addr,
+    public_ip: SharedPublicIp,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        let known = public_ip.is_known();
+        if !known
+            && let Ok(ip) = stun_probe(bind_ip, DEFAULT_STUN_TIMEOUT).await
+            && public_ip.set_if_unset(ip)
+        {
+            tracing::info!("ED2K public IP learned via STUN fallback: {ip}");
+        }
+        let secs = if known {
+            ED2K_PUBLIC_IP_PROBE_KNOWN_SECS
+        } else {
+            ED2K_PUBLIC_IP_PROBE_UNKNOWN_SECS
+        };
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
 }
 
 /// Keep the advertised external eD2k TCP + UDP ports (`advertised_ports`) in sync
