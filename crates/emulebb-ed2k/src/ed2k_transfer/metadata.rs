@@ -373,6 +373,61 @@ impl Ed2kTransferRuntime {
         decode_manifest_aich_hashset(&manifest).map(Some)
     }
 
+    /// Build the OP_AICHANSWER recovery-data body for `part` of a locally
+    /// shared, fully verified file, mirroring `CUpDownClient::ProcessAICHRequest`
+    /// -> `CAICHRecoveryHashSet::CreatePartRecoveryData`.
+    ///
+    /// Returns `None` when we cannot serve (file unknown, not fully verified, no
+    /// trusted AICH root, requested master hash mismatch, or part too small),
+    /// matching the master's always-failure fallback. The returned bytes are the
+    /// recovery body that follows the answer header (file hash + part + master).
+    pub(crate) async fn create_aich_recovery_data(
+        &self,
+        file_hash: &Ed2kHash,
+        part: u16,
+        requested_master_hash: [u8; 20],
+    ) -> Result<Option<Vec<u8>>> {
+        use super::aich_recovery::AichRecoveryHashSet;
+        use super::{ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE};
+
+        let hash_hex = file_hash.to_string();
+        let (file_size, aich_root) = {
+            let _guard = self.manifest_io.lock().await;
+            let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
+                return Ok(None);
+            };
+            // Only serve from a fully verified (shared) file.
+            if !manifest.completed {
+                return Ok(None);
+            }
+            let Some(root) = manifest.aich_root.as_deref() else {
+                return Ok(None);
+            };
+            (manifest.file_size, decode_aich_hash_hex(root)?)
+        };
+
+        // master ProcessAICHRequest guard: file size > PARTSIZE * nPart + EMBLOCKSIZE
+        if aich_root != requested_master_hash {
+            return Ok(None);
+        }
+        if file_size <= ED2K_PART_SIZE * u64::from(part) + ED2K_EMBLOCK_SIZE {
+            return Ok(None);
+        }
+
+        // The recovery data needs the whole-file tree (sibling hashes come from
+        // other parts), so we read the full verified payload.
+        let Some(file_data) = self.read_verified_range(file_hash, 0, file_size).await? else {
+            return Ok(None);
+        };
+        let mut set = AichRecoveryHashSet::new(file_size);
+        set.build_from_data(&file_data)?;
+        if set.master_hash() != aich_root {
+            // local data no longer matches the advertised AICH root
+            return Ok(None);
+        }
+        set.create_part_recovery_data(u64::from(part)).map(Some)
+    }
+
     /// Returns the persisted manifest for orchestration code that needs to read
     /// the current verification or hashset state.
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {

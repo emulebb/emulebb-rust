@@ -398,6 +398,23 @@ pub(super) fn encode_aich_recovery_failure_answer(file_hash: &Ed2kHash) -> Vec<u
     encode_packet(OP_EMULEPROT, OP_AICHANSWER, &file_hash.0)
 }
 
+/// Encode a successful OP_AICHANSWER carrying real recovery data, mirroring
+/// `CUpDownClient::ProcessAICHRequest`'s success packet:
+/// `<file hash 16><part u16><master hash 20><recovery body>`.
+pub(super) fn encode_aich_recovery_answer(
+    file_hash: &Ed2kHash,
+    part: u16,
+    master_hash: [u8; 20],
+    recovery_body: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + 2 + 20 + recovery_body.len());
+    payload.extend_from_slice(&file_hash.0);
+    payload.extend_from_slice(&part.to_le_bytes());
+    payload.extend_from_slice(&master_hash);
+    payload.extend_from_slice(recovery_body);
+    encode_packet(OP_EMULEPROT, OP_AICHANSWER, &payload)
+}
+
 pub(super) fn encode_accept_upload_req() -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ, &[])
 }
