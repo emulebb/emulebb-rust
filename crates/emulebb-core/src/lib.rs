@@ -784,6 +784,9 @@ const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
 const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
 const KAD_FIREWALLED_TCP_PROBE_TIMEOUT_SECS: u64 = 20;
+/// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
+/// `GetClosestTo`), filtering out contacts staler than two age buckets.
+const KAD_REQ_MAX_TYPE: u8 = 2;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 
@@ -4519,6 +4522,18 @@ fn should_request_hello_res_ack(added_or_updated: bool, receiver_verify_key_vali
     added_or_updated && !receiver_verify_key_valid
 }
 
+/// Mask a KADEMLIA2_REQ type byte to its low 5 bits and reject the malformed
+/// type 0, mirroring `Process_KADEMLIA2_REQ` (`byType &= 0x1F`, throw on 0).
+///
+/// Returns the masked type (which doubles as the max contact count to return)
+/// or `None` when the request must be dropped.
+fn kad_req_masked_count(type_byte: u8) -> Option<u8> {
+    match type_byte & 0x1F {
+        0 => None,
+        masked => Some(masked),
+    }
+}
+
 fn build_kad_hello_response_tags(
     kad_udp_port: u16,
     udp_firewalled: bool,
@@ -5112,26 +5127,42 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::Req(req) => {
-            let contacts = dht
-                .closest_contacts(&req.target, req.count as usize)
-                .await
-                .into_iter()
-                .map(|contact| ContactEntry {
-                    node_id: contact.id,
-                    ip: u32::from_be_bytes(contact.ip.octets()),
-                    udp_port: contact.udp_port,
-                    tcp_port: contact.tcp_port,
-                    version: contact.kad_version,
-                })
-                .collect();
-            dht.send_packet(
-                from,
-                &KadPacket::Res(emulebb_kad_proto::Res {
-                    target: req.target,
-                    contacts,
-                }),
-            )
-            .await?;
+            // Oracle Process_KADEMLIA2_REQ (KademliaUDPListener.cpp:706-755):
+            // mask the type to its low 5 bits, reject type 0 as malformed, and
+            // only respond when the recipient-ID sanity check matches our own
+            // Kad ID (the requester proves it is talking to the node it thinks
+            // it is, not a stale/recycled ID). The masked type doubles as the
+            // max number of contacts to return.
+            let Some(max_required) = kad_req_masked_count(req.count) else {
+                tracing::debug!("dropping malformed Kad REQ (type 0) from {from}");
+                return Ok(());
+            };
+            if req.recipient_id != dht.own_id() {
+                tracing::debug!(
+                    "dropping Kad REQ from {from}: recipient-id mismatch (mistaken identity)"
+                );
+            } else {
+                let contacts = dht
+                    .closest_contacts_max_type(&req.target, max_required as usize, KAD_REQ_MAX_TYPE)
+                    .await
+                    .into_iter()
+                    .map(|contact| ContactEntry {
+                        node_id: contact.id,
+                        ip: u32::from_be_bytes(contact.ip.octets()),
+                        udp_port: contact.udp_port,
+                        tcp_port: contact.tcp_port,
+                        version: contact.kad_version,
+                    })
+                    .collect();
+                dht.send_packet(
+                    from,
+                    &KadPacket::Res(emulebb_kad_proto::Res {
+                        target: req.target,
+                        contacts,
+                    }),
+                )
+                .await?;
+            }
         }
         KadPacket::SearchKeyReq(req) => {
             let now = Utc::now();
@@ -8151,6 +8182,16 @@ mod tests {
                 Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05)),
             ]
         );
+    }
+
+    #[test]
+    fn kad_req_masks_type_to_low_five_bits_and_rejects_zero() {
+        // Oracle: byType &= 0x1F; throw on 0.
+        assert_eq!(kad_req_masked_count(0x00), None);
+        assert_eq!(kad_req_masked_count(0x20), None); // high bits only -> 0
+        assert_eq!(kad_req_masked_count(0x02), Some(2));
+        assert_eq!(kad_req_masked_count(0xE2), Some(2)); // high bits masked off
+        assert_eq!(kad_req_masked_count(0x1F), Some(0x1F));
     }
 
     #[test]
