@@ -31,6 +31,14 @@ reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the
 compatibility = "Does not affect eD2K or Kad wire compatibility; unsupported OP_MESSAGE from peers is simply not surfaced."
 
 [[omissions]]
+id = "ed2k-preview"
+area = "ed2k"
+stock_behavior = "Classic eMule can request a media preview from a peer (OP_REQUESTPREVIEW) and answer one (OP_PREVIEWANSWER) by extracting and sending a few decoded video/image frames, viewed in the UI."
+rust_behavior = "The Rust client decodes and logs inbound OP_REQUESTPREVIEW / OP_PREVIEWANSWER for diagnostics but never generates a preview answer and never requests previews; there is no frame-extraction or preview surface."
+reason = "Preview is a rarely-used interactive media feature: answering it needs a heavy media frame-extraction dependency and opens an untrusted-media decode surface, with no eMuleBB /api/v1 route to drive or expose it. Deliberately omitted (operator decision 2026-06-15); it is not advertised as required."
+compatibility = "Does not affect eD2K or Kad wire compatibility; an unanswered preview request simply yields no preview, exactly as a stock peer that has the feature disabled."
+
+[[omissions]]
 id = "udp-source-reask-transport"
 area = "ed2k"
 stock_behavior = "eMule keeps an upload-queue position warm for hours by disconnecting and periodically reasking each source over UDP (OP_REASKFILEPING/OP_REASKACK/OP_QUEUEFULL/OP_FILENOTFOUND on the client UDP socket), and answers inbound reasks from peers queued on it."
