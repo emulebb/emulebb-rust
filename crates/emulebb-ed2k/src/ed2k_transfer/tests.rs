@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod aich_tree;
 mod reask_reciprocity;
 mod upload_queue;
 mod upload_queue_credit;

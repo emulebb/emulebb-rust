@@ -25,6 +25,8 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
 
+mod aich_recovery;
+mod aich_tree;
 mod callback;
 mod catalog;
 mod download_activity;
