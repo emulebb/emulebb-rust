@@ -233,6 +233,26 @@ impl AichRecoveryHashSet {
     }
 }
 
+/// Verify a peer's OP_AICHANSWER recovery body for `part` against a trusted
+/// AICH master hash and return the per-block trusted hashes for that part,
+/// left to right.
+///
+/// Mirrors the receiver half of `CPartFile::AICHRecoveryDataAvailable`: the
+/// recovery data is read into a fresh set seeded with the trusted master hash
+/// (`SetMasterHash` + `ReadRecoveryData`), verified against it, and the part's
+/// lowest-level block hashes are extracted to compare against the local part.
+pub(super) fn trusted_part_block_hashes_from_recovery(
+    file_size: u64,
+    master_hash: [u8; 20],
+    part: u64,
+    recovery_body: &[u8],
+) -> Result<Vec<[u8; 20]>> {
+    let mut set = AichRecoveryHashSet::new(file_size);
+    set.set_master_hash(master_hash);
+    set.read_recovery_data(part, recovery_body)?;
+    set.part_block_hashes(part)
+}
+
 /// Result of an ICH recovery pass over one corrupt part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AichRecoveryOutcome {

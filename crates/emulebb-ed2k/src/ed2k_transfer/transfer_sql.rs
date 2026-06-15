@@ -35,6 +35,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
                 piece_index: piece.piece_index,
                 state: transfer_state_to_sql(piece.state).to_string(),
                 bytes_written: piece.bytes_written,
+                block_bitmap: piece.block_bitmap.clone(),
             })
             .collect(),
         sources: manifest
@@ -85,6 +86,7 @@ pub(super) fn manifest_from_metadata(
                     piece_index: piece.piece_index,
                     state: transfer_state_from_sql(&piece.state)?,
                     bytes_written: piece.bytes_written,
+                    block_bitmap: piece.block_bitmap,
                 })
             })
             .collect::<Result<Vec<_>>>()?,

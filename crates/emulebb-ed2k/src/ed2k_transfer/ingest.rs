@@ -84,6 +84,7 @@ impl Ed2kTransferRuntime {
                     manifest.piece_size,
                     u64::from(piece_index),
                 ),
+                block_bitmap: None,
             })
             .collect();
         rebuild_verified_ranges(&mut manifest);

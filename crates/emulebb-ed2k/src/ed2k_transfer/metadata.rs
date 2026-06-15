@@ -66,6 +66,7 @@ impl Ed2kTransferRuntime {
                         piece_index,
                         state: Ed2kTransferState::Missing,
                         bytes_written: 0,
+                        block_bitmap: None,
                     })
                     .collect();
                 changed = true;

@@ -27,6 +27,7 @@ use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
 
 mod aich_recovery;
 mod aich_tree;
+mod block_bitmap;
 mod callback;
 mod catalog;
 mod download_activity;
@@ -37,6 +38,7 @@ mod metadata;
 mod model;
 mod piece_store;
 mod reask_reciprocity;
+mod salvage;
 mod shared_catalog;
 mod store;
 mod transfer_sql;

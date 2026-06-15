@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::block_bitmap::PartBlockBitmap;
 use super::{Ed2kSharedRange, manifest::piece_count};
 
 /// One persisted ED2K transfer job.
@@ -43,7 +44,73 @@ pub struct Ed2kPieceState {
     /// Current lifecycle state for the piece.
     pub state: Ed2kTransferState,
     /// Last persisted byte count written into the piece store for this piece.
+    ///
+    /// For a contiguous download this is the written prefix length. For a part
+    /// undergoing ICH block-level salvage this tracks the contiguous prefix of
+    /// present blocks; the authoritative non-contiguous presence set lives in
+    /// `block_bitmap`.
     pub bytes_written: u64,
+    /// Lowercase-hex packed block presence bitmap at `EMBLOCKSIZE` granularity
+    /// within the part. `None` (or absent on disk) means "all present blocks are
+    /// the contiguous prefix up to `bytes_written`", preserving resume-manifest
+    /// backward compatibility for manifests written before block-level salvage.
+    #[serde(default)]
+    pub block_bitmap: Option<String>,
+}
+
+impl Ed2kPieceState {
+    /// Resolve the effective per-part block presence bitmap for a part of
+    /// `part_len` bytes.
+    ///
+    /// When a bitmap was persisted it is decoded; otherwise (legacy manifest or
+    /// the contiguous fast path) the bitmap is derived from `bytes_written` as a
+    /// contiguous prefix of whole blocks. A persisted bitmap with a stale length
+    /// also falls back to the contiguous-prefix derivation, preserving
+    /// resume-manifest backward compatibility.
+    pub(super) fn resolve_block_bitmap(&self, part_len: u64) -> PartBlockBitmap {
+        match self.block_bitmap.as_deref() {
+            Some(hex) => PartBlockBitmap::from_hex(part_len, hex)
+                .unwrap_or_else(|| PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written)),
+            None => PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written),
+        }
+    }
+
+    /// Whether this part is mid ICH salvage (a non-contiguous block bitmap is
+    /// persisted). Used by the download window to switch to gap-aware
+    /// re-requesting.
+    pub(crate) fn has_block_bitmap(&self) -> bool {
+        self.block_bitmap.is_some()
+    }
+
+    /// For a part of `part_len` bytes, return `Some(block_end_rel)` when the
+    /// block containing relative offset `rel_offset` is already present (so the
+    /// download window can skip it), or `None` when it is missing/needed.
+    /// `block_end_rel` is the part-relative end offset of that present block.
+    pub(crate) fn present_block_end(&self, part_len: u64, rel_offset: u64) -> Option<u64> {
+        let bitmap = self.resolve_block_bitmap(part_len);
+        let idx = usize::try_from(rel_offset / super::ED2K_EMBLOCK_SIZE).ok()?;
+        if bitmap.is_present(idx) {
+            let (_s, e) = bitmap.block_range(idx);
+            Some(e)
+        } else {
+            None
+        }
+    }
+
+    /// Persist `bitmap` into this piece and refresh `bytes_written` to the
+    /// contiguous present prefix. The bitmap is dropped (set to `None`) when it
+    /// is a clean contiguous prefix so the legacy/fast path representation is
+    /// kept whenever block-level tracking is not needed.
+    pub(super) fn apply_block_bitmap(&mut self, bitmap: &PartBlockBitmap) {
+        let prefix = bitmap.contiguous_prefix_bytes();
+        self.bytes_written = prefix;
+        let is_clean_prefix = bitmap.present_bytes() == prefix;
+        self.block_bitmap = if is_clean_prefix {
+            None
+        } else {
+            Some(bitmap.to_hex())
+        };
+    }
 }
 
 /// One source hint remembered across restarts.
@@ -169,6 +236,7 @@ impl Ed2kResumeManifest {
                     piece_index,
                     state: Ed2kTransferState::Missing,
                     bytes_written: 0,
+                    block_bitmap: None,
                 })
                 .collect(),
             sources: Vec::new(),
