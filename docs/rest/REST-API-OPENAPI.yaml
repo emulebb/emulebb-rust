@@ -1,0 +1,5257 @@
+openapi: 3.1.0
+info:
+  title: eMuleBB REST API (forward, emulebb-rust)
+  version: 1.0.0
+  x-contract-version: "1.0.0"
+  x-contract-baseline: "eMuleBB 0.7.3 frozen contract"
+  summary: Forward eMuleBB /api/v1 contract, owned and evolved by emulebb-rust.
+  description: >
+    Source-of-truth contract for the FORWARD `/api/v1` API, owned by
+    emulebb-rust (decision 2026-06-15). It is baselined on the frozen eMuleBB
+    `0.7.3` contract and now evolves on its own independent **contract version**
+    line (`x-contract-version`, semver), decoupled from any product release tag
+    and from the frozen MFC client. Implementers advertise their contract
+    version; controllers (TrackMuleBB) target a contract version range and
+    degrade by capability.
+    Versioning policy: additive endpoints/fields bump the minor; breaking changes
+    bump the major with a documented migration. The frozen 0.7.3 contract
+    (`emulebb-tooling/docs/rest/REST-API-OPENAPI.yaml`) is the legacy lineage for
+    the MFC client + aMuTorrent and does not evolve.
+    The API uses `X-API-Key` authentication only; adapter compatibility
+    (`/api/v2` qBit-compat, Torznab) must not weaken the native route shape.
+servers:
+  - url: http://{host}:{port}/api/v1
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "4711"
+  - url: https://{host}:{port}/api/v1
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "4711"
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: App
+  - name: Diagnostics
+  - name: Stats
+  - name: Categories
+  - name: Transfers
+  - name: SharedFiles
+  - name: SharedDirectories
+  - name: Uploads
+  - name: Servers
+  - name: Kad
+  - name: Searches
+  - name: Friends
+  - name: Logs
+paths:
+  /app:
+    get:
+      tags: [App]
+      summary: Return application identity, runtime state, and static capabilities.
+      operationId: getApp
+      responses:
+        "200":
+          $ref: "#/components/responses/AppResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /app/preferences:
+    get:
+      tags: [App]
+      summary: Return controller-relevant preferences.
+      operationId: getPreferences
+      responses:
+        "200":
+          $ref: "#/components/responses/PreferencesResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [App]
+      summary: Update controller-relevant preferences.
+      operationId: patchPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferencesPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/PreferencesResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /app/shutdown:
+    post:
+      tags: [App]
+      summary: Request clean eMule process shutdown.
+      operationId: shutdownApp
+      description: >
+        This endpoint closes eMule only. Operating-system shutdown and reboot
+        actions from the legacy WebServer are intentionally not part of the
+        REST API.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShutdownRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /diagnostics/dumps:
+    post:
+      tags: [Diagnostics]
+      summary: Capture an operator-requested eMule diagnostic dump.
+      operationId: captureDiagnosticDump
+      description: >
+        Unsafe diagnostic endpoint. It is available only when diagnostic REST
+        endpoints are explicitly enabled in the WebServer configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiagnosticDumpRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/DiagnosticDumpResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /diagnostics/crash-tests:
+    post:
+      tags: [Diagnostics]
+      summary: Trigger a diagnostic crash to verify dump generation.
+      operationId: triggerDiagnosticCrashTest
+      description: >
+        Unsafe diagnostic endpoint. It is available only when diagnostic REST
+        endpoints are explicitly enabled in the WebServer configuration. A
+        successful request intentionally terminates the process, so clients
+        should treat connection loss after acceptance as the expected result.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiagnosticCrashTestRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /status:
+    get:
+      tags: [Stats]
+      summary: Return current network, transfer, server, and Kad status.
+      operationId: getStatus
+      responses:
+        "200":
+          $ref: "#/components/responses/StatusResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /snapshot:
+    get:
+      tags: [Stats]
+      summary: Return a controller dashboard snapshot.
+      operationId: getSnapshot
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          $ref: "#/components/responses/SnapshotResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /stats:
+    get:
+      tags: [Stats]
+      summary: Return detailed cumulative and session statistics.
+      operationId: getStats
+      responses:
+        "200":
+          $ref: "#/components/responses/StatsResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List download categories.
+      operationId: listCategories
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Categories]
+      summary: Create a download category.
+      operationId: createCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /categories/{categoryId}:
+    parameters:
+      - $ref: "#/components/parameters/CategoryId"
+    get:
+      tags: [Categories]
+      summary: Return one download category.
+      operationId: getCategory
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Categories]
+      summary: Update one download category.
+      operationId: patchCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Categories]
+      summary: Delete one download category.
+      operationId: deleteCategory
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers:
+    get:
+      tags: [Transfers]
+      summary: List incomplete and completed download transfers.
+      operationId: listTransfers
+      parameters:
+        - name: state
+          in: query
+          schema:
+            $ref: "#/components/schemas/TransferState"
+        - name: categoryId
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 4294967295
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Transfers]
+      summary: Add one or more ED2K links to downloads.
+      operationId: createTransfers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/operations/clear-completed:
+    post:
+      tags: [Transfers]
+      summary: Clear completed transfers from the transfer list.
+      operationId: clearCompletedTransfers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClearCompletedTransfersRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [Transfers]
+      summary: Return one transfer row.
+      operationId: getTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Transfers]
+      summary: Update mutable transfer properties.
+      operationId: patchTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Transfers]
+      summary: Remove a completed transfer row without deleting or unsharing the completed file.
+      description: >
+        Removes a completed transfer from the native transfer list without
+        deleting the completed file or changing its shared-file registration.
+        Incomplete transfers cannot preserve their partial .part state when cancelled; use
+        `DELETE /transfers/{hash}/files?confirm=true` to cancel an incomplete
+        transfer and delete its local part data.
+      operationId: deleteTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/files:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    delete:
+      tags: [Transfers]
+      summary: Delete one transfer and its local data.
+      description: >
+        Cancels/removes the transfer and deletes the local completed file or
+        incomplete .part data. This route is the REST v1 replacement for the
+        pre-RC body-required destructive transfer delete payload.
+      operationId: deleteTransferFiles
+      parameters:
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/details:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [Transfers]
+      summary: Return detailed part and source state for one transfer.
+      operationId: getTransferDetails
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferDetailsResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [Transfers]
+      summary: Return known sources for one transfer.
+      operationId: listTransferSources
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferSourceListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    get:
+      tags: [Transfers]
+      summary: Return one transfer source.
+      operationId: getTransferSource
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferSourceResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/browse:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Request source browsing for one transfer source.
+      operationId: browseTransferSource
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferSourceBrowseResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/add-friend:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Add one transfer source as a friend.
+      operationId: addTransferSourceFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/FriendResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/remove-friend:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Remove one transfer source from friends.
+      operationId: removeTransferSourceFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/remove:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Remove one transfer source from the transfer.
+      operationId: removeTransferSource
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/ban:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Ban one transfer source.
+      operationId: banTransferSource
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/unban:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Unban one transfer source.
+      operationId: unbanTransferSource
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/sources/{clientId}/operations/release-slot:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Transfers]
+      summary: Release this peer's active upload slot when it also holds one.
+      operationId: releaseTransferSourceUploadSlot
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/operations/pause:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Transfers]
+      summary: Pause one transfer.
+      operationId: pauseTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/operations/resume:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Transfers]
+      summary: Resume one transfer.
+      operationId: resumeTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/operations/stop:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Transfers]
+      summary: Stop one transfer.
+      operationId: stopTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/BulkOperationResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/operations/recheck:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Transfers]
+      summary: Request a file recheck.
+      operationId: recheckTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/OkAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /transfers/{hash}/operations/preview:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Transfers]
+      summary: Start the configured preview action for one transfer.
+      operationId: previewTransfer
+      responses:
+        "200":
+          $ref: "#/components/responses/TransferResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files:
+    get:
+      tags: [SharedFiles]
+      summary: List completed shared files.
+      operationId: listSharedFiles
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [SharedFiles]
+      summary: Add one local file to the known shared file set.
+      operationId: createSharedFile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SharedFileCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileCreateResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files/operations/reload:
+    post:
+      tags: [SharedFiles]
+      summary: Request a shared-file reload.
+      operationId: reloadSharedFiles
+      responses:
+        "200":
+          $ref: "#/components/responses/OkAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files/{hash}:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [SharedFiles]
+      summary: Return one shared file.
+      operationId: getSharedFile
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [SharedFiles]
+      summary: Update shared-file metadata and upload priority.
+      operationId: patchSharedFile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SharedFilePatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [SharedFiles]
+      summary: Unshare a file without deleting it from disk.
+      operationId: deleteSharedFile
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileDeleteResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files/{hash}/file:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    delete:
+      tags: [SharedFiles]
+      summary: Delete one shared file from disk.
+      description: >
+        Deletes the local file and removes it from the shared-file set. This
+        route is the REST v1 replacement for the pre-RC body-required
+        destructive shared-file delete payload.
+      operationId: deleteSharedFileContent
+      parameters:
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedFileDeleteResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files/{hash}/ed2k-link:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [SharedFiles]
+      summary: Return the ED2K link for one shared file.
+      operationId: getSharedFileEd2kLink
+      responses:
+        "200":
+          $ref: "#/components/responses/Ed2kLinkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-files/{hash}/comments:
+    parameters:
+      - $ref: "#/components/parameters/FileHash"
+    get:
+      tags: [SharedFiles]
+      summary: Return known comments for one shared file.
+      operationId: listSharedFileComments
+      responses:
+        "200":
+          $ref: "#/components/responses/CommentListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-directories:
+    get:
+      tags: [SharedDirectories]
+      summary: List configured shared directory roots.
+      operationId: listSharedDirectories
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedDirectoryListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [SharedDirectories]
+      summary: Replace configured shared directory roots.
+      operationId: replaceSharedDirectories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SharedDirectoryReplaceRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SharedDirectoryListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /shared-directories/operations/reload:
+    post:
+      tags: [SharedDirectories]
+      summary: Request a shared-directory and shared-file reload.
+      operationId: reloadSharedDirectories
+      responses:
+        "200":
+          $ref: "#/components/responses/OkAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads:
+    get:
+      tags: [Uploads]
+      summary: List active upload slots.
+      operationId: listUploads
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    get:
+      tags: [Uploads]
+      summary: Return one uploading client.
+      operationId: getUpload
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/release-slot:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Give one uploading client a release slot.
+      operationId: releaseUploadSlot
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/remove:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Remove one active or queued upload client.
+      operationId: removeUploadClient
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadRemoveResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/add-friend:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Add one upload client as a friend.
+      operationId: addUploadFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/FriendResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/remove-friend:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Remove one upload client from friends.
+      operationId: removeUploadFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/ban:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Ban one upload client.
+      operationId: banUploadClient
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /uploads/{clientId}/operations/unban:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Unban one upload client.
+      operationId: unbanUploadClient
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue:
+    get:
+      tags: [Uploads]
+      summary: List waiting upload clients.
+      operationId: listUploadQueue
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/IncludeScoreBreakdown"
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadQueueListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/remove:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Remove one waiting upload client.
+      operationId: removeUploadQueueClient
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadRemoveResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    get:
+      tags: [Uploads]
+      summary: Return one waiting upload client.
+      operationId: getUploadQueueClient
+      responses:
+        "200":
+          $ref: "#/components/responses/UploadQueueEntryResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/release-slot:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Release this peer's active upload slot if present.
+      operationId: releaseUploadQueueClientSlot
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/add-friend:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Add one queued upload client as a friend.
+      operationId: addUploadQueueFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/FriendResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/remove-friend:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Remove one queued upload client from friends.
+      operationId: removeUploadQueueFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/ban:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Ban one queued upload client.
+      operationId: banUploadQueueClient
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /upload-queue/{clientId}/operations/unban:
+    parameters:
+      - $ref: "#/components/parameters/ClientId"
+    post:
+      tags: [Uploads]
+      summary: Unban one queued upload client.
+      operationId: unbanUploadQueueClient
+      responses:
+        "200":
+          $ref: "#/components/responses/PeerBanResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers:
+    get:
+      tags: [Servers]
+      summary: List known ED2K servers.
+      operationId: listServers
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Servers]
+      summary: Add an ED2K server.
+      operationId: createServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers/operations/connect:
+    post:
+      tags: [Servers]
+      summary: Connect to the best available server.
+      operationId: connectServerAny
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerStatusResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers/operations/disconnect:
+    post:
+      tags: [Servers]
+      summary: Disconnect or stop connecting to ED2K servers.
+      operationId: disconnectServers
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerStatusResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers/operations/import-met-url:
+    post:
+      tags: [Servers]
+      summary: Import or update server.met from a URL.
+      operationId: createServerMetUrlImport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UrlImportRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/UrlImportResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers/{serverId}:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Servers]
+      summary: Return one ED2K server.
+      operationId: getServer
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Servers]
+      summary: Update one ED2K server.
+      operationId: patchServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Servers]
+      summary: Remove one ED2K server.
+      operationId: deleteServer
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /servers/{serverId}/operations/connect:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Servers]
+      summary: Connect to one ED2K server.
+      operationId: connectServer
+      responses:
+        "200":
+          $ref: "#/components/responses/ServerStatusResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad:
+    get:
+      tags: [Kad]
+      summary: Return Kad status.
+      operationId: getKad
+      responses:
+        "200":
+          $ref: "#/components/responses/KadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad/operations/import-nodes-url:
+    post:
+      tags: [Kad]
+      summary: Import or update nodes.dat from a URL.
+      operationId: createKadNodesUrlImport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UrlImportRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/UrlImportResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad/operations/start:
+    post:
+      tags: [Kad]
+      summary: Start Kad.
+      operationId: startKad
+      responses:
+        "200":
+          $ref: "#/components/responses/KadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad/operations/stop:
+    post:
+      tags: [Kad]
+      summary: Stop Kad.
+      operationId: stopKad
+      responses:
+        "200":
+          $ref: "#/components/responses/KadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad/operations/bootstrap:
+    post:
+      tags: [Kad]
+      summary: Bootstrap Kad from node address or known peers.
+      operationId: bootstrapKad
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KadBootstrapRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/KadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /kad/operations/recheck-firewall:
+    post:
+      tags: [Kad]
+      summary: Recheck Kad firewall state.
+      operationId: recheckKadFirewall
+      responses:
+        "200":
+          $ref: "#/components/responses/KadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /searches:
+    get:
+      tags: [Searches]
+      summary: List active search sessions.
+      operationId: listSearches
+      responses:
+        "200":
+          $ref: "#/components/responses/SearchListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Searches]
+      summary: Start a search.
+      operationId: createSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SearchResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Searches]
+      summary: Delete all search sessions.
+      operationId: deleteSearches
+      parameters:
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /searches/{searchId}:
+    parameters:
+      - $ref: "#/components/parameters/SearchId"
+    get:
+      tags: [Searches]
+      summary: Return search status and results.
+      description: >
+        Returns the current native visible result snapshot for this search.
+        `offset` and `limit` bound the returned rows while preserving the
+        native search lifecycle and visibility behavior.
+      operationId: getSearch
+      parameters:
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/IncludeEvidence"
+        - $ref: "#/components/parameters/ExactTotal"
+      responses:
+        "200":
+          $ref: "#/components/responses/SearchResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Searches]
+      summary: Stop and delete one search session.
+      operationId: deleteSearch
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /searches/{searchId}/results/{hash}/operations/download:
+    parameters:
+      - $ref: "#/components/parameters/SearchId"
+      - $ref: "#/components/parameters/FileHash"
+    post:
+      tags: [Searches]
+      summary: Add one search result to downloads.
+      operationId: downloadSearchResult
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchResultDownloadRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SearchResultDownloadResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /friends:
+    get:
+      tags: [Friends]
+      summary: List known friends.
+      operationId: listFriends
+      responses:
+        "200":
+          $ref: "#/components/responses/FriendListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Friends]
+      summary: Add a friend by user hash.
+      operationId: createFriend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FriendCreateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/FriendResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /friends/{userHash}:
+    parameters:
+      - $ref: "#/components/parameters/UserHash"
+    delete:
+      tags: [Friends]
+      summary: Remove a friend by user hash.
+      operationId: deleteFriend
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /logs:
+    get:
+      tags: [Logs]
+      summary: Return recent application log lines.
+      operationId: listLogs
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          $ref: "#/components/responses/LogListResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /logs/operations/clear:
+    post:
+      tags: [Logs]
+      summary: Clear retained application log lines.
+      operationId: clearLogs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClearLogsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    CategoryId:
+      name: categoryId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 4294967295
+    Confirm:
+      name: confirm
+      in: query
+      required: true
+      schema:
+        type: boolean
+        enum: [true]
+      description: Required explicit confirmation for destructive body-free DELETE routes.
+    ClientId:
+      name: clientId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^([0-9a-f]{32}|[^/]+:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))$"
+      description: Stable client selector returned by upload or queue rows, either a lowercase MD4 hash or an endpoint token parsed at the final `address:port` colon.
+    FileHash:
+      name: hash
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9a-f]{32}$"
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 2147483647
+        default: 0
+    IncludeScoreBreakdown:
+      name: includeScoreBreakdown
+      in: query
+      schema:
+        type: boolean
+        default: false
+      description: Include per-client upload score diagnostics such as cooldown availability and cooldown remaining time.
+    IncludeEvidence:
+      name: includeEvidence
+      in: query
+      schema:
+        type: boolean
+        default: true
+      description: Include the grouped SearchResult.evidence block on each result. Set false to omit the heavy evidence payload when only basic result metadata is needed.
+    ExactTotal:
+      name: exactTotal
+      in: query
+      schema:
+        type: boolean
+        default: true
+      description: Return an exact result total. Set false to allow an estimated total when computing the exact count is expensive.
+    SearchId:
+      name: searchId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 4294967295
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[^/]+:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})$"
+      description: URL-encoded endpoint token parsed at the final `address:port` colon.
+    UserHash:
+      name: userHash
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9a-f]{32}$"
+  responses:
+    AppResponse:
+      description: Application envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AppEnvelope"
+    BulkOperationResponse:
+      description: Bulk operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkOperationEnvelope"
+    CategoryListResponse:
+      description: Category collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoryListEnvelope"
+    CategoryResponse:
+      description: Category envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoryEnvelope"
+    CommentListResponse:
+      description: Comment collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CommentListEnvelope"
+    Ed2kLinkResponse:
+      description: ED2K link envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Ed2kLinkEnvelope"
+    ErrorResponse:
+      description: Error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    MethodNotAllowedResponse:
+      description: Error envelope for an unsupported HTTP method on a known route.
+      headers:
+        Allow:
+          description: Comma-separated list of HTTP methods supported by this route.
+          required: true
+          schema:
+            type: string
+          example: "GET, POST"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DiagnosticDumpResponse:
+      description: Diagnostic dump envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DiagnosticDumpEnvelope"
+    FriendListResponse:
+      description: Friend collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FriendListEnvelope"
+    FriendResponse:
+      description: Friend envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FriendEnvelope"
+    KadResponse:
+      description: Kad envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/KadEnvelope"
+    LogListResponse:
+      description: Log collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LogListEnvelope"
+    OkAcceptedResponse:
+      description: Accepted operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OkEnvelope"
+    OkResponse:
+      description: Operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OkEnvelope"
+    PeerBanResponse:
+      description: Peer ban-state operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PeerBanEnvelope"
+    PreferencesResponse:
+      description: Preferences envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PreferencesEnvelope"
+    SearchResponse:
+      description: Search envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SearchEnvelope"
+    SearchResultDownloadResponse:
+      description: Search-result download operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SearchResultDownloadEnvelope"
+    SearchListResponse:
+      description: Search-session collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SearchListEnvelope"
+    ServerListResponse:
+      description: Server collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ServerListEnvelope"
+    ServerResponse:
+      description: Server envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ServerEnvelope"
+    ServerStatusResponse:
+      description: Server status envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ServerStatusEnvelope"
+    SharedDirectoryListResponse:
+      description: Shared-directory collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SharedDirectoryListEnvelope"
+    SharedFileListResponse:
+      description: Shared-file collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SharedFileListEnvelope"
+    SharedFileResponse:
+      description: Shared-file envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SharedFileEnvelope"
+    SharedFileCreateResponse:
+      description: Shared-file create operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SharedFileCreateEnvelope"
+    SharedFileDeleteResponse:
+      description: Shared-file delete result envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SharedFileDeleteEnvelope"
+    SnapshotResponse:
+      description: Snapshot envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SnapshotEnvelope"
+    StatsResponse:
+      description: Stats envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/StatsEnvelope"
+    StatusResponse:
+      description: Status envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/StatusEnvelope"
+    TransferDetailsResponse:
+      description: Transfer detail envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferDetailsEnvelope"
+    TransferListResponse:
+      description: Transfer collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferListEnvelope"
+    TransferResponse:
+      description: Transfer envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferEnvelope"
+    TransferSourceBrowseResponse:
+      description: Transfer-source browse operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferSourceBrowseEnvelope"
+    TransferSourceListResponse:
+      description: Transfer-source collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferSourceListEnvelope"
+    TransferSourceResponse:
+      description: Transfer-source envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferSourceEnvelope"
+    UploadListResponse:
+      description: Upload collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UploadListEnvelope"
+    UploadResponse:
+      description: Upload envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UploadEnvelope"
+    UploadRemoveResponse:
+      description: Upload removal operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UploadRemoveEnvelope"
+    UploadQueueListResponse:
+      description: Upload-queue collection envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UploadQueueListEnvelope"
+    UploadQueueEntryResponse:
+      description: Upload-queue entry envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UploadQueueEntryEnvelope"
+    UrlImportResponse:
+      description: URL import operation envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UrlImportEnvelope"
+  schemas:
+    EnvelopeMeta:
+      type: object
+      additionalProperties: false
+      required: [apiVersion]
+      properties:
+        apiVersion:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+    Ok:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+    OkEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Ok"
+        meta:
+          $ref: "#/components/schemas/EnvelopeMeta"
+    PeerBanEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/PeerBanResult"
+    PeerBanResult:
+      type: object
+      additionalProperties: false
+      required: [ok, banned]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        banned:
+          type: boolean
+    DiagnosticDumpEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosticDump"
+    DiagnosticDump:
+      type: object
+      additionalProperties: false
+      required: [ok, path, fullMemory]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        path:
+          type: string
+        fullMemory:
+          type: boolean
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable native REST error code.
+              enum:
+                - INVALID_ARGUMENT
+                - UNAUTHORIZED
+                - METHOD_NOT_ALLOWED
+                - NOT_FOUND
+                - INVALID_STATE
+                - SERVICE_BUSY
+                - EMULE_UNAVAILABLE
+                - EMULE_ERROR
+            message:
+              type: string
+              description: Human-readable error summary.
+            details:
+              type: object
+              description: >-
+                Bounded structured diagnostic fields, empty when no details are
+                available. For INVALID_ARGUMENT failures on a bounded scalar
+                parameter (such as an out-of-range limit or offset), details
+                carries the offending "field" name and a "constraint" string of
+                the form "min..max" (for example {"field": "limit", "constraint":
+                "1..1000"}).
+              additionalProperties: true
+              properties:
+                field:
+                  type: string
+                  description: Name of the request parameter that failed validation.
+                constraint:
+                  type: string
+                  description: Inclusive numeric bounds the field must satisfy, formatted as "min..max".
+    AppEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/App"
+    EnvelopeBase:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {}
+        meta:
+          $ref: "#/components/schemas/EnvelopeMeta"
+    Pagination:
+      type: object
+      description: >
+        Shared pagination metadata for every paged response (`items` plus
+        these fields). `total` is the full count across all pages, bounded by
+        the same `offset`/`limit` query parameters that produced the page.
+      required: [total, offset, limit]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        offset:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+    App:
+      type: object
+      additionalProperties: false
+      required: [name, version, apiVersion, lifecycle, capabilities]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        apiVersion:
+          type: string
+        build:
+          type: string
+        platform:
+          type: string
+        lifecycle:
+          $ref: "#/components/schemas/AppLifecycle"
+        elevated:
+          type: boolean
+        webServer:
+          type: object
+          additionalProperties: false
+          properties:
+            https:
+              type: boolean
+            allowedIps:
+              type: array
+              items:
+                type: string
+        capabilities:
+          type: object
+          additionalProperties:
+            type: boolean
+    AppLifecycle:
+      type: object
+      additionalProperties: false
+      required: [state, startupComplete, coreReady, sharedFilesReady, acceptingRest, acceptingMutations, shutdownInProgress]
+      properties:
+        state:
+          type: string
+          enum: [starting, running, shuttingdown, done]
+        startupComplete:
+          type: boolean
+        coreReady:
+          type: boolean
+        sharedFilesReady:
+          type: boolean
+        acceptingRest:
+          type: boolean
+        acceptingMutations:
+          type: boolean
+        shutdownInProgress:
+          type: boolean
+    PreferencesEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Preferences"
+    Preferences:
+      type: object
+      additionalProperties: false
+      properties:
+        downloadLimitKiBps:
+          type: integer
+          minimum: 1
+          maximum: 4294967294
+        uploadLimitKiBps:
+          type: integer
+          minimum: 1
+          maximum: 4294967294
+        maxSourcesPerFile:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        maxConnections:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        maxConnectionsPerFiveSeconds:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        uploadClientDataRate:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
+        maxUploadSlots:
+          type: integer
+          minimum: 1
+          maximum: 64
+        uploadSlotElasticPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        queueSize:
+          type: integer
+          minimum: 2000
+          maximum: 10000
+        autoConnect:
+          type: boolean
+        newAutoUp:
+          type: boolean
+        newAutoDown:
+          type: boolean
+        creditSystem:
+          type: boolean
+        safeServerConnect:
+          type: boolean
+        networkKademlia:
+          type: boolean
+        networkEd2k:
+          type: boolean
+        downloadAutoBroadbandIo:
+          type: boolean
+          description: Enables adaptive broadband download write buffering based on currently available RAM.
+    PreferencesPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        downloadLimitKiBps:
+          type: integer
+          minimum: 1
+          maximum: 4294967294
+        uploadLimitKiBps:
+          type: integer
+          minimum: 1
+          maximum: 4294967294
+        maxSourcesPerFile:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        maxConnections:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        maxConnectionsPerFiveSeconds:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        uploadClientDataRate:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
+        maxUploadSlots:
+          type: integer
+          minimum: 1
+          maximum: 64
+        uploadSlotElasticPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        queueSize:
+          type: integer
+          minimum: 2000
+          maximum: 10000
+        autoConnect:
+          type: boolean
+        newAutoUp:
+          type: boolean
+        newAutoDown:
+          type: boolean
+        creditSystem:
+          type: boolean
+        safeServerConnect:
+          type: boolean
+        networkKademlia:
+          type: boolean
+        networkEd2k:
+          type: boolean
+        downloadAutoBroadbandIo:
+          type: boolean
+          description: Enables adaptive broadband download write buffering based on currently available RAM.
+    StatusEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Status"
+    Status:
+      type: object
+      additionalProperties: false
+      required: [lifecycle, stats, servers, kad, network, sharedStartupCache, runtimeDiagnostics]
+      properties:
+        lifecycle:
+          $ref: "#/components/schemas/AppLifecycle"
+        servers:
+          $ref: "#/components/schemas/ServerStatus"
+        kad:
+          $ref: "#/components/schemas/Kad"
+        network:
+          $ref: "#/components/schemas/NetworkStatus"
+        stats:
+          $ref: "#/components/schemas/Stats"
+        sharedStartupCache:
+          $ref: "#/components/schemas/SharedStartupCache"
+        runtimeDiagnostics:
+          $ref: "#/components/schemas/RuntimeDiagnostics"
+    StatsEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Stats"
+    Stats:
+      type: object
+      additionalProperties: false
+      required: [connected, downloadSpeedKiBps, uploadSpeedKiBps, sessionDownloadedBytes, sessionUploadedBytes, activeUploads, waitingUploads, downloadCount, ed2kConnected, ed2kHighId, kadRunning, kadConnected, kadFirewalled]
+      properties:
+        connected:
+          type: boolean
+        downloadSpeedKiBps:
+          type: number
+          minimum: 0
+        uploadSpeedKiBps:
+          type: number
+          minimum: 0
+        sessionDownloadedBytes:
+          type: integer
+          minimum: 0
+        sessionUploadedBytes:
+          type: integer
+          minimum: 0
+        totalDownloadedBytes:
+          type: integer
+          minimum: 0
+        totalUploadedBytes:
+          type: integer
+          minimum: 0
+        activeDownloads:
+          type: integer
+          minimum: 0
+        activeUploads:
+          type: integer
+          minimum: 0
+        waitingUploads:
+          type: integer
+          minimum: 0
+        downloadCount:
+          type: integer
+          minimum: 0
+        sharedHashingActive:
+          type: boolean
+        sharedHashingCount:
+          type: integer
+          minimum: 0
+        sharedFilesReady:
+          type: boolean
+        ed2kConnected:
+          type: boolean
+        ed2kHighId:
+          type: boolean
+        kadRunning:
+          type: boolean
+        kadConnected:
+          type: boolean
+        kadFirewalled:
+          type:
+            - boolean
+            - "null"
+    SharedStartupCache:
+      type: object
+      additionalProperties: false
+      required: [available, ready]
+      properties:
+        available:
+          type: boolean
+        ready:
+          type: boolean
+        filePresent:
+          type: boolean
+        loaded:
+          type: boolean
+        rejected:
+          type: boolean
+        removed:
+          type: boolean
+        rejectCode:
+          type:
+            - string
+            - "null"
+        recordsLoaded:
+          type: integer
+          minimum: 0
+        volumesLoaded:
+          type: integer
+          minimum: 0
+        duplicatePathCache:
+          type: object
+          additionalProperties: false
+          properties:
+            loaded:
+              type: boolean
+            rejected:
+              type: boolean
+            removed:
+              type: boolean
+            rejectCode:
+              type:
+                - string
+                - "null"
+            recordsLoaded:
+              type: integer
+              minimum: 0
+        scan:
+          type: object
+          additionalProperties: false
+          properties:
+            requestedDirectories:
+              type: integer
+              minimum: 0
+            dedupedDirectories:
+              type: integer
+              minimum: 0
+            duplicateDirectories:
+              type: integer
+              minimum: 0
+            directoriesFromCache:
+              type: integer
+              minimum: 0
+            directoriesRescanned:
+              type: integer
+              minimum: 0
+            inaccessibleDirectories:
+              type: integer
+              minimum: 0
+            knownFilesAccepted:
+              type: integer
+              minimum: 0
+            duplicatePathsReused:
+              type: integer
+              minimum: 0
+            filesQueuedForHash:
+              type: integer
+              minimum: 0
+            filesIgnored:
+              type: integer
+              minimum: 0
+        save:
+          type: object
+          additionalProperties: false
+          properties:
+            running:
+              type: boolean
+            dirty:
+              type: boolean
+            waitingForFollowUp:
+              type: boolean
+            phase:
+              type: string
+              enum: [idle, buildingRecords, writingFile, applyingResult]
+            completedDirectories:
+              type: integer
+              minimum: 0
+            totalDirectories:
+              type: integer
+              minimum: 0
+        hashingCount:
+          type: integer
+          minimum: 0
+        deferredHashingActive:
+          type: boolean
+        interruptedHashingInvalidatedCache:
+          type: boolean
+    RuntimeDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [processId, knownFileCount, sharedFileCount, sharedHashingCount, downloadFileCount, activeUploads, waitingUploads, geolocation]
+      properties:
+        processId:
+          type: integer
+          minimum: 0
+        knownFileCount:
+          type: integer
+          minimum: 0
+        sharedFileCount:
+          type: integer
+          minimum: 0
+        sharedHashingCount:
+          type: integer
+          minimum: 0
+        downloadFileCount:
+          type: integer
+          minimum: 0
+        activeUploads:
+          type: integer
+          minimum: 0
+        waitingUploads:
+          type: integer
+          minimum: 0
+        geolocation:
+          oneOf:
+            - $ref: "#/components/schemas/GeolocationRuntimeDiagnostics"
+            - type: "null"
+    NetworkStatus:
+      type: object
+      additionalProperties: false
+      required: [ports, binding, vpnGuard]
+      properties:
+        ports:
+          type: object
+          additionalProperties: false
+          required: [tcp, udp, serverUdp]
+          properties:
+            tcp:
+              type: integer
+              minimum: 0
+              maximum: 65535
+            udp:
+              type: integer
+              minimum: 0
+              maximum: 65535
+            serverUdp:
+              type: integer
+              minimum: 0
+              maximum: 65535
+        binding:
+          type: object
+          additionalProperties: false
+          required: [configuredAddress, configuredInterfaceId, configuredInterfaceName, activeConfiguredAddress, activeInterfaceId, activeInterfaceName, activeInterfaceIndex, resolveResult]
+          properties:
+            configuredAddress:
+              type: string
+            configuredInterfaceId:
+              type: string
+            configuredInterfaceName:
+              type: string
+            activeConfiguredAddress:
+              type: string
+            activeInterfaceId:
+              type: string
+            activeInterfaceName:
+              type: string
+            activeInterfaceIndex:
+              type: integer
+              minimum: 0
+            resolveResult:
+              type: string
+              description: Stable bind-resolution outcome token.
+              enum: [default, resolved, interfacenotfound, interfacenameambiguous, interfacehasnoaddress, addressnotfoundoninterface, addressnotfound, unknown]
+        vpnGuard:
+          type: object
+          additionalProperties: false
+          required: [enabled, mode, allowedPublicIpCidrs, startupBlocked, startupBlockReason]
+          properties:
+            enabled:
+              type: boolean
+            mode:
+              type: string
+              enum: ["off", block]
+            allowedPublicIpCidrs:
+              type: string
+            startupBlocked:
+              type: boolean
+            startupBlockReason:
+              type: string
+    GeolocationRuntimeDiagnostics:
+      type: object
+      additionalProperties: false
+      required: [enabled, databaseLoaded, databaseBytes, indexBytes, nodeCount, recordSize, lookupCacheCount, decodedNodeCacheCount, refreshQueued]
+      properties:
+        enabled:
+          type: boolean
+        databaseLoaded:
+          type: boolean
+        databaseBytes:
+          type: integer
+          minimum: 0
+        indexBytes:
+          type: integer
+          minimum: 0
+        nodeCount:
+          type: integer
+          minimum: 0
+        recordSize:
+          type: integer
+          minimum: 0
+        lookupCacheCount:
+          type: integer
+          minimum: 0
+        decodedNodeCacheCount:
+          type: integer
+          minimum: 0
+        refreshQueued:
+          type: boolean
+    SnapshotEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required:
+                - app
+                - status
+                - transfers
+                - sharedFiles
+                - uploads
+                - uploadQueue
+                - servers
+                - kad
+                - network
+                - logs
+              properties:
+                app:
+                  $ref: "#/components/schemas/App"
+                status:
+                  $ref: "#/components/schemas/Status"
+                transfers:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Transfer"
+                sharedFiles:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SharedFile"
+                uploads:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Upload"
+                uploadQueue:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/UploadQueueEntry"
+                servers:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Server"
+                kad:
+                  $ref: "#/components/schemas/Kad"
+                network:
+                  $ref: "#/components/schemas/NetworkStatus"
+                logs:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/LogEntry"
+    CategoryEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Category"
+    CategoryListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Category"
+    Category:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          minimum: 0
+        name:
+          type: string
+        path:
+          type:
+            - string
+            - "null"
+        comment:
+          type: string
+        color:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 16777215
+        priority:
+          type: integer
+          minimum: 0
+    CategoryPriorityInput:
+      oneOf:
+        - type: string
+          enum: [verylow, low, normal, high, veryhigh]
+        - type: integer
+          minimum: 0
+    CategoryCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        path:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        comment:
+          type: string
+        color:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 16777215
+        priority:
+          $ref: "#/components/schemas/CategoryPriorityInput"
+    CategoryPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+        path:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        comment:
+          type: string
+        color:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 16777215
+        priority:
+          $ref: "#/components/schemas/CategoryPriorityInput"
+    TransferListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              unevaluatedProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Transfer"
+              allOf:
+                - $ref: "#/components/schemas/Pagination"
+    TransferEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Transfer"
+    Transfer:
+      type: object
+      additionalProperties: false
+      required: [hash, name, sizeBytes, state]
+      properties:
+        hash:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        completedBytes:
+          type: integer
+          minimum: 0
+        state:
+          $ref: "#/components/schemas/TransferState"
+        priority:
+          $ref: "#/components/schemas/TransferPriority"
+        categoryId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        categoryName:
+          type: string
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        sources:
+          type: integer
+          minimum: 0
+        sourcesTransferring:
+          type: integer
+          minimum: 0
+        autoPriority:
+          type: boolean
+        eta:
+          type:
+            - integer
+            - "null"
+        addedAt:
+          type:
+            - integer
+            - "null"
+        completedAt:
+          type:
+            - integer
+            - "null"
+        partsTotal:
+          type: integer
+          minimum: 0
+        partsObtained:
+          type: integer
+          minimum: 0
+        partsProgressText:
+          type: string
+        partsAvailable:
+          type: integer
+          minimum: 0
+        stopped:
+          type: boolean
+        fakeFile:
+          $ref: "#/components/schemas/FakeFileAnalysis"
+        downloadSpeedKiBps:
+          type: number
+          minimum: 0
+        uploadSpeedKiBps:
+          type: number
+          minimum: 0
+        ed2kLink:
+          type: string
+    TransferState:
+      type: string
+      enum: [downloading, paused, queued, checking, completing, completed, error, missingfiles]
+    TransferPriority:
+      type: string
+      enum: [auto, verylow, low, normal, high, veryhigh]
+    FakeFileAnalysis:
+      type: object
+      additionalProperties: false
+      required: [score, severity, reasons, pendingHeaderCheck, observedNames, observedExtensions, canonicalNames, ignoredNameTokens, nameDivergenceGroups, claimedType, extensionType, detectedHeaderType, cached]
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        severity:
+          type: string
+          enum: [none, low, medium, high, critical]
+        reasons:
+          type: array
+          items:
+            type: string
+            enum: [multiple_names, bad_signal_name, bad_signal_comment, header_extension_mismatch, claimed_type_mismatch, spam_score, spam_status, bad_rating, fake_rating, multiple_aich, executable_masquerade, archive_masquerade, pending_header_check, implausible_media_length, implausible_media_bitrate]
+        pendingHeaderCheck:
+          type: boolean
+        observedNames:
+          type: array
+          items:
+            type: string
+        observedExtensions:
+          type: array
+          items:
+            type: string
+        canonicalNames:
+          type: array
+          items:
+            type: string
+        ignoredNameTokens:
+          type: array
+          items:
+            type: string
+        nameDivergenceGroups:
+          type: array
+          items:
+            type: string
+        claimedType:
+          type:
+            - string
+            - "null"
+        extensionType:
+          type:
+            - string
+            - "null"
+        detectedHeaderType:
+          type:
+            - string
+            - "null"
+        cached:
+          type: boolean
+    SearchResultEvidence:
+      type: object
+      additionalProperties: false
+      required: [confidence, availabilityEvidence, nameEvidence, integrityEvidence]
+      properties:
+        confidence:
+          $ref: "#/components/schemas/SearchConfidence"
+        availabilityEvidence:
+          $ref: "#/components/schemas/SearchAvailabilityEvidence"
+        nameEvidence:
+          $ref: "#/components/schemas/SearchNameEvidence"
+        integrityEvidence:
+          $ref: "#/components/schemas/SearchIntegrityEvidence"
+    SearchConfidence:
+      type: object
+      description: >-
+        Non-authoritative summary axis folding fake-file heuristics, user ratings
+        and Kad publisher consistency into one symmetric confidence band. Higher
+        score = more confident.
+      additionalProperties: false
+      required: [band, score, fakeScore, severity, spam, userRating, kadBand, reasons]
+      properties:
+        band:
+          type: string
+          enum: [spam, likely_fake, suspect, caution, looks_good, genuine]
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        fakeScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        severity:
+          type: string
+          enum: [none, low, medium, high, critical]
+        spam:
+          type: boolean
+        userRating:
+          type: integer
+          minimum: 0
+          maximum: 6
+        kadBand:
+          type: string
+          enum: [unknown, low, normal, high]
+        reasons:
+          type: array
+          items:
+            type: string
+    SearchAvailabilityEvidence:
+      type: object
+      additionalProperties: false
+      required: [sources, completeSources, complete, clientCount, serverCount, kadPublishers]
+      properties:
+        sources:
+          type: integer
+          minimum: 0
+        completeSources:
+          type: integer
+          minimum: 0
+        complete:
+          type:
+            - boolean
+            - "null"
+        clientCount:
+          type: integer
+          minimum: 0
+        serverCount:
+          type: integer
+          minimum: 0
+        kadPublishers:
+          type: integer
+          minimum: 0
+    SearchNameEvidence:
+      type: object
+      additionalProperties: false
+      required: [observedNames, observedExtensions, canonicalNames, ignoredNameTokens, divergenceGroups, divergent]
+      properties:
+        observedNames:
+          type: array
+          items:
+            type: string
+        observedExtensions:
+          type: array
+          items:
+            type: string
+        canonicalNames:
+          type: array
+          items:
+            type: string
+        ignoredNameTokens:
+          type: array
+          items:
+            type: string
+        divergenceGroups:
+          type: array
+          items:
+            type: string
+        divergent:
+          type: boolean
+    SearchIntegrityEvidence:
+      type: object
+      additionalProperties: false
+      required: [hasAichHash, multipleAich, pendingHeaderCheck, cachedHeaderEvidence, claimedType, extensionType, detectedHeaderType]
+      properties:
+        hasAichHash:
+          type: boolean
+        multipleAich:
+          type: boolean
+        pendingHeaderCheck:
+          type: boolean
+        cachedHeaderEvidence:
+          type: boolean
+        claimedType:
+          type:
+            - string
+            - "null"
+        extensionType:
+          type:
+            - string
+            - "null"
+        detectedHeaderType:
+          type:
+            - string
+            - "null"
+    SharedFilePriority:
+      type: string
+      enum: [auto, verylow, low, normal, high, release]
+    TransferCreateRequest:
+      type: object
+      additionalProperties: false
+      oneOf:
+        - required: [link]
+          not:
+            required: [links]
+        - required: [links]
+          not:
+            required: [link]
+      not:
+        required: [categoryId, categoryName]
+      properties:
+        link:
+          type: string
+          minLength: 1
+        links:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+        categoryId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        categoryName:
+          type: string
+          minLength: 1
+        paused:
+          type: boolean
+    TransferPatch:
+      type: object
+      additionalProperties: false
+      oneOf:
+        - required: [priority]
+          not:
+            anyOf:
+              - required: [name]
+              - required: [categoryId]
+              - required: [categoryName]
+        - required: [name]
+          not:
+            anyOf:
+              - required: [priority]
+              - required: [categoryId]
+              - required: [categoryName]
+        - required: [categoryId]
+          not:
+            anyOf:
+              - required: [priority]
+              - required: [name]
+              - required: [categoryName]
+        - required: [categoryName]
+          not:
+            anyOf:
+              - required: [priority]
+              - required: [name]
+              - required: [categoryId]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        priority:
+          $ref: "#/components/schemas/TransferPriority"
+        categoryId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        categoryName:
+          type: string
+          minLength: 1
+    TransferDetailsEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [transfer, parts, sources]
+              properties:
+                transfer:
+                  $ref: "#/components/schemas/Transfer"
+                parts:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TransferPart"
+                sources:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TransferSource"
+    TransferPart:
+      type: object
+      additionalProperties: false
+      required: [index, start, end, size, completedBytes, gapBytes, complete, requested, corrupted, availableSources]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        start:
+          type: integer
+          minimum: 0
+        end:
+          type: integer
+          minimum: 0
+        size:
+          type: integer
+          minimum: 0
+        completedBytes:
+          type: integer
+          minimum: 0
+        gapBytes:
+          type: integer
+          minimum: 0
+        complete:
+          type: boolean
+        requested:
+          type: boolean
+        corrupted:
+          type: boolean
+        availableSources:
+          type: integer
+          minimum: 0
+    TransferSourceListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TransferSource"
+    TransferSourceEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/TransferSource"
+    TransferSourceBrowseEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/TransferSourceBrowseResult"
+    TransferSourceBrowseResult:
+      type: object
+      additionalProperties: false
+      required: [ok, alreadyPending, searchId]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        alreadyPending:
+          type: boolean
+        searchId:
+          type: string
+    TransferSource:
+      type: object
+      additionalProperties: false
+      required: [clientId, userName, userHash, address, port, downloadState, clientSoftware, downloadSpeedKiBps, availableParts, partCount, serverIp, serverPort, lowId, queueRank, viewSharedFiles, sharedFilesRequestPending]
+      properties:
+        clientId:
+          type: string
+        userName:
+          type: string
+        userHash:
+          type: string
+        address:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        downloadState:
+          type: string
+          enum: [downloading, onqueue, connected, connecting, waitcallback, waitcallbackkad, reqhashset, noneededparts, toomanyconns, toomanyconnskad, lowtolowip, banned, error, none, remotequeuefull, unknown]
+        clientSoftware:
+          type: string
+        downloadSpeedKiBps:
+          type: number
+          minimum: 0
+        availableParts:
+          type: integer
+          minimum: 0
+        partCount:
+          type: integer
+          minimum: 0
+        serverIp:
+          type: string
+        serverPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        lowId:
+          type: boolean
+        queueRank:
+          type: integer
+          minimum: 0
+        viewSharedFiles:
+          type: boolean
+        sharedFilesRequestPending:
+          type: boolean
+    ClearCompletedTransfersRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmClearCompleted]
+      properties:
+        confirmClearCompleted:
+          type: boolean
+          enum: [true]
+    ClearLogsRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmClearLogs]
+      properties:
+        confirmClearLogs:
+          type: boolean
+          enum: [true]
+    ShutdownRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmShutdown]
+      properties:
+        confirmShutdown:
+          type: boolean
+          enum: [true]
+    DiagnosticDumpRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmDump]
+      properties:
+        confirmDump:
+          type: boolean
+          enum: [true]
+        fullMemory:
+          type: boolean
+          default: false
+    DiagnosticCrashTestRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmCrash]
+      properties:
+        confirmCrash:
+          type: boolean
+          enum: [true]
+    SharedFileListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              unevaluatedProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SharedFile"
+              allOf:
+                - $ref: "#/components/schemas/Pagination"
+    SharedFileEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SharedFile"
+    SharedFileCreateEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SharedFileCreateResult"
+    SharedFileCreateResult:
+      type: object
+      additionalProperties: false
+      required: [ok, path, alreadyShared, queued, file]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        path:
+          type: string
+        alreadyShared:
+          type: boolean
+        queued:
+          type: boolean
+        file:
+          oneOf:
+            - $ref: "#/components/schemas/SharedFile"
+            - type: "null"
+    SharedFileDeleteEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SharedFileDelete"
+    SharedFileDelete:
+      type: object
+      additionalProperties: false
+      required: [ok, deletedFiles, path, hash]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        deletedFiles:
+          type: boolean
+        path:
+          type: string
+        hash:
+          type:
+            - string
+            - "null"
+    SharedFile:
+      type: object
+      additionalProperties: false
+      required: [hash, name, path, directory, sizeBytes, priority, autoUploadPriority, requests, acceptedRequests, transferredBytes, allTimeRequests, allTimeAccepts, allTimeTransferred, partCount, partFile, complete, comment, rating, hasComment, userRating, publishedEd2k, sharedByRule]
+      properties:
+        hash:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        priority:
+          $ref: "#/components/schemas/SharedFilePriority"
+        rating:
+          type: integer
+          minimum: 0
+          maximum: 5
+        comment:
+          type: string
+        ed2kLink:
+          type: string
+        directory:
+          type: string
+        autoUploadPriority:
+          type: boolean
+        allTimeRequests:
+          type: integer
+          minimum: 0
+        allTimeAccepts:
+          type: integer
+          minimum: 0
+        allTimeTransferred:
+          type: integer
+          minimum: 0
+        partCount:
+          type: integer
+          minimum: 0
+        partFile:
+          type: boolean
+        complete:
+          type: boolean
+        hasComment:
+          type: boolean
+        userRating:
+          type: integer
+          minimum: 0
+        publishedEd2k:
+          type: boolean
+        sharedByRule:
+          type: boolean
+        requests:
+          type: integer
+          minimum: 0
+        acceptedRequests:
+          type: integer
+          minimum: 0
+        transferredBytes:
+          type: integer
+          minimum: 0
+    SharedFileCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+          minLength: 1
+    SharedFilePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      dependentRequired:
+        comment: [rating]
+        rating: [comment]
+      properties:
+        priority:
+          $ref: "#/components/schemas/SharedFilePriority"
+        rating:
+          type: integer
+          minimum: 0
+          maximum: 5
+        comment:
+          type: string
+    Ed2kLinkEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [hash, link]
+              properties:
+                hash:
+                  type: string
+                link:
+                  type: string
+    CommentListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      source:
+                        type: string
+                      userName:
+                        type:
+                          - string
+                          - "null"
+                      fileName:
+                        type: string
+                      rating:
+                        type: integer
+                      comment:
+                        type: string
+    SharedDirectoryListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items, roots, monitorOwned, hashingCount]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SharedDirectory"
+                roots:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SharedDirectory"
+                monitorOwned:
+                  type: array
+                  items:
+                    type: string
+                hashingCount:
+                  type: integer
+                  minimum: 0
+                total:
+                  type: integer
+                  minimum: 0
+                offset:
+                  type: integer
+                  minimum: 0
+                limit:
+                  type: integer
+                  minimum: 0
+    SharedDirectory:
+      type: object
+      additionalProperties: false
+      required: [path, recursive]
+      properties:
+        path:
+          type: string
+        recursive:
+          type: boolean
+        exists:
+          type: boolean
+        monitored:
+          type: boolean
+        monitorOwned:
+          type: boolean
+        shareable:
+          type: boolean
+        accessible:
+          type: boolean
+    SharedDirectoryReplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmReplaceRoots, roots]
+      properties:
+        confirmReplaceRoots:
+          type: boolean
+          enum: [true]
+        roots:
+          type: array
+          items:
+            $ref: "#/components/schemas/SharedDirectoryRootInput"
+    SharedDirectoryRootInput:
+      oneOf:
+        - type: string
+          minLength: 1
+        - type: object
+          additionalProperties: false
+          required: [path]
+          properties:
+            path:
+              type: string
+              minLength: 1
+            recursive:
+              type: boolean
+    UploadListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Upload"
+    Upload:
+      type: object
+      additionalProperties: false
+      required: [clientId, userName, userHash, clientSoftware, clientMod, uploadState, uploadSpeedKiBps, uploadedBytes, queueSessionUploaded, payloadBuffered, waitTimeMs, waitStartedTick, score, address, port, serverIp, serverPort, lowId, friendSlot, uploading, waitingQueue, requestedFileHash, requestedFileName, requestedFileSizeBytes, requestedPartsObtained, requestedPartsTotal, requestedPartsProgressText]
+      properties:
+        clientId:
+          type: string
+        userName:
+          type: string
+        userHash:
+          type:
+            - string
+            - "null"
+        clientSoftware:
+          type: string
+        clientMod:
+          type: string
+        uploadState:
+          type: string
+          enum: [uploading, queued, connecting, banned, idle]
+        fileHash:
+          type: string
+        fileName:
+          type: string
+        uploadSpeedKiBps:
+          type: number
+          minimum: 0
+        uploadedBytes:
+          type: integer
+          minimum: 0
+        queueSessionUploaded:
+          type: integer
+          minimum: 0
+        payloadBuffered:
+          type: integer
+          minimum: 0
+        waitTimeMs:
+          type: integer
+          minimum: 0
+        waitStartedTick:
+          type: integer
+          minimum: 0
+        score:
+          type: integer
+          minimum: 0
+        address:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        serverIp:
+          type: string
+        serverPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        lowId:
+          type: boolean
+        friendSlot:
+          type: boolean
+        uploading:
+          type: boolean
+        waitingQueue:
+          type: boolean
+        requestedFileHash:
+          type:
+            - string
+            - "null"
+        requestedFileName:
+          type:
+            - string
+            - "null"
+        requestedFileSizeBytes:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        requestedPartsObtained:
+          type: integer
+          minimum: 0
+        requestedPartsTotal:
+          type: integer
+          minimum: 0
+        requestedPartsProgressText:
+          type: string
+        scoreBreakdown:
+          $ref: "#/components/schemas/UploadScoreBreakdown"
+    UploadEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Upload"
+    UploadRemoveEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/UploadRemoveResult"
+    UploadRemoveResult:
+      type: object
+      additionalProperties: false
+      required: [ok, removed]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        removed:
+          type: string
+          enum: [queue, slot]
+    UploadScoreBreakdown:
+      type: object
+      additionalProperties: false
+      required: [availability, baseScore, effectiveScore]
+      properties:
+        availability:
+          type: string
+          enum: [available, friendSlot, cooldown, unavailable]
+        baseScore:
+          type: integer
+          minimum: 0
+        effectiveScore:
+          type: integer
+          minimum: 0
+        coreScore:
+          type: number
+        effectiveScoreFloat:
+          type: number
+        creditRatio:
+          type: number
+        filePriority:
+          type: integer
+        lowRatioApplied:
+          type: boolean
+        lowRatioBonus:
+          type: integer
+          minimum: 0
+        lowIdPenaltyApplied:
+          type: boolean
+        lowIdDivisor:
+          type: integer
+          minimum: 0
+        oldClientPenaltyApplied:
+          type: boolean
+        cooldownRemainingMs:
+          type: integer
+          minimum: 0
+    UploadQueueListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              unevaluatedProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/UploadQueueEntry"
+              allOf:
+                - $ref: "#/components/schemas/Pagination"
+    UploadQueueEntry:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/Upload"
+        - type: object
+          properties:
+            queueRank:
+              type: integer
+              minimum: 0
+    UploadQueueEntryEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/UploadQueueEntry"
+    ServerListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Server"
+    ServerEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Server"
+    Server:
+      type: object
+      additionalProperties: false
+      required: [address, port, name, priority, static, connected, connecting, current, description, dynIp, failedCount, hardFiles, ip, ping, softFiles, version, users, files]
+      properties:
+        address:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        name:
+          type: string
+        priority:
+          type: string
+          enum: [low, normal, high]
+        static:
+          type: boolean
+        connected:
+          type: boolean
+        connecting:
+          type: boolean
+        current:
+          type: boolean
+        description:
+          type: string
+        dynIp:
+          type: string
+        failedCount:
+          type: integer
+          minimum: 0
+        hardFiles:
+          type: integer
+          minimum: 0
+        ip:
+          type: string
+        ping:
+          type: integer
+          minimum: 0
+        softFiles:
+          type: integer
+          minimum: 0
+        version:
+          type: string
+        users:
+          type: integer
+          minimum: 0
+        files:
+          type: integer
+          minimum: 0
+    ServerStatusEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/ServerStatus"
+    ServerStatus:
+      type: object
+      additionalProperties: false
+      required: [connected, connecting, currentServer, lowId, serverCount]
+      properties:
+        connected:
+          type: boolean
+        connecting:
+          type: boolean
+        currentServer:
+          oneOf:
+            - $ref: "#/components/schemas/Server"
+            - type: "null"
+        lowId:
+          type:
+            - boolean
+            - "null"
+        serverCount:
+          type: integer
+          minimum: 0
+        active:
+          $ref: "#/components/schemas/Server"
+    ServerCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [address, port]
+      properties:
+        address:
+          type: string
+          minLength: 1
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        name:
+          type: string
+        priority:
+          type: string
+          enum: [low, normal, high]
+        static:
+          type: boolean
+        connect:
+          type: boolean
+    ServerPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+        priority:
+          type: string
+          enum: [low, normal, high]
+        static:
+          type: boolean
+    UrlImportRequest:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          pattern: '^https?://[^\s/?#][^\s]*$'
+    UrlImportEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/UrlImportResult"
+    UrlImportResult:
+      type: object
+      additionalProperties: false
+      required: [ok, imported]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        imported:
+          type: boolean
+          const: true
+    KadEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Kad"
+    Kad:
+      type: object
+      additionalProperties: false
+      required: [running, connected, firewalled, bootstrapping, bootstrapProgress, contactCount, lanMode, users, files]
+      properties:
+        running:
+          type: boolean
+        connected:
+          type: boolean
+        firewalled:
+          type:
+            - boolean
+            - "null"
+        nodes:
+          type: integer
+          minimum: 0
+        contactCount:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        lanMode:
+          type: boolean
+        users:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        files:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        bootstrapping:
+          type: boolean
+        bootstrapProgress:
+          type: integer
+          minimum: 0
+        indexedSources:
+          type: integer
+          minimum: 0
+        indexedKeywords:
+          type: integer
+          minimum: 0
+        operationQueued:
+          type: boolean
+        alreadyRunning:
+          type: boolean
+        blockedByVpnGuard:
+          type: boolean
+        network:
+          $ref: "#/components/schemas/NetworkStatus"
+    KadBootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [address, port]
+      properties:
+        address:
+          type: string
+          minLength: 1
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+    SearchListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/SearchSession"
+    SearchSession:
+      type: object
+      additionalProperties: false
+      required: [id, query, method, type, status, resultCount]
+      properties:
+        id:
+          type: string
+        query:
+          type: string
+        method:
+          type: string
+          description: Resolved native search method.
+          enum: [automatic, server, global, kad]
+        type:
+          type: string
+          enum: ["", arc, audio, iso, image, pro, video, doc, emulecollection]
+        status:
+          type: string
+          enum: [running, complete]
+        resultCount:
+          type: integer
+          minimum: 0
+    SearchEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Search"
+    Search:
+      type: object
+      unevaluatedProperties: false
+      required: [id, query, method, type, status, items]
+      properties:
+        id:
+          type: string
+        query:
+          type: string
+        method:
+          type: string
+          description: Resolved native search method.
+          enum: [automatic, server, global, kad]
+        type:
+          type: string
+          enum: ["", arc, audio, iso, image, pro, video, doc, emulecollection]
+        status:
+          type: string
+          enum: [running, stopped, complete, error]
+        items:
+          type: array
+          description: >
+            Current native visible result snapshot for this page, bounded by the
+            `offset` and `limit` query parameters. The search resource shares the
+            common pagination fields (`total`/`offset`/`limit`); controllers
+            should poll the resource and preserve eMule's stock eD2K/Kad search
+            semantics.
+          items:
+            $ref: "#/components/schemas/SearchResult"
+      allOf:
+        - $ref: "#/components/schemas/Pagination"
+    SearchCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 160
+        method:
+          type: string
+          description: >
+            Requested native search method. automatic resolves from live network
+            state: connected eD2K uses global, Kad-only uses kad, and offline
+            searches are rejected as not connected.
+          enum: [automatic, server, global, kad]
+        type:
+          type: string
+          enum: ["", arc, audio, iso, image, pro, video, doc, emulecollection]
+        minSizeBytes:
+          type: integer
+          minimum: 0
+        maxSizeBytes:
+          type: integer
+          minimum: 0
+        minAvailability:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        extension:
+          type: string
+    SearchResult:
+      type: object
+      additionalProperties: false
+      required:
+        - searchId
+        - method
+        - type
+        - hash
+        - name
+        - sizeBytes
+        - sources
+        - completeSources
+        - fileType
+        - complete
+        - knownType
+        - directory
+        - clientIp
+        - clientPort
+        - serverIp
+        - serverPort
+        - clientCount
+        - serverCount
+        - kadPublishInfo
+        - rating
+        - hasComment
+        - spam
+        - evidence
+      properties:
+        searchId:
+          type: string
+        method:
+          type: string
+          enum: [automatic, server, global, kad]
+        type:
+          type: string
+          enum: ["", arc, audio, iso, image, pro, video, doc, emulecollection]
+        hash:
+          type: string
+        name:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        sources:
+          type: integer
+          minimum: 0
+        completeSources:
+          type: integer
+          minimum: 0
+        fileType:
+          type: string
+          description: >
+            Raw native file-type tag reported by the search result row. This is
+            not constrained to the search request type enum and is not remapped.
+        extension:
+          type: string
+        complete:
+          type:
+            - boolean
+            - "null"
+        knownType:
+          type: string
+          enum: [shared, downloading, downloaded, cancelled, unknown, undetermined]
+        directory:
+          type:
+            - string
+            - "null"
+        clientIp:
+          type: string
+        clientPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        serverIp:
+          type: string
+        serverPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        clientCount:
+          type: integer
+          minimum: 0
+        serverCount:
+          type: integer
+          minimum: 0
+        kadPublishInfo:
+          type: integer
+          minimum: 0
+        rating:
+          type: integer
+          minimum: 0
+        hasComment:
+          type: boolean
+        spam:
+          type: boolean
+        evidence:
+          $ref: "#/components/schemas/SearchResultEvidence"
+    SearchResultDownloadRequest:
+      type: object
+      additionalProperties: false
+      not:
+        required: [categoryId, categoryName]
+      properties:
+        categoryId:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        categoryName:
+          type: string
+          minLength: 1
+        paused:
+          type: boolean
+    SearchResultDownloadEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SearchResultDownloadResult"
+    SearchResultDownloadResult:
+      type: object
+      additionalProperties: false
+      required: [ok, searchId, hash]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        searchId:
+          type: string
+        hash:
+          type: string
+    FriendListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Friend"
+    FriendEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Friend"
+    Friend:
+      type: object
+      additionalProperties: false
+      required: [userHash]
+      properties:
+        userHash:
+          type: string
+        name:
+          type: string
+        address:
+          type:
+            - string
+            - "null"
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        lastSeen:
+          type:
+            - string
+            - "null"
+          format: date-time
+    FriendCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [userHash]
+      properties:
+        userHash:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+        name:
+          type: string
+          maxLength: 128
+    LogListEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/LogEntry"
+    LogEntry:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        timestamp:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: integer
+        level:
+          type: string
+        debug:
+          type: boolean
+        message:
+          type: string
+    BulkOperationEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/BulkOperationResult"
+                total:
+                  type: integer
+                  minimum: 0
+                offset:
+                  type: integer
+                  minimum: 0
+                limit:
+                  type: integer
+                  minimum: 0
+    BulkOperationResult:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: string
+        hash:
+          type: string
+        name:
+          type: string
+        error:
+          type: string
