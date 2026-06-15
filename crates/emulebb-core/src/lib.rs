@@ -640,8 +640,14 @@ pub struct Upload {
     pub requested_parts_obtained: u32,
     pub requested_parts_total: u32,
     pub requested_parts_progress_text: String,
-    pub score_breakdown: UploadScoreBreakdown,
+    /// Optional per-client upload score diagnostics. Like master, attached only
+    /// when the caller opts in (single-client lookups always; `/upload-queue`
+    /// list only with `includeScoreBreakdown=true`; `/uploads` list never).
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_breakdown: Option<UploadScoreBreakdown>,
+    // Internal-only: queue position is not in the `Upload` contract (it belongs
+    // to source JSON); waiting position is conveyed via score/waitTimeMs.
+    #[serde(skip_serializing)]
     pub queue_rank: Option<u16>,
 }
 
@@ -6313,7 +6319,7 @@ fn upload_from_snapshot(
         wait_time_ms: entry.wait_time_ms,
         wait_started_tick: 0,
         score: u64::from(score),
-        score_breakdown,
+        score_breakdown: Some(score_breakdown),
         address: entry.ip.to_string(),
         port: entry.tcp_port,
         server_ip: String::new(),

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use emulebb_core::TransferSource;
-use serde_json::Value;
+use emulebb_core::{TransferSource, Upload, UploadScoreBreakdown};
+use serde_json::{Value, json};
 
 /// Collect the top-level object keys of a serialized value.
 fn object_keys(value: &Value) -> BTreeSet<String> {
@@ -83,4 +83,85 @@ fn transfer_source_serializes_only_contract_keys() {
             "TransferSource must not serialize `{forbidden}`"
         );
     }
+}
+
+fn score_breakdown() -> UploadScoreBreakdown {
+    UploadScoreBreakdown {
+        availability: "available".to_string(),
+        base_score: 100,
+        effective_score: 100,
+        core_score: 100.0,
+        effective_score_float: 100.0,
+        credit_ratio: 1.0,
+        file_priority: 1,
+        low_ratio_applied: false,
+        low_ratio_bonus: 0,
+        low_id_penalty_applied: false,
+        low_id_divisor: 1,
+        old_client_penalty_applied: false,
+        cooldown_remaining_ms: 0,
+    }
+}
+
+fn populated_upload(score_breakdown: Option<UploadScoreBreakdown>) -> Upload {
+    Upload {
+        client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+        user_name: "peer".to_string(),
+        user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+        client_software: "eMule".to_string(),
+        client_mod: String::new(),
+        upload_state: "uploading".to_string(),
+        upload_speed_ki_bps: 8.0,
+        uploaded_bytes: 1024,
+        queue_session_uploaded: 1024,
+        payload_buffered: 0,
+        wait_time_ms: 5000,
+        wait_started_tick: 0,
+        score: 100,
+        address: "192.0.2.10".to_string(),
+        port: 4662,
+        server_ip: String::new(),
+        server_port: 0,
+        low_id: false,
+        friend_slot: false,
+        uploading: true,
+        waiting_queue: false,
+        requested_file_hash: Some("00112233445566778899aabbccddeeff".to_string()),
+        requested_file_name: Some("file.bin".to_string()),
+        requested_file_size_bytes: Some(4096),
+        requested_parts_obtained: 1,
+        requested_parts_total: 1,
+        requested_parts_progress_text: "1/1".to_string(),
+        score_breakdown,
+        // Internal-only: must never leak into the contract JSON.
+        queue_rank: Some(3),
+    }
+}
+
+#[test]
+fn upload_serializes_without_queue_rank() {
+    let value = serde_json::to_value(populated_upload(Some(score_breakdown()))).unwrap();
+    assert!(
+        value.get("queueRank").is_none(),
+        "Upload must not serialize `queueRank` (it belongs to source JSON)"
+    );
+    // Sanity: a representative contract field is present.
+    assert_eq!(value["clientId"], json!("0102030405060708090a0b0c0d0e0f10"));
+}
+
+#[test]
+fn upload_score_breakdown_is_gated_on_the_flag() {
+    // Present when the caller opts in (single-client lookups / flagged list).
+    let with = serde_json::to_value(populated_upload(Some(score_breakdown()))).unwrap();
+    assert!(
+        with.get("scoreBreakdown").is_some(),
+        "scoreBreakdown must be present when requested"
+    );
+
+    // Absent otherwise (default list behaviour).
+    let without = serde_json::to_value(populated_upload(None)).unwrap();
+    assert!(
+        without.get("scoreBreakdown").is_none(),
+        "scoreBreakdown must be omitted when not requested"
+    );
 }

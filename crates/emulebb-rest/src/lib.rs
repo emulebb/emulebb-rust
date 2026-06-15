@@ -14,7 +14,7 @@ use emulebb_core::{
     LocalShareCreate, NetworkStatus, PreferencesUpdate, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedDirectoriesUpdate,
     SharedFileUpdate, Status, Transfer, TransferCreate, TransferThroughputStats, TransferUpdate,
-    UploadPolicyMetrics, VpnGuardStatus,
+    Upload, UploadPolicyMetrics, VpnGuardStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -637,8 +637,8 @@ async fn snapshot(
         "status": status,
         "transfers": bounded(state.core.transfers().await, limit),
         "sharedFiles": shared_files,
-        "uploads": bounded(state.core.uploads().await, limit),
-        "uploadQueue": bounded(state.core.upload_queue().await, limit),
+        "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
+        "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),
         "servers": bounded(server_responses(state.core.servers().await), limit),
         "kad": kad,
         "network": network_response(&state.core.vpn_guard_status()),
@@ -1558,8 +1558,18 @@ async fn transfer_source_release_slot(
     }
 }
 
+/// Drops `scoreBreakdown` from every upload so list endpoints stay parity-exact
+/// with master, which omits the breakdown unless the caller opts in.
+fn without_score_breakdown(mut uploads: Vec<Upload>) -> Vec<Upload> {
+    for upload in &mut uploads {
+        upload.score_breakdown = None;
+    }
+    uploads
+}
+
 async fn uploads(State(state): State<RestState>) -> impl IntoResponse {
-    api_collection(state.core.uploads().await)
+    // Master's /uploads list never attaches scoreBreakdown.
+    api_collection(without_score_breakdown(state.core.uploads().await))
 }
 
 async fn upload(
@@ -1577,8 +1587,16 @@ async fn upload_queue(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let _include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
-    api_collection_page(state.core.upload_queue().await, query.page()).into_response()
+    // Master gates scoreBreakdown on the includeScoreBreakdown query (default
+    // off) for the /upload-queue list.
+    let include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
+    let items = state.core.upload_queue().await;
+    let items = if include_score_breakdown {
+        items
+    } else {
+        without_score_breakdown(items)
+    };
+    api_collection_page(items, query.page()).into_response()
 }
 
 async fn upload_queue_client(
@@ -3243,6 +3261,66 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+    }
+
+    #[test]
+    fn without_score_breakdown_strips_the_diagnostics() {
+        let breakdown = emulebb_core::UploadScoreBreakdown {
+            availability: "available".to_string(),
+            base_score: 100,
+            effective_score: 100,
+            core_score: 100.0,
+            effective_score_float: 100.0,
+            credit_ratio: 1.0,
+            file_priority: 1,
+            low_ratio_applied: false,
+            low_ratio_bonus: 0,
+            low_id_penalty_applied: false,
+            low_id_divisor: 1,
+            old_client_penalty_applied: false,
+            cooldown_remaining_ms: 0,
+        };
+        let upload = Upload {
+            client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+            user_name: "peer".to_string(),
+            user_hash: None,
+            client_software: "eMule".to_string(),
+            client_mod: String::new(),
+            upload_state: "uploading".to_string(),
+            upload_speed_ki_bps: 8.0,
+            uploaded_bytes: 1024,
+            queue_session_uploaded: 1024,
+            payload_buffered: 0,
+            wait_time_ms: 0,
+            wait_started_tick: 0,
+            score: 100,
+            address: "192.0.2.10".to_string(),
+            port: 4662,
+            server_ip: String::new(),
+            server_port: 0,
+            low_id: false,
+            friend_slot: false,
+            uploading: true,
+            waiting_queue: false,
+            requested_file_hash: None,
+            requested_file_name: None,
+            requested_file_size_bytes: None,
+            requested_parts_obtained: 0,
+            requested_parts_total: 0,
+            requested_parts_progress_text: String::new(),
+            score_breakdown: Some(breakdown),
+            queue_rank: None,
+        };
+
+        // With the breakdown kept, the JSON carries scoreBreakdown.
+        let kept = serde_json::to_value(upload.clone()).unwrap();
+        assert!(kept.get("scoreBreakdown").is_some());
+
+        // The list helper strips it (master omits it unless opted in).
+        let stripped = without_score_breakdown(vec![upload]);
+        assert!(stripped[0].score_breakdown.is_none());
+        let value = serde_json::to_value(&stripped[0]).unwrap();
+        assert!(value.get("scoreBreakdown").is_none());
     }
 
     #[tokio::test]
