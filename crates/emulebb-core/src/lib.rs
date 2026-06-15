@@ -75,6 +75,7 @@ use uuid::Uuid;
 
 mod download_source_registry;
 mod kad_snoop_entry;
+mod kad_udp_firewall_check;
 mod profile_state;
 mod search_query;
 mod search_state;
@@ -676,6 +677,10 @@ pub struct Ed2kNetworkConfig {
     pub kad_publish_contact_fanout: usize,
     pub kad_hello_intro_interval_secs: u64,
     pub kad_hello_intro_fanout: usize,
+    /// Whether the requester-side Kad UDP firewall self-check is driven.
+    pub kad_udp_firewall_check_enabled: bool,
+    /// Seconds between Kad UDP firewall self-check rounds (gentle cadence).
+    pub kad_udp_firewall_check_interval_secs: u64,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
     /// Configured VPN-binding guard.
@@ -802,6 +807,9 @@ struct Ed2kRuntime {
     kad_bootstrap_configured: bool,
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
+    /// Trigger to run a Kad UDP firewall self-check round on demand. `None` when
+    /// the firewall check is disabled in config.
+    kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1094,8 +1102,21 @@ impl EmulebbCore {
     }
 
     pub async fn recheck_kad_firewall(&self) -> NetworkStatus {
+        // Trigger an immediate Kad UDP firewall self-check round when the driver
+        // is running, so the REST recheck actually drives a fresh probe instead of
+        // only reporting status (oracle CUDPFirewallTester::ReCheckFirewallUDP).
+        let triggered = {
+            let runtime = self.ed2k_runtime.lock().await;
+            match runtime.as_ref().and_then(|rt| rt.kad_firewall_recheck.as_ref()) {
+                Some(signal) => {
+                    signal.notify_one();
+                    true
+                }
+                None => false,
+            }
+        };
         let mut status = kad_status_from_running(self.state.lock().await.kad_running);
-        status.operation_queued = Some(status.running);
+        status.operation_queued = Some(triggered);
         status.already_running = Some(false);
         status
     }
@@ -1242,6 +1263,7 @@ impl EmulebbCore {
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
+                    reachability: self.ed2k_reachability.clone(),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -1264,7 +1286,7 @@ impl EmulebbCore {
             )));
         }
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
-            listener: ed2k_listener,
+            listener: Arc::clone(&ed2k_listener),
             dht: dht.clone(),
             server_state: Arc::clone(&server_state),
             kad_firewall: Arc::clone(&kad_firewall),
@@ -1292,7 +1314,7 @@ impl EmulebbCore {
             shared_catalog: self.ed2k_transfers.shared_catalog(),
             state: Arc::clone(&server_state),
             search_inbox,
-            kad_firewall,
+            kad_firewall: Arc::clone(&kad_firewall),
             shutdown: Arc::clone(&shutdown),
             public_ip: ed2k_public_ip.clone(),
             reconnect_signal: server_reconnect_signal,
@@ -1341,6 +1363,30 @@ impl EmulebbCore {
                 Arc::clone(&shutdown),
             )));
         }
+        // Requester-side Kad UDP firewall self-check driver (oracle CUDPFirewallTester).
+        // Drives FIREWALLED2_REQ-independent OP_FWCHECKUDPREQ rounds against open
+        // v6+ helpers and feeds the peer-confirmed external UDP port back into
+        // reachability. Off only when the operator disables it.
+        let kad_firewall_recheck = if network.kad_udp_firewall_check_enabled {
+            let recheck_signal = Arc::new(tokio::sync::Notify::new());
+            tasks.push(tokio::spawn(
+                kad_udp_firewall_check::run_kad_udp_firewall_check_loop(
+                    kad_udp_firewall_check::KadUdpFirewallCheckOptions {
+                        dht: dht.clone(),
+                        ed2k_listener: Arc::clone(&ed2k_listener),
+                        server_state: Arc::clone(&server_state),
+                        kad_firewall: Arc::clone(&kad_firewall),
+                        reachability: self.ed2k_reachability.clone(),
+                        network: network.clone(),
+                        recheck_signal: Arc::clone(&recheck_signal),
+                        shutdown: Arc::clone(&shutdown),
+                    },
+                ),
+            ));
+            Some(recheck_signal)
+        } else {
+            None
+        };
         *runtime_guard = Some(Ed2kRuntime {
             search_handle,
             server_state,
@@ -1348,6 +1394,7 @@ impl EmulebbCore {
             kad_bootstrap_configured: configured_bootstrap_nodes_text.is_some(),
             nat,
             shutdown,
+            kad_firewall_recheck,
             tasks,
         });
         drop(runtime_guard);
@@ -3926,6 +3973,7 @@ struct KadLocalStoreRuntime {
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
+    reachability: ExternalReachability,
     network: Ed2kNetworkConfig,
 }
 
@@ -4628,12 +4676,23 @@ async fn handle_kad_local_store_packet(
                 Utc::now(),
             );
             match outcome {
-                FirewallUdpPacketOutcome::Open(summary) => tracing::info!(
-                    helpers_selected = summary.helpers_selected,
-                    helpers_requested = summary.helpers_requested,
-                    helpers_succeeded = summary.helpers_succeeded,
-                    "Kad UDP firewall check completed from {from}"
-                ),
+                FirewallUdpPacketOutcome::Open(summary) => {
+                    // An open result that discovered a distinct external UDP port
+                    // is the most authoritative reachability fact; pin it over the
+                    // UPnP mapping. (The driver loop also applies this on finish;
+                    // doing it here too means a fast inbound completion is reflected
+                    // immediately.)
+                    if let Some(external_udp_port) = summary.external_udp_port {
+                        runtime.reachability.set_peer_confirmed_udp_port(external_udp_port);
+                    }
+                    tracing::info!(
+                        helpers_selected = summary.helpers_selected,
+                        helpers_requested = summary.helpers_requested,
+                        helpers_succeeded = summary.helpers_succeeded,
+                        external_udp_port = summary.external_udp_port.unwrap_or_default(),
+                        "Kad UDP firewall check completed from {from}"
+                    );
+                }
                 FirewallUdpPacketOutcome::Recorded => tracing::debug!(
                     error_code = packet.error_code,
                     udp_port = packet.udp_port,
@@ -6918,6 +6977,8 @@ mod tests {
             kad_publish_contact_fanout: 4,
             kad_hello_intro_interval_secs: 300,
             kad_hello_intro_fanout: 2,
+            kad_udp_firewall_check_enabled: true,
+            kad_udp_firewall_check_interval_secs: 600,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
             vpn_guard: VpnGuardConfig::default(),
@@ -7188,6 +7249,7 @@ mod tests {
             kad_bootstrap_configured: true,
             nat: Arc::new(NatManager::default()),
             shutdown: Arc::clone(&shutdown),
+            kad_firewall_recheck: None,
             tasks: vec![dht_task],
         });
 
