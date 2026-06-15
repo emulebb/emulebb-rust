@@ -88,6 +88,51 @@ fn test_sanitize_res_contacts_rejects_overlarge_reply() {
 }
 
 #[test]
+fn test_sanitize_res_contacts_drops_kad1_and_dns_port_contacts() {
+    let contacts = vec![
+        // Kad1 (version < 2) -> dropped.
+        ContactEntry {
+            node_id: NodeId::from_bytes([1; 16]),
+            ip: 0x05060708,
+            udp_port: 4672,
+            tcp_port: 4662,
+            version: 1,
+        },
+        // Legacy node on DNS port 53 (version <= 5) -> dropped.
+        ContactEntry {
+            node_id: NodeId::from_bytes([2; 16]),
+            ip: 0x06070809,
+            udp_port: 53,
+            tcp_port: 4663,
+            version: 5,
+        },
+        // Modern node on port 53 (version > 5) -> kept ("No DNS Port without
+        // encryption" only blocks legacy versions).
+        ContactEntry {
+            node_id: NodeId::from_bytes([3; 16]),
+            ip: 0x07080910,
+            udp_port: 53,
+            tcp_port: 4664,
+            version: 8,
+        },
+        // Ordinary modern contact -> kept.
+        ContactEntry {
+            node_id: NodeId::from_bytes([4; 16]),
+            ip: 0x08091011,
+            udp_port: 4675,
+            tcp_port: 4665,
+            version: 9,
+        },
+    ];
+
+    let sanitized =
+        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10).expect("sanitized");
+    assert_eq!(sanitized.len(), 2);
+    assert_eq!(sanitized[0].ip_addr(), Ipv4Addr::new(7, 8, 9, 16));
+    assert_eq!(sanitized[1].ip_addr(), Ipv4Addr::new(8, 9, 16, 17));
+}
+
+#[test]
 fn test_sanitize_res_contacts_filters_duplicate_ip_and_overpopulated_prefix() {
     let contacts = vec![
         ContactEntry {

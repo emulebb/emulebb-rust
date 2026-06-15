@@ -8,7 +8,8 @@ use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
     constants::{
-        ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_STORE, SEARCHTOLERANCE,
+        ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_STORE, KADEMLIA_VERSION2_47A,
+        KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
     },
     opcode,
     packet::{ContactEntry, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq},
@@ -932,6 +933,20 @@ fn sanitize_res_contacts(
     let mut sanitized = Vec::with_capacity(contacts.len());
     for entry in contacts {
         if entry.ip == 0 || entry.udp_port == 0 {
+            continue;
+        }
+
+        // Oracle Process_KADEMLIA2_RES per-contact filtering
+        // (KademliaUDPListener.cpp:830-857): Kad1 nodes (version < 2) are no
+        // longer accepted, and a contact on UDP port 53 is rejected unless it
+        // is a modern (version > 5) crypto-capable node ("No DNS Port without
+        // encryption"). (The sender-IP ip-filter drop is applied separately at
+        // packet ingress; per-RES-contact ip-filtering is not wired here because
+        // the IpFilter lives above this crate.)
+        if entry.version < KADEMLIA_VERSION2_47A {
+            continue;
+        }
+        if entry.udp_port == 53 && entry.version <= KADEMLIA_VERSION5_48A {
             continue;
         }
 

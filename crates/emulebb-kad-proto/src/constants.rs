@@ -11,6 +11,12 @@ pub const OP_KADEMLIAPACKEDPROT: u8 = 0xE5;
 pub const KAD_VERSION: u8 = 10;
 /// Minimum Kad version that accepts the keyword-publish AICH tag.
 pub const KAD_VERSION_AICH_KEYWORD_PUBLISH: u8 = 9;
+/// Lowest accepted Kad2 contact version (`KADEMLIA_VERSION2_47a`); Kad1 nodes
+/// (version < 2) are ignored.
+pub const KADEMLIA_VERSION2_47A: u8 = 2;
+/// Highest pre-obfuscation Kad version (`KADEMLIA_VERSION5_48a`); a contact on
+/// UDP port 53 is only accepted above this ("No DNS Port without encryption").
+pub const KADEMLIA_VERSION5_48A: u8 = 5;
 
 /// K — k-bucket size.
 pub const K: usize = 10;
