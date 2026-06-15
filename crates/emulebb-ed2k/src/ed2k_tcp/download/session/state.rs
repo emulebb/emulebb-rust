@@ -36,6 +36,10 @@ pub(super) struct DownloadSessionState {
     pub(super) peer_udp_port: u16,
     /// Peer's advertised eD2k UDP version (OP_EMULEINFO ET_UDPVER), 0 if unknown.
     pub(super) peer_udp_version: u8,
+    /// Connected peer's advertised per-part availability (OP_FILESTATUS), `None`
+    /// until a status frame is seen. Gates part picking so we only request parts
+    /// the peer holds (master `sender->IsPartAvailable`).
+    pub(super) peer_part_bitmap: Option<Vec<bool>>,
 }
 
 impl DownloadSessionState {
@@ -79,6 +83,7 @@ impl DownloadSessionState {
             peer_user_hash,
             peer_udp_port: 0,
             peer_udp_version: 0,
+            peer_part_bitmap: None,
         }
     }
 

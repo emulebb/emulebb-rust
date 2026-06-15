@@ -526,7 +526,7 @@ async fn release_piece_request_preserves_partial_piece_progress() {
     runtime.ensure_job(&job).await.unwrap();
 
     let claimed = runtime
-        .claim_next_missing_part(&job.file_hash)
+        .claim_next_missing_part(&job.file_hash, None)
         .await
         .unwrap()
         .unwrap();
@@ -550,7 +550,7 @@ async fn release_piece_request_preserves_partial_piece_progress() {
     assert_eq!(manifest.pieces[0].bytes_written, split as u64);
 
     let reclaimed = runtime
-        .claim_next_missing_part(&job.file_hash)
+        .claim_next_missing_part(&job.file_hash, None)
         .await
         .unwrap()
         .unwrap();
@@ -575,7 +575,7 @@ async fn append_piece_block_keeps_partial_progress_in_memory_until_checkpoint() 
         .await
         .unwrap();
     runtime
-        .claim_next_missing_part(&job.file_hash)
+        .claim_next_missing_part(&job.file_hash, None)
         .await
         .unwrap()
         .unwrap();
@@ -613,7 +613,7 @@ async fn reclaim_stale_piece_requests_restores_missing_state_with_progress() {
     runtime.ensure_job(&job).await.unwrap();
 
     runtime
-        .claim_next_missing_part(&job.file_hash)
+        .claim_next_missing_part(&job.file_hash, None)
         .await
         .unwrap()
         .unwrap();
@@ -652,7 +652,7 @@ async fn append_piece_block_persists_piece_completion_after_cached_progress() {
         .await
         .unwrap();
     runtime
-        .claim_next_missing_part(&job.file_hash)
+        .claim_next_missing_part(&job.file_hash, None)
         .await
         .unwrap()
         .unwrap();

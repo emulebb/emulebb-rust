@@ -33,19 +33,41 @@ impl Ed2kTransferRuntime {
     }
 
     /// Claim the next incomplete part atomically for one peer session.
+    ///
+    /// `peer_bitmap` is the connected peer's advertised per-part availability
+    /// (OP_FILESTATUS); when `Some`, only parts the peer holds are claimed so we
+    /// never solicit an `OP_OUTOFPARTREQS` rejection (master
+    /// `sender->IsPartAvailable`). Among the eligible missing parts the rarest
+    /// is preferred, with a preview boost for the first/last part(s) and a
+    /// near-completion priority inversion (master
+    /// `CPartFile::GetNextRequestedBlock` chunk selection, scoped to this
+    /// transfer's live per-part source frequency).
     pub(crate) async fn claim_next_missing_part(
         &self,
         file_hash: &str,
+        peer_bitmap: Option<&[bool]>,
     ) -> Result<Option<Ed2kClaimedPart>> {
         let _guard = self.manifest_io.lock().await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        let Some(piece) = manifest
-            .pieces
-            .iter_mut()
-            .find(|piece| piece.state == Ed2kTransferState::Missing)
-        else {
+        let part_total = u32::try_from(manifest.pieces.len()).unwrap_or(u32::MAX);
+        // Per-part live-source availability is the rarity input. Sampled outside
+        // the manifest lock's borrow so the manifest stays mutably borrowed for
+        // the claim below; this lock is independent of `manifest_io`.
+        let frequency = self.available_sources_per_part(file_hash, part_total);
+        let Some(piece_index) = super::download_pick::pick_next_missing_part(
+            &manifest.pieces,
+            manifest.file_size,
+            manifest.piece_size,
+            peer_bitmap,
+            &frequency,
+        ) else {
             return Ok(None);
         };
+        let piece = manifest
+            .pieces
+            .iter_mut()
+            .find(|piece| piece.piece_index == piece_index)
+            .with_context(|| format!("picked piece {piece_index} absent in {file_hash}"))?;
         let claimed = Ed2kClaimedPart {
             piece_index: piece.piece_index,
             bytes_written: piece.bytes_written,

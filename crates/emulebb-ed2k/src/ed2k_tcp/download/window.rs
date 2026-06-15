@@ -86,6 +86,9 @@ pub(in crate::ed2k_tcp) struct DownloadRequestWindowState<'a> {
     pub(in crate::ed2k_tcp) manifest: &'a Ed2kResumeManifest,
     pub(in crate::ed2k_tcp) active_piece_request: &'a mut Option<ActiveDownloadPiece>,
     pub(in crate::ed2k_tcp) pending_part_requests: &'a mut Vec<PendingPartRequest>,
+    /// Connected peer's advertised per-part availability (OP_FILESTATUS), if
+    /// learned. Gates part picking so we only claim parts the peer holds.
+    pub(in crate::ed2k_tcp) peer_part_bitmap: Option<&'a [bool]>,
     pub(in crate::ed2k_tcp) upload_accepted_at: tokio::time::Instant,
     pub(in crate::ed2k_tcp) completed_block_count: usize,
     pub(in crate::ed2k_tcp) session_payload_down: u64,
@@ -105,6 +108,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         manifest,
         active_piece_request,
         pending_part_requests,
+        peer_part_bitmap,
         upload_accepted_at,
         completed_block_count,
         session_payload_down,
@@ -120,7 +124,7 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         while pending_part_requests.len() < window.max_pending_blocks {
             if active_piece_request.is_none() {
                 let Some(next_part) = transfer_runtime
-                    .claim_next_missing_part(file_hash_hex)
+                    .claim_next_missing_part(file_hash_hex, peer_part_bitmap)
                     .await?
                 else {
                     break;

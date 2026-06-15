@@ -31,6 +31,7 @@ mod block_bitmap;
 mod callback;
 mod catalog;
 mod download_activity;
+mod download_pick;
 mod hashset;
 mod ingest;
 mod manifest;
