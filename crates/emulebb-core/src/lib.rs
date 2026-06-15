@@ -677,6 +677,18 @@ pub struct DownloadSourceMetrics {
     pub leased_peers: usize,
 }
 
+/// Live transfer throughput roll-up for the REST `stats` surface (oracle
+/// `CDownloadQueue::GetDatarate` + `theStats.sessionReceivedBytes`/`sessionSentBytes`).
+#[derive(Debug, Clone, Default)]
+pub struct TransferThroughputStats {
+    /// Aggregate live download rate across all active files, bytes/sec.
+    pub download_rate_bytes_per_sec: u64,
+    /// Payload bytes received since the runtime started.
+    pub session_downloaded_bytes: u64,
+    /// Payload bytes sent since the runtime started.
+    pub session_uploaded_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Ed2kNetworkConfig {
     pub bind_ip: Ipv4Addr,
@@ -2096,6 +2108,17 @@ impl EmulebbCore {
             candidates: state.download_source_registry.candidate_count(),
             a4af_candidates: state.download_source_registry.a4af_candidate_count(),
             leased_peers: state.download_source_registry.leased_peer_count(),
+        }
+    }
+
+    /// Live transfer throughput roll-up for the REST `stats` surface.
+    pub fn transfer_throughput_stats(&self) -> TransferThroughputStats {
+        TransferThroughputStats {
+            download_rate_bytes_per_sec: self
+                .ed2k_transfers
+                .aggregate_download_speed_bytes_per_sec(),
+            session_downloaded_bytes: self.ed2k_transfers.session_downloaded_bytes(),
+            session_uploaded_bytes: self.ed2k_transfers.session_uploaded_bytes(),
         }
     }
 

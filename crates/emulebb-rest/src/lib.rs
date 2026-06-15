@@ -13,8 +13,8 @@ use emulebb_core::{
     AppInfo, AppLifecycle, CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShare,
     LocalShareCreate, NetworkStatus, PreferencesUpdate, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedDirectoriesUpdate,
-    SharedFileUpdate, Status, Transfer, TransferCreate, TransferUpdate, UploadPolicyMetrics,
-    VpnGuardStatus,
+    SharedFileUpdate, Status, Transfer, TransferCreate, TransferThroughputStats, TransferUpdate,
+    UploadPolicyMetrics, VpnGuardStatus,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -601,7 +601,8 @@ async fn status(State(state): State<RestState>) -> impl IntoResponse {
 async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;
-    api_ok(stats_response(&status, &upload_policy))
+    let throughput = state.core.transfer_throughput_stats();
+    api_ok(stats_response(&status, &upload_policy, &throughput))
 }
 
 async fn snapshot(
@@ -2008,17 +2009,19 @@ fn app_info_response(app: AppInfo) -> Value {
     })
 }
 
-fn stats_response(status: &Status, upload_policy: &UploadPolicyMetrics) -> Value {
+fn stats_response(
+    status: &Status,
+    upload_policy: &UploadPolicyMetrics,
+    throughput: &TransferThroughputStats,
+) -> Value {
     let ed2k_connected = status.ed2k.connected;
     let kad_connected = status.kad.connected;
     json!({
         "connected": ed2k_connected || kad_connected,
-        "downloadSpeedKiBps": 0.0,
+        "downloadSpeedKiBps": throughput.download_rate_bytes_per_sec as f64 / 1024.0,
         "uploadSpeedKiBps": upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
-        "sessionDownloadedBytes": 0,
-        "sessionUploadedBytes": 0,
-        "totalDownloadedBytes": 0,
-        "totalUploadedBytes": 0,
+        "sessionDownloadedBytes": throughput.session_downloaded_bytes,
+        "sessionUploadedBytes": throughput.session_uploaded_bytes,
         "activeDownloads": status.transfers.active,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
@@ -2038,12 +2041,13 @@ async fn status_response(state: &RestState) -> Value {
     let status = state.core.status().await;
     let guard = state.core.vpn_guard_status();
     let upload_policy = state.core.upload_policy_metrics().await;
+    let throughput = state.core.transfer_throughput_stats();
     let download_sources = state.core.download_source_metrics().await;
     let shared_file_count = state.core.shares().await.len();
     let download_file_count = status.transfers.active + status.transfers.completed;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
-        "stats": stats_response(&status, &upload_policy),
+        "stats": stats_response(&status, &upload_policy, &throughput),
         "servers": server_status_response(state).await,
         "kad": kad_response(&status.kad, &guard),
         "network": network_response(&guard),
@@ -2548,6 +2552,27 @@ mod tests {
         let value = kad_response(&kad, &guard);
         assert_eq!(value["indexedSources"], 0);
         assert_eq!(value["indexedKeywords"], 0);
+    }
+
+    #[tokio::test]
+    async fn stats_response_reports_real_throughput_and_omits_optional_totals() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let status = core.status().await;
+        let upload_policy = core.upload_policy_metrics().await;
+        let throughput = TransferThroughputStats {
+            download_rate_bytes_per_sec: 4096,
+            session_downloaded_bytes: 1_048_576,
+            session_uploaded_bytes: 524_288,
+        };
+        let value = stats_response(&status, &upload_policy, &throughput);
+        assert_eq!(value["downloadSpeedKiBps"], 4.0);
+        assert_eq!(value["sessionDownloadedBytes"], 1_048_576);
+        assert_eq!(value["sessionUploadedBytes"], 524_288);
+        // Lifetime totals are optional in the contract and eMuleBB omits them; we
+        // omit rather than emit a misleading 0 (no lifetime persistence).
+        assert!(value.get("totalDownloadedBytes").is_none());
+        assert!(value.get("totalUploadedBytes").is_none());
     }
 
     async fn assert_invalid_json_response(

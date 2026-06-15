@@ -123,6 +123,7 @@ impl Ed2kTransferRuntime {
         byte_count: u64,
         now: Instant,
     ) -> Ed2kUploadSessionStatus {
+        self.note_session_uploaded_bytes(byte_count);
         self.upload_queue
             .lock()
             .await

@@ -99,6 +99,40 @@ async fn download_activity_reports_average_speed_until_stale() {
 }
 
 #[tokio::test]
+async fn aggregate_download_speed_and_session_counters_roll_up() {
+    let root = unique_test_dir("ed2k-transfer-aggregate-speed");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let file_a = "00112233445566778899aabbccddeeff";
+    let file_b = "ffeeddccbbaa99887766554433221100";
+
+    // Two files each averaging 49_152 B/s over 3s -> aggregate 98_304 B/s.
+    runtime.note_download_payload_bytes_at(file_a, 65_536, now + Duration::from_secs(1));
+    runtime.note_download_payload_bytes_at(file_a, 32_768, now + Duration::from_secs(3));
+    runtime.note_download_payload_bytes_at(file_b, 65_536, now + Duration::from_secs(1));
+    runtime.note_download_payload_bytes_at(file_b, 32_768, now + Duration::from_secs(3));
+
+    assert_eq!(
+        runtime.aggregate_download_speed_bytes_per_sec_at(now + Duration::from_secs(3)),
+        98_304
+    );
+    // Session received counter accumulates every payload byte, regardless of staleness.
+    assert_eq!(runtime.session_downloaded_bytes(), 196_608);
+    // Stale files drop out of the live aggregate but stay in the session total.
+    assert_eq!(
+        runtime.aggregate_download_speed_bytes_per_sec_at(now + Duration::from_secs(40)),
+        0
+    );
+    assert_eq!(runtime.session_downloaded_bytes(), 196_608);
+
+    // Sent-payload counter is independent and monotonic.
+    assert_eq!(runtime.session_uploaded_bytes(), 0);
+    runtime.note_session_uploaded_bytes(4_096);
+    runtime.note_session_uploaded_bytes(2_048);
+    assert_eq!(runtime.session_uploaded_bytes(), 6_144);
+}
+
+#[tokio::test]
 async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
     let root = unique_test_dir("ed2k-transfer-runtime");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

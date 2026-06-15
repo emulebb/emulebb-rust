@@ -95,6 +95,11 @@ pub struct Ed2kTransferRuntime {
     download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     next_upload_connection_id: AtomicU64,
+    /// Monotonic payload bytes received/sent since the runtime started, for the
+    /// REST `sessionDownloadedBytes`/`sessionUploadedBytes` stats (oracle
+    /// `theStats.sessionReceivedBytes`/`sessionSentBytes`). In-memory only.
+    session_downloaded_bytes: AtomicU64,
+    session_uploaded_bytes: AtomicU64,
 }
 
 impl Ed2kTransferRuntime {
@@ -167,6 +172,8 @@ impl Ed2kTransferRuntime {
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
             next_upload_connection_id: AtomicU64::new(1),
+            session_downloaded_bytes: AtomicU64::new(0),
+            session_uploaded_bytes: AtomicU64::new(0),
         })
     }
 

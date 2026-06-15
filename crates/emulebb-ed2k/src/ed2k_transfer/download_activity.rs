@@ -54,6 +54,9 @@ impl Ed2kTransferRuntime {
         if byte_count == 0 {
             return;
         }
+        // Session-wide received-payload counter (oracle theStats.sessionReceivedBytes).
+        self.session_downloaded_bytes
+            .fetch_add(byte_count, std::sync::atomic::Ordering::Relaxed);
         let Ok(mut activity) = self.download_activity.lock() else {
             return;
         };
@@ -252,6 +255,56 @@ impl Ed2kTransferRuntime {
 
     pub fn download_speed_bytes_per_sec(&self, file_hash: &str) -> u64 {
         self.download_speed_bytes_per_sec_at(file_hash, Instant::now())
+    }
+
+    /// Aggregate live download rate across every active file (oracle
+    /// `CDownloadQueue::GetDatarate`). Sums the per-file rates so the REST stats
+    /// `downloadSpeedKiBps` reflects the whole download queue, not one transfer.
+    pub fn aggregate_download_speed_bytes_per_sec(&self) -> u64 {
+        self.aggregate_download_speed_bytes_per_sec_at(Instant::now())
+    }
+
+    pub(crate) fn aggregate_download_speed_bytes_per_sec_at(&self, now: Instant) -> u64 {
+        let Ok(activity) = self.download_activity.lock() else {
+            return 0;
+        };
+        activity
+            .iter()
+            .filter(|(_, entry)| {
+                now.saturating_duration_since(entry.last_seen_at) <= DOWNLOAD_ACTIVITY_STALE_AFTER
+            })
+            .map(|(_, entry)| {
+                let elapsed_ms = now
+                    .saturating_duration_since(entry.started_at)
+                    .as_millis()
+                    .max(1);
+                u64::try_from((u128::from(entry.downloaded_bytes) * 1_000) / elapsed_ms)
+                    .unwrap_or(u64::MAX)
+            })
+            .fold(0u64, |acc, rate| acc.saturating_add(rate))
+    }
+
+    /// Total payload bytes received since the runtime started
+    /// (`sessionDownloadedBytes`, oracle `theStats.sessionReceivedBytes`).
+    pub fn session_downloaded_bytes(&self) -> u64 {
+        self.session_downloaded_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Total payload bytes sent since the runtime started
+    /// (`sessionUploadedBytes`, oracle `theStats.sessionSentBytes`).
+    pub fn session_uploaded_bytes(&self) -> u64 {
+        self.session_uploaded_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record session-wide sent-payload bytes (oracle `theStats.sessionSentBytes`).
+    pub(crate) fn note_session_uploaded_bytes(&self, byte_count: u64) {
+        if byte_count == 0 {
+            return;
+        }
+        self.session_uploaded_bytes
+            .fetch_add(byte_count, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn download_speed_bytes_per_sec_at(&self, file_hash: &str, now: Instant) -> u64 {
