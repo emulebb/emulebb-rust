@@ -397,6 +397,58 @@ fn firewalled2_req_tolerates_stock_min_size_trailing_bytes() {
 }
 
 #[test]
+fn test_firewalled_res_roundtrip() {
+    // FIREWALLED_RES carries the requester's IP as a u32 (host byte order on the
+    // eMule wire). Lock encode -> decode so the firewall helper send path stays
+    // byte-stable.
+    let pkt = KadPacket::FirewalledRes(FirewalledRes { ip: 0x0102_0304 });
+    let bytes = pkt.encode().unwrap();
+    // header byte + opcode + 4-byte IP body, little-endian.
+    assert_eq!(
+        bytes,
+        vec![OP_KADEMLIAHEADER, opcode::FIREWALLED_RES, 0x04, 0x03, 0x02, 0x01]
+    );
+    match roundtrip(&pkt) {
+        KadPacket::FirewalledRes(f) => assert_eq!(f.ip, 0x0102_0304),
+        other => panic!("wrong type {other:?}"),
+    }
+}
+
+#[test]
+fn test_firewall_udp_roundtrip() {
+    // KADEMLIA2_FIREWALLUDP body = error_code:u8 + udp_port:u16 (little-endian).
+    let pkt = KadPacket::FirewallUdp(FirewallUdp {
+        error_code: 0,
+        udp_port: 4672,
+    });
+    let bytes = pkt.encode().unwrap();
+    assert_eq!(
+        bytes,
+        vec![OP_KADEMLIAHEADER, opcode::FIREWALLUDP, 0x00, 0x40, 0x12]
+    );
+    match roundtrip(&pkt) {
+        KadPacket::FirewallUdp(f) => {
+            assert_eq!(f.error_code, 0);
+            assert_eq!(f.udp_port, 4672);
+        }
+        other => panic!("wrong type {other:?}"),
+    }
+
+    // A non-zero error code (already-known peer) survives the round trip too.
+    let err_pkt = KadPacket::FirewallUdp(FirewallUdp {
+        error_code: 1,
+        udp_port: 51000,
+    });
+    match roundtrip(&err_pkt) {
+        KadPacket::FirewallUdp(f) => {
+            assert_eq!(f.error_code, 1);
+            assert_eq!(f.udp_port, 51000);
+        }
+        other => panic!("wrong type {other:?}"),
+    }
+}
+
+#[test]
 fn firewalled_response_and_legacy_ack_reject_stock_exact_size_trailing_bytes() {
     let firewalled_res = vec![0xE4, opcode::FIREWALLED_RES, 1, 2, 3, 4, 0xAA];
     assert!(KadPacket::decode(&firewalled_res).is_err());
