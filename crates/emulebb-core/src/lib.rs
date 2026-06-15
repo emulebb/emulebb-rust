@@ -4509,6 +4509,16 @@ pub(crate) async fn current_tcp_firewalled(
         .unwrap_or(true)
 }
 
+/// Decide whether an inbound Kad HELLO (req/res) should request a
+/// `HELLO_RES_ACK` to complete the three-way IP-verification handshake.
+///
+/// Mirrors the oracle `bAddedOrUpdated && !bValidReceiverKey` predicate in
+/// `Process_KADEMLIA2_HELLO_REQ`: only request the ACK when the contact was
+/// added or updated and the peer has not already proven a valid receiver key.
+fn should_request_hello_res_ack(added_or_updated: bool, receiver_verify_key_valid: bool) -> bool {
+    added_or_updated && !receiver_verify_key_valid
+}
+
 fn build_kad_hello_response_tags(
     kad_udp_port: u16,
     udp_firewalled: bool,
@@ -4898,7 +4908,12 @@ async fn handle_kad_local_store_packet(
     let kad_buddy = &runtime.kad_buddy;
     let buddy_registry = &runtime.buddy_registry;
     let network = &runtime.network;
-    let ReceivedKadPacket { packet, from, .. } = received;
+    let ReceivedKadPacket {
+        packet,
+        from,
+        receiver_verify_key_valid,
+        ..
+    } = received;
     if let IpAddr::V4(ip) = from.ip() {
         if network.ip_filter.is_filtered(ip) {
             tracing::trace!("dropping Kad packet from IP-filtered peer {from}");
@@ -4907,15 +4922,32 @@ async fn handle_kad_local_store_packet(
     }
     match packet {
         KadPacket::HelloReq(req) => {
-            if let Err(error) = dht
+            // Oracle Process_KADEMLIA2_HELLO_REQ: request the ACK (three-way
+            // handshake to verify the remote's IP) only when the contact was
+            // added/updated and the peer did not already prove a valid receiver
+            // key. Mirrors SendMyDetails(..., bAddedOrUpdated && !bValidReceiverKey).
+            let added_or_updated = match dht
                 .add_contact_from_hello(from, req.node_id, req.tcp_port, req.version, &req.tags)
                 .await
             {
-                tracing::debug!("failed to record Kad HELLO_REQ contact from {from}: {error:#}");
-            }
-            let response =
-                build_kad_hello_response(dht, ed2k_listener, server_state, kad_firewall, false)
-                    .await?;
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::debug!(
+                        "failed to record Kad HELLO_REQ contact from {from}: {error:#}"
+                    );
+                    false
+                }
+            };
+            let request_ack =
+                should_request_hello_res_ack(added_or_updated, receiver_verify_key_valid);
+            let response = build_kad_hello_response(
+                dht,
+                ed2k_listener,
+                server_state,
+                kad_firewall,
+                request_ack,
+            )
+            .await?;
             dht.send_packet(from, &KadPacket::HelloRes(response))
                 .await?;
         }
@@ -8097,6 +8129,15 @@ mod tests {
                 Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05)),
             ]
         );
+    }
+
+    #[test]
+    fn hello_res_ack_requested_only_when_added_and_key_unverified() {
+        // Oracle: SendMyDetails(..., bAddedOrUpdated && !bValidReceiverKey).
+        assert!(should_request_hello_res_ack(true, false));
+        assert!(!should_request_hello_res_ack(true, true));
+        assert!(!should_request_hello_res_ack(false, false));
+        assert!(!should_request_hello_res_ack(false, true));
     }
 
     #[test]
