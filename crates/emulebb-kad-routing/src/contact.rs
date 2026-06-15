@@ -79,6 +79,33 @@ impl Contact {
         is_lan(self.ip)
     }
 
+    /// The oracle age-based contact "type" used as a freshness gate.
+    ///
+    /// Mirrors `CContact::UpdateType` (Contact.cpp:215-230): bucketed by how
+    /// many whole hours the contact has existed. Lower numbers are older and
+    /// more trusted; `GetClosestTo(uMaxType, ...)` keeps only `type <= uMaxType`.
+    ///   - < 1 hour old  -> 2
+    ///   - 1..2 hours    -> 1
+    ///   - >= 2 hours    -> 0
+    #[must_use]
+    pub fn oracle_type(&self) -> u8 {
+        self.oracle_type_at(SystemTime::now())
+    }
+
+    /// [`Contact::oracle_type`] evaluated at an explicit instant (test seam).
+    #[must_use]
+    pub fn oracle_type_at(&self, now: SystemTime) -> u8 {
+        let hours = now
+            .duration_since(self.created_at)
+            .map(|elapsed| elapsed.as_secs() / 3600)
+            .unwrap_or(0);
+        match hours {
+            0 => 2,
+            1 => 1,
+            _ => 0,
+        }
+    }
+
     /// Mark the contact as alive (Active) and update last_seen.
     pub fn mark_alive(&mut self) {
         self.contact_type = ContactType::Active;

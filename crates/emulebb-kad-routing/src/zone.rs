@@ -134,6 +134,41 @@ impl RoutingZone {
         }
     }
 
+    /// Collect contacts closest to `target` whose oracle freshness type is at
+    /// most `max_type` (mirrors `CRoutingBin::GetClosestTo`'s `GetType() <=
+    /// uMaxType` gate). The caller sorts by XOR distance and truncates.
+    pub fn get_closest_max_type(
+        &self,
+        target: &NodeId,
+        n: usize,
+        max_type: u8,
+        result: &mut Vec<Contact>,
+    ) {
+        match &self.content {
+            ZoneContent::Leaf(bin) => {
+                for c in bin.iter() {
+                    if c.oracle_type() <= max_type {
+                        result.push(c.clone());
+                    }
+                }
+            }
+            ZoneContent::Branch { left, right } => {
+                let bit = target.bit(self.depth);
+                if bit {
+                    right.get_closest_max_type(target, n, max_type, result);
+                    if result.len() < n {
+                        left.get_closest_max_type(target, n, max_type, result);
+                    }
+                } else {
+                    left.get_closest_max_type(target, n, max_type, result);
+                    if result.len() < n {
+                        right.get_closest_max_type(target, n, max_type, result);
+                    }
+                }
+            }
+        }
+    }
+
     /// Remove a contact by ID. Returns the removed contact if found.
     pub fn remove(&mut self, id: &NodeId) -> Option<Contact> {
         match &mut self.content {

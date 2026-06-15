@@ -136,6 +136,25 @@ impl RoutingTable {
         result
     }
 
+    /// Get up to `n` contacts closest to `target` by XOR distance, restricted to
+    /// contacts whose oracle freshness type is at most `max_type`.
+    ///
+    /// Mirrors `CRoutingZone::GetClosestTo(uMaxType, ...)`: the REQ responder
+    /// passes `max_type = 2`, which keeps only contacts that have a valid age
+    /// bucket and drops contacts staler than the requested freshness.
+    pub fn get_closest_max_type(&self, target: &NodeId, n: usize, max_type: u8) -> Vec<Contact> {
+        let mut result = Vec::new();
+        self.root
+            .get_closest_max_type(target, usize::MAX, max_type, &mut result);
+        result.sort_by(|a, b| {
+            let da = a.id.distance(target);
+            let db = b.id.distance(target);
+            da.cmp(&db)
+        });
+        result.truncate(n);
+        result
+    }
+
     /// Remove a contact by ID. Returns true if found and removed.
     pub fn remove(&mut self, id: &NodeId) -> bool {
         if let Some(contact) = self.root.remove(id) {
@@ -275,6 +294,37 @@ mod tests {
         assert_eq!(closest[0].id.0[15], 1);
         // Second closest last byte = 2
         assert_eq!(closest[1].id.0[15], 2);
+    }
+
+    #[test]
+    fn test_get_closest_max_type_filters_stale_contacts() {
+        use std::time::Duration;
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+
+        // Fresh contact (created now -> oracle type 2).
+        let fresh = make_contact([0x01; 16], "3.0.0.1");
+        // Stale contact: created 3 hours ago -> oracle type 0, but we want one
+        // that EXCEEDS max_type to prove filtering. Make it "too fresh" relative
+        // to a low max_type instead: created now -> type 2, filtered by max_type 1.
+        let also_fresh = make_contact([0x02; 16], "3.0.1.1");
+        table.add_contact(fresh).unwrap();
+        table.add_contact(also_fresh).unwrap();
+
+        // max_type 2 keeps both fresh contacts.
+        assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 2).len(), 2);
+
+        // max_type 1 drops the brand-new (type 2) contacts.
+        assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 1).len(), 0);
+
+        // Age one contact past two hours so it becomes oracle type 0 and passes
+        // even the strict max_type 0 filter.
+        let aged_id = NodeId::from_bytes([0x01; 16]);
+        {
+            let c = table.root.get_mut(&aged_id).unwrap();
+            c.created_at = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
+        }
+        assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 0).len(), 1);
     }
 
     #[test]

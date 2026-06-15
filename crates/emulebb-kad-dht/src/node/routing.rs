@@ -80,6 +80,22 @@ impl DhtNode {
             .get_closest(target, limit)
     }
 
+    /// Return the closest known contacts to the target, restricted to contacts
+    /// whose oracle freshness type is at most `max_type` (oracle
+    /// `GetClosestTo(uMaxType, ...)`). Used by the KADEMLIA2_REQ responder.
+    pub async fn closest_contacts_max_type(
+        &self,
+        target: &NodeId,
+        limit: usize,
+        max_type: u8,
+    ) -> Vec<Contact> {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .get_closest_max_type(target, limit, max_type)
+    }
+
     /// Select up to `limit` contacts suitable as Kad UDP firewall-check helpers.
     ///
     /// Mirrors `CUDPFirewallTester::QueryNextClient`: only contacts that support
