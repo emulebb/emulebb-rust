@@ -43,6 +43,7 @@ impl DhtNode {
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,
+            ip_filter: self.ip_filter(),
         };
 
         let result = run_traversal(&self.inner.rpc, initial, config).await;
@@ -178,6 +179,7 @@ impl DhtNode {
             phase2_fanout,
             cancel,
             work_class,
+            self.ip_filter(),
         )
     }
 
@@ -292,6 +294,7 @@ impl DhtNode {
             phase2_fanout,
             cancel,
             work_class,
+            self.ip_filter(),
         )
     }
 
@@ -392,6 +395,7 @@ impl DhtNode {
             phase2_fanout,
             cancel,
             work_class,
+            self.ip_filter(),
         )
     }
 

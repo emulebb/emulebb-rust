@@ -16,6 +16,7 @@ use emulebb_kad_proto::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -56,6 +57,17 @@ pub struct TraversalCandidate {
     pub distance: NodeId,
 }
 
+/// A lightweight, crate-external IP-filter hook for per-`RES`-contact dropping.
+///
+/// Returns `true` when the given IPv4 address is **filtered/banned** and the
+/// contact must be dropped. The real [`IpFilter`](../../emulebb_ed2k) lives in
+/// `emulebb-ed2k`, which depends on this crate, so it cannot be referenced here
+/// directly (dependency inversion). Core — which depends on both crates — bridges
+/// the live filter into this hook so traversal can enforce it without moving the
+/// filter. Mirrors the oracle per-contact `theApp.ipfilter->IsFiltered()` drop in
+/// `Process_KADEMLIA2_RES` (`KademliaUDPListener.cpp:830-857`).
+pub type KadIpFilter = Arc<dyn Fn(Ipv4Addr) -> bool + Send + Sync>;
+
 /// Phase-2 behavior that should follow once the closest contacts are known.
 #[derive(Debug, Clone)]
 pub enum TraversalKind {
@@ -93,6 +105,10 @@ pub struct TraversalConfig {
     pub result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
     /// Outbound budget class used by this traversal.
     pub work_class: RpcWorkClass,
+    /// Optional IP-filter hook applied to each `RES`-returned contact (drops
+    /// filtered/banned IPs), bridged from the live ed2k `IpFilter` by core.
+    /// `None` disables per-contact ip-filtering (e.g. unit tests / no filter).
+    pub ip_filter: Option<KadIpFilter>,
 }
 
 /// Final traversal outcome returned to the caller.
@@ -146,6 +162,7 @@ struct LookupPhaseConfig<'a> {
     req_count: u8,
     work_class: RpcWorkClass,
     cancel: &'a CancellationToken,
+    ip_filter: Option<&'a KadIpFilter>,
 }
 
 struct LookupPhaseResult {
@@ -174,6 +191,7 @@ pub async fn run_traversal(
         cancel,
         result_tx,
         work_class,
+        ip_filter,
     } = config;
     let deadline = Instant::now() + timeout;
     let closest_limit = traversal_closest_limit(&search_kind, phase2_fanout);
@@ -196,6 +214,7 @@ pub async fn run_traversal(
             req_count: req_count_for_kind(&search_kind),
             work_class,
             cancel: &cancel,
+            ip_filter: ip_filter.as_ref(),
         },
     )
     .await;
@@ -456,6 +475,7 @@ fn insert_response_contacts(
         &response.contacts,
         responder_addr,
         config.req_count as usize,
+        config.ip_filter,
     ) else {
         trace!(
             "dropping RES from {} because it exceeds requested contact count",
@@ -917,6 +937,7 @@ fn sanitize_res_contacts(
     contacts: &[ContactEntry],
     responder_addr: SocketAddr,
     max_contacts: usize,
+    ip_filter: Option<&KadIpFilter>,
 ) -> Option<Vec<ContactEntry>> {
     if contacts.len() > max_contacts {
         return None;
@@ -940,9 +961,7 @@ fn sanitize_res_contacts(
         // (KademliaUDPListener.cpp:830-857): Kad1 nodes (version < 2) are no
         // longer accepted, and a contact on UDP port 53 is rejected unless it
         // is a modern (version > 5) crypto-capable node ("No DNS Port without
-        // encryption"). (The sender-IP ip-filter drop is applied separately at
-        // packet ingress; per-RES-contact ip-filtering is not wired here because
-        // the IpFilter lives above this crate.)
+        // encryption").
         if entry.version < KADEMLIA_VERSION2_47A {
             continue;
         }
@@ -951,6 +970,15 @@ fn sanitize_res_contacts(
         }
 
         let ip = entry.ip_addr();
+        // Per-contact ip-filter drop (oracle KademliaUDPListener.cpp:830-857
+        // `theApp.ipfilter->IsFiltered(...)`). The IpFilter lives in emulebb-ed2k
+        // (which depends on this crate), so core bridges it via this hook; when no
+        // hook is wired (tests / filter disabled) no contact is dropped here.
+        if let Some(filter) = ip_filter
+            && filter(ip)
+        {
+            continue;
+        }
         if !seen_ips.insert(ip) {
             continue;
         }

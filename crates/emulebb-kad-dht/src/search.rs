@@ -1,4 +1,4 @@
-use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
+use crate::traversal::{KadIpFilter, TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::SEARCH_TIMEOUT_SECS;
@@ -41,6 +41,7 @@ fn map_source_search_result(
 }
 
 /// Run a keyword search. Returns a Stream of results.
+#[allow(clippy::too_many_arguments)]
 pub fn search_keywords(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -49,6 +50,7 @@ pub fn search_keywords(
     phase2_fanout: usize,
     cancel: CancellationToken,
     work_class: RpcWorkClass,
+    ip_filter: Option<KadIpFilter>,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     search_keywords_by_request(
         rpc,
@@ -62,10 +64,12 @@ pub fn search_keywords(
         phase2_fanout,
         cancel,
         work_class,
+        ip_filter,
     )
 }
 
 /// Run a keyword search using a prebuilt Kad keyword request shape.
+#[allow(clippy::too_many_arguments)]
 pub fn search_keywords_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -74,6 +78,7 @@ pub fn search_keywords_by_request(
     phase2_fanout: usize,
     cancel: CancellationToken,
     work_class: RpcWorkClass,
+    ip_filter: Option<KadIpFilter>,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(SEARCH_RESULT_STREAM_BUFFER);
     let request_target = request.target;
@@ -89,6 +94,7 @@ pub fn search_keywords_by_request(
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,
+            ip_filter,
         };
 
         let traversal = tokio::spawn(async move {
@@ -171,6 +177,7 @@ pub fn search_keywords_by_request(
 }
 
 /// Run a source search using a prebuilt Kad source request shape.
+#[allow(clippy::too_many_arguments)]
 pub fn search_sources_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -179,6 +186,7 @@ pub fn search_sources_by_request(
     phase2_fanout: usize,
     cancel: CancellationToken,
     work_class: RpcWorkClass,
+    ip_filter: Option<KadIpFilter>,
 ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SourceResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = request.target;
@@ -196,6 +204,7 @@ pub fn search_sources_by_request(
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,
+            ip_filter,
         };
 
         let traversal = tokio::spawn(async move {
@@ -235,6 +244,7 @@ pub fn search_sources_by_request(
 }
 
 /// Run a notes search.
+#[allow(clippy::too_many_arguments)]
 pub fn search_notes(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -243,6 +253,7 @@ pub fn search_notes(
     phase2_fanout: usize,
     cancel: CancellationToken,
     work_class: RpcWorkClass,
+    ip_filter: Option<KadIpFilter>,
 ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<NoteResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = NodeId::from_be_bytes(request.file_hash.0);
@@ -261,6 +272,7 @@ pub fn search_notes(
             cancel: cancel.clone(),
             result_tx: Some(raw_tx),
             work_class,
+            ip_filter,
         };
 
         let traversal = tokio::spawn(async move {

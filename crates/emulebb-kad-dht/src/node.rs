@@ -43,6 +43,10 @@ struct DhtInner {
     /// Pending pre-v8 contact-verification challenges (oracle
     /// `CPacketTracking::listChallengeRequests`).
     legacy_challenges: Mutex<LegacyChallengeTracker>,
+    /// Optional per-`RES`-contact ip-filter hook, bridged from the live ed2k
+    /// `IpFilter` by core at startup (set once). Applied in traversal's
+    /// `sanitize_res_contacts` (oracle KademliaUDPListener.cpp:830-857).
+    ip_filter: std::sync::OnceLock<crate::traversal::KadIpFilter>,
 }
 
 /// The top-level DHT node. Clone-able (backed by Arc).
@@ -113,6 +117,7 @@ impl DhtNode {
                 semaphore,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
                 legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
+                ip_filter: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -180,6 +185,20 @@ impl DhtNode {
     /// `RpcManager::set_foreign_datagram_handler`.
     pub fn set_foreign_datagram_handler(&self, handler: ForeignDatagramHandler) -> bool {
         self.inner.rpc.set_foreign_datagram_handler(handler)
+    }
+
+    /// Install the per-`RES`-contact ip-filter hook (bridged from the live ed2k
+    /// `IpFilter` by core). Set-once at startup; a later call is a no-op (returns
+    /// `false`). Traversal applies it in `sanitize_res_contacts` to drop
+    /// filtered/banned IPs from `RES` answers (oracle KademliaUDPListener.cpp
+    /// per-contact `IsFiltered` drop).
+    pub fn set_ip_filter(&self, filter: crate::traversal::KadIpFilter) -> bool {
+        self.inner.ip_filter.set(filter).is_ok()
+    }
+
+    /// The installed ip-filter hook, if any, cloned for a traversal config.
+    pub(crate) fn ip_filter(&self) -> Option<crate::traversal::KadIpFilter> {
+        self.inner.ip_filter.get().cloned()
     }
 
     /// Send an already-framed datagram on the shared Kad UDP socket without Kad

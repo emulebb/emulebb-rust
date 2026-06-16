@@ -123,6 +123,7 @@ async fn resolve_publish_contacts(
     target: NodeId,
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
+    ip_filter: Option<crate::traversal::KadIpFilter>,
 ) -> Result<(Vec<TraversalContact>, PublishAttemptStats), DhtError> {
     let initial = get_initial(routing_table, &target).await;
     let traversal = run_traversal(
@@ -137,6 +138,7 @@ async fn resolve_publish_contacts(
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,
+            ip_filter,
         },
     )
     .await;
@@ -331,6 +333,7 @@ pub async fn publish_keyword(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
     request: KeywordPublishRequest,
+    ip_filter: Option<crate::traversal::KadIpFilter>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let KeywordPublishRequest {
         keyword_hash,
@@ -347,6 +350,7 @@ pub async fn publish_keyword(
         target,
         publish_contact_fanout,
         work_class,
+        ip_filter,
     )
     .await?;
     for (index, contact) in publish_contacts.iter().enumerate() {
@@ -400,6 +404,7 @@ fn build_keyword_publish_packet(
 }
 
 /// Publish source availability for a file.
+#[allow(clippy::too_many_arguments)]
 pub async fn publish_source(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
@@ -408,6 +413,7 @@ pub async fn publish_source(
     tags: Vec<Tag>,
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
+    ip_filter: Option<crate::traversal::KadIpFilter>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_be_bytes(file_hash.0);
     let (publish_contacts, mut stats) = resolve_publish_contacts(
@@ -416,6 +422,7 @@ pub async fn publish_source(
         target,
         publish_contact_fanout,
         work_class,
+        ip_filter,
     )
     .await?;
 
@@ -450,6 +457,7 @@ pub async fn publish_source(
 /// `KADEMLIA2_PUBLISH_NOTES_REQ`. The wire width matches a file hash, but the
 /// semantic meaning is publisher identity and must stay aligned across local
 /// store, notes search results, and wire dumps.
+#[allow(clippy::too_many_arguments)]
 pub async fn publish_notes(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
@@ -458,6 +466,7 @@ pub async fn publish_notes(
     tags: Vec<Tag>,
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
+    ip_filter: Option<crate::traversal::KadIpFilter>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_be_bytes(file_hash.0);
     let (publish_contacts, mut stats) = resolve_publish_contacts(
@@ -466,6 +475,7 @@ pub async fn publish_notes(
         target,
         publish_contact_fanout,
         work_class,
+        ip_filter,
     )
     .await?;
 

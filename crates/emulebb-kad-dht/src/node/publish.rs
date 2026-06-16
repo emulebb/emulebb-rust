@@ -44,6 +44,7 @@ impl DhtNode {
                 publish_contact_fanout,
                 work_class,
             },
+            self.ip_filter(),
         )
         .await
     }
@@ -82,6 +83,7 @@ impl DhtNode {
             tags,
             publish_contact_fanout,
             work_class,
+            self.ip_filter(),
         )
         .await
     }
@@ -123,6 +125,7 @@ impl DhtNode {
             tags,
             publish_contact_fanout,
             work_class,
+            self.ip_filter(),
         )
         .await
     }

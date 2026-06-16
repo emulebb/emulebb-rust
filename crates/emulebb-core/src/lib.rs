@@ -661,6 +661,15 @@ impl EmulebbCore {
         })
         .await
         .context("failed to initialize Kad runtime for ED2K listener")?;
+        // Bridge the live ed2k IpFilter into the Kad traversal layer so per-RES
+        // contacts from filtered/banned IPs are dropped (oracle
+        // KademliaUDPListener.cpp:830-857). The IpFilter lives in emulebb-ed2k
+        // which depends on emulebb-kad-dht, so core (depending on both) bridges it
+        // via a closure hook rather than moving the filter across the boundary.
+        {
+            let kad_ip_filter = network.ip_filter.clone();
+            dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
+        }
         let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
         let ed2k_listener =
             Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {

@@ -84,7 +84,7 @@ fn test_sanitize_res_contacts_rejects_overlarge_reply() {
         };
         3
     ];
-    assert!(sanitize_res_contacts(&contacts, "2.3.4.5:4672".parse().unwrap(), 2).is_none());
+    assert!(sanitize_res_contacts(&contacts, "2.3.4.5:4672".parse().unwrap(), 2, None).is_none());
 }
 
 #[test]
@@ -125,11 +125,49 @@ fn test_sanitize_res_contacts_drops_kad1_and_dns_port_contacts() {
         },
     ];
 
-    let sanitized =
-        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10).expect("sanitized");
+    let sanitized = sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, None)
+        .expect("sanitized");
     assert_eq!(sanitized.len(), 2);
     assert_eq!(sanitized[0].ip_addr(), Ipv4Addr::new(7, 8, 9, 16));
     assert_eq!(sanitized[1].ip_addr(), Ipv4Addr::new(8, 9, 16, 17));
+}
+
+#[test]
+fn test_sanitize_res_contacts_drops_ip_filtered_contacts() {
+    // B10: the per-contact ip-filter hook must drop filtered/banned IPs from a RES
+    // answer, mirroring KademliaUDPListener.cpp:830-857 `IsFiltered()`.
+    let contacts = vec![
+        // Banned IP -> dropped by the hook.
+        ContactEntry {
+            node_id: NodeId::from_bytes([1; 16]),
+            ip: 0x0A0B0C0D, // 10.11.12.13
+            udp_port: 4672,
+            tcp_port: 4662,
+            version: 9,
+        },
+        // Allowed IP -> kept.
+        ContactEntry {
+            node_id: NodeId::from_bytes([2; 16]),
+            ip: 0x14151617, // 20.21.22.23
+            udp_port: 4673,
+            tcp_port: 4663,
+            version: 9,
+        },
+    ];
+    let banned = Ipv4Addr::new(10, 11, 12, 13);
+    let filter: crate::traversal::KadIpFilter = std::sync::Arc::new(move |ip| ip == banned);
+
+    let sanitized =
+        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, Some(&filter))
+            .expect("sanitized");
+    assert_eq!(sanitized.len(), 1, "the banned contact must be dropped");
+    assert_eq!(sanitized[0].ip_addr(), Ipv4Addr::new(20, 21, 22, 23));
+
+    // Without the hook, both contacts are kept (filter disabled).
+    let unfiltered =
+        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, None)
+            .expect("sanitized");
+    assert_eq!(unfiltered.len(), 2);
 }
 
 #[test]
@@ -165,8 +203,8 @@ fn test_sanitize_res_contacts_filters_duplicate_ip_and_overpopulated_prefix() {
         },
     ];
 
-    let sanitized =
-        sanitize_res_contacts(&contacts, "1.2.3.1:4672".parse().unwrap(), 10).expect("sanitized");
+    let sanitized = sanitize_res_contacts(&contacts, "1.2.3.1:4672".parse().unwrap(), 10, None)
+        .expect("sanitized");
     assert_eq!(sanitized.len(), 1);
     assert_eq!(sanitized[0].ip_addr(), Ipv4Addr::new(1, 2, 3, 4));
 }
@@ -657,6 +695,7 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
+            ip_filter: None,
         },
     )
     .await;
