@@ -1,54 +1,67 @@
 # Source Management & A4AF — Design Sketch
 
-**Status:** **PARKED** (operator decision 2026-06-15) · not strictly necessary ·
-revisit only on observed real-network need · post-parity · **out of RC2 scope**
-**Area:** ed2k download manager (`emulebb-ed2k`)
-**Audience:** anyone implementing multi-file download source scheduling in emulebb-rust
+**Status:** **A4AF-lite IMPLEMENTED** (operator decision 2026-06-16) · the final
+cross-transfer source-reuse capability-parity item · the obsolete
+live-connection hijacking remains intentionally out of scope (see §0.1)
+**Area:** ed2k download manager (`emulebb-ed2k` + `emulebb-core`)
+**Audience:** anyone working on multi-file download source scheduling in emulebb-rust
 
 ---
 
-## 0. Decision (2026-06-15): parked, revisit-on-observation
+## 0. Decision (2026-06-16): A4AF-lite built; live-connection hijacking excluded
 
-A4AF is **not strictly necessary** for the rust client and stays parked. It is an
-**optimization, not correctness**: without it every download still works, just
-less efficiently when many concurrent transfers share the same peers.
+A4AF-lite is **implemented**. It delivers ≈80% of eMule A4AF (the part that fits
+rust's independent per-transfer task model) and drops only the obsolete
+socket-scarcity-era machinery (live-connection hijacking, §0.1).
 
-**2026 re-assessment (why parked, not built):**
+A4AF was always an **optimization, not correctness**: without it every download
+still works, just less efficiently when many concurrent transfers share the same
+peers. On the shrunken 2026 eD2K network with scarce sources, squeezing each peer
+matters, so the lite version was built rather than left parked.
 
-- **The connection-cost rationale is obsolete.** A4AF's heaviest machinery —
-  *hijacking a live TCP connection* from one transfer to another — existed because
-  in ~2001 sockets/connections were scarce (slow CPUs, the Windows XP SP2
-  half-open cap). In 2026 opening a connection is cheap, so the "full" A4AF
-  (cross-task live-connection dirottamento, which is exactly the part that does
-  not fit rust's independent per-transfer task model) buys little.
-- **What still holds:** A4AF's real driver was never connection count — it is
-  (1) the **structural one-relationship-per-peer** fact (eMule keeps one
-  `CUpDownClient` per peer requesting one `m_reqfile`; the other wanted files sit
-  in `m_OtherRequests_list`), (2) the **queue position** being expensive (earned
-  in hours, bounded by the remote uploader's upload bandwidth — protocol economy,
-  not hardware), and (3) **NNP** (a peer with no needed parts for X may have them
-  for Y). On the **shrunken 2026 eD2K network** with scarce sources, squeezing
-  each peer arguably matters *more*, not less.
-- **The UDP source-reask we shipped** ([[udp-source-reask-foundation]], commit
-  f60fc3c) already makes holding many queue positions cheap (one datagram / ~29
-  min), which erodes one A4AF benefit but not the per-peer-relationship or NNP
-  ones.
+### 0.1 The two legs that were built
 
-**If revisited, build the "lite" version only** (≈80% of the benefit, fits the
-per-transfer model): registry-driven **source-selection bias** + **NNP swap** +
-**cross-transfer peer dedup**, using the already-built read-only
-`crates/emulebb-core/src/download_source_registry.rs` (peer→files index,
-`a4af_candidate_count`, `lease_best_for_file`; has unit tests). **Do not** build
-the live-connection hijacking (the obsolete socket-cost part). Two hook points
-remain: (a) source selection at engagement, (b) NNP reaction in the download
-driver.
+Both legs are driven by the shared, peer-keyed
+`crates/emulebb-core/src/download_source_registry.rs` (peer→files index;
+`lease_best_for_file`, `candidate_count_for_file`, `swap_target_for_peer`) and
+the cross-transfer `download_coordinator.rs` — the same shared state the
+per-transfer tasks already consult, so no monolithic queue loop was introduced.
 
-**Revisit triggers (watch on the real network):** the rust client running
-*dozens* of concurrent eD2K downloads (the operator's expected ceiling) and
-observably (a) wasting scarce sources it could reuse, or (b) opening many
-redundant simultaneous connections to the same overlapping peer, or (c)
-mishandling NNP sources (dropping peers that have needed parts for another wanted
-file). Until such behavior is observed, the lite scaffold stays dormant.
+1. **Source-selection bias + cross-transfer peer dedup**
+   (`EmulebbCore::acquire_direct_download_source_leases`). When a transfer
+   acquires sources, the registry leases each peer to **its single best file**
+   (`lease_best_for_file`, scored by file priority then rare/needed parts) and
+   `active_download_peer_endpoints` enforces **one active relationship per peer**
+   — a peer registered for several of our files is engaged for exactly one at a
+   time, the rest defer (no redundant simultaneous engagement, like eMule's one
+   `CUpDownClient` per peer with the other files parked in `m_OtherRequests_list`).
+   The per-file soft source cap (`can_engage_file_source`) bounds it further.
+
+2. **NNP (No Needed Parts) swap**
+   (`EmulebbCore::swap_no_needed_parts_sources`, master
+   `CUpDownClient::SwapToAnotherFile`). When a connected source reports No Needed
+   Parts for the current file (eMule `OP_OUTOFPARTREQS` / `DS_NONEEDEDPARTS`), the
+   download session returns the new `Ed2kPeerDownloadOutcome::NoNeededParts`. The
+   driver then asks the registry (`swap_target_for_peer`) for the **best other
+   wanted (non-terminal) file the same peer serves** and re-drives that file's
+   download attempt so leg-1 selection re-engages the peer there — **the source is
+   moved to the other file instead of being dropped**. A source whose only
+   registered file was the current one (no swap target) is **still dropped, as
+   before**.
+
+### 0.1.1 Excluded — live-connection hijacking (intentional scope boundary)
+
+The one A4AF piece **deliberately not built** is *hijacking a live, already-open
+TCP connection* from one transfer to another in place. That machinery existed
+because in ~2001 sockets/connections were scarce (slow CPUs, the Windows XP SP2
+half-open cap); in 2026 opening a connection is cheap, and it is exactly the part
+that does not fit rust's independent per-transfer task model. A4AF-lite instead
+operates at the **source-selection + reask/re-engage level**: the NNP swap
+re-queues the target file's own attempt (which reuses the peer through the
+registry) rather than steal the socket mid-flight. This is a **scope boundary**,
+not an omission of A4AF — the capability (reuse a discovered peer across
+overlapping downloads, spend each opportunity on the best file, never lose an NNP
+source that serves another wanted file) is present.
 
 ---
 
@@ -90,9 +103,11 @@ Two design choices drive most of the complexity:
    system must periodically re-balance (`SwapToAnotherFile` every 8 min) to
    correct assignments that have gone stale.
 
-emulebb-rust currently has **none** of this (no `A4AF`, `SwapToAnotherFile`, or
-per-file source ownership). That is an opportunity: we can solve the same problem
-without inheriting the structure that makes it fragile.
+emulebb-rust deliberately did **not** inherit this file-centric ownership (no
+`A4AFsrclist` mirror, no eager per-file source ownership, no `ProcessA4AFClients`
+8-minute sweep). A4AF-lite (§0) solves the same problem with the peer-keyed
+registry + lazy binding described in §3, designing the fragile stale-mirror class
+of bugs out.
 
 ---
 
@@ -221,17 +236,22 @@ re-balance. Binding is lazy and event-driven instead.
 
 ---
 
-## 6. Scope & sequencing
+## 6. Scope & sequencing (as built)
 
-- This is **out of RC2 scope** (RC2 is verification + release-blocking fixes
-  only; emulebb-rust is explicitly out of ship scope). Capture, don't build yet.
-- Precondition: the rust client reliably runs a **multi-file** download queue.
-  A4AF is meaningless with a single download or non-overlapping sources, so build
-  it once multiple concurrent downloads with overlapping peers actually exist.
-- It is then a well-contained module: the `SourceTable` registry, the `pick_file`
-  policy function, and an event hook set (file-complete / priority-change /
-  slot-grant). No need to touch the large legacy-shaped `.rs` files; add it as new
-  modules within the per-module size budget.
+- **Built** as a well-contained slice: the peer-keyed `download_source_registry`
+  (with `swap_target_for_peer` for the NNP swap) + the cross-transfer
+  `download_coordinator`, consumed by the per-transfer driver in
+  `emulebb-core/src/lib.rs` (`acquire_direct_download_source_leases` for leg 1,
+  `swap_no_needed_parts_sources` for leg 2). The lazy "best file" decision is
+  taken at lease/swap time on current priorities/need; there is no eager
+  ownership and no 8-minute sweep.
+- The NNP wire signal is the new `Ed2kPeerDownloadOutcome::NoNeededParts`
+  (`OP_OUTOFPARTREQS`), carried up through `DirectDownloadOutcome`.
+- Coverage: registry unit tests (`swap_target_for_peer` picks the best other
+  file / returns `None` when the peer serves only the current file) plus
+  `emulebb-core` integration tests (multi-file peer reused + not double-engaged;
+  an NNP source swapped to another wanted file; an NNP source with no other
+  wanted file dropped; a completed other file rejected as a swap target).
 
 ---
 

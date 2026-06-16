@@ -289,8 +289,8 @@ for src in self.detached_sources.due(now):
 
 No cross-transfer coordination is introduced — each transfer reasks its own
 sources. This honours the "independent per-transfer tasks, no shared scheduler"
-decision. (A4AF-style cross-file dedup is a *separate*, already-parked design;
-the two compose but neither requires the other.)
+decision. (A4AF-style cross-file dedup is a *separate*, now-implemented design —
+A4AF-lite; the two compose but neither requires the other.)
 
 ### 4.3 One shared client UDP socket, fanned in by correlation key
 
