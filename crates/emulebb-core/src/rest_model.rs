@@ -660,7 +660,14 @@ pub struct Ed2kNetworkConfig {
     /// adapter) rather than a raw address — the guard's confirmation signal.
     pub vpn_interface_bound: bool,
     /// IPv4 range filter (ipfilter.dat). Empty when no filter is configured.
+    /// Shares its backing across clones so a reload is observed live.
     pub ip_filter: IpFilter,
+    /// Configured `ipfilter.dat` path, retained so [`EmulebbCore::reload_ip_filter`]
+    /// can re-read it on demand (`CIPFilter::Reload`). `None` when no file is
+    /// configured (the filter is then immutable-empty).
+    pub ip_filter_path: Option<std::path::PathBuf>,
+    /// Filter level threshold used when (re)parsing `ip_filter_path`.
+    pub ip_filter_level: u32,
 }
 
 /// Configured VPN-binding guard. When enabled in `enforce` mode the client

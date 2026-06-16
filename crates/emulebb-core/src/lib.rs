@@ -1876,10 +1876,37 @@ impl EmulebbCore {
         self.delete_friend(user_hash).await
     }
 
+    /// Re-read the configured `ipfilter.dat` and swap it into the live shared
+    /// `IpFilter`, mirroring `CIPFilter::Reload`. Because the `IpFilter` backing
+    /// is shared across every clone (listener, Kad traversal closure, UDP reask
+    /// loop, source-add gate), the new ranges take effect immediately without a
+    /// restart. Returns the number of ranges loaded, or `None` when no eD2k
+    /// network / ipfilter path is configured.
+    pub fn reload_ip_filter(&self) -> Result<Option<usize>> {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return Ok(None);
+        };
+        let Some(path) = network.ip_filter_path.as_ref() else {
+            return Ok(None);
+        };
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read ipfilter.dat at {}", path.display()))?;
+        network
+            .ip_filter
+            .reload_from(&body, network.ip_filter_level);
+        Ok(Some(network.ip_filter.len()))
+    }
+
     pub async fn ban_upload_client(&self, client_id: &str) -> Result<Option<bool>> {
         let Some(upload) = self.upload_client_for_control(client_id).await else {
             return Ok(None);
         };
+        // Back the manual ban with the enforced ban store (IP + user hash, 4h
+        // CLIENTBANTIME TTL) so it is actually rejected at accept/connect/source
+        // add, mirroring eMule's `CUpDownClient::Ban` (UploadClient.cpp:1042 ->
+        // CClientList::AddBannedClient).
+        self.ed2k_transfers
+            .ban_client(parse_ban_ip(&upload.address), parse_ban_hash(upload.user_hash.as_deref()));
         self.state
             .lock()
             .await
@@ -1892,6 +1919,10 @@ impl EmulebbCore {
         let Some(upload) = self.upload_client_for_control(client_id).await else {
             return Ok(None);
         };
+        let hash = parse_ban_hash(upload.user_hash.as_deref());
+        self.ed2k_transfers
+            .ban_store()
+            .unban(parse_ban_ip(&upload.address), hash.as_ref());
         self.state
             .lock()
             .await
@@ -2115,6 +2146,11 @@ impl EmulebbCore {
         let Some(source) = self.transfer_source(hash, client_id).await? else {
             return Ok(None);
         };
+        // Back the manual source ban with the enforced ban store (IP + user
+        // hash, 4h TTL) so the source is rejected on the next connect / source
+        // add (eMule CUpDownClient::Ban).
+        self.ed2k_transfers
+            .ban_client(parse_ban_ip(&source.ip), parse_ban_hash(source.user_hash.as_deref()));
         self.state
             .lock()
             .await
@@ -2127,6 +2163,10 @@ impl EmulebbCore {
         let Some(source) = self.transfer_source(hash, client_id).await? else {
             return Ok(None);
         };
+        let user_hash = parse_ban_hash(source.user_hash.as_deref());
+        self.ed2k_transfers
+            .ban_store()
+            .unban(parse_ban_ip(&source.ip), user_hash.as_ref());
         self.state
             .lock()
             .await
@@ -2658,6 +2698,11 @@ impl EmulebbCore {
         if !network.ip_filter.is_empty() {
             sources.retain(|source| !network.ip_filter.is_filtered(source.ip));
         }
+        // Drop banned sources before connecting (eMule CDownloadQueue::CheckAndAddSource
+        // / PartFile.cpp:3239,4812 IsBannedClient gate on source add/merge), keyed by
+        // both the source IP and its advertised user hash with the 4h TTL.
+        let ban_store = self.ed2k_transfers.ban_store();
+        sources.retain(|source| !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref()));
         if sources.is_empty() {
             return Ok(Some("downloading"));
         }
@@ -5385,6 +5430,26 @@ const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
 const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
 
+/// Parse a REST-surface IP string (the `Upload.address` / `TransferSource.ip`
+/// fields) into an `Ipv4Addr` for the ban store. Returns `None` when the value
+/// is empty or not a dialable IPv4 (e.g. a LowID client-id), so the ban falls
+/// back to the user-hash key alone.
+fn parse_ban_ip(ip: &str) -> Option<Ipv4Addr> {
+    ip.trim()
+        .parse::<Ipv4Addr>()
+        .ok()
+        .filter(|ip| !ip.is_unspecified())
+}
+
+/// Parse a 32-char lowercase-hex user-hash string into the 16-byte key used by
+/// the ban store. Returns `None` for a missing/malformed hash so the ban falls
+/// back to the IP key alone.
+fn parse_ban_hash(user_hash: Option<&str>) -> Option<[u8; 16]> {
+    let hash = user_hash?;
+    let bytes = hex::decode(hash).ok()?;
+    <[u8; 16]>::try_from(bytes.as_slice()).ok()
+}
+
 fn normalize_user_hash(user_hash: &str) -> Result<String> {
     ensure!(
         user_hash.len() == 32
@@ -5513,6 +5578,8 @@ mod tests {
             vpn_guard: VpnGuardConfig::default(),
             vpn_interface_bound: false,
             ip_filter: IpFilter::default(),
+            ip_filter_path: None,
+            ip_filter_level: emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
         }
     }
 
@@ -7861,5 +7928,29 @@ mod tests {
             source.user_hash,
             Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
         );
+    }
+
+    #[test]
+    fn parse_ban_ip_accepts_dialable_ipv4_only() {
+        assert_eq!(
+            parse_ban_ip("203.0.113.7"),
+            Some(Ipv4Addr::new(203, 0, 113, 7))
+        );
+        // Empty / unspecified / LowID-style non-IP fall back to no IP key.
+        assert_eq!(parse_ban_ip(""), None);
+        assert_eq!(parse_ban_ip("0.0.0.0"), None);
+        assert_eq!(parse_ban_ip("low-id-12345"), None);
+    }
+
+    #[test]
+    fn parse_ban_hash_decodes_16_byte_hex() {
+        assert_eq!(
+            parse_ban_hash(Some("000102030405060708090a0b0c0d0e0f")),
+            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+        );
+        assert_eq!(parse_ban_hash(None), None);
+        assert_eq!(parse_ban_hash(Some("not-hex")), None);
+        // Wrong length is rejected.
+        assert_eq!(parse_ban_hash(Some("0011")), None);
     }
 }

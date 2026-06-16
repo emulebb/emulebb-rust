@@ -250,6 +250,12 @@ impl DaemonConfig {
             },
             vpn_interface_bound: self.p2p_bind_interface.is_some(),
             ip_filter,
+            ip_filter_path: self
+                .ip_filter
+                .enabled
+                .then(|| self.ip_filter.path.clone())
+                .flatten(),
+            ip_filter_level: self.ip_filter.level,
         }))
     }
 
