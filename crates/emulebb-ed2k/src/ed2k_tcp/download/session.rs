@@ -345,8 +345,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
-                    session_state.remote_supports_secure_ident =
-                        hello_profile.supports_secure_ident;
+                    session_state.remote_supports_secure_ident = hello_profile.supports_secure_ident;
+                    session_state.peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
                     session_state.remote_supports_file_identifiers = hello_profile.supports_file_identifiers;
                     session_state.remote_supports_multipacket = hello_profile.supports_multipacket;
                     session_state.remote_supports_ext_multipacket =
@@ -385,8 +385,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
-                    session_state.remote_supports_secure_ident =
-                        hello_profile.supports_secure_ident;
+                    session_state.remote_supports_secure_ident = hello_profile.supports_secure_ident;
+                    session_state.peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
                     session_state.remote_supports_file_identifiers = hello_profile.supports_file_identifiers;
                     session_state.remote_supports_multipacket = hello_profile.supports_multipacket;
                     session_state.remote_supports_ext_multipacket =

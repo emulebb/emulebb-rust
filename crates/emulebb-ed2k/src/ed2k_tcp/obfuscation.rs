@@ -118,7 +118,9 @@ pub(super) async fn negotiate_outgoing_obfuscation_handshake(
         random_key_part,
     );
 
-    let request_padding_len = rand::thread_rng().gen_range(0..=15usize);
+    // eMule CryptTCPPaddingLength default profile (Preferences.cpp:3527 = 128,
+    // capped 254); EncryptedStreamSocket.cpp:422 pads rand % (len+1) -> 0..=128.
+    let request_padding_len = rand::thread_rng().gen_range(0..=128usize);
     let mut request = Vec::with_capacity(12 + request_padding_len);
     request.push(random_non_protocol_marker());
     request.extend_from_slice(&random_key_part);
@@ -226,7 +228,8 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
         receive_cipher.apply(&mut ignored_padding);
     }
 
-    let response_padding_len = rand::thread_rng().gen_range(0..=15usize);
+    // Same stock CryptTCPPaddingLength=128 default profile as the request side.
+    let response_padding_len = rand::thread_rng().gen_range(0..=128usize);
     let mut response_padding = vec![0u8; response_padding_len];
     rand::thread_rng().fill(&mut response_padding[..]);
     let response = encode_incoming_obfuscation_response(&mut send_cipher, &response_padding);

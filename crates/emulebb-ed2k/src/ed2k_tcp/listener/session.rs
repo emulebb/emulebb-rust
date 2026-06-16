@@ -289,6 +289,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .await
                         .with_context(|| format!("failed to reply to OP_HELLO from {peer_addr}"))?;
                 }
+                // SUI level + our HighID IP for V1/V2 outbound signature selection.
+                peer_secure_ident.peer_sec_ident = hello_profile.misc_options1.secure_ident;
+                peer_secure_ident.our_external_ip = reachability.get();
                 if hello_profile.supports_secure_ident && !peer_secure_ident.requested_peer_key {
                     let request = begin_secure_ident_probe(&mut peer_secure_ident);
                     dump_ed2k_tcp_listener_send(

@@ -275,9 +275,60 @@ fn should_attempt_upload_compression(canonical_name: &str) -> bool {
         return true;
     };
     let extension = extension.to_ascii_lowercase();
+    // Already-compressed / incompressible container formats: deflating them only
+    // burns CPU for ~no gain (and can grow the payload). Mirrors the master
+    // CUploadDiskIOThread::ShouldCompressBasedOnFilename exclusion set
+    // (UploadDiskIOThread.cpp:664-684), case-insensitive extension match.
     !matches!(
         extension.as_str(),
-        "zip" | "rar" | "7z" | "cbz" | "cbr" | "ogm" | "ace"
+        "7z" | "aac"
+            | "ace"
+            | "apk"
+            | "avi"
+            | "bz2"
+            | "cab"
+            | "cbr"
+            | "cbz"
+            | "docx"
+            | "flac"
+            | "flv"
+            | "gif"
+            | "gz"
+            | "jar"
+            | "jpeg"
+            | "jpg"
+            | "lz"
+            | "lzma"
+            | "m2ts"
+            | "m4a"
+            | "m4v"
+            | "mkv"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "mpeg"
+            | "mpg"
+            | "mts"
+            | "odp"
+            | "ods"
+            | "odt"
+            | "ogg"
+            | "ogm"
+            | "opus"
+            | "pdf"
+            | "png"
+            | "pptx"
+            | "rar"
+            | "ts"
+            | "vob"
+            | "webm"
+            | "webp"
+            | "wma"
+            | "wmv"
+            | "xlsx"
+            | "xz"
+            | "zip"
+            | "zst"
     )
 }
 
@@ -427,4 +478,40 @@ pub(in crate::ed2k_tcp) fn encode_compressed_part_fragment(
     payload.extend_from_slice(&advertised_compressed_len.to_le_bytes());
     payload.extend_from_slice(compressed_fragment);
     Ok(encode_packet(OP_EMULEPROT, OP_COMPRESSEDPART, &payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_attempt_upload_compression;
+
+    #[test]
+    fn already_compressed_media_is_skipped() {
+        // Representative entries from the master ShouldCompressBasedOnFilename set;
+        // the extension match is case-insensitive.
+        for name in [
+            "movie.mp4",
+            "movie.MKV",
+            "photo.jpg",
+            "song.mp3",
+            "song.flac",
+            "archive.zip",
+            "archive.rar",
+            "book.cbz",
+        ] {
+            assert!(
+                !should_attempt_upload_compression(name),
+                "{name} should not be compressed"
+            );
+        }
+    }
+
+    #[test]
+    fn compressible_types_are_attempted() {
+        for name in ["notes.txt", "payload.bin", "noextension", "data.dat"] {
+            assert!(
+                should_attempt_upload_compression(name),
+                "{name} should be compressed"
+            );
+        }
+    }
 }

@@ -273,3 +273,48 @@ fn helper_sets_verified_only_on_valid_signature() {
     assert!(!state.peer_ident_verified);
     assert!(state.peer_signature_received);
 }
+
+#[test]
+fn outbound_signature_v2_selected_for_v2_only_peer() {
+    let our_ip = Ipv4Addr::new(203, 0, 113, 9);
+    let peer_ip = Ipv4Addr::new(198, 51, 100, 7);
+
+    // secIdent=2 (bit 0 clear) -> V2. HighID (our IP known) signs LOCALCLIENT with
+    // our own public IP (master GetClientID()).
+    assert_eq!(
+        select_outbound_challenge_ip(2, Some(our_ip), Some(peer_ip)),
+        Some((CRYPT_CIP_LOCALCLIENT, our_ip)),
+    );
+    // secIdent=2 + LowID (our IP unknown) -> V2 REMOTECLIENT with the peer's IP.
+    assert_eq!(
+        select_outbound_challenge_ip(2, None, Some(peer_ip)),
+        Some((CRYPT_CIP_REMOTECLIENT, peer_ip)),
+    );
+
+    // secIdent=3 (bit 0 set) -> V1 (no challenge-IP trailer), the common case.
+    assert_eq!(select_outbound_challenge_ip(3, Some(our_ip), Some(peer_ip)), None);
+    // Unknown level (0) stays on the safe V1 path.
+    assert_eq!(select_outbound_challenge_ip(0, Some(our_ip), Some(peer_ip)), None);
+}
+
+#[test]
+fn outbound_v2_payload_differs_from_v1() {
+    // A V2 payload carries an extra ip-kind trailer byte after the signature, so a
+    // V2-only peer (secIdent=2) and a V1 peer (secIdent=3) produce different wire
+    // payloads from the same challenge.
+    let us = ident();
+    let peer = ident();
+    let challenge = 0x1234_5678u32;
+    let our_ip = Ipv4Addr::new(203, 0, 113, 9);
+
+    let v2_sel = select_outbound_challenge_ip(2, Some(our_ip), None);
+    let v1_sel = select_outbound_challenge_ip(3, Some(our_ip), None);
+    let v2 = us
+        .signature_payload_with_challenge_ip(peer.public_key_der(), challenge, v2_sel)
+        .expect("v2 payload");
+    let v1 = us
+        .signature_payload_with_challenge_ip(peer.public_key_der(), challenge, v1_sel)
+        .expect("v1 payload");
+    assert_eq!(v2.len(), v1.len() + 1, "V2 appends the ip-kind trailer byte");
+    assert_eq!(*v2.last().unwrap(), CRYPT_CIP_LOCALCLIENT);
+}

@@ -173,6 +173,16 @@ pub(super) struct Ed2kPeerSecureIdentState {
     /// `IS_IDENTIFIED`. Credits must only be attributed when this is true.
     pub(super) peer_ident_verified: bool,
     pub(super) requested_peer_key: bool,
+    /// The peer's advertised secure-ident level (`m_bySupportSecIdent`, the
+    /// CT_EMULE_MISCOPTIONS1 sub-field / ET_FEATURES low bits). Drives our
+    /// outbound signature version: V2 when bit 0 is clear (V2-only peer, e.g. 2),
+    /// V1 otherwise (the common case, e.g. 3). Defaults to 0; a 0 value keeps the
+    /// V1 path since we only ever sign after a peer that supports SUI probed us.
+    pub(super) peer_sec_ident: u8,
+    /// Our own learned public IPv4 (HighID), captured when the state is created so
+    /// the V2 signature can fold in the correct challenge IP without re-plumbing
+    /// reachability through every signature call site. `None` = LowID / unknown.
+    pub(super) our_external_ip: Option<Ipv4Addr>,
 }
 
 pub(super) fn encode_secident_state(state: u8, challenge: u32) -> Vec<u8> {
@@ -373,6 +383,32 @@ pub(super) fn begin_secure_ident_probe(peer_state: &mut Ed2kPeerSecureIdentState
     encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, challenge_for)
 }
 
+/// Choose the outbound secure-ident signature variant + challenge IP, mirroring
+/// eMule `CUpDownClient::SendSignaturePacket` (BaseClient.cpp:1905-1918):
+/// `bUseV2 = !(m_bySupportSecIdent & 1)`, so we sign V2 only when the peer's
+/// advertised SUI level has bit 0 CLEAR (V2-only peers, e.g. value 2); V1 stays
+/// the default for peers advertising bit 0 (e.g. 3). A 0 level means we never
+/// learned the peer's level, so we keep the safe V1 path (the master is only ever
+/// here with a known SUI peer). For V2 the challenge IP + ip-kind follow our
+/// HighID/LowID state: HighID signs with our own public IP (CRYPT_CIP_LOCALCLIENT,
+/// `GetClientID()`); LowID cannot prove its own IP and folds in the remote peer's
+/// IP instead (CRYPT_CIP_REMOTECLIENT, `GetIP()`).
+fn select_outbound_challenge_ip(
+    peer_sec_ident: u8,
+    our_external_ip: Option<Ipv4Addr>,
+    peer_ip: Option<Ipv4Addr>,
+) -> Option<(u8, Ipv4Addr)> {
+    let use_v2 = peer_sec_ident != 0 && (peer_sec_ident & 1) == 0;
+    if !use_v2 {
+        return None;
+    }
+    match our_external_ip {
+        Some(our_ip) => Some((CRYPT_CIP_LOCALCLIENT, our_ip)),
+        // LowID / IP unknown: fall back to V1 if we also lack a usable peer IP.
+        None => peer_ip.map(|ip| (CRYPT_CIP_REMOTECLIENT, ip)),
+    }
+}
+
 pub(super) async fn try_send_secure_ident_signature(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
@@ -388,10 +424,16 @@ pub(super) async fn try_send_secure_ident_signature(
     if !peer_state.pending_signature {
         return Ok(false);
     }
+    let peer_ip = match peer_addr {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None, // IPv4-only client
+    };
+    let challenge_ip =
+        select_outbound_challenge_ip(peer_state.peer_sec_ident, peer_state.our_external_ip, peer_ip);
     let signature = encode_packet(
         OP_EMULEPROT,
         OP_SIGNATURE,
-        &secure_ident.signature_payload(peer_public_key, challenge)?,
+        &secure_ident.signature_payload_with_challenge_ip(peer_public_key, challenge, challenge_ip)?,
     );
     transport
         .write_all(&signature)

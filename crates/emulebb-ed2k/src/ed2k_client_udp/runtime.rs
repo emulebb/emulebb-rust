@@ -392,8 +392,11 @@ async fn drive_reask_tick(
     // file gets a reask slot this tick and enforces a global inter-reask floor,
     // and gates each file on the per-file UDP source cap
     // (GetMaxSourcePerFileUDP > GetSourceCount). `next_reask_file_slot` returns
-    // None (no rotation offset / pacing floor not elapsed) -> fall back to the
-    // unbounded tick so reask never stalls when there is nothing to pace against.
+    // None when the global inter-reask floor has not elapsed; even then we never
+    // send beyond the per-file UDP cap, so the None branch still runs the paced
+    // tick with the `admit_udp` gate (rotate_offset 0) rather than the unbounded
+    // tick that would bypass the cap (master m_udcounter intent). The per-source
+    // 29-min due gate (due_datagrams) holds either way (paced only suppresses).
     let registered_file_count = info_by_file.len();
     let rotate_offset = transfer_runtime.next_reask_file_slot(registered_file_count);
     let info_lookup = |file_hash: &Ed2kHash| {
@@ -407,18 +410,15 @@ async fn drive_reask_tick(
     };
     let admit_udp =
         |_file_hash: &Ed2kHash, source_count: usize| transfer_runtime.can_reask_file_via_udp(source_count);
-    let out = match rotate_offset {
-        Some(offset) => service.tick_paced(
-            Instant::now(),
-            REASK_REPLY_TIMEOUT,
-            info_lookup,
-            &ReaskTickPacing {
-                rotate_offset: offset,
-                admit: Some(&admit_udp),
-            },
-        ),
-        None => service.tick(Instant::now(), REASK_REPLY_TIMEOUT, info_lookup),
-    };
+    let out = service.tick_paced(
+        Instant::now(),
+        REASK_REPLY_TIMEOUT,
+        info_lookup,
+        &ReaskTickPacing {
+            rotate_offset: rotate_offset.unwrap_or(0),
+            admit: Some(&admit_udp),
+        },
+    );
     for (addr, datagram) in out.send {
         match dht.send_raw_datagram(addr, &datagram).await {
             Ok(()) => {
