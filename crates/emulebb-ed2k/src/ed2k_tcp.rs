@@ -40,6 +40,7 @@ mod firewall_helper;
 mod hello;
 mod hello_buddy;
 mod hello_gpl;
+mod hello_miscoptions;
 mod identity;
 mod listener;
 mod obfuscation;

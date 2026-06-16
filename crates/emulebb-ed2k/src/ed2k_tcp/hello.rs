@@ -411,6 +411,8 @@ pub(super) struct DecodedHelloProfile {
     /// Peer advertised a known GPL-breaker mod-version (eMule
     /// `CUpDownClient::CheckForGPLEvilDoer`): its upload score is zeroed.
     pub(super) gpl_evildoer: bool,
+    /// Fully-decoded `CT_EMULE_MISCOPTIONS1` sub-fields (oracle BaseClient.cpp:515-533).
+    pub(super) misc_options1: super::hello_miscoptions::MiscOptions1,
 }
 
 fn decode_hello_tag_u32(tag: &DecodedHelloTag<'_>) -> Option<u32> {
@@ -501,15 +503,13 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     cursor = &cursor[4..];
 
     let mut is_mule_hello = false;
-    let mut supports_aich = false;
-    let mut supports_secure_ident = false;
-    let mut supports_multipacket = false;
     let mut supports_ext_multipacket = false;
     let mut source_exchange_version = 0;
     let mut supports_source_exchange = false;
     let mut supports_source_exchange2 = false;
     let mut supports_file_identifiers = false;
     let mut gpl_evildoer = false;
+    let mut misc_options1 = super::hello_miscoptions::MiscOptions1::default();
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
         if tag.tag_name == Some(CT_EMULE_VERSION) {
@@ -529,13 +529,13 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             supports_ext_multipacket = ((misc_options2 >> 5) & 1) != 0;
         }
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS1)
-            && let Some(misc_options1) = decode_hello_tag_u32(&tag)
+            && let Some(misc_options1_value) = decode_hello_tag_u32(&tag)
         {
-            supports_aich = ((misc_options1 >> 29) & 0x07) & 0x01 != 0;
-            supports_secure_ident = ((misc_options1 >> 16) & 0x0F) != 0;
-            source_exchange_version = ((misc_options1 >> 12) & 0x0F) as u8;
+            // Decode every sub-field (keeps the full 3-bit AICH version).
+            misc_options1 = super::hello_miscoptions::decode_misc_options1(misc_options1_value);
+            // SX version (bits 12-15) is deprecated/ignored by the oracle here.
+            source_exchange_version = ((misc_options1_value >> 12) & 0x0F) as u8;
             supports_source_exchange = source_exchange_version != 0;
-            supports_multipacket = ((misc_options1 >> 1) & 1) != 0;
         }
         if tag.tag_name == Some(CT_EMULE_UDPPORTS)
             && let Some(udp_ports) = decode_hello_tag_u32(&tag)
@@ -550,15 +550,16 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     Ok(DecodedHelloProfile {
         identity,
         is_mule_hello,
-        supports_aich,
-        supports_secure_ident,
-        supports_multipacket,
+        supports_aich: misc_options1.supports_aich(),
+        supports_secure_ident: misc_options1.supports_secure_ident(),
+        supports_multipacket: misc_options1.multipacket,
         supports_ext_multipacket,
         source_exchange_version,
         supports_source_exchange,
         supports_source_exchange2,
         supports_file_identifiers,
         gpl_evildoer,
+        misc_options1,
     })
 }
 
