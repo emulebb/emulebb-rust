@@ -279,7 +279,11 @@ impl RoutingZone {
 
     /// Collect one random `FindNode` target per leaf zone that passes the
     /// oracle big-timer fill gate (`OnBigTimer`: leaf and `zone_index < KK ||
-    /// level < KBASE || bin >= 0.8*K`), mirroring `RandomLookup`.
+    /// level < KBASE || GetRemaining() >= 0.8*K`), mirroring `RandomLookup`.
+    /// `GetRemaining() = K - size` (FREE slots, RoutingBin.cpp:195), so the
+    /// third disjunct fires when the bin is nearly EMPTY (`size <= 0.2*K`), i.e.
+    /// the tree fills sparse zones first. NOTE: this is the inverse of a
+    /// fill-when-full gate.
     pub(crate) fn random_lookup_targets(
         &self,
         own_id: &NodeId,
@@ -290,7 +294,7 @@ impl RoutingZone {
             ZoneContent::Leaf(bin) => {
                 let fill_gate = (self.zone_index as usize) < KK
                     || (self.depth as usize) < KBASE
-                    || bin.len() * 5 >= K * 4; // bin >= 0.8 * K
+                    || bin.len() * 5 <= K; // GetRemaining() >= 0.8*K <=> size <= 0.2*K
                 if fill_gate {
                     targets.push(crate::maintenance::random_target_in_zone(
                         own_id,
@@ -552,5 +556,41 @@ mod tests {
             })
         ));
         assert_eq!(zone.count(), K);
+    }
+
+    // Leaf at a depth/zone_index that defeats the first two `OnBigTimer`
+    // disjuncts (`zone_index < KK`, `level < KBASE`), so the third
+    // `GetRemaining() >= 0.8*K` disjunct alone decides. Contacts share the
+    // depth-bit=false side (stay in this leaf) on distinct /24s.
+    fn make_leaf_with_size(size: usize) -> RoutingZone {
+        let mut zone = RoutingZone {
+            depth: KBASE as u32,
+            zone_index: KK,
+            content: ZoneContent::Leaf(RoutingBin::new()),
+        };
+        for i in 0..size as u8 {
+            let id = make_id_with_bit(KBASE as u32, false, i + 1);
+            zone.add(make_contact(id, &format!("30.{}.0.1", i + 1)), &OWN, i as usize, usize::MAX)
+                .unwrap();
+        }
+        assert_eq!(zone.count(), size);
+        zone
+    }
+
+    fn gate_fires(zone: &RoutingZone) -> bool {
+        let mut targets = Vec::new();
+        zone.random_lookup_targets(&OWN, &mut || 0u8, &mut targets);
+        !targets.is_empty()
+    }
+
+    #[test]
+    fn big_timer_random_lookup_selects_sparse_leaf_not_full_leaf() {
+        // eMule `OnBigTimer`: third disjunct `GetRemaining() >= 0.8*K` (FREE
+        // slots) fires for a nearly EMPTY bin (`size <= 0.2*K`), filling sparse
+        // zones first. K = 10: fires for size <= 2, not for size >= 3.
+        assert!(gate_fires(&make_leaf_with_size(0)));
+        assert!(gate_fires(&make_leaf_with_size(2))); // exactly 0.2*K
+        assert!(!gate_fires(&make_leaf_with_size(3)));
+        assert!(!gate_fires(&make_leaf_with_size(K - 2))); // nearly full
     }
 }
