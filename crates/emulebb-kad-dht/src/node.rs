@@ -25,10 +25,11 @@ use emulebb_kad_net::{
     RpcObservabilitySnapshot, UdpTransport,
 };
 use emulebb_kad_proto::{KadUdpKey, NodeId};
-use emulebb_kad_routing::RoutingTable;
-use std::net::{Ipv4Addr, SocketAddr};
+use emulebb_kad_routing::{Contact, RoutingTable};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::{Mutex, Semaphore};
 
 struct DhtInner {
@@ -47,6 +48,21 @@ struct DhtInner {
     /// `IpFilter` by core at startup (set once). Applied in traversal's
     /// `sanitize_res_contacts` (oracle KademliaUDPListener.cpp:830-857).
     ip_filter: std::sync::OnceLock<crate::traversal::KadIpFilter>,
+    /// Sender side of the RES-contact ingestion channel (oracle `AddUnfiltered`):
+    /// every good RES contact learned during any traversal is forwarded here and
+    /// drained into the routing table by the task spawned in [`DhtNode::start`].
+    res_contact_tx: mpsc::UnboundedSender<LearnedResContact>,
+}
+
+/// A good `KADEMLIA2_RES` contact learned during traversal, carried over the
+/// ingestion channel to the routing-table drain task (oracle `AddUnfiltered`).
+#[derive(Debug, Clone, Copy)]
+struct LearnedResContact {
+    id: NodeId,
+    ip: Ipv4Addr,
+    udp_port: u16,
+    tcp_port: u16,
+    version: u8,
 }
 
 /// Routing-table contact counts for the `kad_event` `routing_summary`
@@ -122,6 +138,12 @@ impl DhtNode {
 
         let semaphore = Semaphore::new(config.max_concurrent_searches);
 
+        // RES-contact ingestion channel (oracle AddUnfiltered): a dedicated drain
+        // task owns the routing-table add-path so traversal can fire-and-forget
+        // every good RES contact without blocking the lookup loop on the lock.
+        let (res_contact_tx, res_contact_rx) = mpsc::unbounded_channel::<LearnedResContact>();
+        spawn_res_contact_drain(Arc::clone(&routing_table), rpc.clone(), res_contact_rx);
+
         Ok(Self {
             inner: Arc::new(DhtInner {
                 own_id: config.node_id,
@@ -132,6 +154,7 @@ impl DhtNode {
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
                 legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
                 ip_filter: std::sync::OnceLock::new(),
+                res_contact_tx,
             }),
         })
     }
@@ -237,6 +260,34 @@ impl DhtNode {
         self.inner.ip_filter.get().cloned()
     }
 
+    /// A RES-contact sink bound to this node's routing-table ingestion channel
+    /// (oracle `AddUnfiltered`). Threaded into every traversal config the node
+    /// builds so good RES contacts populate the routing table as they arrive.
+    pub(crate) fn res_contact_sink(&self) -> crate::traversal::KadResContactSink {
+        let tx = self.inner.res_contact_tx.clone();
+        Arc::new(move |entry: &emulebb_kad_proto::packet::ContactEntry| {
+            // Skip obviously unusable entries (the traversal sanitizer already
+            // dropped Kad1/filtered/clustered ones, but guard the basics).
+            if entry.ip == 0 || entry.udp_port == 0 {
+                return;
+            }
+            let tcp_port = if entry.tcp_port != 0 {
+                entry.tcp_port
+            } else {
+                entry.udp_port
+            };
+            // Fire-and-forget: a closed channel just means the node is shutting
+            // down, so a dropped contact is harmless.
+            let _ = tx.send(LearnedResContact {
+                id: entry.node_id,
+                ip: entry.ip_addr(),
+                udp_port: entry.udp_port,
+                tcp_port,
+                version: entry.version,
+            });
+        })
+    }
+
     /// Send an already-framed datagram on the shared Kad UDP socket without Kad
     /// encoding — for eD2k reask replies + the per-transfer ticker. Pass-through
     /// to `RpcManager::send_raw_datagram`.
@@ -248,4 +299,41 @@ impl DhtNode {
         self.inner.rpc.send_raw_datagram(addr, data).await?;
         Ok(())
     }
+}
+
+/// Drain learned `RES` contacts into the routing table (oracle `AddUnfiltered`).
+///
+/// Runs for the life of the node; exits when every sender is dropped. Each
+/// contact passes through the same routing-table guards as any other add (IP /
+/// `/24` limits, anti-hijack UDP-key update rule in `RoutingBin::try_add`, and
+/// the full+unsplittable weak-replacement path), so the only difference from the
+/// final-closest-set add is that *every* answered contact is offered, not just
+/// the ones that survive into the lookup result.
+fn spawn_res_contact_drain(
+    routing_table: Arc<Mutex<RoutingTable>>,
+    rpc: RpcManager,
+    mut rx: mpsc::UnboundedReceiver<LearnedResContact>,
+) {
+    tokio::spawn(async move {
+        while let Some(learned) = rx.recv().await {
+            let addr = SocketAddr::new(IpAddr::V4(learned.ip), learned.udp_port);
+            // Register the peer identity/version so subsequent sends carry the
+            // right id/version, mirroring DhtNode::add_contact.
+            rpc.register_peer_identity(addr, learned.id);
+            rpc.register_peer_version(addr, learned.version);
+            let mut contact = Contact::new(
+                learned.id,
+                learned.ip,
+                learned.udp_port,
+                learned.tcp_port,
+                learned.version,
+            );
+            // Carry the latest known anti-spoof key for this IP, if any, so the
+            // anti-hijack update guard is satisfied on a refresh.
+            if let Some(key) = rpc.known_peer_key(addr) {
+                contact.udp_key = KadUdpKey::new(key);
+            }
+            let _ = routing_table.lock().await.add_contact(contact);
+        }
+    });
 }

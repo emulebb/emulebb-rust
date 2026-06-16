@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
+use std::time::SystemTime;
 
 use emulebb_kad_proto::{K, KadUdpKey, NodeId};
 
-use crate::contact::{Contact, ContactType, is_lan};
+use crate::contact::{Contact, ContactType, KAD_LOCAL_QUALITY_REPLACEMENT_MARGIN, is_lan};
 use crate::error::{RoutingError, RoutingSubnetLimitScope};
 
 /// Maximum contacts from one non-LAN `/24` inside a single bin.
@@ -157,6 +158,67 @@ impl RoutingBin {
     /// Drain all contacts out (consuming).
     pub fn drain(&mut self) -> impl Iterator<Item = Contact> + '_ {
         self.contacts.drain(..)
+    }
+
+    /// Iterate over all contacts mutably.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Contact> {
+        self.contacts.iter_mut()
+    }
+
+    /// Snapshot the IDs of all contacts (caller-owned so the bin lock can be
+    /// released before acting on them).
+    pub fn contact_ids(&self) -> Vec<NodeId> {
+        self.contacts.iter().map(|c| c.id).collect()
+    }
+
+    /// Replace the weakest locally-replaceable contact with `contact` when the
+    /// bin is full and unsplittable, mirroring `CRoutingBin::ReplaceWeakContact`
+    /// (RoutingBin.cpp:407-436) plus `GetWeakestReplaceableContact`
+    /// (RoutingBin.cpp:509-524).
+    ///
+    /// The newcomer is accepted only if (a) the bin is at capacity, (b) a weak
+    /// replacement candidate exists, and (c) the newcomer's local quality beats
+    /// the candidate's by at least [`KAD_LOCAL_QUALITY_REPLACEMENT_MARGIN`].
+    /// Returns the evicted contact on success, or `None` when no swap was made
+    /// (the newcomer is then dropped, exactly as the oracle does).
+    pub fn replace_weak_contact(&mut self, contact: Contact) -> Option<Contact> {
+        self.replace_weak_contact_at(contact, SystemTime::now())
+    }
+
+    /// [`RoutingBin::replace_weak_contact`] evaluated at an explicit instant
+    /// (test seam).
+    pub fn replace_weak_contact_at(
+        &mut self,
+        contact: Contact,
+        now: SystemTime,
+    ) -> Option<Contact> {
+        if self.contacts.len() < K {
+            return None;
+        }
+        let (weakest_pos, removed_quality) = self.weakest_replaceable_contact(now)?;
+        let new_quality = contact.local_quality_score(now);
+        if new_quality < removed_quality.saturating_add(KAD_LOCAL_QUALITY_REPLACEMENT_MARGIN) {
+            return None;
+        }
+        let removed = self.contacts.remove(weakest_pos)?;
+        self.contacts.push_back(contact);
+        Some(removed)
+    }
+
+    /// Position + quality of the weakest replaceable contact at `now`, or `None`
+    /// when no contact qualifies (oracle `GetWeakestReplaceableContact`).
+    fn weakest_replaceable_contact(&self, now: SystemTime) -> Option<(usize, u32)> {
+        let mut weakest: Option<(usize, u32)> = None;
+        for (index, contact) in self.contacts.iter().enumerate() {
+            if !contact.is_weak_for_replacement(now) {
+                continue;
+            }
+            let quality = contact.local_quality_score(now);
+            if weakest.is_none_or(|(_, best)| quality < best) {
+                weakest = Some((index, quality));
+            }
+        }
+        weakest
     }
 }
 
@@ -341,5 +403,98 @@ mod tests {
         bin.try_add(c2).unwrap();
         let dead = bin.first_dead().unwrap();
         assert_eq!(dead.id, NodeId::from_bytes([2u8; 16]));
+    }
+
+    /// A strong fresh contact: IP-verified, hello-received, keyed, current type.
+    fn make_strong_contact(id_byte: u8, ip: Ipv4Addr) -> Contact {
+        let mut c = make_contact(id_byte, ip);
+        c.verified = true;
+        c.received_hello_packet = true;
+        c.udp_key = KadUdpKey::new(0x1234_5678);
+        c.probe_type = 0;
+        c.expires_at = Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        c
+    }
+
+    /// A weak contact: unverified, no hello, no key, expired window.
+    fn make_weak_contact(id_byte: u8, ip: Ipv4Addr) -> Contact {
+        let mut c = make_contact(id_byte, ip);
+        c.verified = false;
+        c.received_hello_packet = false;
+        c.udp_key = KadUdpKey::ZERO;
+        c.probe_type = 3;
+        c.expires_at = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        c
+    }
+
+    #[test]
+    fn test_full_bin_replaces_weak_contact_with_fresh_verified_one() {
+        // Fill the bin: one weak stale unverified contact + (K-1) strong ones,
+        // all in distinct /24s to avoid the per-bin subnet limit.
+        let mut bin = RoutingBin::new();
+        let weak = make_weak_contact(0, "9.9.9.1".parse().unwrap());
+        assert!(bin.try_add(weak).unwrap());
+        for i in 1..K {
+            let ip: Ipv4Addr = format!("10.{}.0.1", i).parse().unwrap();
+            assert!(bin.try_add(make_strong_contact(i as u8, ip)).unwrap());
+        }
+        assert!(bin.is_full());
+
+        // The bin is full; a fresh verified newcomer should evict the weak one.
+        let newcomer = make_strong_contact(200, "11.0.0.1".parse().unwrap());
+        let evicted = bin
+            .replace_weak_contact(newcomer)
+            .expect("weak contact should be replaced");
+        assert_eq!(evicted.id, NodeId::from_bytes([0u8; 16]));
+        assert_eq!(bin.len(), K);
+        // The newcomer is now present, the weak contact gone.
+        assert!(bin.iter().any(|c| c.id == NodeId::from_bytes([200u8; 16])));
+        assert!(!bin.iter().any(|c| c.id == NodeId::from_bytes([0u8; 16])));
+    }
+
+    #[test]
+    fn test_full_bin_does_not_evict_when_all_existing_are_stronger() {
+        // Fill the bin entirely with strong contacts -> none is weak.
+        let mut bin = RoutingBin::new();
+        for i in 0..K {
+            let ip: Ipv4Addr = format!("12.{}.0.1", i).parse().unwrap();
+            assert!(bin.try_add(make_strong_contact(i as u8, ip)).unwrap());
+        }
+        assert!(bin.is_full());
+
+        // A fresh verified newcomer must NOT evict anyone: no weak candidate.
+        let newcomer = make_strong_contact(201, "13.0.0.1".parse().unwrap());
+        assert!(bin.replace_weak_contact(newcomer).is_none());
+        assert_eq!(bin.len(), K);
+        assert!(!bin.iter().any(|c| c.id == NodeId::from_bytes([201u8; 16])));
+    }
+
+    #[test]
+    fn test_weak_replacement_requires_quality_margin() {
+        // Fill with one weak contact + strong ones, but the newcomer is itself
+        // weak (unverified/stale) so it does not beat the margin.
+        let mut bin = RoutingBin::new();
+        let weak = make_weak_contact(0, "14.9.9.1".parse().unwrap());
+        assert!(bin.try_add(weak).unwrap());
+        for i in 1..K {
+            let ip: Ipv4Addr = format!("15.{}.0.1", i).parse().unwrap();
+            assert!(bin.try_add(make_strong_contact(i as u8, ip)).unwrap());
+        }
+        // A weak newcomer is not >= weakest + margin, so no swap.
+        let weak_newcomer = make_weak_contact(202, "16.0.0.1".parse().unwrap());
+        assert!(bin.replace_weak_contact(weak_newcomer).is_none());
+        assert_eq!(bin.len(), K);
+    }
+
+    #[test]
+    fn test_non_full_bin_never_replaces() {
+        let mut bin = RoutingBin::new();
+        let weak = make_weak_contact(0, "17.9.9.1".parse().unwrap());
+        assert!(bin.try_add(weak).unwrap());
+        // Bin is not full, so replace_weak_contact is a no-op (newcomer should
+        // go through the normal try_add path instead).
+        let newcomer = make_strong_contact(203, "18.0.0.1".parse().unwrap());
+        assert!(bin.replace_weak_contact(newcomer).is_none());
+        assert_eq!(bin.len(), 1);
     }
 }

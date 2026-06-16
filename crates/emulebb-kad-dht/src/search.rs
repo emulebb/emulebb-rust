@@ -1,4 +1,6 @@
-use crate::traversal::{KadIpFilter, TraversalConfig, TraversalContact, TraversalKind, run_traversal};
+use crate::traversal::{
+    KadIpFilter, KadResContactSink, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
+};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::SEARCH_TIMEOUT_SECS;
@@ -51,6 +53,7 @@ pub fn search_keywords(
     cancel: CancellationToken,
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
+    res_contact_sink: Option<KadResContactSink>,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     search_keywords_by_request(
         rpc,
@@ -65,6 +68,7 @@ pub fn search_keywords(
         cancel,
         work_class,
         ip_filter,
+        res_contact_sink,
     )
 }
 
@@ -79,6 +83,7 @@ pub fn search_keywords_by_request(
     cancel: CancellationToken,
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
+    res_contact_sink: Option<KadResContactSink>,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(SEARCH_RESULT_STREAM_BUFFER);
     let request_target = request.target;
@@ -95,6 +100,7 @@ pub fn search_keywords_by_request(
             result_tx: Some(raw_tx),
             work_class,
             ip_filter,
+            res_contact_sink,
         };
 
         let traversal = tokio::spawn(async move {
@@ -187,6 +193,7 @@ pub fn search_sources_by_request(
     cancel: CancellationToken,
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
+    res_contact_sink: Option<KadResContactSink>,
 ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SourceResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = request.target;
@@ -205,6 +212,7 @@ pub fn search_sources_by_request(
             result_tx: Some(raw_tx),
             work_class,
             ip_filter,
+            res_contact_sink,
         };
 
         let traversal = tokio::spawn(async move {
@@ -254,6 +262,7 @@ pub fn search_notes(
     cancel: CancellationToken,
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
+    res_contact_sink: Option<KadResContactSink>,
 ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<NoteResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = NodeId::from_be_bytes(request.file_hash.0);
@@ -273,6 +282,7 @@ pub fn search_notes(
             result_tx: Some(raw_tx),
             work_class,
             ip_filter,
+            res_contact_sink,
         };
 
         let traversal = tokio::spawn(async move {

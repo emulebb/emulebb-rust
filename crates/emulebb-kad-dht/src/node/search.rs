@@ -45,6 +45,7 @@ impl DhtNode {
             result_tx: None,
             work_class,
             ip_filter: self.ip_filter(),
+            res_contact_sink: Some(self.res_contact_sink()),
         };
 
         let result = run_traversal(&self.inner.rpc, initial, config).await;
@@ -190,6 +191,7 @@ impl DhtNode {
             cancel,
             work_class,
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
     }
 
@@ -305,6 +307,7 @@ impl DhtNode {
             cancel,
             work_class,
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
     }
 
@@ -406,6 +409,7 @@ impl DhtNode {
             cancel,
             work_class,
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
     }
 

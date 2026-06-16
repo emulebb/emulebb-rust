@@ -5,7 +5,7 @@ use emulebb_kad_proto::NodeId;
 
 use crate::contact::{Contact, is_lan};
 use crate::error::{RoutingError, RoutingSubnetLimitScope};
-use crate::zone::RoutingZone;
+use crate::zone::{AddOutcome, RoutingZone};
 
 /// Default maximum contacts in the routing table.
 pub const DEFAULT_MAX_SIZE: usize = 12_000;
@@ -80,7 +80,7 @@ impl RoutingTable {
             .add(contact, &own_id, self.total_contacts, self.max_size);
 
         match result {
-            Ok(true) => {
+            Ok(AddOutcome::Added) => {
                 // Newly added.
                 *self.ip_counts.entry(new_ip).or_insert(0) += 1;
                 if !is_lan(new_ip) {
@@ -90,7 +90,19 @@ impl RoutingTable {
                 self.total_contacts += 1;
                 Ok(())
             }
-            Ok(false) => {
+            Ok(AddOutcome::Replaced(evicted)) => {
+                // A weak contact was evicted to admit the newcomer. The total
+                // count is unchanged: release the evicted IP/subnet bookkeeping
+                // and account for the newcomer's IP/subnet.
+                self.release_ip_bookkeeping(evicted.ip);
+                *self.ip_counts.entry(new_ip).or_insert(0) += 1;
+                if !is_lan(new_ip) {
+                    let subnet = subnet24(new_ip);
+                    *self.subnet_counts.entry(subnet).or_insert(0) += 1;
+                }
+                Ok(())
+            }
+            Ok(AddOutcome::Updated) => {
                 // Updated existing. If IP changed, update maps.
                 if let Some(old) = old_ip
                     && old != new_ip
@@ -163,28 +175,34 @@ impl RoutingTable {
     pub fn remove(&mut self, id: &NodeId) -> bool {
         let own_id = self.own_id;
         if let Some(contact) = self.root.remove(id, &own_id) {
-            let ip = contact.ip;
-            if let Some(cnt) = self.ip_counts.get_mut(&ip) {
-                if *cnt > 1 {
-                    *cnt -= 1;
-                } else {
-                    self.ip_counts.remove(&ip);
-                }
-            }
-            if !is_lan(ip) {
-                let subnet = subnet24(ip);
-                if let Some(cnt) = self.subnet_counts.get_mut(&subnet) {
-                    if *cnt > 1 {
-                        *cnt -= 1;
-                    } else {
-                        self.subnet_counts.remove(&subnet);
-                    }
-                }
-            }
+            self.release_ip_bookkeeping(contact.ip);
             self.total_contacts -= 1;
             true
         } else {
             false
+        }
+    }
+
+    /// Decrement the per-IP and per-`/24` bookkeeping counters for `ip`. Used by
+    /// both [`RoutingTable::remove`] and the weak-contact replacement path (where
+    /// the evicted contact's IP must be released without touching the total).
+    fn release_ip_bookkeeping(&mut self, ip: Ipv4Addr) {
+        if let Some(cnt) = self.ip_counts.get_mut(&ip) {
+            if *cnt > 1 {
+                *cnt -= 1;
+            } else {
+                self.ip_counts.remove(&ip);
+            }
+        }
+        if !is_lan(ip) {
+            let subnet = subnet24(ip);
+            if let Some(cnt) = self.subnet_counts.get_mut(&subnet) {
+                if *cnt > 1 {
+                    *cnt -= 1;
+                } else {
+                    self.subnet_counts.remove(&subnet);
+                }
+            }
         }
     }
 
@@ -235,6 +253,55 @@ impl RoutingTable {
     /// Snapshot all known contacts ordered by XOR distance from our own ID.
     pub fn all_contacts(&self) -> Vec<Contact> {
         self.get_closest(&self.own_id, self.total_contacts)
+    }
+
+    /// Run the oracle small-timer maintenance sweep at `now`: seed expiry
+    /// windows, drop dead+expired contacts, and pick one lowest-quality expired
+    /// contact per leaf to HELLO-probe. Removals are applied to the tree and
+    /// their per-IP/`/24` bookkeeping released so counters stay consistent.
+    ///
+    /// Mirrors `CRoutingZone::OnSmallTimer` (`RoutingZone.cpp:852-906`).
+    pub fn small_timer_maintenance(
+        &mut self,
+        now: std::time::SystemTime,
+    ) -> crate::maintenance::SmallTimerOutcome {
+        // Snapshot the IP of every dead+expired contact before the sweep deletes
+        // it so bookkeeping can be released by id afterwards.
+        let removed_ips: std::collections::HashMap<NodeId, Ipv4Addr> = self
+            .all_contacts()
+            .into_iter()
+            .filter(|c| c.is_dead() && c.is_expired_at(now))
+            .map(|c| (c.id, c.ip))
+            .collect();
+        let mut outcome = crate::maintenance::SmallTimerOutcome::default();
+        self.root.small_timer_sweep(now, &mut outcome);
+        for id in &outcome.removed {
+            if let Some(ip) = removed_ips.get(id) {
+                self.release_ip_bookkeeping(*ip);
+                self.total_contacts = self.total_contacts.saturating_sub(1);
+            }
+        }
+        outcome
+    }
+
+    /// One random `FindNode` target per leaf passing the oracle big-timer fill
+    /// gate (`CRoutingZone::OnBigTimer` -> `RandomLookup`). `rng` supplies random
+    /// bytes for the in-zone target suffix.
+    pub fn random_lookup_targets(&self, rng: &mut impl FnMut() -> u8) -> Vec<NodeId> {
+        let mut targets = Vec::new();
+        self.root
+            .random_lookup_targets(&self.own_id, rng, &mut targets);
+        targets
+    }
+
+    /// Advance a contact's `CheckingType` staleness counter after a maintenance
+    /// HELLO probe was sent to it (oracle `CContact::CheckingType`). Returns the
+    /// new counter value, or `None` if the contact is gone.
+    pub fn checking_type(&mut self, id: &NodeId) -> Option<u8> {
+        let own_id = self.own_id;
+        self.root
+            .get_mut(id, &own_id)
+            .map(|contact| contact.checking_type())
     }
 }
 

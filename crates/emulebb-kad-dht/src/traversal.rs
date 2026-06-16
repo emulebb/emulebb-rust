@@ -72,6 +72,17 @@ pub struct TraversalCandidate {
 /// `Process_KADEMLIA2_RES` (`KademliaUDPListener.cpp:830-857`).
 pub type KadIpFilter = Arc<dyn Fn(Ipv4Addr) -> bool + Send + Sync>;
 
+/// A sink fed every good `KADEMLIA2_RES` contact learned during traversal, the
+/// moment it arrives — mirroring the oracle `Process_KADEMLIA2_RES` path which
+/// `AddUnfiltered`s every answered contact to the routing zone regardless of
+/// whether it ends up in the final closest-set (`KademliaUDPListener.cpp:849`).
+///
+/// The contacts have already passed the per-`RES` sanitation guards
+/// (count cap, Kad1/DNS-port drop, ip-filter, per-`/24` clustering). The sink is
+/// a fire-and-forget hook so it never blocks the lookup loop; the routing crate
+/// cannot be referenced here, so core bridges the live routing table behind it.
+pub type KadResContactSink = Arc<dyn Fn(&ContactEntry) + Send + Sync>;
+
 /// Phase-2 behavior that should follow once the closest contacts are known.
 #[derive(Debug, Clone)]
 pub enum TraversalKind {
@@ -113,6 +124,10 @@ pub struct TraversalConfig {
     /// filtered/banned IPs), bridged from the live ed2k `IpFilter` by core.
     /// `None` disables per-contact ip-filtering (e.g. unit tests / no filter).
     pub ip_filter: Option<KadIpFilter>,
+    /// Optional sink fed every good `RES` contact as it arrives (oracle
+    /// `AddUnfiltered`). `None` disables routing-table population from traversal
+    /// (e.g. unit tests). Bridged to the live routing table by core.
+    pub res_contact_sink: Option<KadResContactSink>,
 }
 
 /// Final traversal outcome returned to the caller.
@@ -167,6 +182,7 @@ struct LookupPhaseConfig<'a> {
     work_class: RpcWorkClass,
     cancel: &'a CancellationToken,
     ip_filter: Option<&'a KadIpFilter>,
+    res_contact_sink: Option<&'a KadResContactSink>,
 }
 
 struct LookupPhaseResult {
@@ -196,6 +212,7 @@ pub async fn run_traversal(
         result_tx,
         work_class,
         ip_filter,
+        res_contact_sink,
     } = config;
     let deadline = Instant::now() + timeout;
     let closest_limit = traversal_closest_limit(&search_kind, phase2_fanout);
@@ -219,6 +236,7 @@ pub async fn run_traversal(
             work_class,
             cancel: &cancel,
             ip_filter: ip_filter.as_ref(),
+            res_contact_sink: res_contact_sink.as_ref(),
         },
     )
     .await;
@@ -488,6 +506,12 @@ fn insert_response_contacts(
         return;
     };
     for entry in sanitized {
+        // Oracle AddUnfiltered (KademliaUDPListener.cpp:849): feed every good RES
+        // contact to the routing table as it arrives, independent of whether it
+        // makes the final closest-set. The entry already passed sanitation.
+        if let Some(sink) = config.res_contact_sink {
+            sink(&entry);
+        }
         insert_response_contact(candidates, seen, config.target, entry);
     }
 }

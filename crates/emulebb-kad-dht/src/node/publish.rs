@@ -45,6 +45,7 @@ impl DhtNode {
                 work_class,
             },
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
         .await
     }
@@ -84,6 +85,7 @@ impl DhtNode {
             publish_contact_fanout,
             work_class,
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
         .await
     }
@@ -126,6 +128,7 @@ impl DhtNode {
             publish_contact_fanout,
             work_class,
             self.ip_filter(),
+            Some(self.res_contact_sink()),
         )
         .await
     }

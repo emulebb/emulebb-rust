@@ -1,4 +1,4 @@
-use emulebb_kad_proto::{KBASE, KK, NodeId};
+use emulebb_kad_proto::{K, KBASE, KK, NodeId};
 use tracing::info;
 
 use crate::bin::RoutingBin;
@@ -15,6 +15,28 @@ enum ZoneContent {
         /// Owns nodes where bit[depth] == 1
         right: Box<RoutingZone>,
     },
+}
+
+/// Outcome of a successful [`RoutingZone::add`] / [`RoutingTable::add_contact`].
+#[derive(Debug)]
+pub enum AddOutcome {
+    /// A brand-new contact was inserted into a bin.
+    Added,
+    /// An existing contact (same id) was refreshed/updated in place.
+    Updated,
+    /// A full+unsplittable bin evicted a weak contact to admit the newcomer
+    /// (oracle `ReplaceWeakContact`). Carries the evicted contact so the table
+    /// can release its IP/subnet bookkeeping.
+    Replaced(Box<Contact>),
+}
+
+impl AddOutcome {
+    /// Whether the table's total contact count grew by one (a fresh insertion).
+    /// A replacement keeps the total unchanged; an update is a no-op on counts.
+    #[must_use]
+    pub fn grew_total(&self) -> bool {
+        matches!(self, AddOutcome::Added)
+    }
 }
 
 // ── RoutingZone ───────────────────────────────────────────────────────────────
@@ -48,14 +70,15 @@ impl RoutingZone {
     /// - `total_contacts`: current total in the whole table
     /// - `max_table_size`: configured maximum
     ///
-    /// Returns `Ok(true)` = added new, `Ok(false)` = updated existing, `Err` = rejected.
+    /// Returns [`AddOutcome`] (Added / Updated / Replaced) on success,
+    /// `Err` = rejected.
     pub fn add(
         &mut self,
         contact: Contact,
         own_id: &NodeId,
         total_contacts: usize,
         max_table_size: usize,
-    ) -> Result<bool, RoutingError> {
+    ) -> Result<AddOutcome, RoutingError> {
         match &mut self.content {
             ZoneContent::Leaf(_) => {
                 // Try adding to the leaf bin.
@@ -67,7 +90,8 @@ impl RoutingZone {
                 };
 
                 match result {
-                    Ok(added) => Ok(added),
+                    Ok(true) => Ok(AddOutcome::Added),
+                    Ok(false) => Ok(AddOutcome::Updated),
                     Err(RoutingError::TableFull { .. }) => {
                         // Attempt to split.
                         let split_check = self.can_split(total_contacts, max_table_size);
@@ -84,9 +108,18 @@ impl RoutingZone {
                             // Retry after split.
                             self.add(contact, own_id, total_contacts, max_table_size)
                         } else {
-                            Err(RoutingError::SplitDenied {
-                                reason: split_check.expect_err("checked above"),
-                            })
+                            // Full + unsplittable: mirror the oracle
+                            // ReplaceWeakContact path (RoutingZone.cpp:613-626)
+                            // before dropping the newcomer.
+                            let ZoneContent::Leaf(bin) = &mut self.content else {
+                                unreachable!()
+                            };
+                            match bin.replace_weak_contact(contact) {
+                                Some(evicted) => Ok(AddOutcome::Replaced(Box::new(evicted))),
+                                None => Err(RoutingError::SplitDenied {
+                                    reason: split_check.expect_err("checked above"),
+                                }),
+                            }
                         }
                     }
                     Err(e) => Err(e),
@@ -218,6 +251,59 @@ impl RoutingZone {
         match &self.content {
             ZoneContent::Leaf(bin) => bin.len(),
             ZoneContent::Branch { left, right } => left.count() + right.count(),
+        }
+    }
+
+    /// Run the small-timer maintenance sweep over every leaf bin, accumulating
+    /// removed-contact IDs and per-leaf probe candidates (oracle
+    /// `CRoutingZone::OnSmallTimer` walked across the tree).
+    pub(crate) fn small_timer_sweep(
+        &mut self,
+        now: std::time::SystemTime,
+        outcome: &mut crate::maintenance::SmallTimerOutcome,
+    ) {
+        match &mut self.content {
+            ZoneContent::Leaf(bin) => {
+                let (removed, probe) = crate::maintenance::small_timer_for_bin(bin, now);
+                outcome.removed.extend(removed);
+                if let Some(candidate) = probe {
+                    outcome.probes.push(candidate);
+                }
+            }
+            ZoneContent::Branch { left, right } => {
+                left.small_timer_sweep(now, outcome);
+                right.small_timer_sweep(now, outcome);
+            }
+        }
+    }
+
+    /// Collect one random `FindNode` target per leaf zone that passes the
+    /// oracle big-timer fill gate (`OnBigTimer`: leaf and `zone_index < KK ||
+    /// level < KBASE || bin >= 0.8*K`), mirroring `RandomLookup`.
+    pub(crate) fn random_lookup_targets(
+        &self,
+        own_id: &NodeId,
+        rng: &mut impl FnMut() -> u8,
+        targets: &mut Vec<NodeId>,
+    ) {
+        match &self.content {
+            ZoneContent::Leaf(bin) => {
+                let fill_gate = (self.zone_index as usize) < KK
+                    || (self.depth as usize) < KBASE
+                    || bin.len() * 5 >= K * 4; // bin >= 0.8 * K
+                if fill_gate {
+                    targets.push(crate::maintenance::random_target_in_zone(
+                        own_id,
+                        self.depth,
+                        self.zone_index,
+                        rng,
+                    ));
+                }
+            }
+            ZoneContent::Branch { left, right } => {
+                left.random_lookup_targets(own_id, rng, targets);
+                right.random_lookup_targets(own_id, rng, targets);
+            }
         }
     }
 

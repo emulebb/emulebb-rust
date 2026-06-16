@@ -60,6 +60,41 @@ impl DhtNode {
         }
     }
 
+    /// Run one oracle small-timer routing-maintenance sweep over the table:
+    /// seed expiry windows, drop dead+expired contacts, and return the per-leaf
+    /// lowest-quality expired contacts to HELLO-probe (oracle
+    /// `CRoutingZone::OnSmallTimer`). Removals are applied inside the lock.
+    pub async fn routing_small_timer_maintenance(
+        &self,
+    ) -> Vec<emulebb_kad_routing::ProbeCandidate> {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .small_timer_maintenance(std::time::SystemTime::now())
+            .probes
+    }
+
+    /// One random `FindNode` target per leaf zone that passes the oracle
+    /// big-timer fill gate (`CRoutingZone::OnBigTimer` -> `RandomLookup`). Used
+    /// by the maintenance loop to keep buckets populated.
+    pub async fn routing_random_lookup_targets(&self) -> Vec<NodeId> {
+        use rand::Rng;
+        let table = self.inner.routing_table.lock().await;
+        // Create the (non-Send) RNG only after the await so it is never held
+        // across a suspension point.
+        let mut rng = rand::thread_rng();
+        let mut next = || rng.r#gen::<u8>();
+        table.random_lookup_targets(&mut next)
+    }
+
+    /// Advance a contact's `CheckingType` staleness counter after a maintenance
+    /// HELLO probe was sent to it (oracle `CContact::CheckingType`). Returns the
+    /// new counter value, or `None` if the contact is gone.
+    pub async fn routing_advance_checking_type(&self, id: &NodeId) -> Option<u8> {
+        self.inner.routing_table.lock().await.checking_type(id)
+    }
+
     /// Mark a routing contact as IP-verified (three-way handshake / legacy
     /// challenge completed). Mirrors `CRoutingZone::VerifyContact`: the contact
     /// must exist with a matching IP. Returns whether a contact was verified.

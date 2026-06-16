@@ -124,6 +124,7 @@ async fn resolve_publish_contacts(
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
     ip_filter: Option<crate::traversal::KadIpFilter>,
+    res_contact_sink: Option<crate::traversal::KadResContactSink>,
 ) -> Result<(Vec<TraversalContact>, PublishAttemptStats), DhtError> {
     let initial = get_initial(routing_table, &target).await;
     let traversal = run_traversal(
@@ -139,6 +140,7 @@ async fn resolve_publish_contacts(
             result_tx: None,
             work_class,
             ip_filter,
+            res_contact_sink,
         },
     )
     .await;
@@ -334,6 +336,7 @@ pub async fn publish_keyword(
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
     request: KeywordPublishRequest,
     ip_filter: Option<crate::traversal::KadIpFilter>,
+    res_contact_sink: Option<crate::traversal::KadResContactSink>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let KeywordPublishRequest {
         keyword_hash,
@@ -351,6 +354,7 @@ pub async fn publish_keyword(
         publish_contact_fanout,
         work_class,
         ip_filter,
+        res_contact_sink,
     )
     .await?;
     for (index, contact) in publish_contacts.iter().enumerate() {
@@ -414,6 +418,7 @@ pub async fn publish_source(
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
     ip_filter: Option<crate::traversal::KadIpFilter>,
+    res_contact_sink: Option<crate::traversal::KadResContactSink>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_be_bytes(file_hash.0);
     let (publish_contacts, mut stats) = resolve_publish_contacts(
@@ -423,6 +428,7 @@ pub async fn publish_source(
         publish_contact_fanout,
         work_class,
         ip_filter,
+        res_contact_sink,
     )
     .await?;
 
@@ -467,6 +473,7 @@ pub async fn publish_notes(
     publish_contact_fanout: usize,
     work_class: RpcWorkClass,
     ip_filter: Option<crate::traversal::KadIpFilter>,
+    res_contact_sink: Option<crate::traversal::KadResContactSink>,
 ) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_be_bytes(file_hash.0);
     let (publish_contacts, mut stats) = resolve_publish_contacts(
@@ -476,6 +483,7 @@ pub async fn publish_notes(
         publish_contact_fanout,
         work_class,
         ip_filter,
+        res_contact_sink,
     )
     .await?;
 

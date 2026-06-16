@@ -202,6 +202,87 @@ fn test_sanitize_res_contacts_drops_ip_filtered_contacts() {
 }
 
 #[test]
+fn test_res_contacts_feed_the_addunfiltered_sink_as_they_arrive() {
+    // Oracle AddUnfiltered (KademliaUDPListener.cpp:849): every good RES contact
+    // is offered to the routing table as it arrives, independent of whether it
+    // ends up in the final closest-set. Here we assert the sink fires once per
+    // sanitized contact and is NOT called for the banned/clustered drops.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let response = emulebb_kad_proto::packet::Res {
+        target: NodeId::ZERO,
+        contacts: vec![
+            // Kept.
+            ContactEntry {
+                node_id: NodeId::from_bytes([1; 16]),
+                ip: 0x14151617, // 20.21.22.23
+                udp_port: 4672,
+                tcp_port: 4662,
+                version: 9,
+            },
+            // Banned -> dropped by the filter, sink must not fire.
+            ContactEntry {
+                node_id: NodeId::from_bytes([2; 16]),
+                ip: 0x0A0B0C0D, // 10.11.12.13
+                udp_port: 4673,
+                tcp_port: 4663,
+                version: 9,
+            },
+            // Kept (distinct /24).
+            ContactEntry {
+                node_id: NodeId::from_bytes([3; 16]),
+                ip: 0x1E1F2021, // 30.31.32.33
+                udp_port: 4674,
+                tcp_port: 4664,
+                version: 9,
+            },
+        ],
+    };
+
+    let banned = Ipv4Addr::new(10, 11, 12, 13);
+    let filter: crate::traversal::KadIpFilter = Arc::new(move |ip| ip == banned);
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_clone = Arc::clone(&fired);
+    let sink: crate::traversal::KadResContactSink = Arc::new(move |entry: &ContactEntry| {
+        // The banned IP must never reach the sink.
+        assert_ne!(entry.ip_addr(), Ipv4Addr::new(10, 11, 12, 13));
+        fired_clone.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let cancel = CancellationToken::new();
+    let search_kind = TraversalKind::FindNode;
+    let config = LookupPhaseConfig {
+        target: NodeId::ZERO,
+        search_kind: &search_kind,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+        query_timeout: std::time::Duration::from_secs(1),
+        closest_limit: K,
+        req_count: 16,
+        work_class: RpcWorkClass::Maintenance,
+        cancel: &cancel,
+        ip_filter: Some(&filter),
+        res_contact_sink: Some(&sink),
+    };
+
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    insert_response_contacts(
+        &mut candidates,
+        &mut seen,
+        &config,
+        NodeId::from_bytes([9; 16]),
+        None,
+        response,
+    );
+
+    // Two good contacts fed the sink; the banned one did not.
+    assert_eq!(fired.load(Ordering::SeqCst), 2);
+    // Both good contacts also became lookup candidates.
+    assert_eq!(candidates.len(), 2);
+}
+
+#[test]
 fn test_sanitize_res_contacts_filters_duplicate_ip_and_overpopulated_prefix() {
     let contacts = vec![
         ContactEntry {
@@ -742,6 +823,7 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
             result_tx: None,
             work_class: RpcWorkClass::Interactive,
             ip_filter: None,
+            res_contact_sink: None,
         },
     )
     .await;
