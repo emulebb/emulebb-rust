@@ -159,6 +159,8 @@ async fn small_file_download_releases_piece_after_out_of_order_multi_range_respo
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

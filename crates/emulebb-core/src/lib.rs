@@ -5623,6 +5623,10 @@ mod tests {
                 tcp_port: 4662,
                 udp_port: 4672,
                 obfuscation_options: Some(0x03),
+                source_type: 1,
+                buddy_id: None,
+                buddy_ip: None,
+                buddy_port: 0,
             }],
         )
         .await;
@@ -6348,6 +6352,8 @@ mod tests {
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         }
     }
 
@@ -6776,6 +6782,10 @@ mod tests {
             tcp_port: 4662,
             udp_port: 4672,
             obfuscation_options: Some(0x03),
+            source_type: 1,
+            buddy_id: None,
+            buddy_ip: None,
+            buddy_port: 0,
         });
 
         assert_eq!(source.file_hash, file_hash);
@@ -6787,6 +6797,38 @@ mod tests {
         assert_eq!(source.obfuscation_options, Some(0x03));
         assert_eq!(source.user_hash, Some(source_id.0));
         assert_eq!(source.source_server, None);
+        assert_eq!(source.buddy_id, None);
+        assert_eq!(source.buddy_endpoint, None);
+    }
+
+    #[test]
+    fn kad_firewalled_buddy_source_maps_to_low_id_with_buddy_target() {
+        // Oracle Kad source type 3: a firewalled LowID source carrying its buddy
+        // id + buddy relay endpoint maps to a LowID source with a buddy reask target.
+        let file_hash = Ed2kHash::from_bytes([0x4b; 16]);
+        let source_id = Ed2kHash::from_bytes([0x4c; 16]);
+        let buddy_id = [0x5a; 16];
+        let source = kad_source_result_to_ed2k_found_source(SourceResult {
+            file_hash,
+            source_id,
+            ip: Ipv4Addr::new(192, 0, 2, 77),
+            tcp_port: 4662,
+            udp_port: 4672,
+            obfuscation_options: None,
+            source_type: 3,
+            buddy_id: Some(buddy_id),
+            buddy_ip: Some(Ipv4Addr::new(198, 51, 100, 9)),
+            buddy_port: 5000,
+        });
+
+        assert!(source.low_id);
+        assert_eq!(source.buddy_id, Some(buddy_id));
+        assert_eq!(
+            source.buddy_endpoint,
+            Some((Ipv4Addr::new(198, 51, 100, 9), 5000))
+        );
+        assert!(source.has_kad_buddy_reask_target());
+        assert!(!source.is_direct_dialable());
     }
 
     #[test]

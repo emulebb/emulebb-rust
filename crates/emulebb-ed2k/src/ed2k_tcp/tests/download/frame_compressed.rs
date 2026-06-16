@@ -75,6 +75,8 @@ async fn small_file_download_accepts_split_compressed_part_frames() {
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -248,6 +250,8 @@ async fn small_file_download_accepts_obfuscated_packed_startup_and_compressed_pa
             obfuscation_options: Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS,),
             user_hash: Some(peer_user_hash),
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

@@ -125,6 +125,8 @@ async fn small_file_download_rejects_wrong_payload_and_keeps_manifest_incomplete
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

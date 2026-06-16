@@ -110,6 +110,8 @@ async fn small_file_download_waits_for_peer_signature_before_start_upload() {
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

@@ -123,6 +123,8 @@ fn found_sources_decoder_extracts_plain_sources() {
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         }]
     );
 }
@@ -170,6 +172,8 @@ fn found_sources_decoder_extracts_obfuscated_sources_with_user_hash() {
             obfuscation_options: Some(SOURCE_OBFUSCATION_USER_HASH_PRESENT | 0x03),
             user_hash: Some([0x61; 16]),
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         }]
     );
 }
@@ -187,6 +191,8 @@ fn found_sources_validation_rejects_hash_mismatch() {
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         }],
         Ed2kHash([0xBB; 16]),
     )

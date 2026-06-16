@@ -82,6 +82,8 @@ pub(crate) fn found_source_from_hint(
         obfuscation_options: None,
         user_hash,
         source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
     })
 }
 
@@ -311,16 +313,30 @@ pub(crate) fn should_query_kad_source_supplement(
 }
 
 pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed2kFoundSource {
+    // Oracle `CDownloadQueue::KademliaSearchFile`: types 3/5 are firewalled LowID
+    // sources reachable only through their Kad buddy (server-/buddy-assisted
+    // callback). For those we carry the buddy id + buddy relay endpoint so the
+    // source can be reasked via its buddy (OP_REASKCALLBACKUDP) rather than dialed.
+    let firewalled_buddy = result.is_firewalled_buddy_source();
+    let buddy_endpoint = match (result.buddy_ip, result.buddy_port) {
+        (Some(buddy_ip), buddy_port) if firewalled_buddy && buddy_port != 0 => {
+            Some((buddy_ip, buddy_port))
+        }
+        _ => None,
+    };
+    let buddy_id = if firewalled_buddy { result.buddy_id } else { None };
     Ed2kFoundSource {
         file_hash: result.file_hash,
         ip: result.ip,
         tcp_port: result.tcp_port,
         client_id: u32::from(result.ip),
-        low_id: false,
+        low_id: firewalled_buddy,
         obfuscated: result.obfuscation_options.is_some(),
         obfuscation_options: result.obfuscation_options,
         user_hash: Some(result.source_id.0),
         source_server: None,
+        buddy_id,
+        buddy_endpoint,
     }
 }
 

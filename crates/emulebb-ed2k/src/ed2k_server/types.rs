@@ -124,6 +124,12 @@ pub struct Ed2kFoundSource {
     pub user_hash: Option<[u8; 16]>,
     /// ED2K server endpoint that reported this source, when known.
     pub source_server: Option<SocketAddr>,
+    /// Buddy Kad-id of a firewalled LowID Kad source (oracle `SetBuddyID`), present
+    /// only for Kad source types 3/5. Gates buddy-relayed `OP_REASKCALLBACKUDP`.
+    pub buddy_id: Option<[u8; 16]>,
+    /// Buddy relay UDP endpoint of a firewalled LowID Kad source (oracle
+    /// `SetBuddyIP`/`SetBuddyPort`), present only for Kad source types 3/5.
+    pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
 }
 
 impl Ed2kFoundSource {
@@ -131,6 +137,15 @@ impl Ed2kFoundSource {
     #[must_use]
     pub fn is_direct_dialable(&self) -> bool {
         !self.low_id
+    }
+
+    /// Returns `true` when this is a firewalled LowID Kad source whose Kad buddy
+    /// (id + relay endpoint) is known, so it can be reasked via its buddy with an
+    /// `OP_REASKCALLBACKUDP` instead of being direct-dialed (oracle Kad source
+    /// types 3/5).
+    #[must_use]
+    pub fn has_kad_buddy_reask_target(&self) -> bool {
+        self.low_id && self.buddy_id.is_some() && self.buddy_endpoint.is_some()
     }
 }
 

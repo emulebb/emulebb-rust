@@ -221,6 +221,8 @@ fn decode_found_sources_from(
             obfuscation_options,
             user_hash,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         });
     }
 

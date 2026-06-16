@@ -54,6 +54,8 @@ async fn background_source_search_channel_round_trips_results() {
         obfuscation_options: Some(0x03),
         user_hash: Some([0x61; 16]),
         source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
     };
     let expected_for_task = expected.clone();
 

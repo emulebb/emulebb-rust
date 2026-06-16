@@ -173,6 +173,8 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
             obfuscation_options: None,
             user_hash: None,
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

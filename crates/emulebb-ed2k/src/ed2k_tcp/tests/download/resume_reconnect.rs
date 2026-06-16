@@ -211,6 +211,8 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
         obfuscation_options: None,
         user_hash: None,
         source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
     };
     let secure_ident = Arc::new(
         Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
@@ -383,6 +385,8 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
         obfuscation_options: Some(super::EMULE_CRYPT_SUPPORTS | super::EMULE_CRYPT_REQUESTS),
         user_hash: Some(peer_user_hash),
         source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
     };
     let secure_ident = Arc::new(
         Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),

@@ -234,6 +234,8 @@ mod tests {
             obfuscation_options: None,
             user_hash: Some(user_hash),
             source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
         }
     }
 }
