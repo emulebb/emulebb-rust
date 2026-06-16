@@ -153,6 +153,39 @@ pub struct SourceResult {
     pub tcp_port: u16,
     pub udp_port: u16,
     pub obfuscation_options: Option<u8>,
+    /// Kad `FT_SOURCETYPE`: 1/4 = HighID/non-firewalled (direct TCP); 3/5 =
+    /// firewalled LowID reachable only via its Kad buddy (server-/buddy-assisted
+    /// callback); 6 = firewalled with direct-UDP-callback support; 2 = ignored.
+    /// Oracle `CSearch::ProcessResultFile` / `CDownloadQueue::KademliaSearchFile`.
+    pub source_type: u8,
+    /// Buddy's Kad id (`FT_BUDDYHASH`), present only for firewalled types 3/5.
+    pub buddy_id: Option<[u8; 16]>,
+    /// Buddy relay endpoint (`FT_SERVERIP`/`FT_SERVERPORT`) for types 3/5.
+    pub buddy_ip: Option<Ipv4Addr>,
+    pub buddy_port: u16,
+}
+
+/// Parse an `FT_BUDDYHASH` 32-char hex string into a 16-byte MD4 buddy id,
+/// mirroring oracle `strmd4`. Returns `None` on a malformed/short string.
+fn parse_buddy_hash(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (index, byte) in out.iter_mut().enumerate() {
+        let hex = value.get(index * 2..index * 2 + 2)?;
+        *byte = u8::from_str_radix(hex, 16).ok()?;
+    }
+    Some(out)
+}
+
+impl SourceResult {
+    /// Whether this Kad source is a firewalled LowID peer reachable only through
+    /// its Kad buddy (oracle source types 3 and 5).
+    #[must_use]
+    pub fn is_firewalled_buddy_source(&self) -> bool {
+        matches!(self.source_type, 3 | 5)
+    }
 }
 
 impl SourceResult {
@@ -161,6 +194,10 @@ impl SourceResult {
         let mut tcp_port: u16 = 0;
         let mut udp_port: u16 = 0;
         let mut obfuscation_options = None;
+        let mut source_type: u8 = 0;
+        let mut buddy_id: Option<[u8; 16]> = None;
+        let mut buddy_ip: Option<Ipv4Addr> = None;
+        let mut buddy_port: u16 = 0;
 
         for tag in &tags {
             match &tag.name {
@@ -198,6 +235,36 @@ impl SourceResult {
                     TagValue::U8(v) => obfuscation_options = Some(*v),
                     _ => {}
                 },
+                TagName::Short(n) if *n == tag_name::SOURCETYPE => match &tag.value {
+                    TagValue::UInt(v) if u8::try_from(*v).is_ok() => source_type = *v as u8,
+                    TagValue::U32(v) if u8::try_from(*v).is_ok() => source_type = *v as u8,
+                    TagValue::U16(v) if u8::try_from(*v).is_ok() => source_type = *v as u8,
+                    TagValue::U8(v) => source_type = *v,
+                    _ => {}
+                },
+                // For a firewalled buddy source (types 3/5) the buddy relay
+                // endpoint is carried in FT_SERVERIP/FT_SERVERPORT (oracle
+                // CSearch::ProcessResultFile maps these to uBuddyIP/uBuddyPort).
+                TagName::Short(n) if *n == tag_name::SERVERIP => match &tag.value {
+                    TagValue::UInt(v) if u32::try_from(*v).is_ok() => {
+                        buddy_ip = Some(Ipv4Addr::from((*v as u32).to_be_bytes()));
+                    }
+                    TagValue::U32(v) => buddy_ip = Some(Ipv4Addr::from(v.to_be_bytes())),
+                    _ => {}
+                },
+                TagName::Short(n) if *n == tag_name::SERVERPORT => match &tag.value {
+                    TagValue::UInt(v) => buddy_port = *v as u16,
+                    TagValue::U16(v) => buddy_port = *v,
+                    TagValue::U32(v) => buddy_port = *v as u16,
+                    TagValue::U8(v) => buddy_port = (*v).into(),
+                    _ => {}
+                },
+                // FT_BUDDYHASH is a 32-char hex MD4 string (oracle strmd4).
+                TagName::Short(n) if *n == tag_name::BUDDYHASH => {
+                    if let TagValue::String(s) = &tag.value {
+                        buddy_id = parse_buddy_hash(s);
+                    }
+                }
                 _ => {}
             }
         }
@@ -218,6 +285,10 @@ impl SourceResult {
             tcp_port,
             udp_port,
             obfuscation_options,
+            source_type,
+            buddy_id,
+            buddy_ip,
+            buddy_port,
         })
     }
 }
@@ -362,6 +433,39 @@ mod tests {
         assert_eq!(result.tcp_port, 4662);
         assert_eq!(result.udp_port, 4672);
         assert_eq!(result.obfuscation_options, Some(0x03));
+    }
+
+    #[test]
+    fn test_source_result_parses_firewalled_buddy_fields() {
+        // A master-shaped firewalled LowID source entry (CSearch::ProcessResultFile
+        // type 3): FT_SOURCETYPE + buddy id (FT_BUDDYHASH) + buddy relay endpoint
+        // (FT_SERVERIP/FT_SERVERPORT).
+        let hash = Ed2kHash::from_bytes([9u8; 16]);
+        let source_id = Ed2kHash::from_bytes([10u8; 16]);
+        let tags = vec![
+            Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0x0A0B0C0D)),
+            Tag::new_short(tag_name::SOURCEPORT, TagValue::U16(4662)),
+            Tag::new_short(tag_name::SOURCETYPE, TagValue::U8(3)),
+            Tag::new_short(tag_name::SERVERIP, TagValue::U32(0xC6336488)),
+            Tag::new_short(tag_name::SERVERPORT, TagValue::U16(5000)),
+            Tag::new_short(
+                tag_name::BUDDYHASH,
+                TagValue::String("0123456789abcdef0123456789abcdef".to_string()),
+            ),
+        ];
+        let result = SourceResult::from_tags(hash, source_id, tags).expect("buddy source result");
+        assert_eq!(result.source_type, 3);
+        assert!(result.is_firewalled_buddy_source());
+        assert_eq!(
+            result.buddy_id,
+            Some([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef
+            ])
+        );
+        assert_eq!(result.buddy_ip, Some(Ipv4Addr::new(198, 51, 100, 136)));
+        assert_eq!(result.buddy_port, 5000);
+        assert_eq!(result.ip, Ipv4Addr::new(10, 11, 12, 13));
     }
 
     #[test]

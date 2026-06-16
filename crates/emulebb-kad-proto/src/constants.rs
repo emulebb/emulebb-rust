@@ -106,6 +106,10 @@ pub mod tag_name {
     pub const KADMISCOPTIONS: u8 = 0xF2;
     pub const ENCRYPTION: u8 = 0xF3;
     pub const FILERATING: u8 = 0xF7;
+    /// Buddy id (firewalled Kad source's buddy Kad-id) as a 32-char hex string.
+    pub const BUDDYHASH: u8 = 0xF8;
+    /// Buddy (relay) UDP port for a firewalled Kad source.
+    pub const SERVERPORT: u8 = 0xFA;
     pub const SERVERIP: u8 = 0xFB;
     pub const SOURCEUPORT: u8 = 0xFC;
     pub const SOURCEPORT: u8 = 0xFD;
