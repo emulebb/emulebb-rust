@@ -92,6 +92,7 @@ rationale = "frozen legacy REST route/controller aggregation; split routes, requ
 [ipv4_only]
 allowed_ipv6_mentions = [
     "crates/emulebb-core/src/lib.rs",
+    "crates/emulebb-core/src/kad_hello.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/transport.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/buddy_link.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",
