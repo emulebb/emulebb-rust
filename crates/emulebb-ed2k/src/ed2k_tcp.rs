@@ -209,6 +209,12 @@ const OP_SIGNATURE: u8 = 0x86;
 const OP_SECIDENTSTATE: u8 = 0x87;
 const OP_FWCHECKUDPREQ: u8 = 0xA7;
 const TCP_PACKET_HEADER_LEN: usize = 6;
+/// Hard cap on the raw (on-wire) eD2k packet length, mirroring the master
+/// client's `sizeof GlobalReadBuffer` (`EMSocket.cpp`: `static char
+/// GlobalReadBuffer[2000000];`). A peer declaring a larger length is dropped
+/// with `ERR_TOOBIG` before any payload buffer is allocated, preventing an
+/// out-of-memory denial of service from a hostile `packet_length`.
+pub(crate) const MAX_ED2K_PACKET_LEN: usize = 2_000_000;
 const MAX_PEER_DECOMPRESSED_PACKET_LEN: usize = 50_000;
 const ED2K_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const ED2K_UPLOAD_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);

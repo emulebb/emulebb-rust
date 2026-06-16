@@ -12,8 +12,9 @@ use tokio::{
 };
 
 use super::{
-    Rc4KeyStream, TCP_PACKET_HEADER_LEN, accept_incoming_obfuscation_handshake,
-    decode_peer_payload, is_plain_ed2k_protocol_marker, negotiate_outgoing_obfuscation_handshake,
+    MAX_ED2K_PACKET_LEN, OP_EDONKEYPROT, OP_EMULEPROT, OP_PACKEDPROT, Rc4KeyStream,
+    TCP_PACKET_HEADER_LEN, accept_incoming_obfuscation_handshake, decode_peer_payload,
+    is_plain_ed2k_protocol_marker, negotiate_outgoing_obfuscation_handshake,
     should_enable_outgoing_obfuscation,
 };
 
@@ -180,11 +181,19 @@ impl Ed2kTransport {
             header_rest[3],
         ]);
         let opcode = header_rest[4];
+        if !matches!(protocol, OP_EDONKEYPROT | OP_PACKEDPROT | OP_EMULEPROT) {
+            anyhow::bail!("invalid eD2k peer protocol header 0x{protocol:02X}");
+        }
         if packet_length == 0 {
             anyhow::bail!("invalid eD2k packet length 0");
         }
 
         let payload_len = usize::try_from(packet_length - 1).context("packet length overflow")?;
+        if payload_len > MAX_ED2K_PACKET_LEN {
+            anyhow::bail!(
+                "oversized eD2k peer packet length {payload_len} exceeds {MAX_ED2K_PACKET_LEN}"
+            );
+        }
         let mut payload = vec![0u8; payload_len];
         self.read_exact(&mut payload).await?;
         let (protocol, payload) = decode_peer_payload(protocol, payload)?;
@@ -240,5 +249,110 @@ impl Ed2kTransport {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::OP_HELLO;
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// Build a plaintext transport whose `read_packet` consumes only the
+    /// `prefetched` bytes (the cap/header validation happens before any payload
+    /// read). The TcpStream is a parked loopback connection used purely to
+    /// satisfy the struct field; its contents are never read in these cases.
+    async fn transport_with_prefetched(prefetched: Vec<u8>) -> (Ed2kTransport, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = listener.accept().await.unwrap();
+        let stream = connect.await.unwrap();
+        (
+            Ed2kTransport {
+                stream,
+                prefetched: prefetched.into(),
+                receive_cipher: None,
+                send_cipher: None,
+                mode: Ed2kTransportMode::Plaintext,
+            },
+            // Returned so the caller controls the peer side (e.g. drop it to
+            // force EOF on a payload read).
+            server,
+        )
+    }
+
+    fn header(protocol: u8, packet_length: u32, opcode: u8) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(TCP_PACKET_HEADER_LEN);
+        bytes.push(protocol);
+        bytes.extend_from_slice(&packet_length.to_le_bytes());
+        bytes.push(opcode);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_declared_packet_length_without_allocating() {
+        // A hostile peer declares packet_length = 0xFFFFFFFF (~4GB). The cap
+        // must reject it before the payload buffer is allocated.
+        let (mut transport, _server) =
+            transport_with_prefetched(header(OP_EDONKEYPROT, u32::MAX, OP_HELLO)).await;
+        let err = transport
+            .read_packet()
+            .await
+            .expect_err("oversized declared length must be rejected");
+        assert!(
+            err.to_string().contains("oversized eD2k peer packet length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_declared_length_at_the_cap_boundary() {
+        // packet_length = MAX_ED2K_PACKET_LEN + 1 -> payload_len == cap, allowed
+        // by the bound (it only rejects payload_len > cap). The payload read
+        // then fails on the closed parked stream, proving we got past the cap.
+        let packet_length = u32::try_from(MAX_ED2K_PACKET_LEN + 1).unwrap();
+        let (mut transport, server) =
+            transport_with_prefetched(header(OP_EDONKEYPROT, packet_length, OP_HELLO)).await;
+        // Close the peer side so the (allowed) payload read fails with EOF
+        // instead of blocking forever.
+        drop(server);
+        let err = transport
+            .read_packet()
+            .await
+            .expect_err("payload read should fail on the closed peer");
+        // The failure must come from the payload read, NOT the oversized cap.
+        assert!(
+            !err.to_string().contains("oversized eD2k peer packet length"),
+            "boundary length must not trip the cap: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_protocol_header() {
+        // Protocol byte not in {0xE3, 0xD4, 0xC5} -> drop (ERR_WRONGHEADER).
+        let (mut transport, _server) = transport_with_prefetched(header(0x12, 5, OP_HELLO)).await;
+        let err = transport
+            .read_packet()
+            .await
+            .expect_err("bad protocol header must be rejected");
+        assert!(
+            err.to_string().contains("invalid eD2k peer protocol header"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_packet_length() {
+        let (mut transport, _server) =
+            transport_with_prefetched(header(OP_EDONKEYPROT, 0, OP_HELLO)).await;
+        let err = transport
+            .read_packet()
+            .await
+            .expect_err("zero packet length must be rejected");
+        assert!(
+            err.to_string().contains("invalid eD2k packet length 0"),
+            "unexpected error: {err}"
+        );
     }
 }

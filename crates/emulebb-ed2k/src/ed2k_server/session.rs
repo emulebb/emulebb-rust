@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::debug;
 
+use crate::ed2k_tcp::MAX_ED2K_PACKET_LEN;
+
 use super::{
     EMULE_ENCRYPTION_METHOD_OBFUSCATION, EMULE_TCP_CRYPT_MAGIC_REQUESTER,
     EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC, Ed2kServerState, OP_EDONKEYPROT,
@@ -127,6 +129,30 @@ impl ServerSession {
             server_list_requested: false,
             phase: ServerSessionPhase::Connecting,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_stream_for_test(stream: TcpStream, endpoint: SocketAddr) -> Self {
+        let trace_id = NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            stream,
+            endpoint,
+            state: Arc::new(RwLock::new(Ed2kServerState::default())),
+            trace_id,
+            trace_role: "test",
+            last_tx: Instant::now(),
+            receive_cipher: None,
+            send_cipher: None,
+            login_accepted: false,
+            probe_search_sent: false,
+            offer_files_sent: false,
+            offer_files_sent_at: None,
+            offer_files_catalog_fingerprint: None,
+            assigned_client_id: None,
+            server_flags: None,
+            server_list_requested: false,
+            phase: ServerSessionPhase::Connecting,
+        }
     }
 
     pub(super) fn set_phase(&mut self, phase: ServerSessionPhase, note: impl Into<String>) {
@@ -327,6 +353,14 @@ impl ServerSession {
         }
         let payload_len =
             usize::try_from(packet_length - 1).context("server packet length overflow")?;
+        if payload_len > MAX_ED2K_PACKET_LEN {
+            anyhow::bail!(
+                "oversized ED2K server packet length {} exceeds {} from {}",
+                payload_len,
+                MAX_ED2K_PACKET_LEN,
+                self.endpoint
+            );
+        }
         let mut payload = vec![0u8; payload_len];
         self.stream.read_exact(&mut payload).await?;
         if let Some(cipher) = self.receive_cipher.as_mut() {
@@ -350,5 +384,42 @@ impl ServerSession {
             opcode: header[5],
             payload,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// A peer that declares an oversized server packet length must be dropped
+    /// before the payload buffer is allocated (raw-length cap mirroring
+    /// `sizeof GlobalReadBuffer`), preventing an OOM denial of service.
+    #[tokio::test]
+    async fn server_read_rejects_oversized_declared_length() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut peer = TcpStream::connect(addr).await.unwrap();
+            // OP_EDONKEYPROT header declaring packet_length = 0xFFFFFFFF (~4GB).
+            let mut header = vec![OP_EDONKEYPROT];
+            header.extend_from_slice(&u32::MAX.to_le_bytes());
+            header.push(OP_EDONKEYPROT); // opcode byte (value irrelevant)
+            peer.write_all(&header).await.unwrap();
+            // Keep the peer alive so the server reads the header, not EOF.
+            peer
+        });
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        let _peer = writer.await.unwrap();
+        let mut session = ServerSession::from_stream_for_test(stream, peer_addr);
+        let err = session
+            .read_packet()
+            .await
+            .expect_err("oversized server packet length must be rejected");
+        assert!(
+            err.to_string().contains("oversized ED2K server packet length"),
+            "unexpected error: {err}"
+        );
     }
 }
