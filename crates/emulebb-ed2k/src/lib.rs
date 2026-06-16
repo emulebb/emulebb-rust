@@ -1,3 +1,4 @@
+pub mod ban_store;
 pub mod buddy_socket;
 pub mod config;
 pub mod diag_event;

@@ -15,6 +15,9 @@ use crate::ed2k_tcp::{
     verify_peer_secure_ident_signature,
 };
 
+use crate::ed2k_transfer::Ed2kTransferRuntime;
+use tracing::debug;
+
 use super::state::DownloadSessionState;
 
 /// OP_SECIDENTSTATE: the peer told us which credential (key and/or signature)
@@ -100,6 +103,7 @@ pub(super) fn handle_signature(
     peer_addr: SocketAddr,
     secure_ident: &Ed2kSecureIdent,
     session_state: &mut DownloadSessionState,
+    transfer_runtime: &Ed2kTransferRuntime,
     payload: &[u8],
 ) {
     match decode_signature_payload(payload) {
@@ -111,6 +115,21 @@ pub(super) fn handle_signature(
                 peer_addr,
                 None,
             );
+            // Bind the just-verified uploader pubkey to its credit row (wiping
+            // credits if a different key verified for this user hash before --
+            // eMule CClientCredits::Verified anti-takeover).
+            if verified {
+                if let (Some(user_hash), Some(public_key)) = (
+                    session_state.peer_user_hash,
+                    session_state.peer_secure_ident.peer_public_key.as_deref(),
+                ) {
+                    if let Err(error) =
+                        transfer_runtime.record_verified_secure_ident(user_hash, public_key)
+                    {
+                        debug!("failed to bind verified secure-ident pubkey: {error:#}");
+                    }
+                }
+            }
             dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport.mode),

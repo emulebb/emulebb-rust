@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::debug;
 
-use crate::ed2k_transfer::Ed2kUploadPeerIdentity;
+use crate::ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 
 use super::super::super::dump::{dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_send};
 use super::super::super::identity::{
@@ -110,6 +110,7 @@ pub(super) fn handle_signature(
     secure_ident: &Arc<Ed2kSecureIdent>,
     peer_secure_ident: &mut Ed2kPeerSecureIdentState,
     peer_upload_identity: &mut Ed2kUploadPeerIdentity,
+    transfer_runtime: &Ed2kTransferRuntime,
     external_ip: Option<Ipv4Addr>,
     payload: &[u8],
 ) {
@@ -122,6 +123,12 @@ pub(super) fn handle_signature(
                 peer_addr,
                 external_ip,
             );
+            // On a successful verify, bind the peer's pubkey to its credit row
+            // (wiping credits if a different key verified for this user hash
+            // before -- eMule CClientCredits::Verified anti-takeover).
+            if verified {
+                bind_verified_pubkey(transfer_runtime, peer_secure_ident, peer_upload_identity);
+            }
             dump_ed2k_tcp_listener_meta(
                 peer_addr,
                 Some(transport.mode),
@@ -150,5 +157,24 @@ pub(super) fn handle_signature(
                 format!("error={error:#}"),
             );
         }
+    }
+}
+
+/// Bind the just-verified peer pubkey to its credit row (eMule
+/// `CClientCredits::Verified`). Requires both the peer's user hash (from the
+/// hello) and its public key (from OP_PUBLICKEY); a missing either is a no-op.
+fn bind_verified_pubkey(
+    transfer_runtime: &Ed2kTransferRuntime,
+    peer_secure_ident: &Ed2kPeerSecureIdentState,
+    peer_upload_identity: &Ed2kUploadPeerIdentity,
+) {
+    let (Some(user_hash), Some(public_key)) = (
+        peer_upload_identity.user_hash,
+        peer_secure_ident.peer_public_key.as_deref(),
+    ) else {
+        return;
+    };
+    if let Err(error) = transfer_runtime.record_verified_secure_ident(user_hash, public_key) {
+        debug!("failed to bind verified secure-ident pubkey: {error:#}");
     }
 }

@@ -261,6 +261,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     upload_peer_identity_from_hello(peer_addr, &hello_profile);
                 // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
                 peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
+                // Feed the upload-score `banned` flag from the ban store now that
+                // we know the peer's user hash (eMule `CUpDownClient::IsBanned`
+                // -> upload score 0). Either the IP or the hash being banned
+                // zeroes the score, exactly like `IsBannedClient(pClient)`.
+                let peer_ban_ip = match peer_addr {
+                    SocketAddr::V4(v4) => Some(*v4.ip()),
+                    SocketAddr::V6(_) => None,
+                };
+                peer_upload_identity.banned = transfer_runtime
+                    .is_client_banned(peer_ban_ip, Some(&hello_profile.identity.user_hash));
                 debug!(
                     "received eD2k OP_HELLO from {peer_addr} transport={} mule_hello={}",
                     transport.mode.as_str(),
@@ -605,6 +615,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     secure_ident,
                     &mut peer_secure_ident,
                     &mut peer_upload_identity,
+                    transfer_runtime,
                     reachability.get(),
                     &packet.payload,
                 );

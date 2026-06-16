@@ -103,12 +103,16 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
         tcp_port: 4662,
         user_hash: Some(hex::encode([0x77; 16])),
     }));
+    // FIX 3: the download path attributes credit only to a cryptographically
+    // verified peer (eMule CClientCredits::AddDownloaded gates IS_IDFAILED/
+    // IDNEEDED when crypto is available). This test peer never completes a secure
+    // -ident handshake, so no download credit is attributed to its user hash.
     assert_eq!(
         transfer_runtime
             .peer_credit_by_hash([0x42; 16])
             .unwrap()
             .map(|credit| credit.downloaded_bytes),
-        Some(payload.len() as u64)
+        None
     );
     assert!(transfer_runtime.download_speed_bytes_per_sec(&file_hash_hex) > 0);
     server.await.unwrap();

@@ -13,7 +13,7 @@
 use std::{
     collections::HashMap,
     fs,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex, atomic::AtomicU64},
     time::{Duration, Instant},
@@ -190,6 +190,11 @@ pub struct Ed2kTransferRuntime {
     /// `theStats.sessionReceivedBytes`/`sessionSentBytes`). In-memory only.
     session_downloaded_bytes: AtomicU64,
     session_uploaded_bytes: AtomicU64,
+    /// In-memory client ban store (eMule `CClientList` ban lists), keyed by IP +
+    /// user hash with a 4h `CLIENTBANTIME` TTL. Shared with the inbound listener,
+    /// the download driver, the UDP reask runtime, and core via this runtime's
+    /// `Arc`. Not persisted across restart, matching the master.
+    ban_store: Arc<crate::ban_store::BanStore>,
 }
 
 impl Ed2kTransferRuntime {
@@ -261,7 +266,7 @@ impl Ed2kTransferRuntime {
         let shared_catalog = Arc::new(RwLock::new(transfer_sql::completed_catalog_from_metadata(
             metadata.transfer_manifests()?,
         )?));
-        Ok(Self {
+        let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,
             shared_catalog,
@@ -283,7 +288,36 @@ impl Ed2kTransferRuntime {
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
-        })
+            ban_store: Arc::new(crate::ban_store::BanStore::new()),
+        };
+        // Credit aging on startup: drop peer credit rows last seen > 150 days ago
+        // (eMule CClientCreditsList::LoadList, ClientCredits.cpp:240-251). The
+        // ban list itself is intentionally NOT persisted, matching the master.
+        if let Err(error) = runtime.prune_aged_peer_credits() {
+            tracing::warn!("failed to prune aged peer credits on startup: {error:#}");
+        }
+        Ok(runtime)
+    }
+
+    /// Shared client ban store handle (eMule `CClientList` ban lists). Cloning
+    /// the `Arc` lets the listener / download driver / reask runtime / core
+    /// consult and mutate the same in-memory, TTL'd ban set.
+    #[must_use]
+    pub fn ban_store(&self) -> Arc<crate::ban_store::BanStore> {
+        Arc::clone(&self.ban_store)
+    }
+
+    /// Ban a client by IP and/or user hash for `CLIENTBANTIME` (4h), mirroring
+    /// `CClientList::AddBannedClient(pClient, clientBanScopeBoth)`.
+    pub fn ban_client(&self, ip: Option<Ipv4Addr>, user_hash: Option<[u8; 16]>) {
+        self.ban_store.ban(ip, user_hash);
+    }
+
+    /// Whether the client identified by `ip` and/or `user_hash` is currently
+    /// banned by either key (`CClientList::IsBannedClient`).
+    #[must_use]
+    pub fn is_client_banned(&self, ip: Option<Ipv4Addr>, user_hash: Option<&[u8; 16]>) -> bool {
+        self.ban_store.is_banned(ip, user_hash)
     }
 
     /// Reserve global download budget for `byte_count` inbound payload bytes,

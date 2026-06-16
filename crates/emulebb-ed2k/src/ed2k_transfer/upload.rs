@@ -209,6 +209,26 @@ impl Ed2kTransferRuntime {
         self.metadata.peer_credit_by_hash(&hex::encode(user_hash))
     }
 
+    /// Prune peer credit rows last seen more than 150 days ago (eMule
+    /// `CClientCreditsList::LoadList` credit aging). Returns the number pruned.
+    pub fn prune_aged_peer_credits(&self) -> anyhow::Result<usize> {
+        self.metadata.prune_aged_peers()
+    }
+
+    /// Bind a verified secure-ident public key to the peer's credit row,
+    /// wiping its credits if a DIFFERENT key verified for the same user hash
+    /// before (eMule `CClientCredits::Verified` anti-takeover, ClientCredits.cpp
+    /// :338-356). Called from the secure-ident verify paths (upload listener +
+    /// download identity verify). Returns `true` when credits were wiped.
+    pub(crate) fn record_verified_secure_ident(
+        &self,
+        user_hash: [u8; 16],
+        public_key: &[u8],
+    ) -> anyhow::Result<bool> {
+        self.metadata
+            .record_verified_secure_ident(&hex::encode(user_hash), public_key)
+    }
+
     fn file_priority_score(&self, file_hash: &Ed2kHash) -> i128 {
         self.metadata
             .transfer_manifest_by_hash(&file_hash.to_string())

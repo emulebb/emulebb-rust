@@ -17,6 +17,7 @@ use std::{
 
 mod aich_trust_corroboration;
 mod aich_tree;
+mod ban_store_runtime;
 mod download_throttle;
 mod file_status_parts;
 mod reask_reciprocity;

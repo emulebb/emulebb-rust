@@ -36,6 +36,13 @@ pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {
     pub(in crate::ed2k_tcp) session_payload_down: &'a mut u64,
     pub(in crate::ed2k_tcp) part_response_deadline: &'a mut Option<tokio::time::Instant>,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
+    /// The peer user hash to attribute *download credit* to, set to `Some` only
+    /// when the peer's secure identity is cryptographically verified (eMule
+    /// `CClientCredits::AddDownloaded` early-returns for IS_IDFAILED/IDBADGUY/
+    /// IDNEEDED when crypto is available; `ClientCredits.cpp:83-91`). Distinct
+    /// from `peer_user_hash`, which is the hello-claimed hash used for ban
+    /// attribution + live source display and must NOT gate credit.
+    pub(in crate::ed2k_tcp) credit_user_hash: Option<[u8; 16]>,
     /// Parts whose MD4 verification just failed; the session drains these to
     /// solicit AICH/ICH recovery from the peer (master `RequestAICHRecovery`).
     pub(in crate::ed2k_tcp) aich_recovery_parts: &'a mut Vec<u16>,
@@ -56,6 +63,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         session_payload_down,
         part_response_deadline,
         peer_user_hash,
+        credit_user_hash,
         aich_recovery_parts,
     } = blocks;
     while pending_part_requests
@@ -84,6 +92,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
+            ban_corrupt_data_sender(transfer_runtime, peer_addr, peer_user_hash);
         }
         dump_ed2k_tcp_download_meta(
             peer_addr,
@@ -97,7 +106,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         *completed_block_count = completed_block_count.saturating_add(1);
         let downloaded_bytes = request.end.saturating_sub(request.start);
         *session_payload_down = session_payload_down.saturating_add(downloaded_bytes);
-        if let Some(user_hash) = peer_user_hash {
+        if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, downloaded_bytes)?;
         }
         transfer_runtime.note_download_payload_bytes(file_hash_hex, downloaded_bytes);
@@ -127,6 +136,26 @@ async fn reserve_download_budget(transfer_runtime: &Ed2kTransferRuntime, byte_co
     }
 }
 
+/// Ban the peer that just sent a part whose MD4 verification failed, mirroring
+/// the eMule `CorruptionBlackBox` -> `CUpDownClient::Ban("Identified as a sender
+/// of corrupt data")` path (`CorruptionBlackBox.cpp:290`). MD4 part-hash failure
+/// is the clearest unambiguous attribution available in the rust download model:
+/// the failing part's bytes all arrived on this one connected source over this
+/// session (single-source-per-part request window), so it is the rust analogue
+/// of eMule's guilty-client identification. The ban covers both the peer IP and
+/// (when known) its user hash, with the 4h `CLIENTBANTIME` TTL.
+fn ban_corrupt_data_sender(
+    transfer_runtime: &Ed2kTransferRuntime,
+    peer_addr: SocketAddr,
+    peer_user_hash: Option<[u8; 16]>,
+) {
+    let ip = match peer_addr {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None,
+    };
+    transfer_runtime.ban_client(ip, peer_user_hash);
+}
+
 /// Map a write outcome to a verification-failed part index (as a u16 part) so
 /// the session can request AICH recovery for it.
 fn verification_failed_part(outcome: PieceWriteOutcome) -> Option<u16> {
@@ -154,6 +183,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     peer_user_hash: Option<[u8; 16]>,
+    credit_user_hash: Option<[u8; 16]>,
     aich_recovery_parts: &mut Vec<u16>,
 ) -> Result<()> {
     loop {
@@ -205,8 +235,9 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
+            ban_corrupt_data_sender(transfer_runtime, peer_addr, peer_user_hash);
         }
-        if let Some(user_hash) = peer_user_hash {
+        if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;
         }
         transfer_runtime.note_download_payload_bytes(file_hash_hex, end.saturating_sub(start));

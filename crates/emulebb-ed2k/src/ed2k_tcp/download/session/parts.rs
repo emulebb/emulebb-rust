@@ -269,6 +269,8 @@ async fn flush_download_blocks(blocks: FlushDownloadBlocks<'_>) -> Result<()> {
         peer_addr,
         transport_mode,
     } = blocks;
+    let peer_user_hash = session_state.peer_user_hash;
+    let credit_user_hash = session_state.verified_credit_user_hash();
     flush_ready_download_blocks(ReadyDownloadBlocks {
         transfer_runtime,
         file_hash_hex,
@@ -280,7 +282,8 @@ async fn flush_download_blocks(blocks: FlushDownloadBlocks<'_>) -> Result<()> {
         completed_block_count: &mut session_state.completed_block_count,
         session_payload_down: &mut session_state.session_payload_down,
         part_response_deadline: &mut session_state.part_response_deadline,
-        peer_user_hash: session_state.peer_user_hash,
+        peer_user_hash,
+        credit_user_hash,
         aich_recovery_parts: &mut session_state.pending_aich_recovery_parts,
     })
     .await

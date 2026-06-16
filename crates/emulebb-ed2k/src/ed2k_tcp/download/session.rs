@@ -460,6 +460,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         secure_ident,
                         &mut session_state,
+                        transfer_runtime,
                         &packet.payload,
                     );
                 }
@@ -1106,6 +1107,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         // The session is ending; any part that fails MD4 here cannot be
         // recovered over this connection, so the recovery queue is discarded.
         let mut teardown_recovery_parts = Vec::new();
+        let teardown_peer_user_hash = session_state.peer_user_hash;
+        let teardown_credit_user_hash = session_state.verified_credit_user_hash();
         flush_buffered_download_prefixes(
             transfer_runtime,
             file_hash_hex,
@@ -1114,7 +1117,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             &mut manifest,
             peer_addr,
             transport.mode,
-            session_state.peer_user_hash,
+            teardown_peer_user_hash,
+            teardown_credit_user_hash,
             &mut teardown_recovery_parts,
         )
         .await?;

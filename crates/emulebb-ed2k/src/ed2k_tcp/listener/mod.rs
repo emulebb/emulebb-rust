@@ -81,6 +81,15 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                         drop(stream);
                         continue;
                     }
+                    // Reject inbound connections from a banned IP at accept, like
+                    // eMule `CListenSocket::OnAccept` -> `IsBannedClient(sin_addr)`
+                    // (ListenSocket.cpp:2362,2511). The user-hash half of the ban
+                    // is enforced once the hello arrives.
+                    if transfer_runtime.is_client_banned(Some(ip), None) {
+                        debug!("dropping inbound eD2k connection from banned peer {peer_addr}");
+                        drop(stream);
+                        continue;
+                    }
                 }
                 // Pin the accepted socket's egress to the VPN tunnel (IP_UNICAST_IF),
                 // best-effort: the socket already sources from the VPN bind IP, so a
