@@ -63,6 +63,11 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         .is_some_and(|request| request.queued && request.is_ready())
     {
         let request = pending_part_requests.remove(0);
+        // Reserve global download budget for this block's inbound payload before
+        // consuming it, so the shared token bucket paces all concurrent transfer
+        // tasks together (mirrors the upload side reserving before each payload
+        // write). A no-op when the download limit is 0 (unlimited).
+        reserve_download_budget(transfer_runtime, request.response_bytes.len()).await;
         let (outcome, refreshed_manifest) = transfer_runtime
             .append_or_salvage_block_with_manifest(
                 file_hash_hex,
@@ -107,6 +112,19 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         *part_response_deadline = None;
     }
     Ok(())
+}
+
+/// Await the global download-rate reservation for one inbound block before it
+/// is consumed, so the shared token bucket paces every concurrent transfer
+/// task together (the download-side counterpart to the upload payload
+/// reservation). A no-op when the limit is 0 (unlimited).
+async fn reserve_download_budget(transfer_runtime: &Ed2kTransferRuntime, byte_count: usize) {
+    let reservation = transfer_runtime
+        .reserve_download_payload_budget(u64::try_from(byte_count).unwrap_or(u64::MAX))
+        .await;
+    if !reservation.delay.is_zero() {
+        tokio::time::sleep(reservation.delay).await;
+    }
 }
 
 /// Map a write outcome to a verification-failed part index (as a u16 part) so
@@ -173,6 +191,10 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             )
         };
 
+        // Reserve global download budget for this contiguous prefix's inbound
+        // payload before consuming it, so the shared token bucket paces all
+        // concurrent transfer tasks together. A no-op when unlimited.
+        reserve_download_budget(transfer_runtime, bytes.len()).await;
         let (outcome, refreshed_manifest) = transfer_runtime
             .append_piece_block_with_manifest(file_hash_hex, piece_index, start, end, &bytes)
             .await?;

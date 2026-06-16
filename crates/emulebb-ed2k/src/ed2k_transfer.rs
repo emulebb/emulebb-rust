@@ -32,6 +32,7 @@ mod callback;
 mod catalog;
 mod download_activity;
 mod download_pick;
+mod download_throttle;
 mod hashset;
 mod ingest;
 mod manifest;
@@ -49,6 +50,8 @@ mod upload_queue;
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+use download_throttle::Ed2kDownloadThrottle;
+pub use download_throttle::Ed2kDownloadThrottleReservation;
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
@@ -101,6 +104,12 @@ pub struct Ed2kTransferRuntime {
     /// detail. In-memory only (live session state, never persisted).
     download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
+    /// Shared cross-transfer download-rate limiter (token bucket). One per
+    /// runtime, consulted by every download task before it consumes a received
+    /// block so the aggregate inbound payload respects the global cap (eMule
+    /// `CDownloadQueue::Process` `downspeed` budget). The symmetric counterpart
+    /// to the upload-side `reserve_upload_payload` limiter. Unlimited by default.
+    download_throttle: Arc<Mutex<Ed2kDownloadThrottle>>,
     next_upload_connection_id: AtomicU64,
     /// Monotonic payload bytes received/sent since the runtime started, for the
     /// REST `sessionDownloadedBytes`/`sessionUploadedBytes` stats (oracle
@@ -126,6 +135,7 @@ impl Ed2kTransferRuntime {
             root_dir,
             metadata,
             Ed2kUploadQueueConfig::default(),
+            0,
         )
     }
 
@@ -139,6 +149,7 @@ impl Ed2kTransferRuntime {
             root_dir,
             metadata,
             upload_queue_config_from_policy(&config.upload_queue),
+            config.download_limit_bytes_per_sec,
         )
     }
 
@@ -152,13 +163,19 @@ impl Ed2kTransferRuntime {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
         let metadata = MetadataStore::open(root_dir.join("metadata.sqlite"))?;
-        Self::load_or_create_with_metadata_and_upload_queue(root_dir, metadata, upload_queue_config)
+        Self::load_or_create_with_metadata_and_upload_queue(
+            root_dir,
+            metadata,
+            upload_queue_config,
+            0,
+        )
     }
 
     pub(crate) fn load_or_create_with_metadata_and_upload_queue(
         root_dir: &Path,
         metadata: MetadataStore,
         upload_queue_config: Ed2kUploadQueueConfig,
+        download_limit_bytes_per_sec: u64,
     ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
@@ -178,10 +195,54 @@ impl Ed2kTransferRuntime {
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
+            download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
+                download_limit_bytes_per_sec,
+            ))),
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
         })
+    }
+
+    /// Reserve global download budget for `byte_count` inbound payload bytes,
+    /// returning the delay the download task must await before consuming them.
+    ///
+    /// The symmetric counterpart to `reserve_upload_payload_budget`: every
+    /// transfer task draws from one shared token bucket, so the SUM of all
+    /// concurrent transfers' inbound payload respects the configured cap. A
+    /// no-op (instant) when the limit is 0 (unlimited).
+    pub(crate) async fn reserve_download_payload_budget(
+        &self,
+        byte_count: u64,
+    ) -> Ed2kDownloadThrottleReservation {
+        self.reserve_download_payload_budget_at(byte_count, Instant::now())
+            .await
+    }
+
+    pub(crate) async fn reserve_download_payload_budget_at(
+        &self,
+        byte_count: u64,
+        now: Instant,
+    ) -> Ed2kDownloadThrottleReservation {
+        self.download_throttle
+            .lock()
+            .await
+            .reserve_download_payload(byte_count, now)
+    }
+
+    /// Replace the active global download rate limit (0 = unlimited). Threaded
+    /// from the daemon/REST preferences like the upload limit.
+    pub async fn apply_download_limit(&self, limit_bytes_per_sec: u64) {
+        self.download_throttle
+            .lock()
+            .await
+            .set_limit(limit_bytes_per_sec);
+    }
+
+    /// Return the active global download rate limit in bytes per second
+    /// (0 = unlimited).
+    pub async fn download_limit_bytes_per_sec(&self) -> u64 {
+        self.download_throttle.lock().await.limit_bytes_per_sec()
     }
 
     pub(crate) async fn should_request_source_exchange(

@@ -16,6 +16,7 @@ use std::{
 };
 
 mod aich_tree;
+mod download_throttle;
 mod reask_reciprocity;
 mod salvage;
 mod upload_queue;

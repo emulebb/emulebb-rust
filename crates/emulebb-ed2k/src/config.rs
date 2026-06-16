@@ -35,6 +35,14 @@ pub struct Ed2kConfig {
     pub kad_source_supplement_max_existing_sources: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
     pub upload_queue: Ed2kUploadQueuePolicyConfig,
+    /// Global (cross-transfer) download payload budget in bytes per second.
+    /// Zero (the default) disables throttling: aggregate inbound bandwidth is
+    /// unbounded, matching today's behavior. When non-zero, a single shared
+    /// token bucket paces every transfer task's inbound block reads so their
+    /// SUM respects this cap (eMule `CDownloadQueue::Process` `downspeed`
+    /// budget). The download-side counterpart to
+    /// `upload_queue.upload_limit_bytes_per_sec`.
+    pub download_limit_bytes_per_sec: u64,
     /// Enable client-to-client UDP source reask on the shared Kad UDP port.
     /// The Rust client's experimental transfer profile keeps queued sources warm
     /// over UDP and falls back to TCP when a peer cannot be reasked reliably.
@@ -91,6 +99,7 @@ impl Default for Ed2kConfig {
             source_server_attempt_budget: 3,
             kad_source_supplement_max_existing_sources: 2,
             upload_queue: Ed2kUploadQueuePolicyConfig::default(),
+            download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
         }
@@ -128,5 +137,8 @@ mod tests {
         assert_eq!(config.source_server_attempt_budget, 3);
         assert_eq!(config.kad_source_supplement_max_existing_sources, 2);
         assert!(config.enable_udp_reask);
+        // Download throttle is unlimited (0) by default, matching today's
+        // unbounded aggregate inbound behavior.
+        assert_eq!(config.download_limit_bytes_per_sec, 0);
     }
 }
