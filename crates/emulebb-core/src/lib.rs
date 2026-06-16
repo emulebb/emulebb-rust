@@ -48,22 +48,26 @@ use emulebb_ed2k::stun::{
     DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
 };
 use emulebb_index::{
-    FileIndex, IndexedFile, KadLocalStore, ScheduledSnoopRequest, SnoopEntry,
-    SnoopQueue, SnoopQueueFamilyCounts, metadata_from_publish_snapshot,
-    publish_snapshot_from_metadata,
+    FileIndex, IndexedFile, KadLocalStore, SnoopEntry, SnoopQueue,
+    metadata_from_publish_snapshot, publish_snapshot_from_metadata,
 };
 #[cfg(test)]
-use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig};
+use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
 use emulebb_kad_dht::{
-    DhtConfig, DhtNode, NoteResult as KadNoteResult, PublishAttemptStats, ReceivedKadPacket,
-    RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
+    DhtConfig, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass,
+};
+#[cfg(test)]
+use emulebb_kad_dht::{
+    NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult,
 };
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes,
-    HelloResAck, KAD_VERSION, KadPacket, PublishRes, SearchKeyReq, SearchNotesReq,
-    SearchRes, SearchResultEntry, SearchSourceReq, Tag, constants::K,
+    HelloResAck, KAD_VERSION, KadPacket, PublishRes,
+    SearchRes, SearchResultEntry, Tag, constants::K,
     packet::ContactEntry,
 };
+#[cfg(test)]
+use emulebb_kad_proto::{SearchKeyReq, SearchNotesReq, SearchSourceReq};
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 #[cfg(test)]
@@ -75,7 +79,6 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -84,6 +87,7 @@ mod download_source_registry;
 mod ed2k_sources;
 mod kad_buddy;
 mod kad_hello;
+mod kad_passive_replay;
 mod kad_snoop_entry;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
@@ -124,6 +128,12 @@ use kad_hello::{
 #[cfg(test)]
 use kad_hello::{
     build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
+};
+use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
+#[cfg(test)]
+use kad_passive_replay::{
+    PassiveReplayFamily, index_passive_keyword_result, preferred_passive_replay_families,
+    remember_passive_note_results, remember_passive_source_results,
 };
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
@@ -168,10 +178,6 @@ const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
 const LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES: usize = 1420;
-const PASSIVE_GENERAL_CRAWL_SECS: u64 = 45;
-const PASSIVE_SOURCE_CRAWL_SECS: u64 = 15;
-const PASSIVE_KEYWORD_RESULT_TARGET: usize = 10;
-const PASSIVE_NOTES_RESULT_TARGET: usize = 3;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
@@ -3634,247 +3640,6 @@ async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassiveReplayWorker {
-    General,
-    Source,
-}
-
-#[derive(Debug)]
-enum PassiveReplaySelection {
-    Keyword(ScheduledSnoopRequest<SearchKeyReq>),
-    Source(ScheduledSnoopRequest<SearchSourceReq>),
-    Notes(ScheduledSnoopRequest<SearchNotesReq>),
-}
-
-async fn run_kad_passive_replay_loop(
-    dht: DhtNode,
-    snoop_queue: Arc<Mutex<SnoopQueue>>,
-    index: Arc<Mutex<FileIndex>>,
-    transfer_runtime: Arc<Ed2kTransferRuntime>,
-    shutdown: Arc<AtomicBool>,
-    worker: PassiveReplayWorker,
-) {
-    let interval = match worker {
-        PassiveReplayWorker::General => Duration::from_secs(PASSIVE_GENERAL_CRAWL_SECS),
-        PassiveReplayWorker::Source => Duration::from_secs(PASSIVE_SOURCE_CRAWL_SECS),
-    };
-    while !shutdown.load(Ordering::SeqCst) {
-        tokio::time::sleep(interval).await;
-        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
-            continue;
-        }
-        let selected = match worker {
-            PassiveReplayWorker::General => next_passive_replay_request(&snoop_queue).await,
-            PassiveReplayWorker::Source => next_passive_replay_source_request(&snoop_queue)
-                .await
-                .map(PassiveReplaySelection::Source),
-        };
-        let Some(selected) = selected else {
-            continue;
-        };
-        run_selected_passive_replay(&dht, &snoop_queue, &index, &transfer_runtime, selected).await;
-    }
-}
-
-async fn next_passive_replay_request(
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-) -> Option<PassiveReplaySelection> {
-    let mut queue = snoop_queue.lock().await;
-    let now = Utc::now();
-    for family in preferred_passive_replay_families(queue.family_counts()) {
-        let selected = match family {
-            PassiveReplayFamily::Keyword => queue
-                .select_next_keyword_request(now)
-                .map(PassiveReplaySelection::Keyword),
-            PassiveReplayFamily::Source => queue
-                .select_next_source_request(now)
-                .map(PassiveReplaySelection::Source),
-            PassiveReplayFamily::Notes => queue
-                .select_next_notes_request(now)
-                .map(PassiveReplaySelection::Notes),
-        };
-        if selected.is_some() {
-            return selected;
-        }
-    }
-    None
-}
-
-async fn next_passive_replay_source_request(
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-) -> Option<ScheduledSnoopRequest<SearchSourceReq>> {
-    snoop_queue
-        .lock()
-        .await
-        .select_next_source_request(Utc::now())
-}
-
-async fn run_selected_passive_replay(
-    dht: &DhtNode,
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-    index: &Arc<Mutex<FileIndex>>,
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    selected: PassiveReplaySelection,
-) {
-    let (logical_key, result_count) = match selected {
-        PassiveReplaySelection::Keyword(selected) => {
-            let logical_key = selected.logical_key;
-            let result_count = run_passive_keyword_replay(dht, index, selected.request).await;
-            (logical_key, result_count)
-        }
-        PassiveReplaySelection::Source(selected) => {
-            let source_stop_after_results = {
-                snoop_queue
-                    .lock()
-                    .await
-                    .config()
-                    .source_stop_after_results
-                    .max(1)
-            };
-            let logical_key = selected.logical_key;
-            let source_results =
-                run_passive_source_replay(dht, selected.request, source_stop_after_results).await;
-            remember_passive_source_results(transfer_runtime, &source_results).await;
-            (logical_key, source_results.len())
-        }
-        PassiveReplaySelection::Notes(selected) => {
-            let logical_key = selected.logical_key;
-            let note_results = run_passive_notes_replay(dht, selected.request).await;
-            remember_passive_note_results(transfer_runtime, &note_results).await;
-            (logical_key, note_results.len())
-        }
-    };
-    snoop_queue
-        .lock()
-        .await
-        .record_replay_outcome(&logical_key, Utc::now(), result_count);
-}
-
-async fn run_passive_keyword_replay(
-    dht: &DhtNode,
-    index: &Arc<Mutex<FileIndex>>,
-    request: SearchKeyReq,
-) -> usize {
-    let cancel = CancellationToken::new();
-    let mut stream = dht.search_keyword_request_with_cancel_and_class(
-        request.clone(),
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
-    let mut seen_hashes = HashSet::new();
-    let mut result_count = 0usize;
-    while let Some(result) = stream.next().await {
-        if !seen_hashes.insert(result.hash) {
-            continue;
-        }
-        result_count += 1;
-        index_passive_keyword_result(index, &result).await;
-        if result_count >= PASSIVE_KEYWORD_RESULT_TARGET {
-            cancel.cancel();
-            break;
-        }
-    }
-    tracing::debug!(
-        target = %request.target,
-        start_position = request.start_position,
-        result_count,
-        "completed Kad passive keyword replay"
-    );
-    result_count
-}
-
-async fn run_passive_source_replay(
-    dht: &DhtNode,
-    request: SearchSourceReq,
-    source_stop_after_results: usize,
-) -> Vec<SourceResult> {
-    let cancel = CancellationToken::new();
-    let mut stream = dht.search_source_request_with_cancel_and_class(
-        request.clone(),
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
-    let mut seen_sources = HashSet::new();
-    let mut results = Vec::new();
-    while let Some(result) = stream.next().await {
-        let source_key = (result.ip, result.tcp_port, result.udp_port);
-        if !seen_sources.insert(source_key) {
-            continue;
-        }
-        results.push(result);
-        if results.len() >= source_stop_after_results {
-            cancel.cancel();
-            break;
-        }
-    }
-    tracing::debug!(
-        target = %request.target,
-        start_position = request.start_position,
-        size = request.size,
-        result_count = results.len(),
-        "completed Kad passive source replay"
-    );
-    results
-}
-
-async fn remember_passive_source_results(
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    results: &[SourceResult],
-) {
-    for result in results {
-        let source = kad_source_result_to_ed2k_found_source(result.clone());
-        if !source.is_direct_dialable() {
-            continue;
-        }
-        let hint = Ed2kSourceHint {
-            ip: source.ip.to_string(),
-            tcp_port: source.tcp_port,
-            user_hash: source.user_hash.map(hex::encode),
-        };
-        if let Err(error) = transfer_runtime
-            .remember_source(&result.file_hash.to_string(), hint)
-            .await
-        {
-            tracing::debug!(
-                file_hash = %result.file_hash,
-                source = %SocketAddr::new(IpAddr::V4(result.ip), result.tcp_port),
-                "skipping passive Kad source memory: {error:#}"
-            );
-        }
-    }
-}
-
-async fn run_passive_notes_replay(dht: &DhtNode, request: SearchNotesReq) -> Vec<KadNoteResult> {
-    let cancel = CancellationToken::new();
-    let file_hash = Ed2kHash::from_bytes(request.target.to_be_bytes());
-    let mut stream = dht.search_notes_with_cancel_and_class(
-        file_hash,
-        request.size,
-        cancel.clone(),
-        RpcWorkClass::Harvest,
-    );
-    let mut seen_notes = HashSet::new();
-    let mut results = Vec::new();
-    while let Some(result) = stream.next().await {
-        if !seen_notes.insert(note_result_key(&result)) {
-            continue;
-        }
-        results.push(result);
-        if results.len() >= PASSIVE_NOTES_RESULT_TARGET {
-            cancel.cancel();
-            break;
-        }
-    }
-    tracing::debug!(
-        target = %request.target,
-        size = request.size,
-        result_count = results.len(),
-        "completed Kad passive notes replay"
-    );
-    results
-}
-
 /// The current TCP-firewalled (LowID) verdict, in oracle priority order:
 /// the eD2k server's authoritative LowID flag first, then the Kad TCP firewall
 /// recheck verdict (so a pure-Kad node with no server still detects it), then a
@@ -3904,95 +3669,6 @@ const LEGACY_VERIFY_VERSION_THRESHOLD: u8 = 8;
 /// but not `HELLO_RES_ACK`, so on a HELLO_REQ it is verified with a PING
 /// challenge, and it is not challenged at all on the HELLO_RES leg.
 const KAD_VERSION_7: u8 = 7;
-
-async fn remember_passive_note_results(
-    transfer_runtime: &Arc<Ed2kTransferRuntime>,
-    results: &[KadNoteResult],
-) {
-    for result in results {
-        let file_hash = result.file_hash.to_string();
-        let Ok(manifest) = transfer_runtime.manifest(&file_hash).await else {
-            tracing::debug!(
-                file_hash,
-                "skipping passive Kad note memory for unknown transfer"
-            );
-            continue;
-        };
-        if !manifest.comment.is_empty() || manifest.rating != 0 {
-            continue;
-        }
-        let comment = result.comment.clone().unwrap_or_default();
-        let rating = result.rating.unwrap_or(0).min(5);
-        if comment.is_empty() && rating == 0 {
-            continue;
-        }
-        if let Err(error) = transfer_runtime
-            .update_shared_file_metadata(&file_hash, None, Some((&comment, rating)))
-            .await
-        {
-            tracing::debug!(
-                file_hash,
-                source_id = %result.source_id,
-                "skipping passive Kad note memory: {error:#}"
-            );
-        }
-    }
-}
-
-async fn index_passive_keyword_result(index: &Arc<Mutex<FileIndex>>, result: &KadSearchResult) {
-    let Some(size_bytes) = result.size.filter(|size| *size > 0) else {
-        return;
-    };
-    if result.names.is_empty() {
-        return;
-    }
-    let availability_score = result.source_count.unwrap_or(1).max(1) as i64;
-    let mut index = index.lock().await;
-    for name in &result.names {
-        if name.trim().is_empty() {
-            continue;
-        }
-        if let Err(error) = index.upsert_file(&IndexedFile {
-            ed2k_hash: result.hash.to_string(),
-            name: name.clone(),
-            size_bytes,
-            content_type: "unknown".to_string(),
-            availability_score,
-        }) {
-            tracing::debug!(
-                file_hash = %result.hash,
-                name,
-                "failed to index passive Kad keyword result: {error:#}"
-            );
-        }
-    }
-}
-
-fn note_result_key(result: &KadNoteResult) -> (Ed2kHash, Ed2kHash, Option<u8>, Option<String>) {
-    (
-        result.file_hash,
-        result.source_id,
-        result.rating,
-        result.comment.clone(),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassiveReplayFamily {
-    Keyword,
-    Source,
-    Notes,
-}
-
-fn preferred_passive_replay_families(counts: SnoopQueueFamilyCounts) -> [PassiveReplayFamily; 3] {
-    let mut families = [
-        (PassiveReplayFamily::Keyword, counts.keyword, 0u8),
-        (PassiveReplayFamily::Source, counts.source, 1u8),
-        (PassiveReplayFamily::Notes, counts.notes, 2u8),
-    ];
-    families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
-    [families[0].0, families[1].0, families[2].0]
-}
 
 #[allow(clippy::cognitive_complexity)]
 async fn handle_kad_local_store_packet(
