@@ -2060,7 +2060,6 @@ async fn status_response(state: &RestState) -> Value {
     let guard = state.core.vpn_guard_status();
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
-    let download_sources = state.core.download_source_metrics().await;
     let shared_file_count = state.core.shares().await.len();
     let download_file_count = status.transfers.active + status.transfers.completed;
     json!({
@@ -2091,8 +2090,6 @@ async fn status_response(state: &RestState) -> Value {
             "downloadFileCount": download_file_count,
             "activeUploads": upload_policy.active_sessions,
             "waitingUploads": upload_policy.waiting_sessions,
-            "uploadPolicy": upload_policy,
-            "downloadSources": download_sources,
             "geolocation": null
         }
     })
