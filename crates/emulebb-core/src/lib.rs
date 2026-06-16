@@ -17,7 +17,7 @@ use emulebb_ed2k::{
     NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_upnp_port_mapping_providers,
-    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
+    config::Ed2kConfig,
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions,
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
@@ -41,6 +41,8 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
+#[cfg(test)]
+use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
 #[cfg(test)]
 use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_index::{
@@ -88,6 +90,7 @@ mod kad_hello;
 mod kad_passive_replay;
 mod kad_snoop_entry;
 mod local_search_response;
+mod preferences;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
 mod profile_state;
@@ -145,6 +148,10 @@ use kad_snoop_entry::{
 use local_search_response::send_local_search_response;
 #[cfg(test)]
 use local_search_response::split_stock_search_responses;
+use preferences::{
+    apply_preferences_update, default_preferences, ed2k_upload_queue_policy_from_preferences,
+    initial_ed2k_upload_queue_policy, preferences_update_is_empty,
+};
 use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
@@ -4746,177 +4753,6 @@ fn local_share_from_summary(
         comment: String::new(),
         rating: 0,
     }
-}
-
-fn default_preferences() -> Preferences {
-    Preferences {
-        upload_limit_ki_bps: 1024,
-        download_limit_ki_bps: 4096,
-        max_connections: 500,
-        max_connections_per_five_seconds: 20,
-        max_sources_per_file: 400,
-        upload_client_data_rate: 32,
-        max_upload_slots: 8,
-        upload_slot_elastic_percent: 80,
-        queue_size: 5000,
-        auto_connect: false,
-        new_auto_up: true,
-        new_auto_down: true,
-        credit_system: true,
-        safe_server_connect: true,
-        network_kademlia: true,
-        network_ed2k: true,
-        download_auto_broadband_io: true,
-    }
-}
-
-fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
-    update.upload_limit_ki_bps.is_none()
-        && update.download_limit_ki_bps.is_none()
-        && update.max_connections.is_none()
-        && update.max_connections_per_five_seconds.is_none()
-        && update.max_sources_per_file.is_none()
-        && update.upload_client_data_rate.is_none()
-        && update.max_upload_slots.is_none()
-        && update.upload_slot_elastic_percent.is_none()
-        && update.queue_size.is_none()
-        && update.auto_connect.is_none()
-        && update.new_auto_up.is_none()
-        && update.new_auto_down.is_none()
-        && update.credit_system.is_none()
-        && update.safe_server_connect.is_none()
-        && update.network_kademlia.is_none()
-        && update.network_ed2k.is_none()
-        && update.download_auto_broadband_io.is_none()
-}
-
-fn apply_preferences_update(
-    preferences: &mut Preferences,
-    update: PreferencesUpdate,
-) -> Result<()> {
-    if let Some(value) = update.upload_limit_ki_bps {
-        ensure_finite_kibps(value, "uploadLimitKiBps")?;
-        preferences.upload_limit_ki_bps = value;
-    }
-    if let Some(value) = update.download_limit_ki_bps {
-        ensure_finite_kibps(value, "downloadLimitKiBps")?;
-        preferences.download_limit_ki_bps = value;
-    }
-    if let Some(value) = update.max_connections {
-        ensure_positive_u32(value, "maxConnections")?;
-        preferences.max_connections = value;
-    }
-    if let Some(value) = update.max_connections_per_five_seconds {
-        ensure_positive_u32(value, "maxConnectionsPerFiveSeconds")?;
-        preferences.max_connections_per_five_seconds = value;
-    }
-    if let Some(value) = update.max_sources_per_file {
-        ensure_positive_u32(value, "maxSourcesPerFile")?;
-        preferences.max_sources_per_file = value;
-    }
-    if let Some(value) = update.upload_client_data_rate {
-        ensure!(
-            value > 0,
-            "uploadClientDataRate must be an unsigned number in the range 1..4294967295"
-        );
-        preferences.upload_client_data_rate = value;
-        preferences.max_upload_slots = derive_upload_slots(preferences.upload_limit_ki_bps, value);
-    }
-    if let Some(value) = update.max_upload_slots {
-        ensure!(
-            (1..=64).contains(&value),
-            "maxUploadSlots must be an unsigned number in the range 1..64"
-        );
-        preferences.max_upload_slots = value;
-    }
-    if let Some(value) = update.upload_slot_elastic_percent {
-        ensure!(
-            value <= 100,
-            "uploadSlotElasticPercent must be an unsigned number in the range 0..100"
-        );
-        preferences.upload_slot_elastic_percent = value;
-    }
-    if let Some(value) = update.queue_size {
-        ensure!(
-            (2000..=10000).contains(&value),
-            "queueSize must be an unsigned number in the range 2000..10000"
-        );
-        preferences.queue_size = value;
-    }
-    if let Some(value) = update.auto_connect {
-        preferences.auto_connect = value;
-    }
-    if let Some(value) = update.new_auto_up {
-        preferences.new_auto_up = value;
-    }
-    if let Some(value) = update.new_auto_down {
-        preferences.new_auto_down = value;
-    }
-    if let Some(value) = update.credit_system {
-        preferences.credit_system = value;
-    }
-    if let Some(value) = update.safe_server_connect {
-        preferences.safe_server_connect = value;
-    }
-    if let Some(value) = update.network_kademlia {
-        preferences.network_kademlia = value;
-    }
-    if let Some(value) = update.network_ed2k {
-        preferences.network_ed2k = value;
-    }
-    if let Some(value) = update.download_auto_broadband_io {
-        preferences.download_auto_broadband_io = value;
-    }
-    Ok(())
-}
-
-fn ed2k_upload_queue_policy_from_preferences(
-    base: Option<&Ed2kUploadQueuePolicyConfig>,
-    preferences: &Preferences,
-) -> Ed2kUploadQueuePolicyConfig {
-    let mut policy = base.cloned().unwrap_or_default();
-    policy.active_slots = preferences.max_upload_slots as usize;
-    policy.elastic_percent = preferences.upload_slot_elastic_percent.min(100);
-    policy.upload_limit_bytes_per_sec = u64::from(preferences.upload_limit_ki_bps) * 1024;
-    policy.elastic_underfill_bytes_per_sec =
-        u64::from(preferences.upload_client_data_rate.max(1)) * 1024;
-    policy.elastic_underfill_secs = policy.elastic_underfill_secs.max(10);
-    policy.waiting_capacity = preferences.queue_size as usize;
-    policy
-}
-
-fn initial_ed2k_upload_queue_policy(
-    base: Option<&Ed2kUploadQueuePolicyConfig>,
-    has_persisted_preferences: bool,
-    preferences: &Preferences,
-) -> Ed2kUploadQueuePolicyConfig {
-    if has_persisted_preferences || base.is_none() {
-        ed2k_upload_queue_policy_from_preferences(base, preferences)
-    } else {
-        base.cloned().unwrap_or_default()
-    }
-}
-
-fn ensure_finite_kibps(value: u32, name: &str) -> Result<()> {
-    ensure!(
-        value > 0 && value < u32::MAX,
-        "{name} must be an unsigned number in the range 1..4294967294"
-    );
-    Ok(())
-}
-
-fn ensure_positive_u32(value: u32, name: &str) -> Result<()> {
-    ensure!(
-        value > 0 && value <= i32::MAX as u32,
-        "{name} must be an unsigned number in the range 1..2147483647"
-    );
-    Ok(())
-}
-
-fn derive_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rate: u32) -> u32 {
-    upload_limit_ki_bps
-        .div_ceil(upload_client_data_rate)
-        .clamp(1, 64)
 }
 
 const ED2K_DOWNLOAD_KAD_SOURCE_CAP: usize = 64;
