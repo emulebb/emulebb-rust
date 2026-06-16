@@ -61,6 +61,12 @@ pub struct Ed2kConfig {
     /// Publish the real `emule-rust` mod identity in the eD2k hello instead of
     /// the default "eMule Community" (0.7-series) identity used to blend in.
     pub publish_emule_rust_identity: bool,
+    /// Number of consecutive connect/ping failures after which a non-static
+    /// server is dropped from the list (eMule `thePrefs.GetDeadServerRetries`,
+    /// `DeadServerRetry` ini key). Master default is 1 (range 1..=10,
+    /// `MAX_SERVERFAILCOUNT`); a successful connect clears the count. Static
+    /// servers are never dropped.
+    pub dead_server_retries: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +123,9 @@ impl Default for Ed2kConfig {
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
+            // eMule `CPreferences` DeadServerRetry default (NormalizeRetryCount
+            // default 1, min 1, max MAX_SERVERFAILCOUNT=10).
+            dead_server_retries: 1,
         }
     }
 }
@@ -160,5 +169,7 @@ mod tests {
         // Download throttle is unlimited (0) by default, matching today's
         // unbounded aggregate inbound behavior.
         assert_eq!(config.download_limit_bytes_per_sec, 0);
+        // eMule DeadServerRetry default is 1.
+        assert_eq!(config.dead_server_retries, 1);
     }
 }

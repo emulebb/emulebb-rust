@@ -62,6 +62,7 @@ pub(crate) fn load_core_state(
         servers,
         server_overrides: HashMap::new(),
         disabled_servers,
+        server_fail_counts: HashMap::new(),
         banned_source_clients: HashSet::new(),
         active_download_attempts: HashSet::new(),
         active_download_peer_endpoints: HashSet::new(),

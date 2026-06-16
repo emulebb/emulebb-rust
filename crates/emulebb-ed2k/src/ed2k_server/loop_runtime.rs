@@ -5,6 +5,7 @@ use std::{
 
 use tracing::{info, warn};
 
+use super::server_events::Ed2kServerListEvent;
 use super::types::ServerSessionContext;
 use super::{
     Ed2kServerLoopOptions, clear_server_connection_state, configured_server_entries,
@@ -25,6 +26,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         shutdown,
         public_ip,
         reconnect_signal,
+        server_list_events,
     } = options;
     let reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
     let session_context = ServerSessionContext {
@@ -42,6 +44,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         shutdown: Arc::clone(&shutdown),
         public_ip,
         reconnect_signal,
+        server_list_events,
     };
 
     let configured_servers = match configured_server_entries(&config) {
@@ -71,6 +74,16 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         run_one_server_session(&server, &session_context, &mut search_inbox).await
                     {
                         clear_server_connection_state(&state).await;
+                        // eMule `CServerList::ServerStats`: a failed connect/session
+                        // increments the server's fail-count (the core drops a
+                        // non-static dead server at the threshold). A successful
+                        // login emits `ConnectSucceeded` from inside the session,
+                        // which resets the count.
+                        if let Some(sender) = session_context.server_list_events.as_ref() {
+                            let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
+                                endpoint: configured_server.base_endpoint_text(),
+                            });
+                        }
                         warn!(
                             "ED2K server session ended for {} name={}: {error}",
                             server.base_endpoint(),
@@ -79,6 +92,13 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                     }
                 }
                 Err(error) => {
+                    // A resolve failure is also a connect failure for the dead-server
+                    // accounting (eMule treats a server it cannot reach as failed).
+                    if let Some(sender) = session_context.server_list_events.as_ref() {
+                        let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
+                            endpoint: configured_server.base_endpoint_text(),
+                        });
+                    }
                     warn!(
                         "failed to resolve ED2K server endpoint {} name={}: {error}",
                         configured_server.base_endpoint_text(),

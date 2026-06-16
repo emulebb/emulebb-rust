@@ -14,6 +14,7 @@ use crate::{
     kad_firewall::KadFirewallState,
 };
 
+use super::server_events::Ed2kServerListEventSender;
 use super::{Ed2kServerSearchInbox, is_low_id};
 /// Live ED2K server session view used by the Rust client to decide whether TCP is
 /// still effectively firewalled from the network's point of view.
@@ -69,6 +70,10 @@ pub(super) struct ServerSessionContext {
     /// (UPnP became ready / was remapped) so the session drops and re-logs in with
     /// the new HighID callback port instead of waiting for a natural reconnect.
     pub(super) reconnect_signal: Arc<tokio::sync::Notify>,
+    /// Optional feedback channel to the core's server store for discovered
+    /// servers (`OP_SERVERLIST`) and connect/ping outcomes (fail-count / dead
+    /// server drop). `None` when the loop is run without a core store wired.
+    pub(super) server_list_events: Option<Ed2kServerListEventSender>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,4 +176,7 @@ pub struct Ed2kServerLoopOptions {
     /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
     /// when the external port changes so the session re-logs in promptly.
     pub reconnect_signal: Arc<tokio::sync::Notify>,
+    /// Optional feedback channel to the core's server store (server discovery +
+    /// connect/ping outcome). `None` disables server-list feedback.
+    pub server_list_events: Option<Ed2kServerListEventSender>,
 }

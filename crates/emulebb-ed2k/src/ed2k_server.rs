@@ -31,6 +31,7 @@ mod packet_handler;
 mod result_decoder;
 mod search_expr;
 mod server_entry;
+mod server_events;
 mod server_met;
 mod server_status;
 mod session;
@@ -60,6 +61,11 @@ pub use background::{
 use diagnostics::{dump_ed2k_server_meta, dump_ed2k_server_packet};
 use flags::{format_connect_options, format_server_flags, is_low_id};
 pub use loop_runtime::run_ed2k_server_loop;
+use server_events::decode_server_list;
+pub use server_events::{
+    Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerListEventSender,
+    MAX_SERVERS_FROM_ONE_LIST, ed2k_server_list_event_channel,
+};
 pub use server_met::{ParsedServerMetEntry, parse_server_met};
 use obfuscation::{
     Rc4KeyStream, biguint_to_fixed_be, derive_server_cipher, random_non_protocol_marker,

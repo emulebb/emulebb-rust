@@ -500,6 +500,45 @@ pub(crate) fn plaintext_fallback_for_obfuscated_source(
     Some(fallback)
 }
 
+/// Identity used to recognize and drop our own client from a learned source set
+/// (eMule `CDownloadQueue::CheckAndAddSource`: a source whose user-hash equals
+/// ours, or whose IP/client-id + port equals ours, is never added as a source).
+#[derive(Debug, Clone)]
+pub(crate) struct OwnSourceIdentity {
+    /// Our advertised user hash.
+    pub(crate) user_hash: [u8; 16],
+    /// Our advertised public endpoints `(ip, tcp_port)` that a peer could report
+    /// us as. Both the externally-advertised endpoint and the local bind endpoint
+    /// are checked so a self-source is dropped regardless of which one a server or
+    /// Kad reflected back.
+    pub(crate) endpoints: Vec<(Ipv4Addr, u16)>,
+}
+
+impl OwnSourceIdentity {
+    /// `true` when `source` is us (same user-hash, or same `(ip, tcp_port)`),
+    /// mirroring eMule's self-source rejection in `CheckAndAddSource`.
+    pub(crate) fn matches(&self, source: &Ed2kFoundSource) -> bool {
+        if source.user_hash == Some(self.user_hash) {
+            return true;
+        }
+        self.endpoints
+            .iter()
+            .any(|(ip, port)| *ip == source.ip && *port == source.tcp_port && *port != 0)
+    }
+}
+
+/// Drop sources that are our own client (self-source) — eMule never adds a source
+/// whose user-hash or `(ip, port)` is ours. A user-hash-less source whose port is
+/// zero is left untouched here (it is not a meaningful endpoint match).
+pub(crate) fn drop_self_sources(
+    sources: &mut Vec<Ed2kFoundSource>,
+    identity: &OwnSourceIdentity,
+) -> usize {
+    let before = sources.len();
+    sources.retain(|source| !identity.matches(source));
+    before - sources.len()
+}
+
 pub(crate) fn merge_download_sources(
     target: &mut Vec<Ed2kFoundSource>,
     incoming: Vec<Ed2kFoundSource>,

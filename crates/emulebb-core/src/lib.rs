@@ -21,8 +21,8 @@ use emulebb_ed2k::{
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions,
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
-        Ed2kUdpSourceSearchOptions, new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_on_server,
+        Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
+        parse_server_met, publish_shared_catalog_via_background_session, request_callback_on_server,
         request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
         search_keyword_via_background_session, search_source_servers, search_source_udp_servers,
         search_source_via_background_session,
@@ -111,15 +111,16 @@ use categories::{
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
 use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
-    run_ed2k_public_ip_probe, run_ed2k_reask_reengage,
+    run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_sources::{
-    Ed2kServerCallbackRoute, LearnedEd2kMetadata, collect_kad_ed2k_metadata,
+    Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
-    ed2k_keyword_server_attempts, ed2k_server_callback_route, found_source_from_hint,
-    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
-    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
+    drop_self_sources, ed2k_keyword_server_attempts, ed2k_server_callback_route,
+    found_source_from_hint, hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source,
+    keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
+    new_direct_ed2k_source_count,
     plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
     should_adopt_hash_only_metadata_name, should_exclude_background_source_endpoint,
     should_query_kad_source_supplement, should_skip_no_progress_source_requery,
@@ -265,6 +266,10 @@ struct CoreState {
     servers: HashMap<String, ServerInfo>,
     server_overrides: HashMap<String, ServerUpdate>,
     disabled_servers: HashSet<String>,
+    /// Consecutive connect/ping failures per server endpoint (eMule
+    /// `CServer::IncFailedCount`). A non-static server is dropped at the
+    /// `dead_server_retries` threshold; a successful connect clears the count.
+    server_fail_counts: HashMap<String, u32>,
     banned_source_clients: HashSet<String>,
     active_download_attempts: HashSet<String>,
     active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
@@ -905,6 +910,11 @@ impl EmulebbCore {
         set_publish_rust_identity(config.publish_emule_rust_identity);
         let enable_udp_reask = config.enable_udp_reask;
         let reask_user_hash = network.user_hash;
+        // Server-list feedback channel (eMule `CServerSocket`/`CServerList`): the
+        // session reports discovered servers (OP_SERVERLIST) and connect/ping
+        // outcomes; this consumer applies them to the core's persisted store.
+        let dead_server_retries = config.dead_server_retries;
+        let (server_list_events_tx, server_list_events_rx) = ed2k_server_list_event_channel();
         tasks.push(tokio::spawn(run_ed2k_server_loop(Ed2kServerLoopOptions {
             bind_ip: network.bind_ip,
             nat: Arc::clone(&nat),
@@ -917,7 +927,14 @@ impl EmulebbCore {
             shutdown: Arc::clone(&shutdown),
             public_ip: ed2k_public_ip.clone(),
             reconnect_signal: server_reconnect_signal,
+            server_list_events: Some(server_list_events_tx),
         })));
+        tasks.push(tokio::spawn(run_ed2k_server_list_events(
+            self.clone(),
+            server_list_events_rx,
+            dead_server_retries,
+            Arc::clone(&shutdown),
+        )));
         if enable_udp_reask {
             // Off by default; wire-validate before enabling. udp_version 4 matches
             // our advertised hello ET_UDPVER. The handle lets the direct download
@@ -1158,6 +1175,146 @@ impl EmulebbCore {
         state.server_overrides.remove(&server.endpoint);
         state.disabled_servers.insert(server.endpoint.clone());
         Ok(Some(server))
+    }
+
+    /// Merge servers discovered from an `OP_SERVERLIST` reply into the server
+    /// store (eMule `CServerSocket::ProcessPacket` OP_SERVERLIST -> AddServer).
+    /// New `(ip, port)` servers are added at low priority; existing ones (by
+    /// endpoint, including config + dynamic + disabled) are skipped. A
+    /// previously dead-dropped server is NOT silently re-added: it stays in
+    /// `disabled_servers` so we do not re-add what we just dropped.
+    async fn merge_discovered_ed2k_servers(&self, servers: Vec<(Ipv4Addr, u16)>) {
+        if servers.is_empty() {
+            return;
+        }
+        let existing: HashSet<String> = self
+            .servers()
+            .await
+            .into_iter()
+            .map(|server| server.endpoint)
+            .collect();
+        let disabled: HashSet<String> = {
+            let state = self.state.lock().await;
+            state.disabled_servers.clone()
+        };
+        let connected_endpoint = self.ed2k_connected_endpoint().await;
+        let mut added = 0usize;
+        for (ip, port) in servers {
+            if port == 0 {
+                continue;
+            }
+            let endpoint = format!("{ip}:{port}");
+            if existing.contains(&endpoint) || disabled.contains(&endpoint) {
+                continue;
+            }
+            // Add directly to the store (never auto-connect a discovered server),
+            // mirroring `add_server` minus the connect branch — eMule adds
+            // OP_SERVERLIST servers at low priority without connecting.
+            let mut server = server_info_from_parts(
+                &ip.to_string(),
+                port,
+                None,
+                None,
+                false,
+                connected_endpoint.as_deref(),
+            );
+            server.priority = "low".to_string();
+            if profile_state::persist_server(&self.metadata_store, &server, true).is_err() {
+                continue;
+            }
+            let mut state = self.state.lock().await;
+            state.disabled_servers.remove(&endpoint);
+            state.servers.insert(endpoint, server);
+            drop(state);
+            added += 1;
+        }
+        if added > 0 {
+            tracing::info!("added {added} ED2K server(s) discovered via OP_SERVERLIST");
+        }
+    }
+
+    /// Resolve a feedback-event endpoint (which may be the configured host:port
+    /// or the resolved ip:port) to the matching stored server endpoint key.
+    async fn resolve_server_event_endpoint(&self, endpoint: &str) -> Option<String> {
+        let servers = self.servers().await;
+        // Exact endpoint match first.
+        if let Some(server) = servers
+            .iter()
+            .find(|server| server.endpoint.eq_ignore_ascii_case(endpoint))
+        {
+            return Some(server.endpoint.clone());
+        }
+        // Fall back to matching the resolved host:port against each server's
+        // configured address (handles a DNS-named server whose event carries the
+        // resolved IP, or vice versa, when the literal forms differ).
+        let (event_host, event_port) = parse_server_endpoint(endpoint).ok()?;
+        servers
+            .into_iter()
+            .find(|server| {
+                server.port == event_port
+                    && (server.address == event_host || server.ip == event_host)
+            })
+            .map(|server| server.endpoint)
+    }
+
+    /// Increment a server's consecutive-failure count and drop a non-static dead
+    /// server at the `dead_server_retries` threshold (eMule
+    /// `CServerList::ServerStats`: `IncFailedCount` + RemoveServer when
+    /// `GetFailedCount() >= GetDeadServerRetries()`). Static servers are kept.
+    async fn note_ed2k_server_connect_failed(&self, endpoint: &str, dead_server_retries: u32) {
+        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
+            return;
+        };
+        let Some(mut server_info) = self.server(&stored_endpoint).await else {
+            return;
+        };
+        let threshold = dead_server_retries.max(1);
+        let (fail_count, reached) = {
+            let mut state = self.state.lock().await;
+            let count = state
+                .server_fail_counts
+                .entry(stored_endpoint.clone())
+                .or_insert(0);
+            *count += 1;
+            let fail_count = *count;
+            // Reflect the live fail-count in the dynamic store / REST view.
+            if let Some(server) = state.servers.get_mut(&stored_endpoint) {
+                server.failed_count = fail_count;
+            }
+            (fail_count, fail_count >= threshold)
+        };
+        if reached && !server_info.static_server {
+            // eMule drops a dead non-static server from the list.
+            server_info.failed_count = fail_count;
+            let _ = profile_state::persist_server(&self.metadata_store, &server_info, false);
+            let mut state = self.state.lock().await;
+            state.servers.remove(&stored_endpoint);
+            state.server_overrides.remove(&stored_endpoint);
+            state.server_fail_counts.remove(&stored_endpoint);
+            state.disabled_servers.insert(stored_endpoint.clone());
+            drop(state);
+            tracing::info!(
+                "dropped dead ED2K server {stored_endpoint} (fail_count={fail_count} >= dead_server_retries={threshold})"
+            );
+        } else {
+            tracing::debug!(
+                "ED2K server {stored_endpoint} connect failed (fail_count={fail_count}, static={})",
+                server_info.static_server
+            );
+        }
+    }
+
+    /// Clear a server's failure count after a successful connect (eMule resets the
+    /// count on a successful response/connect).
+    async fn note_ed2k_server_connect_succeeded(&self, endpoint: &str) {
+        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
+            return;
+        };
+        let mut state = self.state.lock().await;
+        state.server_fail_counts.remove(&stored_endpoint);
+        if let Some(server) = state.servers.get_mut(&stored_endpoint) {
+            server.failed_count = 0;
+        }
     }
 
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
@@ -3263,6 +3420,29 @@ impl EmulebbCore {
         }
         if sources.is_empty() {
             merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
+        }
+        // Self-source exclusion (eMule `CDownloadQueue::CheckAndAddSource`): never
+        // treat our own client as a download source. A server or Kad lookup can
+        // reflect our own (ip, tcp_port) or user-hash back to us, which would
+        // otherwise waste a connect slot dialing ourselves.
+        let own_identity = OwnSourceIdentity {
+            user_hash: network.user_hash,
+            endpoints: {
+                let advertised_tcp = self
+                    .ed2k_reachability
+                    .advertised_tcp_port(network.listen_port);
+                let mut endpoints = vec![(network.bind_ip, network.listen_port)];
+                if let Some(public_ip) = self.ed2k_reachability.get() {
+                    endpoints.push((public_ip, advertised_tcp));
+                }
+                endpoints
+            },
+        };
+        let dropped = drop_self_sources(&mut sources, &own_identity);
+        if dropped > 0 {
+            tracing::debug!(
+                "ED2K dropped {dropped} self-source(s) for file_hash={file_hash} (own user-hash or endpoint)"
+            );
         }
         for source in &sources {
             self.remember_ed2k_sources(file_hash, std::slice::from_ref(source))
@@ -6285,6 +6465,114 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn merge_discovered_servers_adds_new_dedups_existing() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.add_server(ServerCreate {
+            address: "45.82.80.155".to_string(),
+            port: 5687,
+            name: None,
+            priority: None,
+            static_server: Some(true),
+            connect: None,
+        })
+        .await
+        .unwrap();
+
+        core.merge_discovered_ed2k_servers(vec![
+            (Ipv4Addr::new(45, 82, 80, 155), 5687), // duplicate of existing
+            (Ipv4Addr::new(203, 0, 113, 9), 4661),  // new
+            (Ipv4Addr::new(203, 0, 113, 9), 4661),  // duplicate within batch
+        ])
+        .await;
+
+        let servers = core.servers().await;
+        let lugd = servers
+            .iter()
+            .filter(|s| s.address == "45.82.80.155" && s.port == 5687)
+            .count();
+        assert_eq!(lugd, 1, "existing server is not duplicated");
+        let new_server = servers
+            .iter()
+            .find(|s| s.address == "203.0.113.9" && s.port == 4661)
+            .expect("discovered server added");
+        assert_eq!(new_server.priority, "low");
+        assert!(!new_server.static_server);
+    }
+
+    #[tokio::test]
+    async fn connect_failed_drops_non_static_dead_server_at_threshold() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.add_server(ServerCreate {
+            address: "203.0.113.5".to_string(),
+            port: 4661,
+            name: None,
+            priority: None,
+            static_server: Some(false),
+            connect: None,
+        })
+        .await
+        .unwrap();
+        let endpoint = "203.0.113.5:4661";
+
+        // Default dead_server_retries = 1: first failure drops the server.
+        core.note_ed2k_server_connect_failed(endpoint, 1).await;
+        assert!(
+            core.server(endpoint).await.is_none(),
+            "non-static dead server is dropped at the threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_failed_never_drops_static_server() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.add_server(ServerCreate {
+            address: "203.0.113.6".to_string(),
+            port: 4661,
+            name: None,
+            priority: None,
+            static_server: Some(true),
+            connect: None,
+        })
+        .await
+        .unwrap();
+        let endpoint = "203.0.113.6:4661";
+
+        // Even far past the threshold, a static server is kept (eMule keeps
+        // static servers); the fail-count is still tracked.
+        for _ in 0..5 {
+            core.note_ed2k_server_connect_failed(endpoint, 1).await;
+        }
+        let server = core.server(endpoint).await.expect("static server kept");
+        assert!(server.failed_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn connect_succeeded_clears_fail_count() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.add_server(ServerCreate {
+            address: "203.0.113.7".to_string(),
+            port: 4661,
+            name: None,
+            priority: None,
+            static_server: Some(false),
+            connect: None,
+        })
+        .await
+        .unwrap();
+        let endpoint = "203.0.113.7:4661";
+
+        // With a higher threshold, accumulate failures, then a success clears them.
+        core.note_ed2k_server_connect_failed(endpoint, 3).await;
+        core.note_ed2k_server_connect_failed(endpoint, 3).await;
+        assert_eq!(core.server(endpoint).await.unwrap().failed_count, 2);
+        core.note_ed2k_server_connect_succeeded(endpoint).await;
+        assert_eq!(core.server(endpoint).await.unwrap().failed_count, 0);
+        // The cleared count means it now takes the full threshold again to drop.
+        core.note_ed2k_server_connect_failed(endpoint, 3).await;
+        assert!(core.server(endpoint).await.is_some());
+    }
+
     #[test]
     fn exact_ed2k_hash_query_token_extracts_hash_only_queries() {
         let exact_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
@@ -7502,6 +7790,53 @@ mod tests {
 
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source_server, Some(source_server));
+    }
+
+    #[test]
+    fn drop_self_sources_removes_own_endpoint_and_user_hash() {
+        let file_hash = Ed2kHash::from_bytes([0x47; 16]);
+        let own_ip = Ipv4Addr::new(203, 0, 113, 7);
+        let own_port = 4662u16;
+        let own_user_hash = [0xAB; 16];
+        let identity = OwnSourceIdentity {
+            user_hash: own_user_hash,
+            endpoints: vec![
+                (Ipv4Addr::new(192, 168, 50, 2), 4662),
+                (own_ip, own_port),
+            ],
+        };
+
+        // (1) self by advertised public endpoint, (2) self by local bind endpoint,
+        // (3) self by user-hash on a different endpoint, (4) a real foreign source.
+        let mut self_by_endpoint = direct_test_source(file_hash, own_ip, own_port);
+        self_by_endpoint.user_hash = None;
+        let self_by_bind = direct_test_source(file_hash, Ipv4Addr::new(192, 168, 50, 2), 4662);
+        let mut self_by_hash =
+            direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 9), 5000);
+        self_by_hash.user_hash = Some(own_user_hash);
+        let foreign = direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 22), 4662);
+
+        let mut sources = vec![self_by_endpoint, self_by_bind, self_by_hash, foreign.clone()];
+        let dropped = drop_self_sources(&mut sources, &identity);
+
+        assert_eq!(dropped, 3);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].ip, foreign.ip);
+        assert_eq!(sources[0].tcp_port, foreign.tcp_port);
+    }
+
+    #[test]
+    fn drop_self_sources_keeps_foreign_when_only_port_collides() {
+        let file_hash = Ed2kHash::from_bytes([0x48; 16]);
+        let identity = OwnSourceIdentity {
+            user_hash: [0x01; 16],
+            endpoints: vec![(Ipv4Addr::new(203, 0, 113, 7), 4662)],
+        };
+        // Same port, different IP, different user-hash: a genuine peer, kept.
+        let foreign = direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 30), 4662);
+        let mut sources = vec![foreign];
+        assert_eq!(drop_self_sources(&mut sources, &identity), 0);
+        assert_eq!(sources.len(), 1);
     }
 
     #[test]

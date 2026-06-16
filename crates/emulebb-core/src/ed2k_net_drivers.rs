@@ -20,6 +20,7 @@ use std::{
 };
 
 use anyhow::Result;
+use emulebb_ed2k::ed2k_server::{Ed2kServerListEvent, Ed2kServerListEventReceiver};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatManager, TransportProtocol,
     reachability::ExternalReachability,
@@ -215,6 +216,36 @@ async fn handle_reask_event(core: EmulebbCore, event: ReaskEvent) {
             };
             if transfer.state == "downloading" {
                 core.queue_ed2k_download_attempt(transfer);
+            }
+        }
+    }
+}
+
+/// Consumer for server-list feedback raised by the ED2K server session loop
+/// (eMule `CServerSocket`/`CServerList`): merges discovered servers into the
+/// store (OP_SERVERLIST auto-add) and maintains the per-server fail-count with a
+/// dead-server drop at `dead_server_retries`. Isolated per-event so a panic
+/// handling one event cannot tear down the whole consumer.
+pub(crate) async fn run_ed2k_server_list_events(
+    core: EmulebbCore,
+    mut events: Ed2kServerListEventReceiver,
+    dead_server_retries: u32,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        let Some(event) = events.recv().await else {
+            break;
+        };
+        match event {
+            Ed2kServerListEvent::DiscoveredServers(servers) => {
+                core.merge_discovered_ed2k_servers(servers).await;
+            }
+            Ed2kServerListEvent::ConnectFailed { endpoint } => {
+                core.note_ed2k_server_connect_failed(&endpoint, dead_server_retries)
+                    .await;
+            }
+            Ed2kServerListEvent::ConnectSucceeded { endpoint } => {
+                core.note_ed2k_server_connect_succeeded(&endpoint).await;
             }
         }
     }

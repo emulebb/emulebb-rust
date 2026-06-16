@@ -5,14 +5,15 @@ use tracing::{debug, info};
 
 use crate::ed2k_tcp::{connect_callback_peer, enrich_hello_identity};
 
+use super::server_events::Ed2kServerListEvent;
 use super::types::{CallbackRequest, ServerSessionContext};
 use super::{
     Ed2kPacket, OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_IDCHANGE, OP_QUERY_MORE_RESULT,
     OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE,
     OP_SERVERSTATUS, ST_DESCRIPTION, ST_SERVERNAME, ServerSession, ServerSessionPhase,
-    decode_ed2k_string, decode_search_result_page, decode_tag, encode_search_request,
-    format_connect_options, format_server_flags, ipv4_from_client_id, is_low_id,
-    log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
+    decode_ed2k_string, decode_search_result_page, decode_server_list, decode_tag,
+    encode_search_request, format_connect_options, format_server_flags, ipv4_from_client_id,
+    is_low_id, log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
 };
 
 #[allow(clippy::cognitive_complexity)]
@@ -62,6 +63,13 @@ pub(super) async fn handle_server_packet(
             session.assigned_client_id = Some(id_change.client_id);
             session.server_flags = id_change.server_flags;
             session.login_accepted = true;
+            // eMule `CServerList::ServerStats`: a successful connect resets the
+            // server's fail-count. Report the login so the core clears it.
+            if let Some(sender) = context.server_list_events.as_ref() {
+                let _ = sender.send(Ed2kServerListEvent::ConnectSucceeded {
+                    endpoint: session.endpoint.to_string(),
+                });
+            }
             // Learn our public IP exactly as eMule does (theApp.SetPublicIP).
             // HighID: the OP_IDCHANGE client_id IS our public IPv4. LowID: we are
             // firewalled, but the server may still report our real external IP
@@ -142,11 +150,23 @@ pub(super) async fn handle_server_packet(
             }
         }
         OP_SERVERLIST => {
-            let count = packet.payload.first().copied().unwrap_or_default();
+            // Decode the `(ip, port)` server entries and report them to the core
+            // for merge+dedup into the server list (eMule
+            // `CServerSocket::ProcessPacket` OP_SERVERLIST -> AddServer, gated by
+            // `GetAddServersFromServer`). The core owns the persisted store and
+            // the "add servers from server" preference.
+            let discovered = decode_server_list(&packet.payload);
             debug!(
-                "ED2K server {} returned {} server list entries",
-                session.endpoint, count
+                "ED2K server {} returned {} server list entries ({} usable)",
+                session.endpoint,
+                packet.payload.first().copied().unwrap_or_default(),
+                discovered.len()
             );
+            if !discovered.is_empty()
+                && let Some(sender) = context.server_list_events.as_ref()
+            {
+                let _ = sender.send(Ed2kServerListEvent::DiscoveredServers(discovered));
+            }
             if allow_probe_search {
                 maybe_send_probe_search(session, context).await?;
             }
