@@ -26,7 +26,7 @@ use emulebb_kad_proto::Ed2kHash;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
+use super::service::{ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
@@ -387,7 +387,16 @@ async fn drive_reask_tick(
         info_by_file.insert(file_hash, info);
     }
 
-    let out = service.tick(Instant::now(), REASK_REPLY_TIMEOUT, |file_hash| {
+    // Global reask pacing / round-robin (eMule CDownloadQueue::Process
+    // m_udcounter + SendNextUDPPacket): the shared coordinator round-robins which
+    // file gets a reask slot this tick and enforces a global inter-reask floor,
+    // and gates each file on the per-file UDP source cap
+    // (GetMaxSourcePerFileUDP > GetSourceCount). `next_reask_file_slot` returns
+    // None (no rotation offset / pacing floor not elapsed) -> fall back to the
+    // unbounded tick so reask never stalls when there is nothing to pace against.
+    let registered_file_count = info_by_file.len();
+    let rotate_offset = transfer_runtime.next_reask_file_slot(registered_file_count);
+    let info_lookup = |file_hash: &Ed2kHash| {
         info_by_file
             .get(file_hash)
             .cloned()
@@ -395,7 +404,21 @@ async fn drive_reask_tick(
                 part_status: None,
                 complete_source_count: 0,
             })
-    });
+    };
+    let admit_udp =
+        |_file_hash: &Ed2kHash, source_count: usize| transfer_runtime.can_reask_file_via_udp(source_count);
+    let out = match rotate_offset {
+        Some(offset) => service.tick_paced(
+            Instant::now(),
+            REASK_REPLY_TIMEOUT,
+            info_lookup,
+            &ReaskTickPacing {
+                rotate_offset: offset,
+                admit: Some(&admit_udp),
+            },
+        ),
+        None => service.tick(Instant::now(), REASK_REPLY_TIMEOUT, info_lookup),
+    };
     for (addr, datagram) in out.send {
         match dht.send_raw_datagram(addr, &datagram).await {
             Ok(()) => trace!(

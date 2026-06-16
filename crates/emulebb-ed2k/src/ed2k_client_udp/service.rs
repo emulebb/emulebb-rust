@@ -67,6 +67,37 @@ pub(crate) struct ReaskTickOutput {
     pub timed_out: Vec<(SocketAddr, ReaskAction)>,
 }
 
+/// Global pacing/round-robin control for a reask tick, supplied by the caller
+/// (which wraps the shared download coordinator). Keeps the service I/O-free and
+/// the coordinator the single decision-maker: the service only rotates the file
+/// visit order and asks `admit` whether a file may emit reask pings this tick.
+pub(crate) struct ReaskTickPacing<'a> {
+    /// Round-robin start offset into the (sorted) file list for fairness
+    /// (eMule `CDownloadQueue::Process` `m_udcounter` rotation).
+    pub rotate_offset: usize,
+    /// Whether `file_hash` (currently holding `source_count` reask sources) may
+    /// emit reask pings this tick: the per-file UDP source cap
+    /// (`GetMaxSourcePerFileUDP > GetSourceCount`) AND the global reask pacing
+    /// floor. `None` = admit every file (the unbounded default tick).
+    pub admit: Option<&'a dyn Fn(&Ed2kHash, usize) -> bool>,
+}
+
+impl ReaskTickPacing<'_> {
+    /// The unbounded pacing used by the plain [`ReaskService::tick`]: no
+    /// rotation, every file admitted (preserves the prior behavior exactly).
+    pub(crate) fn unbounded() -> Self {
+        Self {
+            rotate_offset: 0,
+            admit: None,
+        }
+    }
+
+    fn admit(&self, file_hash: &Ed2kHash, source_count: usize) -> bool {
+        self.admit
+            .is_none_or(|admit| admit(file_hash, source_count))
+    }
+}
+
 /// Transfer-level inputs the tick needs for one file's reask pings.
 #[derive(Debug, Clone)]
 pub(crate) struct TransferReaskInfo {
@@ -198,16 +229,48 @@ impl ReaskService {
         &mut self,
         now: Instant,
         reply_timeout: Duration,
+        info_for: impl FnMut(&Ed2kHash) -> TransferReaskInfo,
+    ) -> ReaskTickOutput {
+        self.tick_paced(now, reply_timeout, info_for, &ReaskTickPacing::unbounded())
+    }
+
+    /// Like [`tick`], but globally paces + round-robins reask sends across files
+    /// (eMule `CDownloadQueue::Process` `m_udcounter` rotation +
+    /// `SendNextUDPPacket`): files are visited in a rotated order seeded by
+    /// `pacing.rotate_offset` for fairness, and a file emits reask pings only
+    /// when `pacing.admit(file_hash, source_count)` allows it (the per-file UDP
+    /// source cap + global pacing floor live in the coordinator the caller
+    /// wraps). Timed-out reask accounting is never paced (it is bookkeeping, not
+    /// new outbound load).
+    pub(crate) fn tick_paced(
+        &mut self,
+        now: Instant,
+        reply_timeout: Duration,
         mut info_for: impl FnMut(&Ed2kHash) -> TransferReaskInfo,
+        pacing: &ReaskTickPacing<'_>,
     ) -> ReaskTickOutput {
         let mut out = ReaskTickOutput::default();
-        for (file_hash, set) in &mut self.per_file {
+        // Deterministic, rotated file order so no file is starved when the global
+        // pacing floor admits only a subset per tick.
+        let mut file_hashes: Vec<Ed2kHash> = self.per_file.keys().copied().collect();
+        file_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let len = file_hashes.len();
+        for step in 0..len {
+            let index = (pacing.rotate_offset.wrapping_add(step)) % len;
+            let file_hash = file_hashes[index];
+            let Some(set) = self.per_file.get_mut(&file_hash) else {
+                continue;
+            };
             // Timed-out reasks first (so a due+timed-out source reschedules cleanly).
             for ((ip, port), action) in set.drain_timeouts(now, reply_timeout) {
                 out.timed_out
                     .push((SocketAddr::new(ip.into(), port), action));
             }
-            let info = info_for(file_hash);
+            // Global pacing / per-file UDP cap gate.
+            if !pacing.admit(&file_hash, set.len()) {
+                continue;
+            }
+            let info = info_for(&file_hash);
             for (dest, datagram) in set.due_datagrams(
                 now,
                 info.part_status.as_deref(),
@@ -334,6 +397,47 @@ mod tests {
                 action: ReaskAction::UpdatedRank(12),
             }
         );
+    }
+
+    #[test]
+    fn tick_paced_suppresses_sends_when_the_udp_cap_denies_a_file() {
+        let now = Instant::now();
+        let mut svc = service();
+        register(&mut svc, now);
+
+        // admit=false models a file already at its per-file UDP source cap
+        // (GetMaxSourcePerFileUDP <= GetSourceCount): no reask ping is emitted,
+        // but timed-out accounting still runs (none pending here).
+        let deny = |_h: &Ed2kHash, _n: usize| false;
+        let out = svc.tick_paced(
+            now,
+            Duration::from_secs(20),
+            |_| TransferReaskInfo {
+                part_status: Some(vec![true, false]),
+                complete_source_count: 1,
+            },
+            &ReaskTickPacing {
+                rotate_offset: 0,
+                admit: Some(&deny),
+            },
+        );
+        assert!(out.send.is_empty());
+
+        // admit=true emits the due ping as the unbounded tick would.
+        let allow = |_h: &Ed2kHash, _n: usize| true;
+        let out = svc.tick_paced(
+            now,
+            Duration::from_secs(20),
+            |_| TransferReaskInfo {
+                part_status: Some(vec![true, false]),
+                complete_source_count: 1,
+            },
+            &ReaskTickPacing {
+                rotate_offset: 0,
+                admit: Some(&allow),
+            },
+        );
+        assert_eq!(out.send.len(), 1);
     }
 
     #[test]
