@@ -215,6 +215,12 @@ struct DirectDownloadOutcome {
     /// does not re-connect them over TCP while the reask loop holds them (the
     /// loop owns re-engagement; on UDP failure it drops them back to TCP).
     detached_reask_endpoints: Vec<(Ipv4Addr, u16)>,
+    /// Sources that reported No Needed Parts for this file (eMuleBB
+    /// `DS_NONEEDEDPARTS` / `OP_OUTOFPARTREQS`). The driver runs the A4AF-lite
+    /// swap (`CUpDownClient::SwapToAnotherFile`) on each: if the registry shows
+    /// the peer serves another wanted file, the source is moved to that file
+    /// instead of being dropped.
+    no_needed_parts_sources: Vec<Ed2kFoundSource>,
 }
 
 struct DirectDownloadOptions {
@@ -2095,7 +2101,7 @@ impl EmulebbCore {
         let Some(transfer) = self.set_transfer_state(hash, "downloading").await else {
             return Ok(None);
         };
-        self.queue_ed2k_download_attempt(transfer.clone()).await;
+        self.queue_ed2k_download_attempt(transfer.clone());
         Ok(Some(transfer))
     }
 
@@ -2196,7 +2202,7 @@ impl EmulebbCore {
         // Non-paused downloads start immediately: kick the download driver so
         // ED2K source acquisition begins without requiring an explicit resume.
         if !matches!(state_name, "paused" | "stopped") {
-            self.queue_ed2k_download_attempt(transfer.clone()).await;
+            self.queue_ed2k_download_attempt(transfer.clone());
         }
         Ok(transfer)
     }
@@ -2613,6 +2619,19 @@ impl EmulebbCore {
                 if outcome.completed {
                     return Ok(Some("completed"));
                 }
+                // A4AF-lite NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
+                // a source that has No Needed Parts for THIS file but serves
+                // another wanted file in the registry is moved to that file
+                // (its transfer is re-driven so leg-1 selection reuses the peer)
+                // instead of being dropped. Sources with no other wanted file
+                // fall through and stay dropped (the lease was just released).
+                if !outcome.no_needed_parts_sources.is_empty() {
+                    self.swap_no_needed_parts_sources(
+                        &transfer.hash,
+                        &outcome.no_needed_parts_sources,
+                    )
+                    .await;
+                }
                 accepted_incomplete_peers =
                     accepted_incomplete_peers.saturating_add(outcome.accepted_incomplete_peers);
                 if let Some(error) = outcome.last_error {
@@ -2789,19 +2808,87 @@ impl EmulebbCore {
         }
     }
 
-    async fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
-        let hash = transfer.hash.clone();
+    /// A4AF-lite NNP swap (eMuleBB `CUpDownClient::SwapToAnotherFile`). For each
+    /// source that reported No Needed Parts on `current_file_hash`, consult the
+    /// cross-transfer registry for the best OTHER wanted file the same peer
+    /// serves. When such a file exists and is still an active (non-terminal)
+    /// transfer, re-drive that transfer's download attempt so the registry-driven
+    /// source selection (leg 1) re-engages this peer on the swap-target file
+    /// instead of dropping it. Sources whose only registered file was the current
+    /// one (no swap target) are left dropped, exactly as before. Returns the
+    /// number of sources actually swapped (target queued).
+    async fn swap_no_needed_parts_sources(
+        &self,
+        current_file_hash: &str,
+        sources: &[Ed2kFoundSource],
+    ) -> usize {
+        // Collect distinct swap-target transfers under the state lock, then queue
+        // their attempts after releasing it (queue_ed2k_download_attempt also
+        // takes the lock).
+        let mut swap_targets: Vec<Transfer> = Vec::new();
         {
-            let mut state = self.state.lock().await;
-            // WHY: REST resume returns before the peer transfer finishes, so repeated
-            // resume requests must not start duplicate writers for the same part file.
-            if !state.active_download_attempts.insert(hash.clone()) {
-                return;
+            let state = self.state.lock().await;
+            let mut seen_targets: HashSet<String> = HashSet::new();
+            for source in sources {
+                let Some(candidate) = state
+                    .download_source_registry
+                    .swap_target_for_peer(source, current_file_hash)
+                else {
+                    continue;
+                };
+                if !seen_targets.insert(candidate.file_hash.clone()) {
+                    continue;
+                }
+                // The swap target must still be a wanted (active) transfer.
+                if let Some(target) = state.transfers.get(&candidate.file_hash) {
+                    if !matches!(
+                        target.state.as_str(),
+                        "completed" | "completing" | "paused" | "stopped"
+                    ) {
+                        swap_targets.push(target.clone());
+                    }
+                }
             }
         }
+        let swapped = swap_targets.len();
+        for target in swap_targets {
+            tracing::info!(
+                "ED2K A4AF-lite swap source from file_hash={} to wanted file_hash={}",
+                current_file_hash,
+                target.hash
+            );
+            // Spawn the target attempt rather than awaiting it inline: the swap is
+            // reached from within a download attempt, so awaiting the recursive
+            // attempt future here would make the spawned driver task's future
+            // self-referential (non-`Send`). Detaching also matches the master,
+            // where SwapToAnotherFile only re-files the source and the swap target
+            // is driven by its own download loop.
+            // The swap target is driven by its own download loop (master
+            // SwapToAnotherFile only re-files the source); queue_ed2k_download_attempt
+            // spawns the attempt and dedups against any already running for that file.
+            self.queue_ed2k_download_attempt(target);
+        }
+        swapped
+    }
 
+    /// Spawn a background download attempt for `transfer`. Synchronous (returns
+    /// immediately after spawning) so it carries no opaque async return type:
+    /// an attempt may run the A4AF-lite NNP swap, which re-queues another attempt
+    /// (run_attempt -> swap -> queue -> run_attempt); keeping this a plain `fn`
+    /// severs that type-inference cycle while the spawn breaks the recursion at
+    /// runtime. The dedup guard runs inside the spawned task.
+    fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
+        let hash = transfer.hash.clone();
         let core = self.clone();
         tokio::spawn(async move {
+            {
+                let mut state = core.state.lock().await;
+                // WHY: REST resume returns before the peer transfer finishes, so repeated
+                // resume requests must not start duplicate writers for the same part file.
+                if !state.active_download_attempts.insert(hash.clone()) {
+                    return;
+                }
+            }
             let result = core.run_ed2k_download_attempt(&transfer).await;
             let mut retry_downloading = false;
             match result {
@@ -2847,7 +2934,7 @@ impl EmulebbCore {
             if transfer.state != "downloading" {
                 return;
             }
-            core.queue_ed2k_download_attempt(transfer).await;
+            core.queue_ed2k_download_attempt(transfer);
         });
     }
 
@@ -4613,6 +4700,10 @@ where
     // Endpoints that detached onto UDP reask across all retry rounds; their leases
     // are kept (not released) so the next cycle does not re-TCP them.
     let mut detached_reask_endpoints: Vec<(Ipv4Addr, u16)> = Vec::new();
+    // Sources that reported No Needed Parts; the driver runs the A4AF-lite swap
+    // on each after the round (move to another wanted file the peer serves, else
+    // drop). Kept across retry rounds.
+    let mut no_needed_parts_sources: Vec<Ed2kFoundSource> = Vec::new();
 
     loop {
         let mut accepted_incomplete_peers = 0u32;
@@ -4670,6 +4761,7 @@ where
                                 .as_ref()
                                 .map(|error| anyhow::anyhow!(error.to_string())),
                             detached_reask_endpoints: detached_reask_endpoints.clone(),
+                            no_needed_parts_sources: no_needed_parts_sources.clone(),
                         });
                     }
                 }
@@ -4689,6 +4781,17 @@ where
                     detached_reask_endpoints.push(source_endpoint_key(&source));
                     tracing::info!(
                         "ED2K direct download peer detached to UDP reask file_hash={} peer={}",
+                        file_hash_hex,
+                        peer_addr
+                    );
+                }
+                Ok(Ed2kPeerDownloadOutcome::NoNeededParts) => {
+                    // No Needed Parts for this file (eMuleBB DS_NONEEDEDPARTS). The
+                    // driver runs the A4AF-lite SwapToAnotherFile afterwards: this
+                    // source is moved to another wanted file it serves, if any.
+                    no_needed_parts_sources.push(source.clone());
+                    tracing::info!(
+                        "ED2K direct download peer reported no needed parts file_hash={} peer={}",
                         file_hash_hex,
                         peer_addr
                     );
@@ -4729,8 +4832,12 @@ where
                 .as_ref()
                 .map(|error| anyhow::anyhow!(error.to_string())),
             detached_reask_endpoints: detached_reask_endpoints.clone(),
+            no_needed_parts_sources: no_needed_parts_sources.clone(),
         };
-        if outcome.completed || outcome.accepted_incomplete_peers != 0 {
+        if outcome.completed
+            || outcome.accepted_incomplete_peers != 0
+            || !outcome.no_needed_parts_sources.is_empty()
+        {
             return Ok(outcome);
         }
 
@@ -6783,6 +6890,201 @@ mod tests {
         assert_eq!(higher_deferred, 0);
         core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
             .await;
+    }
+
+    fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
+        Transfer {
+            hash: hash.to_string(),
+            name: "file".to_string(),
+            path: String::new(),
+            size_bytes: 1,
+            completed_bytes: 0,
+            state: state_name.to_string(),
+            progress: 0.0,
+            sources: 0,
+            sources_transferring: 0,
+            download_speed_ki_bps: 0.0,
+            upload_speed_ki_bps: 0.0,
+            stopped: state_name == "paused" || state_name == "stopped",
+            ed2k_link: String::new(),
+            priority: "normal".to_string(),
+            category_id: 0,
+            category_name: String::new(),
+            eta: None,
+            added_at: None,
+            completed_at: None,
+            parts_total: 1,
+            parts_obtained: 0,
+            parts_progress_text: "0".to_string(),
+            parts_available: 0,
+            auto_priority: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a4af_multi_file_peer_is_reused_and_not_double_engaged() {
+        // A4AF-lite leg 1: a peer registered for two of our files is engaged for
+        // exactly one file at a time; the second file defers the same peer
+        // (one active relationship per peer, like eMule) rather than opening a
+        // redundant second engagement.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let file_a = Ed2kHash::from_bytes([0x71; 16]).to_string();
+        let file_b = Ed2kHash::from_bytes([0x72; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x71; 16]),
+            Ipv4Addr::new(192, 0, 2, 31),
+            41010,
+        );
+        {
+            let mut state = core.state.lock().await;
+            // File A is the peer's best (higher priority), so it wins the single
+            // per-peer relationship; file B is the lower-priority other file.
+            for (hash, priority) in [(&file_a, 9u32), (&file_b, 3u32)] {
+                state
+                    .download_source_registry
+                    .add_candidate(DownloadSourceCandidate {
+                        file_hash: hash.clone(),
+                        file_priority: priority,
+                        needed_parts: 4,
+                        rare_parts: 1,
+                        source: source.clone(),
+                    });
+            }
+        }
+
+        let (a_sources, a_deferred) = core
+            .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
+            .await;
+        let (b_sources, b_deferred) = core
+            .acquire_direct_download_source_leases(&file_b, std::slice::from_ref(&source))
+            .await;
+
+        // Engaged once (file A, the peer's best), deferred (NOT double-engaged)
+        // for file B: one active relationship per peer, like eMule.
+        assert_eq!(a_sources, vec![source.clone()]);
+        assert_eq!(a_deferred, 0);
+        assert!(b_sources.is_empty());
+        assert_eq!(b_deferred, 1);
+
+        // The peer holds exactly one active engagement across both files (no
+        // double-engage / one relationship per peer).
+        assert_eq!(core.state.lock().await.active_download_peer_endpoints.len(), 1);
+
+        // After the peer is released, a fresh acquisition for the best file reuses
+        // the same source rather than being permanently consumed.
+        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
+            .await;
+        let (a_again, a_again_deferred) = core
+            .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(a_again, vec![source.clone()]);
+        assert_eq!(a_again_deferred, 0);
+        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a4af_nnp_source_is_swapped_to_another_wanted_file() {
+        // A4AF-lite leg 2: a source with No Needed Parts for the current file but
+        // registered for another WANTED file is swapped to that file (its attempt
+        // is queued) instead of being dropped (master SwapToAnotherFile).
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let current = Ed2kHash::from_bytes([0x73; 16]).to_string();
+        let other = Ed2kHash::from_bytes([0x74; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x73; 16]),
+            Ipv4Addr::new(192, 0, 2, 32),
+            41011,
+        );
+        {
+            let mut state = core.state.lock().await;
+            // The other file is a wanted (downloading) transfer.
+            state
+                .transfers
+                .insert(other.clone(), a4af_test_transfer(&other, "downloading"));
+            for hash in [&current, &other] {
+                state
+                    .download_source_registry
+                    .add_candidate(DownloadSourceCandidate {
+                        file_hash: hash.clone(),
+                        file_priority: 5,
+                        needed_parts: 4,
+                        rare_parts: 1,
+                        source: source.clone(),
+                    });
+            }
+        }
+
+        let swapped = core
+            .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(swapped, 1, "NNP source must be swapped to the other wanted file");
+    }
+
+    #[tokio::test]
+    async fn a4af_nnp_source_without_other_wanted_file_is_dropped() {
+        // A4AF-lite leg 2 negative: a source with No Needed Parts that serves no
+        // OTHER wanted file is not swapped (it stays dropped, as before).
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let current = Ed2kHash::from_bytes([0x75; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x75; 16]),
+            Ipv4Addr::new(192, 0, 2, 33),
+            41012,
+        );
+        {
+            let mut state = core.state.lock().await;
+            state
+                .download_source_registry
+                .add_candidate(DownloadSourceCandidate {
+                    file_hash: current.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 1,
+                    source: source.clone(),
+                });
+        }
+
+        let swapped = core
+            .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(swapped, 0, "NNP source with no other wanted file must not be swapped");
+    }
+
+    #[tokio::test]
+    async fn a4af_nnp_source_other_file_completed_is_not_swapped() {
+        // A4AF-lite leg 2 guard: the swap target must still be a wanted transfer;
+        // a completed/paused other file is not a valid swap target.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let current = Ed2kHash::from_bytes([0x76; 16]).to_string();
+        let other = Ed2kHash::from_bytes([0x77; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x76; 16]),
+            Ipv4Addr::new(192, 0, 2, 34),
+            41013,
+        );
+        {
+            let mut state = core.state.lock().await;
+            state
+                .transfers
+                .insert(other.clone(), a4af_test_transfer(&other, "completed"));
+            for hash in [&current, &other] {
+                state
+                    .download_source_registry
+                    .add_candidate(DownloadSourceCandidate {
+                        file_hash: hash.clone(),
+                        file_priority: 5,
+                        needed_parts: 4,
+                        rare_parts: 1,
+                        source: source.clone(),
+                    });
+            }
+        }
+
+        let swapped = core
+            .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(swapped, 0, "completed other file is not a valid swap target");
     }
 
     #[test]

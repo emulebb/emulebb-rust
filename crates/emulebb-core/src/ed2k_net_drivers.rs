@@ -196,7 +196,7 @@ pub(crate) async fn run_ed2k_reask_reengage(
                     continue;
                 };
                 if transfer.state == "downloading" {
-                    core.queue_ed2k_download_attempt(transfer).await;
+                    core.queue_ed2k_download_attempt(transfer);
                 }
             }
         }
