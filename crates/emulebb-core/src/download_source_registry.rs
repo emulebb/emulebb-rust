@@ -88,6 +88,29 @@ impl DownloadSourceRegistry {
         Some(candidate.clone())
     }
 
+    /// A4AF-lite NNP swap target (master `CUpDownClient::SwapToAnotherFile`):
+    /// when a source reports No Needed Parts for `current_file_hash`, find the
+    /// best OTHER file this same peer is registered to serve, so the source is
+    /// moved to that file instead of being dropped. Returns the highest-priority
+    /// candidate (by [`candidate_score`]: file priority, then rare/needed parts)
+    /// among the peer's files whose hash differs from `current_file_hash`, or
+    /// `None` when the peer serves no other wanted file (caller then drops it as
+    /// before). Does not mutate lease state; the caller leases the chosen file's
+    /// candidate via [`lease_best_for_file`] on the swap target if it engages it.
+    pub(crate) fn swap_target_for_peer(
+        &self,
+        source: &Ed2kFoundSource,
+        current_file_hash: &str,
+    ) -> Option<DownloadSourceCandidate> {
+        let peer_key = DownloadPeerKey::from_source(source);
+        let candidates = self.peers.get(&peer_key)?;
+        candidates
+            .iter()
+            .filter(|candidate| candidate.file_hash != current_file_hash)
+            .max_by_key(candidate_score)
+            .cloned()
+    }
+
     pub(crate) fn release_peer(&mut self, source: &Ed2kFoundSource) {
         self.leased_peers
             .remove(&DownloadPeerKey::from_source(source));
@@ -218,6 +241,55 @@ mod tests {
             registry
                 .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn registry_swap_target_picks_best_other_wanted_file_and_skips_current() {
+        let source = source_with_hash([0x55; 16]);
+        let mut registry = DownloadSourceRegistry::default();
+        // Peer serves three files: current (a), a low-priority other (b), and a
+        // high-priority other (c). The NNP swap must pick c over b and never a.
+        registry.add_candidate(candidate(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9,
+            9,
+            source.clone(),
+        ));
+        registry.add_candidate(candidate(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            1,
+            1,
+            source.clone(),
+        ));
+        registry.add_candidate(candidate(
+            "cccccccccccccccccccccccccccccccc",
+            5,
+            1,
+            source.clone(),
+        ));
+
+        let target = registry
+            .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap();
+        assert_eq!(target.file_hash, "cccccccccccccccccccccccccccccccc");
+    }
+
+    #[test]
+    fn registry_swap_target_is_none_when_peer_serves_only_the_current_file() {
+        let source = source_with_hash([0x66; 16]);
+        let mut registry = DownloadSourceRegistry::default();
+        registry.add_candidate(candidate(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9,
+            9,
+            source.clone(),
+        ));
+
+        assert!(
+            registry
+                .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_none()
         );
     }
 
