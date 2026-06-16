@@ -25,16 +25,12 @@ use super::super::{
     OP_SETREQFILEID, OP_SIGNATURE, SourceExchangePeer, begin_secure_ident_probe,
     build_hello_responses, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,
-    decode_answer_sources2_payload, decode_chat_captcha_request_payload,
-    decode_chat_captcha_result_payload, decode_client_id_change_payload,
+    decode_answer_sources2_payload, decode_client_id_change_payload,
     decode_client_message_payload, decode_edonkey_queue_rank_payload, decode_emule_info_profile,
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
-    decode_file_description_payload, decode_file_status_availability,
-    decode_file_status_body_availability, decode_hashset_answer,
+    decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_hello_answer_profile, decode_hello_profile,
-    decode_kad_callback_payload, decode_optional_file_hash_payload, decode_preview_answer_payload,
-    decode_preview_request_payload, decode_public_ip_answer_payload, decode_public_key_payload,
-    decode_reask_callback_tcp_payload, decode_request_filename_answer,
+    decode_optional_file_hash_payload, decode_public_key_payload, decode_request_filename_answer,
     decode_request_filename_answer_body, decode_secident_state, decode_signature_payload,
     dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send,
     encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_emule_info_answer,
@@ -49,6 +45,7 @@ use super::{
     reconcile_download_manifest_metadata,
 };
 mod browse;
+mod notify;
 mod parts;
 mod startup;
 mod state;
@@ -549,62 +546,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                 }
                 (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => {
-                    let public_ip = decode_public_ip_answer_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "public_ip_answer",
-                        format!("public_ip={public_ip}"),
-                    );
+                    notify::handle_public_ip_answer(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_CALLBACK) => {
-                    let callback = decode_kad_callback_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "kad_callback",
-                        format!(
-                            "file_hash={} callback_peer={}:{} buddy_check={} trailing_len={}",
-                            callback.file_hash,
-                            callback.peer_ip,
-                            callback.peer_tcp_port,
-                            hex::encode(callback.buddy_check),
-                            callback.trailing_len
-                        ),
-                    );
+                    notify::handle_kad_callback(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
-                    let reask = decode_reask_callback_tcp_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "reask_callback_tcp",
-                        format!(
-                            "file_hash={} dest={}:{} extended_info_len={}",
-                            reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-                        ),
-                    );
+                    notify::handle_reask_callback_tcp(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_CHATCAPTCHAREQ) => {
-                    let request = decode_chat_captcha_request_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "chat_captcha_request",
-                        format!(
-                            "tag_count={} data_len={}",
-                            request.tag_count, request.data_len
-                        ),
-                    );
+                    notify::handle_chat_captcha_request(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_CHATCAPTCHARES) => {
-                    let status = decode_chat_captcha_result_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "chat_captcha_result",
-                        format!("status={status}"),
-                    );
+                    notify::handle_chat_captcha_result(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_PORTTEST) => {
                     let reply = encode_port_test_answer();
@@ -615,20 +569,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         .with_context(|| format!("failed to send OP_PORTTEST to {peer_addr}"))?;
                 }
                 (OP_EMULEPROT, OP_KAD_FWTCPCHECK_ACK) => {
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "kad_firewall_tcp_ack",
-                        "received=true",
-                    );
+                    notify::handle_kad_firewall_tcp_ack(transport, peer_addr);
                 }
                 (OP_EMULEPROT, OP_BUDDYPING) | (OP_EMULEPROT, OP_BUDDYPONG) => {
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "kad_buddy_ping_pong",
-                        format!("opcode=0x{:02X}", packet.opcode),
-                    );
+                    notify::handle_buddy_ping_pong(transport, peer_addr, packet.opcode);
                 }
                 (OP_EDONKEYPROT, OP_HASHSETANSWER) => {
                     let (returned_hash, hashset) = decode_hashset_answer(&packet.payload)?;
@@ -1022,44 +966,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     );
                 }
                 (OP_EMULEPROT, OP_FILEDESC) => {
-                    let file_desc = decode_file_description_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "file_desc",
-                        format!(
-                            "file_hash={file_hash_hex} rating={} comment_len={}",
-                            file_desc.rating,
-                            file_desc.comment.len()
-                        ),
-                    );
+                    notify::handle_file_desc(transport, peer_addr, file_hash_hex, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_REQUESTPREVIEW) => {
-                    let preview_request = decode_preview_request_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "preview_request",
-                        format!(
-                            "file_hash={} trailing_len={}",
-                            preview_request.file_hash, preview_request.trailing_len
-                        ),
-                    );
+                    notify::handle_preview_request(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_PREVIEWANSWER) => {
-                    let preview_answer = decode_preview_answer_payload(&packet.payload)?;
-                    dump_ed2k_tcp_download_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "preview_answer",
-                        format!(
-                            "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
-                            preview_answer.file_hash,
-                            preview_answer.frame_count,
-                            preview_answer.frame_payload_bytes,
-                            preview_answer.trailing_len
-                        ),
-                    );
+                    notify::handle_preview_answer(transport, peer_addr, &packet.payload)?;
                 }
                 (OP_EMULEPROT, OP_AICHREQUEST) => {
                     let request = decode_aich_recovery_request_payload(&packet.payload)?;
