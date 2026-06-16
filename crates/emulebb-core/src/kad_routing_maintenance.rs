@@ -32,10 +32,12 @@ const BIG_TIMER_SECS: u64 = 10;
 /// Oracle `OnSmallTimer` runs once per minute per leaf; we sweep the whole table
 /// on this cadence.
 const SMALL_TIMER_SECS: u64 = 60;
-/// Bound the number of random-target lookups we kick off per big-timer tick so a
-/// large tree cannot turn maintenance into a query storm (the master spreads one
-/// zone per scheduler tick). Round-robined across ticks via the target rotation.
-const MAX_RANDOM_LOOKUPS_PER_TICK: usize = 2;
+/// Bound the number of random-target lookups we kick off per big-timer tick.
+/// The master fires at most ONE zone's `OnBigTimer` per scheduler pass: the
+/// `tNow >= m_tBigTimer` guard plus `m_tBigTimer = tNow + SEC(10)` after a
+/// successful zone (Kademlia.cpp:289-294) rate-limits it to one zone random
+/// lookup per SEC(10). Round-robined across ticks via the target rotation.
+const MAX_RANDOM_LOOKUPS_PER_TICK: usize = 1;
 /// Bound the number of stale contacts we HELLO-probe per small-timer sweep so a
 /// large table stays gentle (the master probes one per leaf; we cap the total).
 const MAX_PROBES_PER_SWEEP: usize = 16;

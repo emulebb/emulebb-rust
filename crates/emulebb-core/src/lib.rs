@@ -5698,7 +5698,7 @@ mod tests {
 
     #[test]
     fn kad_hello_response_tags_include_source_udp_port_and_misc_bits() {
-        let tags = build_kad_hello_response_tags(41000, true, true, true);
+        let tags = build_kad_hello_response_tags(41000, true, true, true, true);
 
         assert_eq!(
             tags,
@@ -5706,6 +5706,21 @@ mod tests {
                 Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
                 Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x07)),
             ]
+        );
+    }
+
+    #[test]
+    fn kad_hello_response_tags_gate_both_tags_like_request_and_oracle() {
+        // Oracle SendMyDetails gates HELLO_RES tags as HELLO_REQ: SOURCEUPORT
+        // only when advertising the intern port; KADMISCOPTIONS only on ACK/fw.
+        assert!(build_kad_hello_response_tags(41000, false, false, false, false).is_empty());
+        assert_eq!(
+            build_kad_hello_response_tags(41000, true, false, false, false),
+            vec![Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000))]
+        );
+        assert_eq!(
+            build_kad_hello_response_tags(41000, false, true, false, true),
+            vec![Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05))]
         );
     }
 

@@ -136,6 +136,11 @@ impl DhtNode {
             res.sender_tcp_port,
             res.sender_version,
         );
+        // This is the bootstrap node that answered our BootstrapReq (reachable),
+        // so flag it for the oracle +10 bootstrap quality bonus
+        // (Contact.cpp:293-294). The contacts it returns below are ordinary
+        // learned peers, not bootstrap nodes, and stay unflagged.
+        sender_contact.bootstrap = true;
         if let Some(known_udp_key) = self.known_peer_key(addr) {
             sender_contact.udp_key = known_udp_key;
         }

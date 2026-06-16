@@ -81,20 +81,34 @@ pub(crate) fn kad_publish_within_tolerance(
 
 pub(crate) fn build_kad_hello_response_tags(
     kad_udp_port: u16,
+    can_advertise_source_udp_port: bool,
     udp_firewalled: bool,
     tcp_firewalled: bool,
     request_ack: bool,
 ) -> Vec<Tag> {
-    let mut tags = vec![Tag::new_short(
-        tag_name::SOURCEUPORT,
-        TagValue::U16(kad_udp_port),
-    )];
-    let misc_options =
-        u8::from(udp_firewalled) | (u8::from(tcp_firewalled) << 1) | (u8::from(request_ack) << 2);
-    tags.push(Tag::new_short(
-        tag_name::KADMISCOPTIONS,
-        TagValue::U8(misc_options),
-    ));
+    // HELLO_RES is emitted by the same oracle `SendMyDetails`
+    // (KademliaUDPListener.cpp:146-168) as HELLO_REQ, so the two tags carry the
+    // identical gates: SOURCEUPORT only when advertising our intern Kad port
+    // (`!GetUseExternKadPort()`), and KADMISCOPTIONS only on v8+ AND when we
+    // request an ACK or are UDP/TCP firewalled. (KAD_VERSION is well past v8, so
+    // the version gate is always satisfied here.) Previously this builder always
+    // emitted both, unlike the request builder and the oracle.
+    let mut tags = Vec::new();
+    if can_advertise_source_udp_port {
+        tags.push(Tag::new_short(
+            tag_name::SOURCEUPORT,
+            TagValue::U16(kad_udp_port),
+        ));
+    }
+    if request_ack || udp_firewalled || tcp_firewalled {
+        let misc_options = u8::from(udp_firewalled)
+            | (u8::from(tcp_firewalled) << 1)
+            | (u8::from(request_ack) << 2);
+        tags.push(Tag::new_short(
+            tag_name::KADMISCOPTIONS,
+            TagValue::U8(misc_options),
+        ));
+    }
     tags
 }
 
@@ -210,6 +224,10 @@ pub(crate) async fn build_kad_hello_response(
         version: KAD_VERSION,
         tags: build_kad_hello_response_tags(
             bind_addr.port(),
+            // Mirror the request builder: advertise SOURCEUPORT whenever we are
+            // on our verified-open intern Kad port (the rust modelling of
+            // `!GetUseExternKadPort()`).
+            firewall.udp_verified && firewall.udp_open,
             firewall.udp_verified && !firewall.udp_open,
             tcp_firewalled,
             request_ack,

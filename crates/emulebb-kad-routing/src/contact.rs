@@ -61,6 +61,16 @@ pub struct Contact {
     /// liveness window lapses. `None` mirrors the oracle `m_tExpires == 0`
     /// (no window set yet); the small timer seeds it on first sweep.
     pub expires_at: Option<SystemTime>,
+    /// Oracle `CContact::m_tLastTypeSet`: the instant `probe_type` was last
+    /// advanced by `CheckingType`. `None` mirrors the oracle default of 0, which
+    /// makes the first `checking_type` re-age guard (`now - m_tLastTypeSet >= 10`)
+    /// always pass.
+    pub last_type_set_at: Option<SystemTime>,
+    /// Oracle `CContact::m_bBootstrapContact`: set for a contact created from a
+    /// bootstrap response, granting a +10 local-quality bonus
+    /// (Contact.cpp:293-294) so the seed nodes that taught us the network are
+    /// preferentially retained.
+    pub bootstrap: bool,
     /// Most recent successful observation time.
     pub last_seen: SystemTime,
     /// First insertion time for this contact.
@@ -98,6 +108,8 @@ impl Contact {
             contact_type: ContactType::Inactive,
             probe_type: 2,
             expires_at: None,
+            last_type_set_at: None,
+            bootstrap: false,
             last_seen: now,
             created_at: now,
         }
@@ -158,15 +170,27 @@ impl Contact {
 
     /// Advance the staleness counter the way the oracle small timer does before
     /// HELLO-probing a stale contact (`CContact::CheckingType`,
-    /// Contact.cpp:205-213): while not yet dead, bump `probe_type` toward 4 and
-    /// open a fresh two-minute expiry window. Returns the new counter value.
+    /// Contact.cpp:205-213): while not yet dead AND at least 10s since the last
+    /// advance, bump `probe_type` toward 4 and open a fresh two-minute expiry
+    /// window. Returns the (possibly unchanged) counter value.
     pub fn checking_type(&mut self) -> u8 {
         self.checking_type_at(SystemTime::now())
     }
 
     /// [`Contact::checking_type`] evaluated at an explicit instant (test seam).
     pub fn checking_type_at(&mut self, now: SystemTime) -> u8 {
-        if self.probe_type < CONTACT_TYPE_DEAD {
+        // Oracle re-age guard (Contact.cpp:207): only advance if >= 10s have
+        // passed since the last advance. `last_type_set_at == None` mirrors the
+        // oracle `m_tLastTypeSet == 0`, which always passes the guard.
+        let due = match self.last_type_set_at {
+            Some(last) => now
+                .duration_since(last)
+                .map(|elapsed| elapsed >= Duration::from_secs(10))
+                .unwrap_or(false),
+            None => true,
+        };
+        if due && self.probe_type < CONTACT_TYPE_DEAD {
+            self.last_type_set_at = Some(now);
             self.probe_type += 1;
             self.expires_at = Some(now + Duration::from_secs(2 * 60));
         }
@@ -225,6 +249,9 @@ impl Contact {
             score += 50;
         } else if age <= 12 * 3600 {
             score += 25;
+        }
+        if self.bootstrap {
+            score += 10;
         }
         score += kad_version_quality(self.kad_version);
         score
@@ -335,14 +362,46 @@ mod tests {
     fn test_checking_type_ages_toward_dead() {
         let mut c = Contact::new(NodeId::from_bytes([3u8; 16]), "8.8.8.8".parse().unwrap(), 1, 2, 9);
         c.probe_type = 0;
-        let now = SystemTime::now();
-        assert_eq!(c.checking_type_at(now), 1);
-        assert_eq!(c.checking_type_at(now), 2);
-        assert_eq!(c.checking_type_at(now), 3);
-        assert_eq!(c.checking_type_at(now), 4);
+        let base = SystemTime::now();
+        // Each advance is at least 10s after the previous to clear the oracle
+        // re-age guard (Contact.cpp:207).
+        let step = |n: u64| base + Duration::from_secs(10 * n);
+        assert_eq!(c.checking_type_at(step(1)), 1);
+        assert_eq!(c.checking_type_at(step(2)), 2);
+        assert_eq!(c.checking_type_at(step(3)), 3);
+        assert_eq!(c.checking_type_at(step(4)), 4);
         // Saturates at dead.
-        assert_eq!(c.checking_type_at(now), 4);
+        assert_eq!(c.checking_type_at(step(5)), 4);
         assert!(c.is_dead());
+    }
+
+    #[test]
+    fn test_checking_type_re_age_guard_blocks_within_10s() {
+        // Oracle CheckingType (Contact.cpp:207) only advances if >= 10s have
+        // passed since the last advance.
+        let mut c = Contact::new(NodeId::from_bytes([8u8; 16]), "8.8.4.4".parse().unwrap(), 1, 2, 9);
+        c.probe_type = 0;
+        let base = SystemTime::now();
+        // First advance always passes (last_type_set_at == None).
+        assert_eq!(c.checking_type_at(base), 1);
+        // A second call only 9s later is suppressed by the guard.
+        assert_eq!(c.checking_type_at(base + Duration::from_secs(9)), 1);
+        // At exactly 10s after the last advance it proceeds.
+        assert_eq!(c.checking_type_at(base + Duration::from_secs(10)), 2);
+    }
+
+    #[test]
+    fn test_bootstrap_contact_quality_bonus() {
+        // Oracle Contact.cpp:293-294: a bootstrap contact gets +10.
+        let now = SystemTime::now();
+        let mut base = Contact::new(NodeId::from_bytes([9u8; 16]), "1.2.3.9".parse().unwrap(), 1, 2, 10);
+        base.received_hello_packet = true;
+        base.probe_type = 0;
+        base.last_seen = now;
+        let without = base.local_quality_score(now);
+        let mut boot = base.clone();
+        boot.bootstrap = true;
+        assert_eq!(boot.local_quality_score(now), without + 10);
     }
 
     #[test]
