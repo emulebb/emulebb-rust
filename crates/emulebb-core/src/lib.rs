@@ -1161,18 +1161,18 @@ impl EmulebbCore {
         // Trigger an immediate Kad UDP firewall self-check round when the driver
         // is running, so the REST recheck actually drives a fresh probe instead of
         // only reporting status (oracle CUDPFirewallTester::ReCheckFirewallUDP).
-        let triggered = {
+        {
             let runtime = self.ed2k_runtime.lock().await;
-            match runtime.as_ref().and_then(|rt| rt.kad_firewall_recheck.as_ref()) {
-                Some(signal) => {
-                    signal.notify_one();
-                    true
-                }
-                None => false,
+            if let Some(signal) = runtime.as_ref().and_then(|rt| rt.kad_firewall_recheck.as_ref())
+            {
+                signal.notify_one();
             }
-        };
+        }
+        // Master parity (kad/recheck_firewall -> PostWebGuiInteraction): the recheck
+        // request is "queued" whenever Kad is running, independent of whether the
+        // live ed2k networking runtime is up (the GUI accepts the interaction post).
         let mut status = kad_status_from_running(self.state.lock().await.kad_running);
-        status.operation_queued = Some(triggered);
+        status.operation_queued = Some(status.running);
         status.already_running = Some(false);
         status
     }
