@@ -4,6 +4,7 @@ use anyhow::Result;
 use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tracing::{debug, info, warn};
 
+use super::server_status::status_ping_due_at;
 use super::types::{ServerSessionContext, ServerUdpPacket};
 use super::udp_runtime::{
     bind_server_udp_socket, read_server_udp_packet, send_server_udp_status_request,
@@ -115,6 +116,12 @@ pub(super) async fn run_one_server_session(
     // set when we send OP_GLOBSERVSTATREQ, validated against the echoed challenge in
     // the OP_GLOBSERVSTATRES handler, then cleared.
     let mut server_status_challenge: Option<u32> = None;
+    // Per-server UDP global-server-status ping cadence gate (eMule
+    // `CServerList::ServerStats`): a status ping is sent at most once every
+    // `UDPSERVSTATREASKTIME` (4.5h, floored at the 20min min-reask), DECOUPLED
+    // from the ~60s TCP keepalive tick. Sending it every keepalive tick (as the
+    // old code did) is a ~270x over-ping and a live-network ban risk.
+    let mut last_status_ping: Option<TokioInstant> = None;
 
     loop {
         if context.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -417,9 +424,18 @@ pub(super) async fn run_one_server_session(
                         debug!("sent ED2K server keepalive to {}", server.base_endpoint());
                     }
                 }
-                if let Some(socket) = server_udp_socket.as_ref() {
+                // The UDP global-server-status ping is GATED on its own 4.5h
+                // cadence and decoupled from the keepalive tick above: pinging on
+                // every ~60s keepalive is a ~270x over-ping (eMule pings at most
+                // once per `UDPSERVSTATREASKTIME`), which risks a server ban.
+                if let Some(socket) = server_udp_socket.as_ref()
+                    && status_ping_due_at(last_status_ping, TokioInstant::now())
+                {
                     match send_server_udp_status_request(socket, server).await {
-                        Ok(challenge) => server_status_challenge = Some(challenge),
+                        Ok(challenge) => {
+                            server_status_challenge = Some(challenge);
+                            last_status_ping = Some(TokioInstant::now());
+                        }
                         Err(error) => warn!(
                             "failed to send ED2K server UDP status request to {}: {error}",
                             server.base_endpoint()
