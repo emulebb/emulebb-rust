@@ -27,7 +27,7 @@ use super::super::codec::{
     decode_exact_file_hash_payload, decode_kad_callback_payload,
     decode_optional_file_hash_payload, encode_aich_recovery_answer,
     encode_aich_recovery_failure_answer, encode_buddy_pong, encode_file_req_ans_nofil,
-    encode_packet, encode_port_test_answer, encode_public_ip_answer,
+    encode_port_test_answer, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
@@ -39,14 +39,9 @@ use super::super::hello::{
     DecodedHelloProfile, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
     encode_emule_info_answer,
 };
-use super::super::identity::{
-    Ed2kPeerSecureIdentState, begin_secure_ident_probe, decode_public_key_payload,
-    decode_secident_state, decode_signature_payload, encode_secident_state, random_nonzero_u32,
-    try_send_secure_ident_signature, verify_peer_secure_ident_signature,
-};
+use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
-    ED2K_CONNECTION_IDLE_TIMEOUT, ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-    ED2K_SECURE_IDENT_SIGNATURE_NEEDED, Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport,
+    ED2K_CONNECTION_IDLE_TIMEOUT, Ed2kHelloIdentity, Ed2kSecureIdent, Ed2kTransport,
     FirewallCheckUdpRequest, OP_AICHANSWER, OP_AICHFILEHASHREQ, OP_AICHREQUEST,
     OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES,
     OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS, OP_BUDDYPING,
@@ -64,6 +59,7 @@ use super::super::{
 
 mod browse;
 mod notify;
+mod secure_ident;
 mod shared_file;
 mod upload_payload;
 mod upload_queue;
@@ -569,125 +565,36 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 );
             }
             (OP_EMULEPROT, OP_SECIDENTSTATE) => {
-                let (state, challenge) = decode_secident_state(&packet.payload)?;
-                debug!(
-                    "received eMule OP_SECIDENTSTATE from {peer_addr} transport={} state={} challenge={challenge}",
-                    transport.mode.as_str(),
-                    state
-                );
-                peer_secure_ident.peer_challenge_from = Some(challenge);
-                if state != 0 {
-                    peer_secure_ident.pending_signature = true;
-                }
-                if state == ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED {
-                    let public_key = encode_packet(
-                        OP_EMULEPROT,
-                        OP_PUBLICKEY,
-                        &secure_ident.public_key_payload()?,
-                    );
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "public_key",
-                        &public_key,
-                    );
-                    transport
-                        .write_all(&public_key)
-                        .await
-                        .with_context(|| format!("failed to send OP_PUBLICKEY to {peer_addr}"))?;
-                }
-                if !try_send_secure_ident_signature(
+                secure_ident::handle_secident_state(
                     &mut transport,
                     peer_addr,
                     secure_ident,
                     &mut peer_secure_ident,
-                )
-                .await?
-                    && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
-                    && !peer_secure_ident.requested_peer_key
-                {
-                    let challenge_for = random_nonzero_u32();
-                    peer_secure_ident.challenge_for = Some(challenge_for);
-                    peer_secure_ident.pending_signature = true;
-                    peer_secure_ident.requested_peer_key = true;
-                    let request = encode_secident_state(
-                        ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                        challenge_for,
-                    );
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "secure_ident_probe",
-                        &request,
-                    );
-                    transport.write_all(&request).await.with_context(|| {
-                        format!("failed to send fallback OP_SECIDENTSTATE to {peer_addr}")
-                    })?;
-                }
-            }
-            (OP_EMULEPROT, OP_PUBLICKEY) => {
-                peer_secure_ident.peer_public_key =
-                    Some(decode_public_key_payload(&packet.payload)?);
-                debug!(
-                    "received eMule OP_PUBLICKEY from {peer_addr} transport={} key_len={}",
-                    transport.mode.as_str(),
-                    peer_secure_ident
-                        .peer_public_key
-                        .as_ref()
-                        .map_or(0, Vec::len)
-                );
-                let _ = try_send_secure_ident_signature(
-                    &mut transport,
-                    peer_addr,
-                    secure_ident,
-                    &mut peer_secure_ident,
+                    &packet.payload,
                 )
                 .await?;
             }
-            (OP_EMULEPROT, OP_SIGNATURE) => match decode_signature_payload(&packet.payload) {
-                Ok(signature) => {
-                    let verified = verify_peer_secure_ident_signature(
-                        secure_ident,
-                        &mut peer_secure_ident,
-                        &signature,
-                        peer_addr,
-                        reachability.get(),
-                    );
-                    dump_ed2k_tcp_listener_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        if verified {
-                            "secure_ident_signature_verified"
-                        } else {
-                            "secure_ident_signature_unverified"
-                        },
-                        format!(
-                            "signature_len={} challenge_ip_kind={} verified={verified}",
-                            signature.signature_len,
-                            signature
-                                .challenge_ip_kind
-                                .map(|kind| kind.to_string())
-                                .unwrap_or_else(|| "none".to_string())
-                        ),
-                    );
-                    // Sync ident state so the credit score only benefits a
-                    // verified peer (eMule IS_IDENTIFIED gating GetScoreRatio).
-                    peer_upload_identity.ident_verified = verified;
-                    // A peer that presented a public key + signature that FAILED
-                    // verification is IS_IDBADGUY (eMule GetCurrentIdentState):
-                    // its upload score is zeroed, not merely denied the credit
-                    // benefit. A later successful verify clears the verdict.
-                    peer_upload_identity.ident_bad_guy = !verified;
-                }
-                Err(error) => {
-                    dump_ed2k_tcp_listener_meta(
-                        peer_addr,
-                        Some(transport.mode),
-                        "secure_ident_signature_invalid",
-                        format!("error={error:#}"),
-                    );
-                }
-            },
+            (OP_EMULEPROT, OP_PUBLICKEY) => {
+                secure_ident::handle_public_key(
+                    &mut transport,
+                    peer_addr,
+                    secure_ident,
+                    &mut peer_secure_ident,
+                    &packet.payload,
+                )
+                .await?;
+            }
+            (OP_EMULEPROT, OP_SIGNATURE) => {
+                secure_ident::handle_signature(
+                    &transport,
+                    peer_addr,
+                    secure_ident,
+                    &mut peer_secure_ident,
+                    &mut peer_upload_identity,
+                    reachability.get(),
+                    &packet.payload,
+                );
+            }
             (OP_EMULEPROT, OP_PUBLICIP_REQ) => {
                 debug!(
                     "received eMule OP_PUBLICIP_REQ from {peer_addr} transport={}",
