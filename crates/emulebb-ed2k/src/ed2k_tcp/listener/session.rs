@@ -30,12 +30,9 @@ use super::super::codec::{
     decode_exact_file_hash_payload, decode_file_description_payload, decode_kad_callback_payload,
     decode_optional_file_hash_payload, decode_preview_answer_payload,
     decode_preview_request_payload, decode_public_ip_answer_payload,
-    decode_reask_callback_tcp_payload, decode_shared_dirs_answer_payload,
-    decode_shared_files_answer_payload, decode_shared_files_dir_answer_payload,
-    decode_shared_files_dir_request_payload, encode_aich_recovery_answer,
-    encode_aich_recovery_failure_answer,
-    encode_buddy_pong, encode_empty_shared_files_answer, encode_file_req_ans_nofil, encode_packet,
-    encode_port_test_answer, encode_public_ip_answer, encode_shared_browse_denied_answer,
+    decode_reask_callback_tcp_payload, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer, encode_buddy_pong, encode_file_req_ans_nofil,
+    encode_packet, encode_port_test_answer, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
@@ -70,6 +67,7 @@ use super::super::{
     handle_aich_recovery_answer,
 };
 
+mod browse;
 mod shared_file;
 mod upload_payload;
 mod upload_queue;
@@ -483,100 +481,28 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 );
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => {
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "ask_shared_files",
-                    format!("payload_len={}", packet.payload.len()),
-                );
-                let reply = encode_empty_shared_files_answer();
-                dump_ed2k_tcp_listener_send(
-                    peer_addr,
-                    transport.mode,
-                    "shared_files_answer",
-                    &reply,
-                );
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_ASKSHAREDFILESANSWER to {peer_addr}")
-                })?;
+                browse::handle_ask_shared_files(&mut transport, peer_addr, packet.payload.len())
+                    .await?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDDIRS) => {
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "ask_shared_dirs",
-                    format!("payload_len={}", packet.payload.len()),
-                );
-                let reply = encode_shared_browse_denied_answer();
-                dump_ed2k_tcp_listener_send(
-                    peer_addr,
-                    transport.mode,
-                    "shared_browse_denied",
-                    &reply,
-                );
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_ASKSHAREDDENIEDANS to {peer_addr}")
-                })?;
+                browse::handle_ask_shared_dirs(&mut transport, peer_addr, packet.payload.len())
+                    .await?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIR) => {
-                let dir = decode_shared_files_dir_request_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "ask_shared_files_dir",
-                    format!("dir={dir}"),
-                );
-                let reply = encode_shared_browse_denied_answer();
-                dump_ed2k_tcp_listener_send(
-                    peer_addr,
-                    transport.mode,
-                    "shared_browse_denied",
-                    &reply,
-                );
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_ASKSHAREDDENIEDANS to {peer_addr}")
-                })?;
+                browse::handle_ask_shared_files_dir(&mut transport, peer_addr, &packet.payload)
+                    .await?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESANSWER) => {
-                let answer = decode_shared_files_answer_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "shared_files_answer",
-                    format!(
-                        "file_count={} entry_bytes={}",
-                        answer.file_count, answer.entry_bytes
-                    ),
-                );
+                browse::handle_ask_shared_files_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS) => {
-                let answer = decode_shared_dirs_answer_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "shared_dirs_answer",
-                    format!("dir_count={} dirs={}", answer.dir_count, answer.dirs.len()),
-                );
+                browse::handle_ask_shared_dirs_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILESDIRANS) => {
-                let answer = decode_shared_files_dir_answer_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "shared_files_dir_answer",
-                    format!(
-                        "dir={} file_count={} entry_bytes={}",
-                        answer.dir, answer.file_count, answer.entry_bytes
-                    ),
-                );
+                browse::handle_ask_shared_files_dir_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDDENIEDANS) => {
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "shared_browse_denied",
-                    format!("payload_len={}", packet.payload.len()),
-                );
+                browse::handle_ask_shared_denied_answer(&transport, peer_addr, packet.payload.len());
             }
             (OP_EDONKEYPROT, OP_QUEUERANK) => {
                 let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
