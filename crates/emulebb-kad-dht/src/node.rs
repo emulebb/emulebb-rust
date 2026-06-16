@@ -49,6 +49,20 @@ struct DhtInner {
     ip_filter: std::sync::OnceLock<crate::traversal::KadIpFilter>,
 }
 
+/// Routing-table contact counts for the `kad_event` `routing_summary`
+/// diagnostic. Mirrors the oracle `SKadContactSummary` `total` / `verified` /
+/// `with_udp_key` fields used by the master's `LogRoutingSummary`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KadRoutingSummaryCounts {
+    /// Total routing-table contacts (oracle `total`).
+    pub total: usize,
+    /// Contacts that completed the verified path (oracle `verified`).
+    pub verified: usize,
+    /// Contacts carrying a non-zero peer UDP anti-spoofing key (oracle
+    /// `with_udp_key`).
+    pub with_udp_key: usize,
+}
+
 /// The top-level DHT node. Clone-able (backed by Arc).
 pub struct DhtNode {
     inner: Arc<DhtInner>,
@@ -159,6 +173,28 @@ impl DhtNode {
             Ok(rt) => rt.len(),
             Err(_) => 0,
         }
+    }
+
+    /// Routing-table contact counts for the `kad_event` `routing_summary`
+    /// diagnostic (uniform-diagnostics-v2): total contacts, the verified subset,
+    /// and the subset carrying a non-zero peer UDP anti-spoofing key. Mirrors the
+    /// oracle `SKadContactSummary` `total` / `verified` / `with_udp_key` fields.
+    pub async fn routing_summary_counts(&self) -> KadRoutingSummaryCounts {
+        let rt = self.inner.routing_table.lock().await;
+        let mut counts = KadRoutingSummaryCounts {
+            total: rt.len(),
+            verified: 0,
+            with_udp_key: 0,
+        };
+        for contact in rt.all_contacts() {
+            if contact.verified {
+                counts.verified += 1;
+            }
+            if contact.udp_key != KadUdpKey::ZERO {
+                counts.with_udp_key += 1;
+            }
+        }
+        counts
     }
 
     /// True if the routing table has enough contacts to operate.

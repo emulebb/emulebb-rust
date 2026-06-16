@@ -267,6 +267,8 @@ async fn apply_kad_udp_firewall_check_result(
 ) {
     match summary {
         Some(summary) if summary.open => {
+            // kad_event firewall milestone `open` (uniform-diagnostics-v2 §3.3).
+            crate::diag_kad_event::firewall(false);
             if let Some(external_udp_port) = summary.external_udp_port {
                 reachability.set_peer_confirmed_udp_port(external_udp_port);
                 tracing::info!(
@@ -282,6 +284,8 @@ async fn apply_kad_udp_firewall_check_result(
             }
         }
         Some(summary) => {
+            // kad_event firewall milestone `firewalled` (uniform-diagnostics-v2 §3.3).
+            crate::diag_kad_event::firewall(true);
             let error = kad_firewall.lock().await.last_error.clone();
             tracing::info!(
                 helpers_requested = summary.helpers_requested,

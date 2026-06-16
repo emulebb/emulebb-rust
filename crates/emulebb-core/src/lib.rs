@@ -82,6 +82,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod categories;
+mod diag_kad_event;
 mod diag_sched;
 mod download_source_registry;
 mod ed2k_buddy_reask;
@@ -3724,6 +3725,21 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
         }
 
         let need = current_buddy_need(&runtime).await;
+
+        // kad_event routing_summary (uniform-diagnostics-v2 §3.3): emit the
+        // routing-table + connection gauge from this periodic maintenance tick
+        // (the 30s cadence matches the master's LogRoutingSummary interval). A
+        // no-op when EMULEBB_RUST_LOG_DIR is unset.
+        let connected = runtime.dht.is_bootstrapped();
+        let counts = runtime.dht.routing_summary_counts().await;
+        crate::diag_kad_event::routing_summary(
+            connected,
+            !connected,
+            need.tcp_firewalled,
+            false,
+            counts,
+        );
+
         let now = Utc::now();
         {
             let mut state = runtime.kad_buddy.lock().await;
@@ -4491,6 +4507,8 @@ async fn handle_kad_find_buddy_res(
         state.set_outgoing_buddy(buddy);
     }
     set_hello_buddy_snapshot(Some(HelloBuddySnapshot { ip: buddy_ip, udp_port: from.port() }));
+    // kad_event buddy milestone `buddy_established` (uniform-diagnostics-v2 §3.3).
+    crate::diag_kad_event::buddy(true, from);
     tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
 
     // Establish + hold the persistent buddy TCP link so callbacks can be relayed
@@ -4528,6 +4546,8 @@ async fn handle_kad_find_buddy_res(
         // the next upkeep re-searches.
         kad_buddy.lock().await.clear_outgoing_buddy();
         set_hello_buddy_snapshot(None);
+        // kad_event buddy milestone `buddy_released` (uniform-diagnostics-v2 §3.3).
+        crate::diag_kad_event::buddy(false, buddy_addr);
     });
 }
 

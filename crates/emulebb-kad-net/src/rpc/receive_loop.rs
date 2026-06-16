@@ -146,6 +146,20 @@ impl RpcManager {
                                 from.ip(),
                                 opcode_name(response_opcode),
                             );
+                            // bad_peer: packet from an IP previously flood-banned
+                            // by the anti-flood limiter (uniform-diagnostics-v2
+                            // §3.4). repeatCount/windowSeconds are unknown here
+                            // (the ban verdict happened on an earlier packet), so
+                            // they are reported as 0 rather than faked.
+                            crate::diag_event::bad_peer_kad_drop(
+                                "anti_flood_ban",
+                                "high",
+                                "anti_flood_ban",
+                                "packet from flood-banned IP",
+                                from,
+                                0,
+                                0,
+                            );
                             continue;
                         }
 
@@ -207,6 +221,25 @@ impl RpcManager {
                                     decision.observed_packets,
                                     decision.max_packets,
                                     decision.window.as_millis(),
+                                );
+                                // bad_peer: the per-bucket anti-flood token limiter
+                                // dropped this packet (uniform-diagnostics-v2 §3.4).
+                                // repeatCount = packets observed in the window;
+                                // windowSeconds = the limiter window.
+                                let (bad_event, bad_behavior, bad_severity) =
+                                    if matches!(decision.action, PacketTrackerAction::MassiveDrop) {
+                                        ("anti_flood_ban", "anti_flood_ban", "high")
+                                    } else {
+                                        ("anti_flood_drop", "anti_flood_drop", "medium")
+                                    };
+                                crate::diag_event::bad_peer_kad_drop(
+                                    bad_event,
+                                    bad_severity,
+                                    bad_behavior,
+                                    decision.action.label(),
+                                    from,
+                                    decision.observed_packets,
+                                    decision.window.as_secs(),
                                 );
                                 if matches!(decision.action, PacketTrackerAction::MassiveDrop)
                                     && let Some(handler) = &inner.massive_flood_handler

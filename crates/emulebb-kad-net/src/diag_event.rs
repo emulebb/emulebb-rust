@@ -90,6 +90,52 @@ pub fn emit(
     let _ = guard.flush();
 }
 
+/// `family:"kad_event"` `bootstrap` milestone `bootstrap_contact_added`
+/// (uniform-diagnostics-v2 §3.3): a contact was added to the routing table from a
+/// bootstrap response. `peer` is the contact's `ip:port` (Kad UDP endpoint).
+/// Typed wrapper so `emulebb-kad-dht` need not depend on `serde_json` directly.
+/// No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
+    emit(
+        "kad_event",
+        "bootstrap",
+        "info",
+        serde_json::json!({ "peer": peer.to_string() }),
+        serde_json::json!({ "milestone": "bootstrap_contact_added", "action": "observe" }),
+    );
+}
+
+/// `family:"bad_peer"` abuse event (uniform-diagnostics-v2 §3.4): a Kad UDP peer
+/// was dropped by the public-network anti-flood guard. `behavior` is the abuse
+/// classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason` the
+/// drop classification (e.g. the tracker bucket/action label). `repeat_count` is
+/// the observed packet count in the tracker window; `window_seconds` the window.
+/// Only `peer` is known at the Kad UDP layer, so `peerHash`/`fileHash`/`searchId`
+/// are omitted (not faked). No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+pub fn bad_peer_kad_drop(
+    event: &'static str,
+    severity: &'static str,
+    behavior: &'static str,
+    reason: &str,
+    peer: std::net::SocketAddr,
+    repeat_count: u32,
+    window_seconds: u64,
+) {
+    emit(
+        "bad_peer",
+        event,
+        severity,
+        serde_json::json!({ "peer": peer.to_string() }),
+        serde_json::json!({
+            "behavior": behavior,
+            "action": "drop",
+            "reason": reason,
+            "repeatCount": repeat_count,
+            "windowSeconds": window_seconds,
+        }),
+    );
+}
+
 fn diag_event_writer() -> Option<&'static DiagEventWriter> {
     DIAG_EVENT_WRITER.get_or_init(init_diag_event_writer).as_ref()
 }
@@ -124,10 +170,36 @@ fn read_env_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::DIAG_EVENT_FILE_PREFIX;
+    use super::{DIAG_EVENT_FILE_PREFIX, bad_peer_kad_drop, kad_event_bootstrap_contact_added};
 
     #[test]
     fn diag_event_file_prefix_uses_emulebb_rust_name() {
         assert_eq!(DIAG_EVENT_FILE_PREFIX, "emulebb-rust-diag-");
+    }
+
+    #[test]
+    fn typed_helpers_emit_without_panicking() {
+        // Exercises the bad_peer + kad_event(bootstrap) builder paths. Writes a
+        // real record only when EMULEBB_RUST_LOG_DIR is set (used by the lane-E
+        // trace-capture run); otherwise a cheap no-op.
+        kad_event_bootstrap_contact_added("1.2.3.4:4672".parse().unwrap());
+        bad_peer_kad_drop(
+            "anti_flood_ban",
+            "high",
+            "anti_flood_ban",
+            "tracker_massive_drop",
+            "5.6.7.8:4672".parse().unwrap(),
+            42,
+            10,
+        );
+        bad_peer_kad_drop(
+            "anti_flood_drop",
+            "medium",
+            "anti_flood_drop",
+            "tracker_drop",
+            "5.6.7.8:4672".parse().unwrap(),
+            7,
+            10,
+        );
     }
 }

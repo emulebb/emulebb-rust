@@ -357,6 +357,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     let sleep = tokio::time::sleep(timeout);
     tokio::pin!(sleep);
     let mut learned = LearnedEd2kMetadata::default();
+    let mut result_count: u32 = 0;
 
     loop {
         tokio::select! {
@@ -365,6 +366,7 @@ pub(crate) async fn collect_kad_ed2k_metadata(
                 let Some(result) = result else {
                     break;
                 };
+                result_count = result_count.saturating_add(1);
                 if let Some(candidate) = select_kad_keyword_metadata(&result, file_hash) {
                     learned.merge_missing_from(candidate);
                     if learned.is_complete() {
@@ -376,6 +378,11 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     }
 
     cancel.cancel();
+    // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): keyword lookup done.
+    crate::diag_kad_event::lookup_complete(
+        crate::diag_kad_event::KAD_SEARCH_TYPE_KEYWORD,
+        result_count,
+    );
     (!learned.is_empty()).then_some(learned)
 }
 
@@ -427,6 +434,11 @@ pub(crate) async fn collect_kad_ed2k_sources(
                             attempts,
                             sources.len()
                         );
+                        // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
+                        crate::diag_kad_event::lookup_complete(
+                            crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+                            sources.len() as u32,
+                        );
                         return sources;
                     }
                 }
@@ -446,6 +458,11 @@ pub(crate) async fn collect_kad_ed2k_sources(
                 attempts,
                 sources.len()
             );
+            // kad_event lookup_complete (uniform-diagnostics-v2 §3.3).
+            crate::diag_kad_event::lookup_complete(
+                crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+                sources.len() as u32,
+            );
             return sources;
         }
 
@@ -460,6 +477,11 @@ pub(crate) async fn collect_kad_ed2k_sources(
         "ED2K Kad source lookup exhausted file_hash={} attempts={} source_count=0",
         file_hash,
         attempts
+    );
+    // kad_event lookup_complete (uniform-diagnostics-v2 §3.3): exhausted = 0 found.
+    crate::diag_kad_event::lookup_complete(
+        crate::diag_kad_event::KAD_SEARCH_TYPE_FILE,
+        sources.len() as u32,
     );
     sources
 }

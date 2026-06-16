@@ -139,15 +139,25 @@ impl DhtNode {
         if let Some(known_udp_key) = self.known_peer_key(addr) {
             sender_contact.udp_key = known_udp_key;
         }
-        let _ = rt.add_contact(sender_contact);
+        if rt.add_contact(sender_contact).is_ok() {
+            // kad_event bootstrap milestone bootstrap_contact_added (§3.3).
+            emulebb_kad_net::diag_event::kad_event_bootstrap_contact_added(SocketAddr::new(
+                IpAddr::V4(bc.ip),
+                bc.udp_port,
+            ));
+        }
         for contact in res.contacts.into_iter().filter_map(bootstrap_contact_entry) {
+            let contact_addr = addr_from_contact(&contact);
             self.inner
                 .rpc
-                .register_peer_identity(addr_from_contact(&contact), contact.id);
+                .register_peer_identity(contact_addr, contact.id);
             self.inner
                 .rpc
-                .register_peer_version(addr_from_contact(&contact), contact.kad_version);
-            let _ = rt.add_contact(contact);
+                .register_peer_version(contact_addr, contact.kad_version);
+            if rt.add_contact(contact).is_ok() {
+                // kad_event bootstrap milestone bootstrap_contact_added (§3.3).
+                emulebb_kad_net::diag_event::kad_event_bootstrap_contact_added(contact_addr);
+            }
         }
         info!(
             "bootstrap response from {} - routing table now {} contacts",
