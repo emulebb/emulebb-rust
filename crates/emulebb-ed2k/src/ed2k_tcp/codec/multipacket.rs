@@ -10,8 +10,8 @@ use super::super::{
     OP_REQUESTSOURCES2, OP_SETREQFILEID,
 };
 use super::{
-    encode_file_status_body_complete, encode_packet, encode_request_filename_answer_body,
-    encode_request_filename_ext_info, encode_request_sources2_subpayload,
+    encode_packet, encode_request_filename_answer_body, encode_request_filename_ext_info,
+    encode_request_sources2_subpayload,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_answer(
     file_identifier: &Ed2kFileIdentifier,
     file_name: &str,
     include_filename_answer: bool,
-    include_file_status: bool,
+    file_status_body: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(64);
     file_identifier.encode_into(&mut payload);
@@ -92,9 +92,9 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_ext2_answer(
         payload.push(OP_REQFILENAMEANSWER);
         payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
     }
-    if include_file_status {
+    if let Some(status_body) = file_status_body {
         payload.push(OP_FILESTATUS);
-        payload.extend_from_slice(&encode_file_status_body_complete());
+        payload.extend_from_slice(status_body);
     }
     Ok(encode_packet(
         OP_EMULEPROT,
@@ -107,7 +107,7 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_answer(
     file_hash: &Ed2kHash,
     file_name: &str,
     include_filename_answer: bool,
-    include_file_status: bool,
+    file_status_body: Option<&[u8]>,
     aich_root: Option<[u8; 20]>,
 ) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(64);
@@ -116,9 +116,9 @@ pub(in crate::ed2k_tcp) fn encode_multipacket_answer(
         payload.push(OP_REQFILENAMEANSWER);
         payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
     }
-    if include_file_status {
+    if let Some(status_body) = file_status_body {
         payload.push(OP_FILESTATUS);
-        payload.extend_from_slice(&encode_file_status_body_complete());
+        payload.extend_from_slice(status_body);
     }
     if let Some(aich_root) = aich_root {
         payload.push(OP_AICHFILEHASHANS);

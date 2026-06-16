@@ -15,10 +15,10 @@ use crate::{
 use super::super::super::codec::{
     SourceExchangePeer, decode_exact_file_hash_payload, decode_file_hash_payload,
     decode_hashset_request2, decode_request_sources_payload, encode_aich_file_hash_answer,
-    encode_answer_sources, encode_answer_sources2, encode_file_req_ans_nofil,
-    encode_file_status_complete, encode_hashset_answer, encode_hashset_answer2,
-    encode_multipacket_answer, encode_multipacket_ext2_answer, encode_request_filename_answer,
-    skip_request_filename_ext_info, source_exchange_entry_count,
+    encode_answer_sources, encode_answer_sources2, encode_file_req_ans_nofil, encode_file_status,
+    encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
+    encode_multipacket_ext2_answer, encode_request_filename_answer, skip_request_filename_ext_info,
+    source_exchange_entry_count,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
@@ -30,7 +30,10 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
 ) -> Result<Option<Ed2kHash>> {
     let (requested_identifier, mut remaining) = Ed2kFileIdentifier::decode(payload)?;
     let requested = requested_identifier.file_hash;
-    let Some(shared) = transfer_runtime.local_entry(&requested).await? else {
+    // A partfile is a valid requested file only once it holds at least one
+    // complete part (master ListenSocket.cpp file-request fallback:
+    // downloadqueue file with GetCompletedSize() >= PARTSIZE).
+    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
         send_nofile(transport, peer_addr, &requested, "multipacket_ext2_nofil").await?;
         return Ok(Some(requested));
     };
@@ -96,11 +99,12 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     }
 
     if include_filename || include_status {
+        let status_body = include_status.then(|| shared.encode_part_status_body());
         let reply = encode_multipacket_ext2_answer(
             &shared_identifier,
             &shared.canonical_name,
             include_filename,
-            include_status,
+            status_body.as_deref(),
         )?;
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_ext2_answer", &reply);
         transport
@@ -135,7 +139,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     } else {
         None
     };
-    let Some(shared) = transfer_runtime.local_entry(&requested).await? else {
+    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
         send_nofile(transport, peer_addr, &requested, "multipacket_nofil").await?;
         return Ok(Some(requested));
     };
@@ -186,11 +190,12 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     }
 
     if include_filename || include_status || include_aich_root.is_some() {
+        let status_body = include_status.then(|| shared.encode_part_status_body());
         let reply = encode_multipacket_answer(
             &requested,
             &shared.canonical_name,
             include_filename,
-            include_status,
+            status_body.as_deref(),
             include_aich_root,
         )?;
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_answer", &reply);
@@ -209,7 +214,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     payload: &[u8],
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
-    let reply = if let Some(shared) = transfer_runtime.local_entry(&requested).await? {
+    let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
         encode_request_filename_answer(&requested, &shared.canonical_name)?
     } else {
         encode_file_req_ans_nofil(&requested)
@@ -229,8 +234,13 @@ pub(in crate::ed2k_tcp) async fn handle_set_req_file_id(
     payload: &[u8],
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_exact_file_hash_payload(payload, "OP_SETREQFILEID")?;
-    let reply = if transfer_runtime.local_entry(&requested).await?.is_some() {
-        encode_file_status_complete(&requested)
+    // OP_SETREQFILEID answers the live part-status: a complete file collapses to
+    // the master "complete" sentinel, while an in-progress partfile reports its
+    // verified parts (master ListenSocket.cpp: IsPartFile() -> WritePartStatus,
+    // else WriteUInt16(0)). A partfile is only a valid requested file once it
+    // holds at least one complete part.
+    let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
+        encode_file_status(&requested, &shared.encode_part_status_body())
     } else {
         encode_file_req_ans_nofil(&requested)
     };

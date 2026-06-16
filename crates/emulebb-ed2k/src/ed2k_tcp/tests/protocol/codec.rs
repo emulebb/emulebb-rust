@@ -572,7 +572,8 @@ fn legacy_multipacket_answer_uses_hash_prefixed_subpackets() {
     let aich_root = [0x6D; 20];
 
     let packet =
-        encode_multipacket_answer(&file_hash, "legacy.avi", true, true, Some(aich_root)).unwrap();
+        encode_multipacket_answer(&file_hash, "legacy.avi", true, Some(&[0, 0]), Some(aich_root))
+            .unwrap();
 
     assert_eq!(packet[0], OP_EMULEPROT);
     assert_eq!(packet[5], OP_MULTIPACKETANSWER);

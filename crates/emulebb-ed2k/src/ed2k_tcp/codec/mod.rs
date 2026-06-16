@@ -24,8 +24,8 @@ pub(in crate::ed2k_tcp) use buddy::{
     encode_buddy_ping, encode_buddy_pong, encode_kad_callback_relay,
 };
 pub(super) use file_status::{
-    decode_file_status_availability, decode_file_status_body_availability,
-    encode_file_status_body_complete, encode_file_status_complete, validate_file_status_part_count,
+    decode_file_status_availability, decode_file_status_body_availability, encode_file_status,
+    validate_file_status_part_count,
 };
 #[cfg(test)]
 pub(super) use file_status::decode_file_status_payload;

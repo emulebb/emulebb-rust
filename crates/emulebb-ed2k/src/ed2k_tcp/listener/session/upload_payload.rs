@@ -59,7 +59,10 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     } else {
         None
     };
-    let Some(shared) = transfer_runtime.local_entry(&requested).await? else {
+    // Serve a fully verified file or an in-progress partfile holding at least one
+    // complete part; a range inside a not-yet-complete part is skipped below by
+    // read_verified_range returning None (master serves only complete parts).
+    let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? else {
         let reply = encode_file_req_ans_nofil(&requested);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "request_parts_nofil", &reply);
         transport

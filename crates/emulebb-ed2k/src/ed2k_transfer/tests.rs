@@ -1,6 +1,6 @@
 use super::{
-    ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint, Ed2kTransferRuntime,
-    Ed2kTransferState, PAYLOAD_FILE_NAME, new_transfer_job,
+    ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSourceHint,
+    Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME, new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 use crate::{HashType, PopularHash};
@@ -218,6 +218,92 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
             .iter()
             .any(|entry| entry.file_hash == job.file_hash && entry.verified_complete)
     );
+}
+
+#[tokio::test]
+async fn partfile_serves_complete_parts_while_downloading() {
+    // A two-part download: part 0 verified, part 1 still missing. eMule serves a
+    // partfile's complete parts ("share while downloading"): the part-status
+    // answer advertises only the verified part, a block range inside the complete
+    // part is served, and a range in the incomplete part is rejected.
+    let root = unique_test_dir("ed2k-transfer-partfile-serve");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    // A non-PARTSIZE-multiple size yields exactly two ED2K parts (no phantom
+    // trailing zero-length part), with a shorter trailing part.
+    let last_part_len = ED2K_PART_SIZE / 2;
+    let file_size = ED2K_PART_SIZE + last_part_len;
+    let first_piece = vec![3u8; ED2K_PART_SIZE as usize];
+    let last_piece = vec![4u8; last_part_len as usize];
+    let first_piece_hash: [u8; 16] = Md4::digest(&first_piece).into();
+    let last_piece_hash: [u8; 16] = Md4::digest(&last_piece).into();
+    let mut file_hasher = Md4::new();
+    file_hasher.update(first_piece_hash);
+    file_hasher.update(last_piece_hash);
+    let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
+    let job = new_transfer_job(file_hash, "partfile.iso".to_string(), file_size);
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .await
+        .unwrap();
+    runtime
+        .mark_piece_requested(&job.file_hash, 0)
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+
+    // The in-progress partfile is a servable entry with part 0 complete and
+    // part 1 missing.
+    let entry = runtime.local_entry(&file_hash).await.unwrap().unwrap();
+    assert!(!entry.verified_complete);
+    assert!(entry.is_servable());
+    assert_eq!(entry.complete_parts, vec![true, false]);
+
+    // OP_FILESTATUS body: part_count=2 (LE), then one bit per part LSB-first
+    // (only part 0 set) — mirrors CPartFile::WritePartStatus.
+    assert_eq!(entry.encode_part_status_body(), vec![0x02, 0x00, 0x01]);
+
+    // A block range inside the verified part 0 is served.
+    let in_part0 = runtime
+        .read_verified_range(&file_hash, 0, ED2K_EMBLOCK_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(in_part0, Some(vec![3u8; ED2K_EMBLOCK_SIZE as usize]));
+
+    // A range inside the not-yet-complete part 1 is rejected.
+    let in_part1 = runtime
+        .read_verified_range(
+            &file_hash,
+            ED2K_PART_SIZE,
+            ED2K_PART_SIZE + ED2K_EMBLOCK_SIZE,
+        )
+        .await
+        .unwrap();
+    assert!(in_part1.is_none());
+
+    // Once the file completes it becomes fully servable and the part-status
+    // answer collapses to the master complete sentinel (WriteUInt16(0)).
+    runtime
+        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .await
+        .unwrap();
+    let complete = runtime.local_entry(&file_hash).await.unwrap().unwrap();
+    assert!(complete.verified_complete);
+    assert!(complete.is_servable());
+    assert!(complete.complete_parts.is_empty());
+    assert_eq!(complete.encode_part_status_body(), vec![0x00, 0x00]);
+    let served = runtime
+        .read_verified_range(
+            &file_hash,
+            ED2K_PART_SIZE,
+            ED2K_PART_SIZE + ED2K_EMBLOCK_SIZE,
+        )
+        .await
+        .unwrap();
+    assert_eq!(served, Some(vec![4u8; ED2K_EMBLOCK_SIZE as usize]));
 }
 
 #[tokio::test]

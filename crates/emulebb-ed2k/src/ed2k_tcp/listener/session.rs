@@ -391,7 +391,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 let requested =
                     decode_exact_file_hash_payload(&packet.payload, "OP_STARTUPLOADREQ")?;
                 requested_file_hash = Some(requested);
-                let reply = if transfer_runtime.local_entry(&requested).await?.is_some() {
+                let reply = if transfer_runtime.local_servable_entry(&requested).await?.is_some() {
                     let mut peer_identity = peer_upload_identity.clone();
                     peer_identity.firewall_context =
                         upload_firewall_context(server_state, kad_firewall).await;

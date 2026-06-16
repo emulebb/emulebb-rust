@@ -227,8 +227,16 @@ fn encode_startup_multipacket_ext2_answer_with_identifier(
     file_name: &str,
     include_file_status: bool,
 ) -> Vec<u8> {
-    super::encode_multipacket_ext2_answer(file_identifier, file_name, true, include_file_status)
-        .unwrap()
+    // The startup/answer fixtures cover complete-file shares, so a requested
+    // status maps to the master "complete" body (`WriteUInt16(0)`).
+    let status_body = include_file_status.then(|| 0u16.to_le_bytes().to_vec());
+    super::encode_multipacket_ext2_answer(
+        file_identifier,
+        file_name,
+        true,
+        status_body.as_deref(),
+    )
+    .unwrap()
 }
 
 fn encode_startup_multipacket_ext2_answer(

@@ -61,17 +61,19 @@ fn expected_file_status_part_count(file_size: u64) -> u16 {
     u16::try_from(part_count).unwrap_or(u16::MAX)
 }
 
-pub(in crate::ed2k_tcp) fn encode_file_status_complete(
+/// Encode a standalone OP_FILESTATUS packet from a file hash and a pre-built
+/// status body (the bytes after the hash: `uED2KPartCount` u16 + per-part bits).
+/// A complete file's body is `WriteUInt16(0)`; a partfile's body is the
+/// `CPartFile::WritePartStatus` bitmap. See
+/// [`crate::ed2k_transfer::Ed2kSharedEntry::encode_part_status_body`].
+pub(in crate::ed2k_tcp) fn encode_file_status(
     file_hash: &emulebb_kad_proto::Ed2kHash,
+    status_body: &[u8],
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(18);
+    let mut payload = Vec::with_capacity(16 + status_body.len());
     payload.extend_from_slice(&file_hash.0);
-    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(status_body);
     encode_packet(OP_EDONKEYPROT, OP_FILESTATUS, &payload)
-}
-
-pub(in crate::ed2k_tcp) fn encode_file_status_body_complete() -> Vec<u8> {
-    0u16.to_le_bytes().to_vec()
 }
 
 /// Like the legacy skip helper but also returns the peer's per-part

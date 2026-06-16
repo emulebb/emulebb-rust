@@ -42,13 +42,24 @@ impl Ed2kTransferRuntime {
         let sender_udp_port = v4.port();
         let requested_hex = ping.file_hash.to_string();
 
-        // `reqfile != NULL`: we serve a verified-complete copy of the requested file.
-        let file_shared = {
+        // `reqfile != NULL`: we serve the requested file — either a verified
+        // complete copy or an in-progress partfile with at least one complete
+        // part ("share while downloading"). `our_part_status` then advertises the
+        // partfile's verified parts, mirroring eMule's OP_REASKFILEPING handler
+        // answering `WritePartStatus` for an `IsPartFile()` reqfile.
+        let serving_entry = {
             let catalog = self.shared_catalog.read().await;
             catalog
                 .iter()
-                .any(|e| e.verified_complete && e.file_hash.eq_ignore_ascii_case(&requested_hex))
+                .find(|e| e.is_servable() && e.file_hash.eq_ignore_ascii_case(&requested_hex))
+                .cloned()
         };
+        let file_shared = serving_entry.is_some();
+        let our_part_status = serving_entry.and_then(|e| {
+            // A complete file advertises full availability (`None` = complete, no
+            // partstatus bitmap); a partfile advertises its per-part bitmap.
+            (!e.verified_complete && !e.complete_parts.is_empty()).then(|| e.complete_parts.clone())
+        });
 
         let (snapshot, queue_size) = {
             let mut queue = self.upload_queue.lock().await;
@@ -88,9 +99,7 @@ impl Ed2kTransferRuntime {
             peer_udp_version: located.map_or(0, |e| e.udp_version),
             dest_user_hash: located.and_then(|e| e.user_hash).unwrap_or_default(),
             should_crypt: located.is_some_and(|e| e.should_crypt && e.user_hash.is_some()),
-            // We only advertise verified-complete shares for upload, so our part
-            // availability is full (`None` = complete, no partstatus bitmap).
-            our_part_status: None,
+            our_part_status,
         };
 
         build_reciprocity_reply(&req, &framing, our_public_ip)
