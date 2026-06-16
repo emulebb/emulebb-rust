@@ -447,9 +447,11 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
     assert_eq!(network.kad_publish_contact_fanout, 4);
     assert_eq!(network.kad_hello_intro_interval_secs, 300);
     assert_eq!(network.kad_hello_intro_fanout, 2);
+    // Default source TTL mirrors the master inbound source entry lifetime =
+    // KADEMLIAREPUBLISHTIMES (5h), KademliaUDPListener.cpp:1349.
     assert_eq!(
         network.kad_local_store.source_ttl,
-        std::time::Duration::from_secs(21_600)
+        std::time::Duration::from_secs(18_000)
     );
     assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
     let store = metadata_store(&config);

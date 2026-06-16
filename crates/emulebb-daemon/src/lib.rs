@@ -141,7 +141,9 @@ impl Default for KadListenerConfig {
             bootstrap_min_routing_contacts: 10,
             local_store_enabled: true,
             local_store_keyword_ttl_secs: 86_400,
-            local_store_source_ttl_secs: 21_600,
+            // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
+            // KademliaUDPListener.cpp:1349. Keyword/notes keep 24h.
+            local_store_source_ttl_secs: 18_000,
             local_store_notes_ttl_secs: 86_400,
             local_store_keyword_capacity: 20_000,
             local_store_source_capacity: 20_000,

@@ -89,7 +89,11 @@ impl Default for KadLocalStoreConfig {
         Self {
             enabled: false,
             keyword_ttl: Duration::from_secs(86_400),
-            source_ttl: Duration::from_secs(86_400),
+            // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
+            // set on each stored source entry in KademliaUDPListener.cpp:1349
+            // (`m_tLifetime = time(NULL) + KADEMLIAREPUBLISHTIMES`). Keyword and
+            // notes keep their 24h lifetimes (KADEMLIAREPUBLISHTIMEK/N).
+            source_ttl: Duration::from_secs(5 * 60 * 60),
             notes_ttl: Duration::from_secs(86_400),
             keyword_capacity: STOCK_MAX_KEYWORD_ENTRIES,
             source_capacity: DEFAULT_MAX_SOURCE_ENTRIES,
@@ -530,6 +534,16 @@ mod tests {
 
     fn ts(seconds: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(seconds, 0).single().unwrap()
+    }
+
+    #[test]
+    fn default_source_ttl_matches_master_kademliarepublishtimes() {
+        // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
+        // KademliaUDPListener.cpp:1349. Keyword/notes keep the 24h lifetimes.
+        let config = KadLocalStoreConfig::default();
+        assert_eq!(config.source_ttl, Duration::from_secs(5 * 60 * 60));
+        assert_eq!(config.keyword_ttl, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(config.notes_ttl, Duration::from_secs(24 * 60 * 60));
     }
 
     #[test]
