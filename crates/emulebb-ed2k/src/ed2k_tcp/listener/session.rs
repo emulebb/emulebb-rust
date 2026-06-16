@@ -24,13 +24,8 @@ use crate::{
 
 use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
-    decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
-    decode_client_id_change_payload, decode_client_message_payload,
-    decode_edonkey_queue_rank_payload, decode_emule_queue_ranking_payload,
-    decode_exact_file_hash_payload, decode_file_description_payload, decode_kad_callback_payload,
-    decode_optional_file_hash_payload, decode_preview_answer_payload,
-    decode_preview_request_payload, decode_public_ip_answer_payload,
-    decode_reask_callback_tcp_payload, encode_aich_recovery_answer,
+    decode_exact_file_hash_payload, decode_kad_callback_payload,
+    decode_optional_file_hash_payload, encode_aich_recovery_answer,
     encode_aich_recovery_failure_answer, encode_buddy_pong, encode_file_req_ans_nofil,
     encode_packet, encode_port_test_answer, encode_public_ip_answer,
 };
@@ -68,6 +63,7 @@ use super::super::{
 };
 
 mod browse;
+mod notify;
 mod shared_file;
 mod upload_payload;
 mod upload_queue;
@@ -436,49 +432,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EDONKEYPROT, OP_OUTOFPARTREQS) => {
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "out_of_part_requests",
-                    "received=true",
-                );
+                notify::handle_out_of_part_requests(&transport, peer_addr);
             }
             (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
-                let change = decode_client_id_change_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "change_client_id",
-                    format!(
-                        "new_user_id={} new_server_ip={} trailing_len={}",
-                        change.new_user_id, change.new_server_ip, change.trailing_len
-                    ),
-                );
+                notify::handle_change_client_id(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_CHANGE_SLOT) => {
-                let changed_file = decode_optional_file_hash_payload(&packet.payload);
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "change_slot",
-                    format!(
-                        "file_hash={} payload_len={}",
-                        changed_file.map_or_else(|| "none".to_string(), |hash| hash.to_string()),
-                        packet.payload.len()
-                    ),
-                );
+                notify::handle_change_slot(&transport, peer_addr, &packet.payload);
             }
             (OP_EDONKEYPROT, OP_MESSAGE) => {
-                let message = decode_client_message_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "client_message",
-                    format!(
-                        "message_len={} accepted_len={}",
-                        message.message_len, message.accepted_len
-                    ),
-                );
+                notify::handle_client_message(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => {
                 browse::handle_ask_shared_files(&mut transport, peer_addr, packet.payload.len())
@@ -505,22 +468,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 browse::handle_ask_shared_denied_answer(&transport, peer_addr, packet.payload.len());
             }
             (OP_EDONKEYPROT, OP_QUEUERANK) => {
-                let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "queue_ranking",
-                    format!("rank={rank} protocol=edonkey"),
-                );
+                notify::handle_edonkey_queue_rank(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_QUEUERANKING) => {
-                let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "queue_ranking",
-                    format!("rank={rank} protocol=emule"),
-                );
+                notify::handle_emule_queue_ranking(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EDONKEYPROT, OP_HASHSETREQUEST) => {
                 requested_file_hash = handle_hashset_request(
@@ -756,13 +707,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EMULEPROT, OP_PUBLICIP_ANSWER) => {
-                let public_ip = decode_public_ip_answer_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "public_ip_answer",
-                    format!("public_ip={public_ip}"),
-                );
+                notify::handle_public_ip_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_CALLBACK) => {
                 let callback = decode_kad_callback_payload(&packet.payload)?;
@@ -823,37 +768,13 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
-                let reask = decode_reask_callback_tcp_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "reask_callback_tcp",
-                    format!(
-                        "file_hash={} dest={}:{} extended_info_len={}",
-                        reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-                    ),
-                );
+                notify::handle_reask_callback_tcp(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_CHATCAPTCHAREQ) => {
-                let request = decode_chat_captcha_request_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "chat_captcha_request",
-                    format!(
-                        "tag_count={} data_len={}",
-                        request.tag_count, request.data_len
-                    ),
-                );
+                notify::handle_chat_captcha_request(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_CHATCAPTCHARES) => {
-                let status = decode_chat_captcha_result_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "chat_captcha_result",
-                    format!("status={status}"),
-                );
+                notify::handle_chat_captcha_result(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_PORTTEST) => {
                 debug!(
@@ -929,52 +850,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
             (OP_EMULEPROT, OP_BUDDYPONG) => {
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "kad_buddy_pong",
-                    format!("held_buddy={}", buddy_hold.is_some()),
-                );
+                notify::handle_buddy_pong(&transport, peer_addr, buddy_hold.is_some());
             }
             (OP_EMULEPROT, OP_FILEDESC) => {
-                let file_desc = decode_file_description_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "file_desc",
-                    format!(
-                        "rating={} comment_len={}",
-                        file_desc.rating,
-                        file_desc.comment.len()
-                    ),
-                );
+                notify::handle_file_desc(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_REQUESTPREVIEW) => {
-                let preview_request = decode_preview_request_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "preview_request",
-                    format!(
-                        "file_hash={} trailing_len={}",
-                        preview_request.file_hash, preview_request.trailing_len
-                    ),
-                );
+                notify::handle_preview_request(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_PREVIEWANSWER) => {
-                let preview_answer = decode_preview_answer_payload(&packet.payload)?;
-                dump_ed2k_tcp_listener_meta(
-                    peer_addr,
-                    Some(transport.mode),
-                    "preview_answer",
-                    format!(
-                        "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
-                        preview_answer.file_hash,
-                        preview_answer.frame_count,
-                        preview_answer.frame_payload_bytes,
-                        preview_answer.trailing_len
-                    ),
-                );
+                notify::handle_preview_answer(&transport, peer_addr, &packet.payload)?;
             }
             (OP_EMULEPROT, OP_AICHREQUEST) => {
                 let request = decode_aich_recovery_request_payload(&packet.payload)?;
