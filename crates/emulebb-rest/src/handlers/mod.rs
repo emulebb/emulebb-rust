@@ -24,6 +24,7 @@ pub(crate) mod logs;
 pub(crate) mod searches;
 pub(crate) mod servers;
 pub(crate) mod shared_files;
+pub(crate) mod transfers;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
@@ -47,6 +48,13 @@ pub(crate) use shared_files::{
     create_shared_file, delete_shared_file, delete_shared_file_payload, reload_shared_directories,
     shared_directories, shared_file, shared_file_comments, shared_file_ed2k_link, shared_files,
     update_shared_directories, update_shared_file,
+};
+pub(crate) use transfers::{
+    clear_completed_transfers, create_transfer, transfer, transfer_delete, transfer_delete_files,
+    transfer_details, transfer_pause, transfer_preview, transfer_recheck, transfer_resume,
+    transfer_source, transfer_source_add_friend, transfer_source_ban, transfer_source_browse,
+    transfer_source_release_slot, transfer_source_remove, transfer_source_remove_friend,
+    transfer_source_unban, transfer_sources, transfer_stop, transfers, update_transfer,
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,
