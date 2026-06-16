@@ -282,6 +282,13 @@ CREATE TABLE peers (
     last_udp_port INTEGER,
     low_id INTEGER NOT NULL DEFAULT 0 CHECK(low_id IN (0, 1)),
     secure_ident_state TEXT NOT NULL DEFAULT '',
+    -- Verified secure-identification public key bound to this peer on the first
+    -- successful secure-ident verify (eMule CClientCredits abySecureIdent[80] +
+    -- nKeySize, persisted in clients.met). A later verify with a DIFFERENT key
+    -- for the same user hash wipes this peer's credits (anti-takeover,
+    -- ClientCredits.cpp:338-356 CClientCredits::Verified).
+    secure_ident_pubkey BLOB,
+    secure_ident_pubkey_len INTEGER NOT NULL DEFAULT 0,
     friend INTEGER NOT NULL DEFAULT 0 CHECK(friend IN (0, 1)),
     banned INTEGER NOT NULL DEFAULT 0 CHECK(banned IN (0, 1)),
     uploaded_bytes INTEGER NOT NULL DEFAULT 0,
