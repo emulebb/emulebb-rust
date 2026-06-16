@@ -18,16 +18,19 @@ use crate::{
 };
 
 mod entry_store;
+mod notes;
 mod size_tags;
 mod source;
 
-use entry_store::{
-    DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index, purge_expired, upsert_entry,
+use entry_store::{DedupEntry, TimedEntry, purge_expired, upsert_entry};
+use notes::{
+    StoredNotesPublish, has_stock_note_tags, notes_dedup_key, notes_result_tags,
+    stock_notes_publish_load, upsert_notes_entry,
 };
 use size_tags::{
-    search_response, stock_first_file_size, stock_first_filename,
-    stock_first_keyword_source_file_size, stock_notes_file_size_matches_request,
-    stock_source_file_size_matches_request, stock_stored_publish_tags,
+    search_response, stock_first_filename, stock_first_keyword_source_file_size,
+    stock_notes_file_size_matches_request, stock_source_file_size_matches_request,
+    stock_stored_publish_tags,
 };
 use source::{
     StoredSourcePublish, is_stock_source_publish, source_dedup_key, source_entry_id,
@@ -101,16 +104,6 @@ struct StoredKeywordPublish {
     observed_at: DateTime<Utc>,
     target: NodeId,
     file_hash: Ed2kHash,
-    tags: Vec<Tag>,
-    dedup_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct StoredNotesPublish {
-    observed_at: DateTime<Utc>,
-    target: NodeId,
-    publisher_id: NodeId,
-    publisher_ip: Ipv4Addr,
     tags: Vec<Tag>,
     dedup_key: String,
 }
@@ -585,97 +578,6 @@ fn keyword_aich_result_tag(hash: [u8; 20]) -> Tag {
     Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload))
 }
 
-fn notes_result_tags(entry: &StoredNotesPublish) -> Vec<Tag> {
-    let mut tags = Vec::new();
-    if let Some(name) = stock_first_filename(&entry.tags) {
-        tags.push(Tag::filename(name));
-    }
-    if let Some(size) = stock_first_file_size(&entry.tags).filter(|size| *size > 0) {
-        tags.push(Tag::filesize(size));
-    }
-
-    for tag in &entry.tags {
-        match tag.name {
-            TagName::Short(name) if name == tag_name::FILENAME || name == tag_name::FILESIZE => {}
-            _ => tags.push(tag.clone()),
-        }
-    }
-    tags
-}
-
-fn upsert_notes_entry(
-    entries: &mut Vec<StoredNotesPublish>,
-    per_file_capacity: usize,
-    capacity: usize,
-    entry: StoredNotesPublish,
-) {
-    if let Some(existing) = entries.iter_mut().find(|candidate| {
-        candidate.target == entry.target
-            && (candidate.publisher_ip == entry.publisher_ip
-                || candidate.publisher_id == entry.publisher_id)
-    }) {
-        *existing = entry;
-        return;
-    }
-
-    // Per-file cap (stock KADEMLIAMAXNOTESPERFILE): evict the oldest note for
-    // this target so one file cannot exceed its per-target note list.
-    if entries
-        .iter()
-        .filter(|candidate| candidate.target == entry.target)
-        .count()
-        > per_file_capacity
-        && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
-    {
-        entries.remove(oldest_index);
-    }
-
-    // Global store cap: bound total memory across all files.
-    if entries.len() >= capacity
-        && let Some((oldest_index, _)) = entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, candidate)| candidate.observed_at())
-    {
-        entries.remove(oldest_index);
-    }
-    entries.push(entry);
-}
-
-fn stock_notes_publish_load(
-    entries: &[StoredNotesPublish],
-    target: NodeId,
-    per_file_capacity: usize,
-    publisher_id: NodeId,
-    publisher_ip: Ipv4Addr,
-) -> u8 {
-    let target_count = entries
-        .iter()
-        .filter(|candidate| candidate.target == target)
-        .count();
-    if target_count == 0 {
-        return 1;
-    }
-    if target_count > per_file_capacity
-        && !notes_replacement_matches(entries, target, publisher_id, publisher_ip)
-    {
-        return 100;
-    }
-    (target_count * 100 / per_file_capacity.max(1)) as u8
-}
-
-fn notes_replacement_matches(
-    entries: &[StoredNotesPublish],
-    target: NodeId,
-    publisher_id: NodeId,
-    publisher_ip: Ipv4Addr,
-) -> bool {
-    entries.iter().any(|candidate| {
-        candidate.target == target
-            && (candidate.publisher_ip == publisher_ip || candidate.publisher_id == publisher_id)
-    })
-}
-
 impl TimedEntry for StoredKeywordPublish {
     fn observed_at(&self) -> DateTime<Utc> {
         self.observed_at
@@ -683,24 +585,6 @@ impl TimedEntry for StoredKeywordPublish {
 }
 
 impl DedupEntry for StoredKeywordPublish {
-    fn dedup_key(&self) -> &str {
-        &self.dedup_key
-    }
-}
-
-impl TimedEntry for StoredNotesPublish {
-    fn observed_at(&self) -> DateTime<Utc> {
-        self.observed_at
-    }
-}
-
-impl TargetedEntry for StoredNotesPublish {
-    fn target(&self) -> NodeId {
-        self.target
-    }
-}
-
-impl DedupEntry for StoredNotesPublish {
     fn dedup_key(&self) -> &str {
         &self.dedup_key
     }
@@ -767,25 +651,6 @@ fn keyword_source_exists(
 
 fn keyword_dedup_key(target: NodeId, file_hash: Ed2kHash, size: u64) -> String {
     format!("keyword:{target}:{file_hash}:{size}")
-}
-
-fn has_stock_note_tags(tags: &[Tag]) -> bool {
-    tags.iter().any(|tag| match (&tag.name, &tag.value) {
-        (TagName::Short(name), TagValue::String(value)) if *name == tag_name::FILENAME => {
-            !value.is_empty()
-        }
-        (TagName::Short(name), _) if *name == tag_name::FILESIZE => {
-            stock_first_file_size(std::slice::from_ref(tag))
-                .map(|size| size > 0)
-                .unwrap_or(false)
-        }
-        (TagName::Short(name), _) => *name != tag_name::FILENAME && *name != tag_name::FILESIZE,
-        (TagName::Long(_), _) => true,
-    })
-}
-
-fn notes_dedup_key(target: NodeId, publisher_id: NodeId, publisher_ip: Ipv4Addr) -> String {
-    format!("notes:{target}:{publisher_id}:{publisher_ip}")
 }
 
 #[cfg(test)]
@@ -2409,7 +2274,7 @@ mod tests {
 
     #[test]
     fn stock_first_file_size_uses_primary_size_and_first_high_part() {
-        let size = super::stock_first_file_size(&[
+        let size = super::size_tags::stock_first_file_size(&[
             Tag::new_short(tag_name::FILESIZE, TagValue::U32(1)),
             Tag::new_short(tag_name::FILESIZE, TagValue::U32(999)),
             Tag::new_short(tag_name::FILESIZE_HI, TagValue::U32(2)),

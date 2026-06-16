@@ -66,7 +66,7 @@ rationale = "frozen legacy rupnp backend adapter; split discovery, mapping, and 
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-index/src/kad_store/mod.rs"
-hard_limit_lines = 2454
+hard_limit_lines = 2319
 rationale = "frozen legacy Kad publish cache, now being split by responsibility into a kad_store/ module tree (pure behavior-preserving restructuring). mod.rs keeps the KadLocalStore orchestrator and shared helpers; per-domain submodules (keyword/source/notes) and shared tag/size helpers move out into separate files re-exported from here, so the public API and all callers compile unchanged. Cap tracks the true mod.rs line count and is lowered with each extraction. Earlier history: cap exposed the local index sizes as public counts (keyword_entry_count / source_entry_count, oracle CIndexed m_uTotalIndexKeyword / m_uTotalIndexSource) so the REST kad status can report indexedKeywords / indexedSources, and disentangled the per-file vs global source/note caps (A5)."
 
 [[structure.large_file_allowlist]]
