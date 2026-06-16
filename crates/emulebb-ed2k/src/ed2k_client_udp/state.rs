@@ -43,6 +43,20 @@ pub(crate) struct ReaskSource {
     pub user_hash: Option<[u8; 16]>,
     /// Whether to obfuscate reasks to this peer (`ShouldReceiveCryptUDPPackets`).
     pub should_crypt: bool,
+    /// Whether this source is a firewalled LowID client (oracle `HasLowID()`): a
+    /// LowID source is not directly reachable over client UDP, so its UDP reask is
+    /// driven through its Kad buddy via `OP_REASKCALLBACKUDP` when its buddy is known.
+    pub low_id: bool,
+    /// The source's Kad buddy endpoint (oracle `GetBuddyIP()` / `GetBuddyPort()`)
+    /// learned from its hello (`CT_EMULE_BUDDYIP`/`CT_EMULE_BUDDYUDP`); `None` when
+    /// the source advertised no buddy. The buddy-relayed reask is sent here.
+    pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
+    /// The source's buddy id (oracle `GetBuddyID()`, the leading field of an
+    /// `OP_REASKCALLBACKUDP`). Only known when the source was learned via the Kad
+    /// source-finding path (oracle `DownloadQueue.cpp:2793`); the eD2k hello does
+    /// not carry it. `None` until/unless a Kad-found buddy-id is available, which
+    /// gates origination exactly like the oracle `HasValidBuddyID()` guard.
+    pub buddy_id: Option<[u8; 16]>,
 }
 
 impl ReaskSource {
@@ -66,6 +80,9 @@ impl ReaskSource {
             remote_queue_full: false,
             user_hash: None,
             should_crypt: false,
+            low_id: false,
+            buddy_endpoint: None,
+            buddy_id: None,
         }
     }
 
@@ -75,6 +92,32 @@ impl ReaskSource {
         self.user_hash = Some(user_hash);
         self.should_crypt = should_crypt;
         self
+    }
+
+    /// Attach the source's firewalled-LowID flag + Kad buddy endpoint/id (learned
+    /// from its hello / Kad source-finding) so a LowID source whose direct client
+    /// UDP is unreachable can be reasked through its buddy via OP_REASKCALLBACKUDP.
+    pub(crate) fn with_buddy(
+        mut self,
+        low_id: bool,
+        buddy_endpoint: Option<(Ipv4Addr, u16)>,
+        buddy_id: Option<[u8; 16]>,
+    ) -> Self {
+        self.low_id = low_id;
+        self.buddy_endpoint = buddy_endpoint;
+        self.buddy_id = buddy_id;
+        self
+    }
+
+    /// Whether a buddy-relayed reask (`OP_REASKCALLBACKUDP`) can be originated for
+    /// this source: it is a firewalled LowID client AND we know both its buddy
+    /// endpoint and its buddy id (oracle `HasLowID() && GetBuddyIP() &&
+    /// GetBuddyPort() && HasValidBuddyID()`).
+    pub(crate) fn buddy_reask_target(&self) -> Option<((Ipv4Addr, u16), [u8; 16])> {
+        if !self.low_id {
+            return None;
+        }
+        Some((self.buddy_endpoint?, self.buddy_id?))
     }
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
@@ -313,6 +356,34 @@ mod tests {
             source.record_failure(now);
         }
         assert!(source.fallback_tcp_only);
+    }
+
+    #[test]
+    fn buddy_reask_target_requires_low_id_endpoint_and_id() {
+        let now = Instant::now();
+        let endpoint = (Ipv4Addr::new(198, 51, 100, 30), 4672);
+        let buddy_ep = (Ipv4Addr::new(203, 0, 113, 50), 5000);
+        let buddy_id = [0xCD; 16];
+
+        // HighID source: never a buddy-reask target even with buddy info present.
+        let high = ReaskSource::new(endpoint, hash(), 4, now)
+            .with_buddy(false, Some(buddy_ep), Some(buddy_id));
+        assert!(high.buddy_reask_target().is_none());
+
+        // LowID but missing the buddy id (hello-only buddy) -> not eligible.
+        let no_id = ReaskSource::new(endpoint, hash(), 4, now)
+            .with_buddy(true, Some(buddy_ep), None);
+        assert!(no_id.buddy_reask_target().is_none());
+
+        // LowID but missing the buddy endpoint -> not eligible.
+        let no_ep =
+            ReaskSource::new(endpoint, hash(), 4, now).with_buddy(true, None, Some(buddy_id));
+        assert!(no_ep.buddy_reask_target().is_none());
+
+        // LowID with both endpoint + id -> eligible, returns (endpoint, id).
+        let ok = ReaskSource::new(endpoint, hash(), 4, now)
+            .with_buddy(true, Some(buddy_ep), Some(buddy_id));
+        assert_eq!(ok.buddy_reask_target(), Some((buddy_ep, buddy_id)));
     }
 
     #[test]

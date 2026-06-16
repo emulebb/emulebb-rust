@@ -76,8 +76,8 @@ fn apply_emule_info_profile(
 }
 
 /// Detach a just-queued source onto UDP reask when reask is enabled and the peer
-/// is UDP-eligible (eMuleBB §4.1 `QueuedDetached`). Returns whether the source
-/// was handed off (so the session can close its TCP socket and return early).
+/// is UDP-eligible (eMuleBB §4.1 `QueuedDetached`). Returns whether it was handed
+/// off (so the session closes its TCP socket and returns early).
 fn try_detach_queued_source_for_reask(
     reask_register: &Option<crate::ed2k_client_udp::ReaskSourceHandle>,
     peer_addr: SocketAddr,
@@ -91,20 +91,16 @@ fn try_detach_queued_source_for_reask(
     let SocketAddr::V4(v4) = peer_addr else {
         return false; // IPv4-only client
     };
-    // A peer that advertised a non-zero eD2k UDP port in its hello
-    // (CT_EMULE_UDPPORTS) supports client UDP, even when the download session
-    // never completed an OP_EMULEINFO exchange to learn its ET_UDPVER. Default
-    // the version to our own advertised udp_version (4) for the eligibility gate
-    // and the ReaskSource; the outbound reask ping is framed by OUR udp_version,
-    // so this does not affect the wire format.
+    // A peer advertising a non-zero eD2k UDP port (CT_EMULE_UDPPORTS) supports client
+    // UDP even without OP_EMULEINFO ET_UDPVER; default the version to our own (4) (the
+    // reask ping is framed by OUR version).
     const DEFAULT_PEER_UDP_VERSION: u8 = 4;
     let effective_udp_version = if session_state.peer_udp_version != 0 {
         session_state.peer_udp_version
     } else {
         DEFAULT_PEER_UDP_VERSION
     };
-    // We hold the shared Kad UDP port whenever reask is enabled (have_local_udp);
-    // we are detaching, so no live TCP socket remains; no proxy/firewall modelled.
+    // We hold the shared Kad UDP port; detaching means no live TCP socket.
     let eligible = crate::ed2k_client_udp::udp_reask_eligible(
         session_state.peer_udp_port,
         effective_udp_version,
@@ -114,19 +110,23 @@ fn try_detach_queued_source_for_reask(
         false,
     );
     tracing::debug!(
-        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} (effective={effective_udp_version}) eligible={eligible}",
-        session_state.peer_udp_port, session_state.peer_udp_version,
+        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} (effective={effective_udp_version}) low_id={} eligible={eligible}",
+        session_state.peer_udp_port, session_state.peer_udp_version, session_state.peer_low_id,
     );
     if !eligible {
         return false;
     }
-    handle.detach(
+    handle.detach(crate::ed2k_client_udp::ReaskDetachArgs {
         file_hash,
-        (*v4.ip(), session_state.peer_udp_port),
-        effective_udp_version,
-        session_state.peer_user_hash,
+        endpoint: (*v4.ip(), session_state.peer_udp_port),
+        udp_version: effective_udp_version,
+        user_hash: session_state.peer_user_hash,
         should_crypt,
-    );
+        // LowID + hello buddy endpoint gate a buddy-relayed reask; buddy id is Kad-only.
+        low_id: session_state.peer_low_id,
+        buddy_endpoint: session_state.peer_buddy_endpoint,
+        buddy_id: None,
+    });
     true
 }
 
@@ -135,13 +135,12 @@ fn try_detach_queued_source_for_reask(
 pub enum Ed2kPeerDownloadOutcome {
     /// The peer contributed enough data for the manifest to complete.
     Completed,
-    /// The peer accepted the session and looked valid, but the transfer did not
-    /// complete before the peer closed or the attempt timed out.
+    /// The peer accepted the session but the transfer did not complete before the
+    /// peer closed or the attempt timed out.
     AcceptedButIncomplete,
-    /// The peer queued us and is UDP-reask eligible, so the session detached its
-    /// TCP socket and handed the source to the UDP reask loop (eMuleBB
-    /// `QueuedDetached`). The driver should not immediately reconnect — the reask
-    /// loop keeps the queue slot warm and re-engages over TCP on UDP failure.
+    /// The peer queued us and is UDP-reask eligible, so the session detached its TCP
+    /// socket onto the UDP reask loop (eMuleBB `QueuedDetached`); the driver must not
+    /// reconnect (the reask loop keeps the slot warm + re-engages on UDP failure).
     QueuedDetachedForUdpReask,
 }
 
@@ -159,9 +158,8 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) initial_hello_complete: bool,
     pub(in crate::ed2k_tcp) initial_secure_ident_started: bool,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
-    /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its
-    /// TCP socket onto UDP reask via this handle instead of holding the queue
-    /// position over TCP. `None` keeps the legacy TCP-only queued behaviour.
+    /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
+    /// socket onto UDP reask via this handle. `None` keeps the legacy TCP-only path.
     pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
 }
 
@@ -337,6 +335,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     if hello_profile.identity.udp_port != 0 {
                         session_state.peer_udp_port = hello_profile.identity.udp_port;
                     }
+                    session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;
@@ -376,6 +375,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     if hello_profile.identity.udp_port != 0 {
                         session_state.peer_udp_port = hello_profile.identity.udp_port;
                     }
+                    session_state.capture_peer_buddy(&hello_profile);
                     session_state.remote_supports_aich = hello_profile.supports_aich;
                     session_state.remote_supports_secure_ident =
                         hello_profile.supports_secure_ident;

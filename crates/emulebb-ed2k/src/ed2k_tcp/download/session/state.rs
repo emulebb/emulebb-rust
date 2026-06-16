@@ -36,6 +36,12 @@ pub(super) struct DownloadSessionState {
     pub(super) peer_udp_port: u16,
     /// Peer's advertised eD2k UDP version (OP_EMULEINFO ET_UDPVER), 0 if unknown.
     pub(super) peer_udp_version: u8,
+    /// Whether the connected source is a firewalled LowID client (oracle
+    /// `HasLowID()`: client_id below the HighID floor). Set from the hello identity.
+    pub(super) peer_low_id: bool,
+    /// The source's Kad buddy endpoint (ip, udp_port) decoded from its hello
+    /// `CT_EMULE_BUDDYIP`/`CT_EMULE_BUDDYUDP`; `None` unless it advertised a buddy.
+    pub(super) peer_buddy_endpoint: Option<(std::net::Ipv4Addr, u16)>,
     /// Connected peer's advertised per-part availability (OP_FILESTATUS), `None`
     /// until a status frame is seen. Gates part picking so we only request parts
     /// the peer holds (master `sender->IsPartAvailable`).
@@ -91,9 +97,27 @@ impl DownloadSessionState {
             peer_user_hash,
             peer_udp_port: 0,
             peer_udp_version: 0,
+            peer_low_id: false,
+            peer_buddy_endpoint: None,
             peer_part_bitmap: None,
             pending_aich_recovery_parts: Vec::new(),
             aich_requests_inflight: Vec::new(),
+        }
+    }
+
+    /// Capture the connected source's firewalled-LowID flag + its Kad buddy
+    /// endpoint from its decoded hello, so a queued LowID source can later be
+    /// reasked through its buddy (`OP_REASKCALLBACKUDP`). The buddy *id* is not in
+    /// the hello (the oracle only learns it via Kad source-finding), so only the
+    /// endpoint + LowID flag are captured here.
+    pub(super) fn capture_peer_buddy(
+        &mut self,
+        profile: &super::super::super::hello::DecodedHelloProfile,
+    ) {
+        // Oracle HasLowID(): a client id below the HighID floor (0x01000000).
+        self.peer_low_id = profile.identity.client_id < 0x0100_0000;
+        if let Some(buddy) = profile.buddy {
+            self.peer_buddy_endpoint = Some((buddy.ip, buddy.udp_port));
         }
     }
 

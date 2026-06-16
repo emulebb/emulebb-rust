@@ -8,13 +8,13 @@
 //! periodic tick. All reask *decisions* live in the I/O-free
 //! [`super::ReaskService`]; this is the thin async shell doing the socket I/O.
 //!
-//! Wired directions: the uploader **reciprocity** answer (global upload-queue
-//! `(ip,udp_port)` lookup), the downloader **detach hook** (a queued
-//! UDP-eligible source detaches onto periodic UDP reask, dropped on `RetryTcp`
-//! so core re-engages over TCP), and the **buddy relay** legs — as a source's
-//! buddy we relay an inbound `OP_REASKCALLBACKUDP` as `OP_REASKCALLBACKTCP`, and
-//! as the firewalled source we answer a relayed reask over UDP (both via
-//! [`super::buddy_relay`]). Gated behind `enable_udp_reask` (on by default).
+//! Wired directions: the uploader **reciprocity** answer; the downloader
+//! **detach hook** (a queued UDP-eligible source detaches onto periodic reask,
+//! dropped on `RetryTcp`); the **downloader origination** of
+//! `OP_REASKCALLBACKUDP` to a LowID source's buddy; and the **buddy relay** legs
+//! (relay an inbound `OP_REASKCALLBACKUDP` as `OP_REASKCALLBACKTCP`, and answer a
+//! relayed reask over UDP) — both via [`super::buddy_relay`]. Gated behind
+//! `enable_udp_reask` (on by default).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -38,26 +38,37 @@ use crate::reachability::ExternalReachability;
 /// core can carry the channel; constructed in-crate by the download session.
 #[derive(Debug, Clone)]
 pub enum ReaskCommand {
-    /// Detach a source that queued us (eMuleBB §4.1 `QueuedDetached` transition).
-    Register {
-        file_hash: Ed2kHash,
-        endpoint: (Ipv4Addr, u16),
-        udp_version: u8,
-        user_hash: Option<[u8; 16]>,
-        should_crypt: bool,
-    },
+    /// Detach a source that queued us (eMuleBB §4.1 `QueuedDetached` transition),
+    /// carrying its endpoint + buddy knowledge ([`ReaskDetachArgs`]).
+    Register(ReaskDetachArgs),
     /// Drop a source by endpoint (transfer completed / no longer wanted).
     Remove { endpoint: (Ipv4Addr, u16) },
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
-    /// *source*): our buddy forwarded a downloader's reask, answer it over UDP at
-    /// `dest` like an inbound `OP_REASKFILEPING` (oracle ListenSocket.cpp). Only the
-    /// file hash is carried (the reciprocity answer is keyed on it), keeping
-    /// `ReaskCommand`'s public surface free of crate-internal wire structs.
+    /// *source*): answer the downloader at `dest` like an inbound `OP_REASKFILEPING`
+    /// (oracle ListenSocket.cpp). Only the file hash is carried (reciprocity key).
     AnswerCallbackTcp { dest: SocketAddr, file_hash: Ed2kHash },
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
 pub type ReaskCommandReceiver = mpsc::Receiver<ReaskCommand>;
+
+/// Inputs for [`ReaskSourceHandle::detach`]: the just-queued source's endpoint +
+/// the buddy knowledge that gates a LowID buddy-relayed reask. Built by the
+/// download session from the connected source's hello profile.
+#[derive(Debug, Clone)]
+pub struct ReaskDetachArgs {
+    pub file_hash: Ed2kHash,
+    pub endpoint: (Ipv4Addr, u16),
+    pub udp_version: u8,
+    pub user_hash: Option<[u8; 16]>,
+    pub should_crypt: bool,
+    /// Source is a firewalled LowID client (oracle `HasLowID()`).
+    pub low_id: bool,
+    /// Source's Kad buddy endpoint from its hello (`GetBuddyIP`/`GetBuddyPort`).
+    pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
+    /// Source's buddy id (`GetBuddyID`), only known via Kad source-finding.
+    pub buddy_id: Option<[u8; 16]>,
+}
 
 /// Cloneable sender handle a download session uses to detach a queued source.
 #[derive(Debug, Clone)]
@@ -66,21 +77,8 @@ pub struct ReaskSourceHandle(mpsc::Sender<ReaskCommand>);
 impl ReaskSourceHandle {
     /// Detach a queued source onto UDP reask. Best-effort: a full/closed channel
     /// silently drops the command (the source just stays on its TCP path).
-    pub(crate) fn detach(
-        &self,
-        file_hash: Ed2kHash,
-        endpoint: (Ipv4Addr, u16),
-        udp_version: u8,
-        user_hash: Option<[u8; 16]>,
-        should_crypt: bool,
-    ) {
-        let _ = self.0.try_send(ReaskCommand::Register {
-            file_hash,
-            endpoint,
-            udp_version,
-            user_hash,
-            should_crypt,
-        });
+    pub(crate) fn detach(&self, args: ReaskDetachArgs) {
+        let _ = self.0.try_send(ReaskCommand::Register(args));
     }
 
     /// Drop a source from reask state by endpoint. Best-effort.
@@ -102,25 +100,19 @@ pub fn reask_command_channel() -> (ReaskSourceHandle, ReaskCommandReceiver) {
     (ReaskSourceHandle(tx), rx)
 }
 
-/// A typed event the reask loop raises for core to act on — a libtorrent-alert /
-/// libp2p-`SwarmEvent`-style signal that replaces bespoke per-need channels.
-/// Events flow loop -> core; commands flow core -> loop ([`ReaskCommand`]).
+/// A typed event the reask loop raises for core to act on (alert-style). Events
+/// flow loop -> core; commands flow core -> loop ([`ReaskCommand`]).
 #[derive(Debug, Clone)]
 pub enum ReaskEvent {
-    /// A detached source's UDP lease must be released back to core: its endpoint
-    /// is still held in core's `active_download_peer_endpoints` + download source
-    /// registry (it was filtered out of the lease release when it detached). The
-    /// loop raises this whenever it drops a detached source from reask state, so
-    /// core frees the lease and a subsequent download cycle (or the `SourceReady`
-    /// that follows) can re-acquire and reconnect it over TCP. Must be delivered
-    /// *before* the `SourceReady` for the same source so the re-engage attempt
-    /// sees a free endpoint.
+    /// A detached source's UDP lease must be released back to core: its endpoint is
+    /// still held in core's `active_download_peer_endpoints` + download source
+    /// registry. The loop raises this whenever it drops a detached source, so core
+    /// frees the lease and a later cycle (or the following `SourceReady`) reconnects
+    /// it over TCP. Must precede the `SourceReady` for the same source.
     SourceReleased { endpoint: (Ipv4Addr, u16) },
-    /// A queued source for `file_hash` reported a queue rank at/under the
-    /// re-engage threshold: a slot is imminent, so core should reconnect over TCP
-    /// now to claim it instead of waiting for the periodic download cycle. The
-    /// loop has already handed the source back (removed it from reask state) and
-    /// released its lease via a preceding `SourceReleased`.
+    /// A queued source for `file_hash` reported a queue rank at/under the re-engage
+    /// threshold: a slot is imminent, so core reconnects over TCP now. The loop has
+    /// already removed the source + released its lease via a preceding `SourceReleased`.
     SourceReady { file_hash: Ed2kHash },
 }
 
@@ -147,10 +139,9 @@ const REASK_INBOUND_CHANNEL_BOUND: usize = 256;
 /// Bound on the detach-command channel; a full channel just drops the detach
 /// (the source keeps its TCP behaviour), so a modest bound is safe.
 const REASK_COMMAND_CHANNEL_BOUND: usize = 256;
-/// Reconnect a queued source over TCP when an `OP_REASKACK` reports a queue rank
-/// at or below this: a slot is imminent, so claim it now rather than waiting for
-/// the periodic download cycle (eMule reconnects proactively near the front of
-/// the queue). Conservative to avoid premature reconnects on still-deep ranks.
+/// Reconnect a queued source over TCP when an `OP_REASKACK` rank is at/below this:
+/// a slot is imminent, so claim it now (eMule reconnects near the queue front).
+/// Conservative to avoid premature reconnects on still-deep ranks.
 const REENGAGE_RANK_THRESHOLD: u16 = 4;
 
 /// Hex preview of a datagram for reask packet-trace diagnostics (capped so a
@@ -218,8 +209,7 @@ pub async fn run_ed2k_udp_reask_loop(
             }
             maybe = commands.recv() => {
                 let Some(command) = maybe else { break };
-                // Source side: AnswerCallbackTcp needs async UDP I/O, so it is
-                // handled here; the rest mutate sync reask state in apply_reask_command.
+                // AnswerCallbackTcp needs async UDP I/O (handled here); the rest are sync.
                 if let ReaskCommand::AnswerCallbackTcp { dest, file_hash } = command {
                     super::buddy_relay::answer_buddy_relayed_reask(
                         &dht, &transfer_runtime, public_ip.octets(), dest, file_hash,
@@ -240,10 +230,9 @@ pub async fn run_ed2k_udp_reask_loop(
 /// Decide the loop->core events for a routed downloader reply. Pure so the
 /// re-engage / lease-release ordering is unit-testable without socket I/O.
 ///
-/// Invariant: a `SourceReleased` for the endpoint is always emitted *before* a
-/// `SourceReady`, so core frees the held UDP lease before the re-engage attempt
-/// tries to re-acquire it (otherwise `acquire_direct_download_source_leases`
-/// sees the endpoint still inserted and defers the source forever — the B1 leak).
+/// Invariant: a `SourceReleased` is always emitted *before* a `SourceReady` so
+/// core frees the held UDP lease before the re-engage attempt re-acquires it
+/// (else `acquire_direct_download_source_leases` defers it forever — the B1 leak).
 fn routed_reply_events(
     action: ReaskAction,
     file_hash: Ed2kHash,
@@ -286,8 +275,7 @@ async fn handle_inbound_datagram(
     data: &[u8],
     from: SocketAddr,
 ) {
-    // Drop datagrams from a filtered/banned IP before any processing (master
-    // ClientUDPSocket.cpp IsFiltered; not covered by core's Kad IP-filter here).
+    // Drop datagrams from a filtered/banned IP first (master ClientUDPSocket.cpp).
     if is_filtered_reask_source(from, ip_filter) {
         trace!("ed2k udp reask: dropping inbound datagram from filtered IP {from}");
         return;
@@ -343,17 +331,16 @@ fn apply_reask_command(
     command: ReaskCommand,
 ) {
     match command {
-        ReaskCommand::Register {
-            file_hash,
-            endpoint,
-            udp_version,
-            user_hash,
-            should_crypt,
-        } => {
+        ReaskCommand::Register(args) => {
+            let ReaskDetachArgs {
+                file_hash, endpoint, udp_version, user_hash, should_crypt, low_id, buddy_endpoint,
+                buddy_id,
+            } = args;
             let mut source = ReaskSource::new(endpoint, file_hash, udp_version, Instant::now());
             if let Some(hash) = user_hash {
                 source = source.with_obfuscation(hash, should_crypt);
             }
+            source = source.with_buddy(low_id, buddy_endpoint, buddy_id);
             trace!(
                 "ed2k udp reask: detaching source {}:{} for {} onto UDP reask",
                 endpoint.0, endpoint.1, file_hash
@@ -361,9 +348,8 @@ fn apply_reask_command(
             service.register_source(file_hash, source);
         }
         ReaskCommand::Remove { endpoint } => {
-            // Only release the lease if this endpoint was actually a detached
-            // reask source we held: a Remove for an unknown endpoint is a no-op
-            // and must not free a lease core never handed to the loop.
+            // Only release the lease if this endpoint was a detached source we held;
+            // a Remove for an unknown endpoint must not free a lease core never gave us.
             if service.remove_source(endpoint.0, endpoint.1) {
                 let _ = events.send(ReaskEvent::SourceReleased { endpoint });
             }
@@ -382,8 +368,7 @@ async fn drive_reask_tick(
     transfer_runtime: &Ed2kTransferRuntime,
     events: &ReaskEventSender,
 ) {
-    // Pre-fetch each registered file's reask info (async manifest read) so the
-    // sync `tick` closure can look it up without blocking.
+    // Pre-fetch each file's reask info so the sync `tick` closure can look it up.
     let mut info_by_file: std::collections::HashMap<Ed2kHash, TransferReaskInfo> =
         std::collections::HashMap::new();
     for file_hash in service.registered_file_hashes() {
@@ -411,11 +396,8 @@ async fn drive_reask_tick(
     }
     for (addr, action) in out.timed_out {
         trace!("ed2k udp reask: reask to {addr} timed out: {action:?}");
-        // On RetryTcp the source has exhausted its UDP-reask budget (failure ratio
-        // tripped). Drop it from reask state and release its held UDP lease so it
-        // returns to the normal TCP path: it stays in the transfer's remembered
-        // sources, and once the lease is freed core's next download cycle
-        // re-acquires and reconnects it over TCP. (RetryUdp keeps reasking.)
+        // On RetryTcp the source exhausted its UDP-reask budget: drop it + release
+        // its lease so core's next cycle re-acquires it over TCP. (RetryUdp keeps reasking.)
         if matches!(action, ReaskAction::RetryTcp)
             && let SocketAddr::V4(v4) = addr
         {
@@ -447,13 +429,16 @@ mod tests {
         apply_reask_command(
             &mut svc,
             &events,
-            ReaskCommand::Register {
+            ReaskCommand::Register(ReaskDetachArgs {
                 file_hash,
                 endpoint,
                 udp_version: 4,
                 user_hash: Some([0x55; 16]),
                 should_crypt: true,
-            },
+                low_id: false,
+                buddy_endpoint: None,
+                buddy_id: None,
+            }),
         );
         assert_eq!(svc.source_count(), 1);
         assert_eq!(svc.registered_file_hashes(), vec![file_hash]);
@@ -548,13 +533,16 @@ mod tests {
         apply_reask_command(
             &mut svc,
             &events,
-            ReaskCommand::Register {
+            ReaskCommand::Register(ReaskDetachArgs {
                 file_hash,
                 endpoint,
                 udp_version: 4,
                 user_hash: None,
                 should_crypt: false,
-            },
+                low_id: false,
+                buddy_endpoint: None,
+                buddy_id: None,
+            }),
         );
         // Simulate the RetryTcp branch: remove + release.
         assert!(svc.remove_source(endpoint.0, endpoint.1));
@@ -589,10 +577,22 @@ mod tests {
     fn detach_handle_register_is_received_as_a_command() {
         let (handle, mut rx) = reask_command_channel();
         let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
-        handle.detach(file_hash, (Ipv4Addr::new(10, 0, 0, 1), 5000), 4, None, false);
+        handle.detach(ReaskDetachArgs {
+            file_hash,
+            endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
+            udp_version: 4,
+            user_hash: None,
+            should_crypt: false,
+            low_id: true,
+            buddy_endpoint: Some((Ipv4Addr::new(203, 0, 113, 9), 5000)),
+            buddy_id: Some([0x77; 16]),
+        });
         match rx.try_recv().expect("a queued command") {
-            ReaskCommand::Register { endpoint, .. } => {
-                assert_eq!(endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
+            ReaskCommand::Register(args) => {
+                assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
+                assert!(args.low_id);
+                assert_eq!(args.buddy_endpoint, Some((Ipv4Addr::new(203, 0, 113, 9), 5000)));
+                assert_eq!(args.buddy_id, Some([0x77; 16]));
             }
             other => panic!("expected Register, got {other:?}"),
         }
