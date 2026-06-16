@@ -89,6 +89,7 @@ async fn corrupt_part_triggers_aich_recovery_request() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x14; 16],

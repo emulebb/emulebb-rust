@@ -111,6 +111,7 @@ async fn small_file_download_ignores_malformed_range_and_releases_pending_piece(
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

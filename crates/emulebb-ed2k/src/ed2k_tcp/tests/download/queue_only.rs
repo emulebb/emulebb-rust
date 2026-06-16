@@ -77,6 +77,7 @@ async fn queue_only_peer_is_accepted_without_counting_as_failure() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -242,6 +243,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -415,6 +417,7 @@ async fn obfuscated_queued_peer_waits_for_late_accept_upload() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

@@ -81,6 +81,17 @@ impl ReaskSourceHandle {
         let _ = self.0.try_send(ReaskCommand::Register(args));
     }
 
+    /// Register a firewalled LowID Kad source (oracle source types 3/5) directly
+    /// onto UDP reask, bypassing TCP: such a source is reachable only via its Kad
+    /// buddy, so it never gets a direct TCP session to detach from. The reask loop
+    /// then originates an `OP_REASKCALLBACKUDP` to the buddy on the normal cadence
+    /// (oracle `CDownloadQueue::KademliaSearchFile` types 3/5 + `UDPReaskForDownload`
+    /// LowID branch). Best-effort: a full/closed channel drops the registration
+    /// (the source stays a server-callback candidate). Returns whether it was sent.
+    pub fn register_kad_buddy_source(&self, args: ReaskDetachArgs) -> bool {
+        self.0.try_send(ReaskCommand::Register(args)).is_ok()
+    }
+
     /// Drop a source from reask state by endpoint. Best-effort.
     pub(crate) fn remove(&self, endpoint: (Ipv4Addr, u16)) {
         let _ = self.0.try_send(ReaskCommand::Remove { endpoint });
@@ -575,9 +586,11 @@ mod tests {
 
     #[test]
     fn detach_handle_register_is_received_as_a_command() {
+        // Exercises the public Kad-buddy registration entry point (used by core to
+        // detach a firewalled LowID Kad source straight onto reask, bypassing TCP).
         let (handle, mut rx) = reask_command_channel();
         let file_hash = Ed2kHash::from_bytes([0xCD; 16]);
-        handle.detach(ReaskDetachArgs {
+        assert!(handle.register_kad_buddy_source(ReaskDetachArgs {
             file_hash,
             endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
             udp_version: 4,
@@ -586,7 +599,7 @@ mod tests {
             low_id: true,
             buddy_endpoint: Some((Ipv4Addr::new(203, 0, 113, 9), 5000)),
             buddy_id: Some([0x77; 16]),
-        });
+        }));
         match rx.try_recv().expect("a queued command") {
             ReaskCommand::Register(args) => {
                 assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));

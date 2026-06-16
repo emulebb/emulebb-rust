@@ -69,6 +69,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -154,6 +155,7 @@ async fn nofile_answer_for_requested_file_is_incomplete_not_error() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x12; 16],
@@ -259,6 +261,7 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x13; 16],

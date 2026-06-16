@@ -77,6 +77,7 @@ async fn small_file_download_accepts_split_compressed_part_frames() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],
@@ -252,6 +253,7 @@ async fn small_file_download_accepts_obfuscated_packed_startup_and_compressed_pa
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

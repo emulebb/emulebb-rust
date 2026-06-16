@@ -125,6 +125,7 @@ fn found_sources_decoder_extracts_plain_sources() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         }]
     );
 }
@@ -174,6 +175,7 @@ fn found_sources_decoder_extracts_obfuscated_sources_with_user_hash() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         }]
     );
 }
@@ -193,6 +195,7 @@ fn found_sources_validation_rejects_hash_mismatch() {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         }],
         Ed2kHash([0xBB; 16]),
     )

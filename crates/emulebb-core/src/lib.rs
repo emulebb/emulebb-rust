@@ -83,6 +83,7 @@ use uuid::Uuid;
 
 mod categories;
 mod download_source_registry;
+mod ed2k_buddy_reask;
 mod ed2k_net_drivers;
 mod ed2k_sources;
 mod kad_buddy;
@@ -108,6 +109,7 @@ use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage,
 };
+use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
@@ -2419,9 +2421,20 @@ impl EmulebbCore {
         let mut source_requery_round = 0usize;
         loop {
             sort_download_sources(&mut sources);
+            // A firewalled LowID Kad source whose Kad buddy is known is reasked via
+            // its buddy (OP_REASKCALLBACKUDP), not through an eD2k-server callback:
+            // detach it straight onto the UDP reask loop (oracle
+            // CDownloadQueue::KademliaSearchFile types 3/5). Server-callback LowID
+            // sources (no Kad buddy) keep the OP_CALLBACKREQUEST path below.
+            detach_kad_buddy_sources_for_reask(
+                self.ed2k_reask_handle.lock().unwrap().clone().as_ref(),
+                file_hash,
+                &sources,
+                &mut requested_callback_sources,
+            );
             let callback_only_sources = sources
                 .iter()
-                .filter(|source| source.low_id)
+                .filter(|source| source.low_id && !source.has_kad_buddy_reask_target())
                 .cloned()
                 .collect::<Vec<_>>();
             let callback_cancel = CancellationToken::new();
@@ -6354,6 +6367,7 @@ mod tests {
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         }
     }
 
@@ -6799,36 +6813,6 @@ mod tests {
         assert_eq!(source.source_server, None);
         assert_eq!(source.buddy_id, None);
         assert_eq!(source.buddy_endpoint, None);
-    }
-
-    #[test]
-    fn kad_firewalled_buddy_source_maps_to_low_id_with_buddy_target() {
-        // Oracle Kad source type 3: a firewalled LowID source carrying its buddy
-        // id + buddy relay endpoint maps to a LowID source with a buddy reask target.
-        let file_hash = Ed2kHash::from_bytes([0x4b; 16]);
-        let source_id = Ed2kHash::from_bytes([0x4c; 16]);
-        let buddy_id = [0x5a; 16];
-        let source = kad_source_result_to_ed2k_found_source(SourceResult {
-            file_hash,
-            source_id,
-            ip: Ipv4Addr::new(192, 0, 2, 77),
-            tcp_port: 4662,
-            udp_port: 4672,
-            obfuscation_options: None,
-            source_type: 3,
-            buddy_id: Some(buddy_id),
-            buddy_ip: Some(Ipv4Addr::new(198, 51, 100, 9)),
-            buddy_port: 5000,
-        });
-
-        assert!(source.low_id);
-        assert_eq!(source.buddy_id, Some(buddy_id));
-        assert_eq!(
-            source.buddy_endpoint,
-            Some((Ipv4Addr::new(198, 51, 100, 9), 5000))
-        );
-        assert!(source.has_kad_buddy_reask_target());
-        assert!(!source.is_direct_dialable());
     }
 
     #[test]

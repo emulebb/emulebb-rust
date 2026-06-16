@@ -84,6 +84,7 @@ pub(crate) fn found_source_from_hint(
         source_server: None,
         buddy_id: None,
         buddy_endpoint: None,
+        source_udp_port: None,
     })
 }
 
@@ -337,6 +338,7 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed
         source_server: None,
         buddy_id,
         buddy_endpoint,
+        source_udp_port: firewalled_buddy.then_some(result.udp_port),
     }
 }
 

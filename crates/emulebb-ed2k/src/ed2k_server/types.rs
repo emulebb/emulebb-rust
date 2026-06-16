@@ -130,6 +130,11 @@ pub struct Ed2kFoundSource {
     /// Buddy relay UDP endpoint of a firewalled LowID Kad source (oracle
     /// `SetBuddyIP`/`SetBuddyPort`), present only for Kad source types 3/5.
     pub buddy_endpoint: Option<(Ipv4Addr, u16)>,
+    /// Source's own eD2k UDP port from a Kad source result (`FT_SOURCEUPORT`).
+    /// For a firewalled buddy source this is the endpoint the source UDP-answers
+    /// the downloader from after the buddy relays our callback, so it keys the
+    /// reask pending gate. `None` for server sources (no Kad UDP port).
+    pub source_udp_port: Option<u16>,
 }
 
 impl Ed2kFoundSource {

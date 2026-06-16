@@ -233,6 +233,7 @@ async fn large_file_download_waits_for_secure_ident_before_hashset_and_upload() 
             source_server: None,
             buddy_id: None,
             buddy_endpoint: None,
+            source_udp_port: None,
         },
         Ed2kHelloIdentity {
             user_hash: [0x11; 16],

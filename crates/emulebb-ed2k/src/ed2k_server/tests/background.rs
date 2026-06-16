@@ -56,6 +56,7 @@ async fn background_source_search_channel_round_trips_results() {
         source_server: None,
         buddy_id: None,
         buddy_endpoint: None,
+        source_udp_port: None,
     };
     let expected_for_task = expected.clone();
 
