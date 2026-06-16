@@ -11,15 +11,17 @@ use axum::{
 };
 use emulebb_core::{
     CategoryCreate, CategoryUpdate, EmulebbCore, FriendCreate, LocalShareCreate, PreferencesUpdate,
-    SearchCreate, SearchResult, SearchResultDownloadCreate, ServerCreate, ServerUpdate,
-    SharedDirectoriesUpdate, SharedFileUpdate, TransferCreate, TransferUpdate, Upload,
+    SearchCreate, SearchResultDownloadCreate, ServerCreate, ServerUpdate, SharedDirectoriesUpdate,
+    SharedFileUpdate, TransferCreate, TransferUpdate, Upload,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 mod log_buffer;
 pub use log_buffer::record_log;
+
+mod dto;
+use dto::*;
 
 mod envelope;
 use envelope::*;
@@ -37,214 +39,6 @@ pub struct RestState {
     core: Arc<EmulebbCore>,
     api_key: Arc<String>,
     shutdown: Option<watch::Sender<bool>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkOperationResult {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchResultDownloadResult {
-    ok: bool,
-    search_id: String,
-    hash: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedFileResponse {
-    hash: String,
-    name: String,
-    path: String,
-    directory: String,
-    size_bytes: u64,
-    priority: String,
-    auto_upload_priority: bool,
-    requests: u64,
-    accepted_requests: u64,
-    transferred_bytes: u64,
-    all_time_requests: u64,
-    all_time_accepts: u64,
-    all_time_transferred: u64,
-    part_count: u32,
-    part_file: bool,
-    complete: bool,
-    comment: String,
-    rating: u8,
-    has_comment: bool,
-    user_rating: u8,
-    published_ed2k: bool,
-    shared_by_rule: bool,
-    ed2k_link: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SharedFileCreateRequest {
-    path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedFileCreateResult {
-    ok: bool,
-    path: String,
-    already_shared: bool,
-    queued: bool,
-    file: SharedFileResponse,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Ed2kLinkResult {
-    hash: String,
-    link: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SharedFileRemoveResult {
-    ok: bool,
-    deleted_files: bool,
-    path: String,
-    hash: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ConfirmQuery {
-    confirm: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SnapshotQuery {
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PageQuery {
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TransfersQuery {
-    state: Option<String>,
-    category_id: Option<u32>,
-    offset: Option<usize>,
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UploadQueueQuery {
-    offset: Option<usize>,
-    limit: Option<usize>,
-    #[serde(default)]
-    include_score_breakdown: Option<bool>,
-}
-
-impl TransfersQuery {
-    fn page(&self) -> PageQuery {
-        PageQuery {
-            offset: self.offset,
-            limit: self.limit,
-        }
-    }
-}
-
-impl UploadQueueQuery {
-    fn page(&self) -> PageQuery {
-        PageQuery {
-            offset: self.offset,
-            limit: self.limit,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchResultsQuery {
-    offset: Option<usize>,
-    limit: Option<usize>,
-    #[serde(default)]
-    include_evidence: Option<bool>,
-    #[serde(default)]
-    exact_total: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchResultsPage {
-    id: String,
-    query: String,
-    method: String,
-    #[serde(rename = "type")]
-    file_type: String,
-    status: String,
-    total: usize,
-    offset: usize,
-    limit: usize,
-    results: Vec<SearchResult>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LogsClearRequest {
-    confirm_clear_logs: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ShutdownRequest {
-    confirm_shutdown: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DiagnosticDumpRequest {
-    confirm_dump: bool,
-    #[serde(default)]
-    full_memory: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DiagnosticCrashTestRequest {
-    confirm_crash: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ClearCompletedTransfersRequest {
-    confirm_clear_completed: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UrlImportRequest {
-    url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct KadBootstrapRequest {
-    address: String,
-    port: u16,
 }
 
 pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
