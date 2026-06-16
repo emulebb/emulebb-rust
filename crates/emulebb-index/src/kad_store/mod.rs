@@ -19,14 +19,20 @@ use crate::{
 
 mod entry_store;
 mod size_tags;
+mod source;
 
 use entry_store::{
     DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index, purge_expired, upsert_entry,
 };
 use size_tags::{
-    is_integer_tag_value, search_response, stock_first_file_size, stock_first_filename,
+    search_response, stock_first_file_size, stock_first_filename,
     stock_first_keyword_source_file_size, stock_notes_file_size_matches_request,
     stock_source_file_size_matches_request, stock_stored_publish_tags,
+};
+use source::{
+    StoredSourcePublish, is_stock_source_publish, source_dedup_key, source_entry_id,
+    source_result_tags, stock_source_publish_load, stock_source_tcp_port,
+    stock_stored_source_publish_tags, upsert_source_entry,
 };
 
 // Stock per-file/per-keyword caps (Opcodes.h KADEMLIAMAXSOURCEPERFILE /
@@ -95,18 +101,6 @@ struct StoredKeywordPublish {
     observed_at: DateTime<Utc>,
     target: NodeId,
     file_hash: Ed2kHash,
-    tags: Vec<Tag>,
-    dedup_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct StoredSourcePublish {
-    observed_at: DateTime<Utc>,
-    target: NodeId,
-    publisher_id: NodeId,
-    source_ip: Ipv4Addr,
-    source_tcp_port: u16,
-    source_udp_port: u16,
     tags: Vec<Tag>,
     dedup_key: String,
 }
@@ -536,40 +530,6 @@ fn keyword_entry_matches_restrictive_payload(
     matches_restrictive_keyword_payload(&filename, &entry.tags, payload)
 }
 
-fn stock_stored_source_publish_tags(tags: &[Tag]) -> Vec<Tag> {
-    stock_stored_publish_tags(tags)
-        .into_iter()
-        .filter(|tag| {
-            !matches!(
-                (&tag.name, &tag.value),
-                (TagName::Short(name), value)
-                    if *name == tag_name::SERVERIP && !is_integer_tag_value(value)
-            )
-        })
-        .collect()
-}
-
-fn is_stock_source_publish(tags: &[Tag]) -> bool {
-    tags.iter()
-        .any(|tag| matches!(tag.name, TagName::Short(tag_name::SOURCETYPE)))
-}
-
-fn stock_source_tcp_port(tags: &[Tag]) -> Option<u16> {
-    tags.iter().find_map(|tag| {
-        if !matches!(tag.name, TagName::Short(tag_name::SOURCEPORT)) {
-            return None;
-        }
-        match tag.value {
-            TagValue::UInt(value) => u16::try_from(value).ok().filter(|port| *port > 0),
-            TagValue::U64(value) => u16::try_from(value).ok().filter(|port| *port > 0),
-            TagValue::U32(value) => u16::try_from(value).ok().filter(|port| *port > 0),
-            TagValue::U16(value) => (value > 0).then_some(value),
-            TagValue::U8(value) => (value > 0).then_some(u16::from(value)),
-            _ => None,
-        }
-    })
-}
-
 fn keyword_result_tags(entry: &StoredKeywordPublish) -> Vec<Tag> {
     let mut tags = Vec::new();
     if let Some(name) = stock_first_filename(&entry.tags) {
@@ -625,43 +585,6 @@ fn keyword_aich_result_tag(hash: [u8; 20]) -> Tag {
     Tag::new_short(tag_name::KADAICHHASHRESULT, TagValue::SmallBlob(payload))
 }
 
-fn source_result_tags(entry: &StoredSourcePublish) -> Vec<Tag> {
-    let mut tags = Vec::new();
-    if let Some(size) = stock_first_keyword_source_file_size(&entry.tags) {
-        tags.push(Tag::filesize(size));
-    }
-
-    let mut saw_source_type = false;
-    let mut saw_source_tcp_port = false;
-    let mut saw_source_udp_port = false;
-    for tag in &entry.tags {
-        match tag.name {
-            TagName::Short(name) if name == tag_name::SOURCETYPE => {
-                if !saw_source_type {
-                    tags.push(source_ip_tag(entry.source_ip));
-                    tags.push(tag.clone());
-                    saw_source_type = true;
-                }
-            }
-            TagName::Short(name) if name == tag_name::FILESIZE => {}
-            TagName::Short(name) if name == tag_name::SOURCEPORT => {
-                if !saw_source_tcp_port {
-                    tags.push(normalized_source_port_tag(tag));
-                    saw_source_tcp_port = true;
-                }
-            }
-            TagName::Short(name) if name == tag_name::SOURCEUPORT => {
-                if !saw_source_udp_port && let Some(tag) = normalized_source_udp_port_tag(tag) {
-                    tags.push(tag);
-                    saw_source_udp_port = true;
-                }
-            }
-            _ => tags.push(tag.clone()),
-        }
-    }
-    tags
-}
-
 fn notes_result_tags(entry: &StoredNotesPublish) -> Vec<Tag> {
     let mut tags = Vec::new();
     if let Some(name) = stock_first_filename(&entry.tags) {
@@ -678,82 +601,6 @@ fn notes_result_tags(entry: &StoredNotesPublish) -> Vec<Tag> {
         }
     }
     tags
-}
-
-fn source_ip_tag(source_ip: Ipv4Addr) -> Tag {
-    Tag::new_short(
-        tag_name::SOURCEIP,
-        TagValue::U32(u32::from_be_bytes(source_ip.octets())),
-    )
-}
-
-fn normalized_source_port_tag(tag: &Tag) -> Tag {
-    let mut tag = tag.clone();
-    if let TagValue::UInt(value) = tag.value
-        && u32::try_from(value).is_ok()
-    {
-        tag.value = TagValue::U32(value as u32);
-    }
-    tag
-}
-
-fn normalized_source_udp_port_tag(tag: &Tag) -> Option<Tag> {
-    let port = match tag.value {
-        TagValue::UInt(value) => u16::try_from(value).ok()?,
-        TagValue::U64(value) => u16::try_from(value).ok()?,
-        TagValue::U32(value) => u16::try_from(value).ok()?,
-        TagValue::U16(value) => value,
-        TagValue::U8(value) => u16::from(value),
-        _ => return None,
-    };
-    if port == 0 {
-        return None;
-    }
-    Some(Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(port)))
-}
-
-fn source_entry_id(publisher_id: NodeId) -> Ed2kHash {
-    Ed2kHash::from_bytes(publisher_id.to_be_bytes())
-}
-
-fn upsert_source_entry(
-    entries: &mut Vec<StoredSourcePublish>,
-    per_file_capacity: usize,
-    capacity: usize,
-    entry: StoredSourcePublish,
-) {
-    if let Some(existing) = entries.iter_mut().find(|candidate| {
-        candidate.target == entry.target
-            && candidate.source_ip == entry.source_ip
-            && (candidate.source_tcp_port == entry.source_tcp_port
-                || candidate.source_udp_port == entry.source_udp_port)
-    }) {
-        *existing = entry;
-        return;
-    }
-
-    // Per-file cap (stock KADEMLIAMAXSOURCEPERFILE): evict the oldest entry for
-    // this target so one file cannot exceed its per-target source list.
-    if entries
-        .iter()
-        .filter(|candidate| candidate.target == entry.target)
-        .count()
-        > per_file_capacity
-        && let Some(oldest_index) = oldest_target_entry_index(entries, entry.target)
-    {
-        entries.remove(oldest_index);
-    }
-
-    // Global store cap: bound total memory across all files.
-    if entries.len() >= capacity
-        && let Some((oldest_index, _)) = entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, candidate)| candidate.observed_at())
-    {
-        entries.remove(oldest_index);
-    }
-    entries.push(entry);
 }
 
 fn upsert_notes_entry(
@@ -793,44 +640,6 @@ fn upsert_notes_entry(
         entries.remove(oldest_index);
     }
     entries.push(entry);
-}
-
-fn stock_source_publish_load(
-    entries: &[StoredSourcePublish],
-    target: NodeId,
-    per_file_capacity: usize,
-    source_ip: Ipv4Addr,
-    source_tcp_port: u16,
-    source_udp_port: u16,
-) -> u8 {
-    let target_count = entries
-        .iter()
-        .filter(|candidate| candidate.target == target)
-        .count();
-    if target_count == 0 {
-        return 1;
-    }
-    if target_count > per_file_capacity
-        && !source_replacement_matches(entries, target, source_ip, source_tcp_port, source_udp_port)
-    {
-        return 100;
-    }
-    (target_count * 100 / per_file_capacity.max(1)) as u8
-}
-
-fn source_replacement_matches(
-    entries: &[StoredSourcePublish],
-    target: NodeId,
-    source_ip: Ipv4Addr,
-    source_tcp_port: u16,
-    source_udp_port: u16,
-) -> bool {
-    entries.iter().any(|candidate| {
-        candidate.target == target
-            && candidate.source_ip == source_ip
-            && (candidate.source_tcp_port == source_tcp_port
-                || candidate.source_udp_port == source_udp_port)
-    })
 }
 
 fn stock_notes_publish_load(
@@ -874,24 +683,6 @@ impl TimedEntry for StoredKeywordPublish {
 }
 
 impl DedupEntry for StoredKeywordPublish {
-    fn dedup_key(&self) -> &str {
-        &self.dedup_key
-    }
-}
-
-impl TimedEntry for StoredSourcePublish {
-    fn observed_at(&self) -> DateTime<Utc> {
-        self.observed_at
-    }
-}
-
-impl TargetedEntry for StoredSourcePublish {
-    fn target(&self) -> NodeId {
-        self.target
-    }
-}
-
-impl DedupEntry for StoredSourcePublish {
     fn dedup_key(&self) -> &str {
         &self.dedup_key
     }
@@ -976,15 +767,6 @@ fn keyword_source_exists(
 
 fn keyword_dedup_key(target: NodeId, file_hash: Ed2kHash, size: u64) -> String {
     format!("keyword:{target}:{file_hash}:{size}")
-}
-
-fn source_dedup_key(
-    target: NodeId,
-    source_ip: Ipv4Addr,
-    source_tcp_port: u16,
-    source_udp_port: u16,
-) -> String {
-    format!("source:{target}:{source_ip}:{source_tcp_port}:{source_udp_port}")
 }
 
 fn has_stock_note_tags(tags: &[Tag]) -> bool {
