@@ -7,9 +7,10 @@
 # enforcement does not block on pre-existing dependency facts.
 
 [advisories]
-# Deny known vulnerabilities and yanked crates; warn on unmaintained.
+# Deny known vulnerabilities and yanked crates; flag all unmaintained advisories.
+# (cargo-deny's `unmaintained` takes all/workspace/transitive/none, not a severity.)
 yanked = "deny"
-unmaintained = "warn"
+unmaintained = "all"
 
 [bans]
 multiple-versions = "warn"
