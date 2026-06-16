@@ -350,6 +350,7 @@ mod tests {
             compatibility_hint: false,
             source_count_hint: None,
             aich_root: None,
+            complete_parts: Vec::new(),
         }
     }
 

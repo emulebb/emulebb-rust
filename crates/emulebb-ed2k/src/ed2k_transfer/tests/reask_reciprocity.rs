@@ -27,6 +27,7 @@ fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        complete_parts: Vec::new(),
     }
 }
 
@@ -89,6 +90,55 @@ async fn reciprocity_acks_a_located_waiting_peer_with_its_rank() {
     match parse_inbound_reask_datagram(&reply, OUR_PUBLIC_IP, &PEER_USER_HASH, PEER_UDP_VERSION) {
         Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 1),
         other => panic!("expected obfuscated Ack, got {other:?}"),
+    }
+}
+
+/// A servable in-progress partfile entry: not verified-complete, holding the
+/// first of two ED2K parts.
+fn partfile_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
+    Ed2kSharedEntry {
+        verified_complete: false,
+        complete_parts: vec![true, false],
+        ..shared_entry(file_hash)
+    }
+}
+
+#[tokio::test]
+async fn reciprocity_acks_a_partfile_share_while_downloading() {
+    // eMule answers OP_REASKFILEPING for an IsPartFile() reqfile too, advertising
+    // its WritePartStatus bitmap. A located waiting peer reasking for a partfile
+    // we serve must receive an ack (the partfile satisfies `reqfile != NULL`).
+    let root = unique_test_dir("ed2k-reask-reciprocity-partfile");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0xBC; 16]);
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(partfile_entry(&file_hash));
+
+    let (_granted, _) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    let peer_udp_port = 4673;
+    let (_waiting, _) = runtime
+        .begin_upload_session(reasking_peer(peer_udp_port), &file_hash)
+        .await;
+
+    let ping = ReaskFilePing {
+        file_hash,
+        part_status: None,
+        complete_source_count: None,
+    };
+    let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), peer_udp_port);
+    let reply = runtime
+        .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
+        .await
+        .expect("an ack reply for a served partfile");
+    match parse_inbound_reask_datagram(&reply, OUR_PUBLIC_IP, &PEER_USER_HASH, PEER_UDP_VERSION) {
+        Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 1),
+        other => panic!("expected obfuscated Ack for a partfile, got {other:?}"),
     }
 }
 

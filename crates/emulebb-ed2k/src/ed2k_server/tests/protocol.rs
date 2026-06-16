@@ -315,6 +315,7 @@ fn offer_files_payload_matches_oracle_search_session_sample() {
         compatibility_hint: true,
         source_count_hint: Some(12),
         aich_root: None,
+        complete_parts: Vec::new(),
     }];
     let packet = encode_packet(
         OP_OFFERFILES,
@@ -349,6 +350,7 @@ fn offer_files_payload_advertises_large_file_size_truthfully() {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        complete_parts: Vec::new(),
     }];
     let payload = encode_offer_files_payload(
         &shared_catalog,
@@ -394,6 +396,7 @@ fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
         compatibility_hint: true,
         source_count_hint: Some(12),
         aich_root: None,
+        complete_parts: Vec::new(),
     }];
     let mut expanded_catalog = base_catalog.clone();
     expanded_catalog.push(Ed2kSharedEntry {
@@ -405,6 +408,7 @@ fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        complete_parts: Vec::new(),
     });
 
     assert_ne!(

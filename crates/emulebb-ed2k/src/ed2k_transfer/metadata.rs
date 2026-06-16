@@ -319,6 +319,21 @@ impl Ed2kTransferRuntime {
             .map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
     }
 
+    /// Like [`Self::local_entry`] but only returns an entry that may be served
+    /// to an inbound peer right now: a fully verified file, or an in-progress
+    /// partfile holding at least one complete part ("share while downloading").
+    /// Mirrors the master file-request fallback that admits a `downloadqueue`
+    /// partfile only with at least one complete part (ListenSocket.cpp).
+    pub async fn local_servable_entry(
+        &self,
+        file_hash: &Ed2kHash,
+    ) -> Result<Option<Ed2kSharedEntry>> {
+        Ok(self
+            .local_entry(file_hash)
+            .await?
+            .filter(Ed2kSharedEntry::is_servable))
+    }
+
     /// Whether we share or are downloading the file with this hash.
     ///
     /// A manifest exists for both shared files and in-progress downloads, so a
