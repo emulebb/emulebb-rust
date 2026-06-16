@@ -5,6 +5,7 @@
 //! observable behavior is mostly in transport mode selection, pending-request
 //! tracking, and flood handling.
 
+pub mod diag_event;
 pub mod error;
 pub mod obfuscation;
 pub mod rate_limit;
