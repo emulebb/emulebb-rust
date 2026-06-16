@@ -65,9 +65,9 @@ hard_limit_lines = 907
 rationale = "frozen legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
 
 [[structure.large_file_allowlist]]
-path = "crates/emulebb-index/src/kad_store.rs"
-hard_limit_lines = 2846
-rationale = "frozen legacy Kad SQLite store; split schema, node store, search store, and snoop persistence as touched. Cap bumped (+8) to expose the local index sizes as public counts (keyword_entry_count / source_entry_count, oracle CIndexed m_uTotalIndexKeyword / m_uTotalIndexSource) so the REST kad status can report indexedKeywords / indexedSources instead of hardcoded 0. Bumped again (+123) to disentangle the per-file vs global source/note caps (A5): KadLocalStoreConfig gains explicit source_per_file_capacity / notes_per_file_capacity (stock KADEMLIAMAXSOURCEPERFILE / KADEMLIAMAXNOTESPERFILE) separate from the global source_capacity / notes_capacity store cap, the upsert/load helpers take the per-file cap as a parameter instead of the hardcoded stock constant, the defaults set the global caps strictly larger than the per-file caps so the two no longer coincide, plus the new independence + non-conflation unit tests."
+path = "crates/emulebb-index/src/kad_store/mod.rs"
+hard_limit_lines = 2719
+rationale = "frozen legacy Kad publish cache, now being split by responsibility into a kad_store/ module tree (pure behavior-preserving restructuring). mod.rs keeps the KadLocalStore orchestrator and shared helpers; per-domain submodules (keyword/source/notes) and shared tag/size helpers move out into separate files re-exported from here, so the public API and all callers compile unchanged. Cap tracks the true mod.rs line count and is lowered with each extraction. Earlier history: cap exposed the local index sizes as public counts (keyword_entry_count / source_entry_count, oracle CIndexed m_uTotalIndexKeyword / m_uTotalIndexSource) so the REST kad status can report indexedKeywords / indexedSources, and disentangled the per-file vs global source/note caps (A5)."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-index/src/snoop_queue.rs"
