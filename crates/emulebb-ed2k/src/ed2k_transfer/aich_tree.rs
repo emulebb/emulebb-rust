@@ -275,22 +275,38 @@ impl AichHashTree {
         true
     }
 
-    /// Append one node's hash with its 16-bit ident. Mirrors `WriteHash`.
-    fn write_hash(&self, out: &mut Vec<u8>, mut hash_ident: u32) {
+    /// Append one node's hash with its ident. Mirrors `WriteHash`: a 16-bit
+    /// ident for normal files, a 32-bit ident for large (>4GB) files
+    /// (`b32BitIdent`).
+    fn write_hash(&self, out: &mut Vec<u8>, mut hash_ident: u32, use_32bit: bool) {
         hash_ident <<= 1;
         hash_ident |= u32::from(self.is_left_branch);
-        out.extend_from_slice(&(hash_ident as u16).to_le_bytes());
+        if use_32bit {
+            out.extend_from_slice(&hash_ident.to_le_bytes());
+        } else {
+            out.extend_from_slice(&(hash_ident as u16).to_le_bytes());
+        }
         out.extend_from_slice(&self.hash);
     }
 
     /// Append the lowest-level hashes left-to-right. Mirrors
-    /// `WriteLowestLevelHashes` (16-bit ident, identifiers always written here).
-    fn write_lowest_level_hashes(&self, out: &mut Vec<u8>, mut hash_ident: u32) -> Result<()> {
+    /// `WriteLowestLevelHashes` (identifiers always written here; 16- or 32-bit
+    /// per `b32BitIdent`).
+    fn write_lowest_level_hashes(
+        &self,
+        out: &mut Vec<u8>,
+        mut hash_ident: u32,
+        use_32bit: bool,
+    ) -> Result<()> {
         hash_ident <<= 1;
         hash_ident |= u32::from(self.is_left_branch);
         if self.left.is_none() && self.right.is_none() {
             if self.data_size <= self.base_size() && self.hash_valid {
-                out.extend_from_slice(&(hash_ident as u16).to_le_bytes());
+                if use_32bit {
+                    out.extend_from_slice(&hash_ident.to_le_bytes());
+                } else {
+                    out.extend_from_slice(&(hash_ident as u16).to_le_bytes());
+                }
                 out.extend_from_slice(&self.hash);
                 return Ok(());
             }
@@ -299,8 +315,8 @@ impl AichHashTree {
         let (Some(left), Some(right)) = (self.left.as_ref(), self.right.as_ref()) else {
             bail!("AICH WriteLowestLevelHashes: incomplete inner node");
         };
-        left.write_lowest_level_hashes(out, hash_ident)?;
-        right.write_lowest_level_hashes(out, hash_ident)
+        left.write_lowest_level_hashes(out, hash_ident, use_32bit)?;
+        right.write_lowest_level_hashes(out, hash_ident, use_32bit)
     }
 
     /// Emit the recovery data for one part. Mirrors
@@ -313,12 +329,13 @@ impl AichHashTree {
         size: u64,
         out: &mut Vec<u8>,
         mut hash_ident: u32,
+        use_32bit: bool,
     ) -> Result<()> {
         if start + size > self.data_size || size > self.data_size {
             bail!("AICH CreatePartRecoveryData: range out of bounds");
         }
         if start == 0 && size == self.data_size {
-            return self.write_lowest_level_hashes(out, hash_ident);
+            return self.write_lowest_level_hashes(out, hash_ident, use_32bit);
         }
         if self.data_size <= self.base_size() {
             bail!("AICH CreatePartRecoveryData: cannot descend below base size");
@@ -336,15 +353,15 @@ impl AichHashTree {
             if start + size > left_size || !right.hash_valid {
                 bail!("AICH CreatePartRecoveryData: invalid left descent");
             }
-            right.write_hash(out, hash_ident);
-            return left.create_part_recovery_data(start, size, out, hash_ident);
+            right.write_hash(out, hash_ident, use_32bit);
+            return left.create_part_recovery_data(start, size, out, hash_ident, use_32bit);
         }
         let start = start - left_size;
         if start + size > right_size || !left.hash_valid {
             bail!("AICH CreatePartRecoveryData: invalid right descent");
         }
-        left.write_hash(out, hash_ident);
-        right.create_part_recovery_data(start, size, out, hash_ident)
+        left.write_hash(out, hash_ident, use_32bit);
+        right.create_part_recovery_data(start, size, out, hash_ident, use_32bit)
     }
 
     /// Insert a hash addressed by `hash_ident` (16-bit path). Mirrors

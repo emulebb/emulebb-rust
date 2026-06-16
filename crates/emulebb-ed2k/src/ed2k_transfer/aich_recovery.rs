@@ -116,8 +116,16 @@ impl AichRecoveryHashSet {
 
     /// Build the OP_AICHANSWER recovery payload body (the part after the 16-byte
     /// file hash + 2-byte part + 20-byte master hash). Mirrors
-    /// `CAICHRecoveryHashSet::CreatePartRecoveryData` (16-bit ident form):
+    /// `CAICHRecoveryHashSet::CreatePartRecoveryData`.
+    ///
+    /// For files up to 4 GiB the 16-bit ident form is emitted:
     /// `<count1 u16> (ident u16, hash[20])[count1] <count2 u16 = 0>`.
+    ///
+    /// For large files (>`u32::MAX` bytes, `IsLargeFile()`) the 32-bit ident
+    /// form is emitted, matching `bUse32BitIdentifier`:
+    /// `<count1 u16 = 0> <count2 u16> (ident u32, hash[20])[count2]`
+    /// (a leading zero 16-bit count, then the 32-bit-ident block; no trailing
+    /// 16-bit-count word).
     pub(super) fn create_part_recovery_data(&mut self, part: u64) -> Result<Vec<u8>> {
         if self.root.data_size <= ED2K_EMBLOCK_SIZE {
             bail!("AICH CreatePartRecoveryData: file too small for recovery");
@@ -128,20 +136,58 @@ impl AichRecoveryHashSet {
         }
         let p_size = part_size(self.file_size, part);
         let hashes_to_write = self.recovery_hash_count(part)?;
+        // eMule writes 32-bit identifiers for files larger than 4 GiB so the
+        // hash idents (which can exceed 16 bits for the deeper trees of large
+        // files) fit. Mirrors `bUse32BitIdentifier = m_pOwner->IsLargeFile()`.
+        let use_32bit = self.file_size > u64::from(u32::MAX);
+        let ident_size = if use_32bit { 4usize } else { 2usize };
         let mut out = Vec::new();
+        if use_32bit {
+            // No 16-bit hashes to write, then the 32-bit-hash count.
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
         out.extend_from_slice(&hashes_to_write.to_le_bytes());
         let body_start = out.len();
         self.root
-            .create_part_recovery_data(p_start, p_size, &mut out, 0)?;
+            .create_part_recovery_data(p_start, p_size, &mut out, 0, use_32bit)?;
         let written = out.len() - body_start;
-        if written != usize::from(hashes_to_write) * (HASHSIZE + 2) {
+        if written != usize::from(hashes_to_write) * (HASHSIZE + ident_size) {
             bail!(
                 "AICH recovery data wrong length: {written} != {}",
-                usize::from(hashes_to_write) * (HASHSIZE + 2)
+                usize::from(hashes_to_write) * (HASHSIZE + ident_size)
             );
         }
-        // no 32-bit hashes
-        out.extend_from_slice(&0u16.to_le_bytes());
+        if !use_32bit {
+            // no 32-bit hashes
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Test-only: emit the recovery body for `part` in the large-file 32-bit
+    /// identifier framing regardless of the file size, so the 32-bit writer path
+    /// can be round-tripped against the (size-independent) 32-bit reader path on
+    /// a small, in-memory-buildable tree. Mirrors the `bUse32BitIdentifier=true`
+    /// branch of `CAICHRecoveryHashSet::CreatePartRecoveryData`:
+    /// `<count1 u16 = 0> <count2 u16> (ident u32, hash[20])[count2]`.
+    #[cfg(test)]
+    pub(super) fn create_part_recovery_data_force_32bit(&mut self, part: u64) -> Result<Vec<u8>> {
+        let p_start = part * ED2K_PART_SIZE;
+        let p_size = part_size(self.file_size, part);
+        let hashes_to_write = self.recovery_hash_count(part)?;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0u16.to_le_bytes()); // no 16-bit hashes
+        out.extend_from_slice(&hashes_to_write.to_le_bytes());
+        let body_start = out.len();
+        self.root
+            .create_part_recovery_data(p_start, p_size, &mut out, 0, true)?;
+        let written = out.len() - body_start;
+        if written != usize::from(hashes_to_write) * (HASHSIZE + 4) {
+            bail!(
+                "AICH 32-bit recovery data wrong length: {written} != {}",
+                usize::from(hashes_to_write) * (HASHSIZE + 4)
+            );
+        }
         Ok(out)
     }
 

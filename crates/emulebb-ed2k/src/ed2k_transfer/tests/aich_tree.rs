@@ -287,3 +287,65 @@ fn recovery_data_for_part_zero_round_trips() {
     let clean = compute_part_recovery(size, 0, good, &trusted).unwrap();
     assert!(clean.corrupt_ranges.is_empty());
 }
+
+#[test]
+fn normal_file_recovery_uses_16bit_ident_framing() {
+    // For files <= 4 GiB the body must use the 16-bit ident form: a leading
+    // non-zero hash count (count1), then 16-bit-ident blocks, then a trailing
+    // count2 = 0. The wire size per hash is HASHSIZE + 2.
+    let size = ED2K_PART_SIZE + 2 * ED2K_EMBLOCK_SIZE + 99;
+    let data = pattern(size as usize);
+    let mut sharer = AichRecoveryHashSet::new(size);
+    sharer.build_from_data(&data).unwrap();
+    let body = sharer.create_part_recovery_data(1).unwrap();
+
+    let count1 = u16::from_le_bytes([body[0], body[1]]);
+    assert!(count1 > 0, "16-bit form must lead with a non-zero count1");
+    // count1 16-bit-ident hashes, then a trailing zero count2.
+    let expected = 2 + usize::from(count1) * (20 + 2) + 2;
+    assert_eq!(body.len(), expected, "16-bit framing size mismatch");
+    let count2 = u16::from_le_bytes([body[body.len() - 2], body[body.len() - 1]]);
+    assert_eq!(count2, 0, "16-bit form must trail with count2 = 0");
+}
+
+#[test]
+fn large_file_32bit_ident_recovery_round_trips() {
+    // The serve path for >4 GiB files emits 32-bit identifiers
+    // (bUse32BitIdentifier). Build a small valid tree (the geometry is
+    // size-independent), emit the body forced into the large-file 32-bit
+    // framing, and confirm the existing 32-bit reader path verifies it.
+    let size = 2 * ED2K_PART_SIZE + 3 * ED2K_EMBLOCK_SIZE + 777;
+    let data = pattern(size as usize);
+    let mut sharer = AichRecoveryHashSet::new(size);
+    sharer.build_from_data(&data).unwrap();
+    let master = sharer.master_hash();
+
+    let part = 1u64;
+    let body = sharer.create_part_recovery_data_force_32bit(part).unwrap();
+
+    // Large-file framing: leading 16-bit count == 0, then the 32-bit-hash
+    // count, then count * (20 + 4) bytes; no trailing 16-bit-count word.
+    let count1 = u16::from_le_bytes([body[0], body[1]]);
+    assert_eq!(count1, 0, "32-bit form must lead with count1 = 0");
+    let count2 = u16::from_le_bytes([body[2], body[3]]);
+    assert!(count2 > 0, "32-bit form must carry a non-zero count2");
+    assert_eq!(
+        body.len(),
+        4 + usize::from(count2) * (20 + 4),
+        "32-bit framing size mismatch"
+    );
+
+    // The downloader trusts only the master hash and reads the 32-bit body.
+    let mut downloader = AichRecoveryHashSet::new(size);
+    downloader.set_master_hash(master);
+    downloader
+        .read_recovery_data(part, &body)
+        .expect("32-bit recovery body must verify against the trusted master hash");
+    let trusted = downloader.part_block_hashes(part).unwrap();
+
+    let p_start = (part * ED2K_PART_SIZE) as usize;
+    let p_size = (size - part * ED2K_PART_SIZE).min(ED2K_PART_SIZE) as usize;
+    let clean =
+        compute_part_recovery(size, part, &data[p_start..p_start + p_size], &trusted).unwrap();
+    assert!(clean.corrupt_ranges.is_empty(), "part must verify clean");
+}
