@@ -321,7 +321,7 @@ impl Ed2kUploadQueueState {
     pub(super) fn capacity_snapshot(&mut self, now: Instant) -> Ed2kUploadQueueCapacitySnapshot {
         self.reap_expired_sessions(now);
         self.refresh_elastic_underfill(now);
-        Ed2kUploadQueueCapacitySnapshot {
+        let snapshot = Ed2kUploadQueueCapacitySnapshot {
             base_slots: self.config.active_slots.max(1),
             elastic_slots: self.elastic_slot_allowance(),
             active_slots: self.effective_active_slot_limit(now),
@@ -329,7 +329,15 @@ impl Ed2kUploadQueueState {
             waiting_sessions: self.waiting_session_count(),
             upload_rate_bytes_per_sec: self.upload_rate_bytes_per_sec(now),
             elastic_underfill: self.elastic_underfill_ready(now),
-        }
+        };
+        super::diag_sched::capacity_snapshot(
+            snapshot.base_slots,
+            snapshot.elastic_slots,
+            snapshot.active_slots,
+            snapshot.active_sessions,
+            snapshot.waiting_sessions,
+        );
+        snapshot
     }
 
     pub(super) fn begin_session(
@@ -726,10 +734,24 @@ impl Ed2kUploadQueueState {
                     Ed2kUploadSessionPhase::Granted => self.config.granted_timeout,
                     Ed2kUploadSessionPhase::Uploading => self.config.upload_timeout,
                 };
-                (now.duration_since(session.last_activity) > timeout).then(|| key.clone())
+                (now.duration_since(session.last_activity) > timeout)
+                    .then(|| (key.clone(), session.phase))
             })
             .collect::<Vec<_>>();
-        for key in expired {
+        for (key, phase) in expired {
+            // An idle active slot reclaimed by the queue is a `recycle` (master
+            // activeNoRequestRecycle*), distinct from a peer-initiated close; a
+            // reaped waiter is a plain queue drop and is not emitted here.
+            if matches!(
+                phase,
+                Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+            ) {
+                super::diag_sched::upload_slot_recycled(
+                    &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
+                    key.peer.user_hash,
+                    &key.file_hash,
+                );
+            }
             self.sessions.remove(&key);
             self.waiting_order.retain(|queued| queued != &key);
         }

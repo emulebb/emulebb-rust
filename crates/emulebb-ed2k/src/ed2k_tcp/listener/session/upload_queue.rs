@@ -10,7 +10,7 @@ use crate::{
     },
     ed2k_transfer::{
         Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadSessionHandle,
-        Ed2kUploadSessionStatus,
+        Ed2kUploadSessionStatus, diag_sched,
     },
 };
 
@@ -34,6 +34,11 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     granted_sent: bool,
     last_queue_rank: Option<u16>,
     last_queue_rank_sent_at: Option<tokio::time::Instant>,
+    // Stable peer identity for the `sched` diag_event_v1 emits, captured from the
+    // advertised upload peer identity (so slot events align with the upload-queue
+    // session key, not the ephemeral socket source port).
+    diag_peer: Option<String>,
+    diag_peer_hash: Option<[u8; 16]>,
 }
 
 impl ListenerUploadQueue {
@@ -44,6 +49,35 @@ impl ListenerUploadQueue {
             granted_sent: false,
             last_queue_rank: None,
             last_queue_rank_sent_at: None,
+            diag_peer: None,
+            diag_peer_hash: None,
+        }
+    }
+
+    /// Capture the advertised peer identity for the `sched` diag emits.
+    fn record_diag_peer(&mut self, peer_identity: &Ed2kUploadPeerIdentity) {
+        self.diag_peer = Some(diag_sched::peer_label(peer_identity.ip, peer_identity.tcp_port));
+        self.diag_peer_hash = peer_identity.user_hash;
+    }
+
+    /// Emit `upload_slot_opened` once per grant transition (peer + file known).
+    fn emit_slot_opened(&self) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+            diag_sched::upload_slot_opened(peer, self.diag_peer_hash, &file_hash.to_string());
+        }
+    }
+
+    /// Emit `queue_rank` for a genuine waiting rank sent on the wire.
+    fn emit_queue_rank(&self, rank: u16) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+            diag_sched::queue_rank(peer, self.diag_peer_hash, &file_hash.to_string(), rank);
+        }
+    }
+
+    /// Emit `upload_slot_closed` when a held session is released.
+    fn emit_slot_closed(&self) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+            diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string());
         }
     }
 
@@ -106,6 +140,7 @@ impl ListenerUploadQueue {
                 None => Ed2kUploadSessionStatus::Stale,
             }
         } else {
+            self.record_diag_peer(&peer_identity);
             let (session_handle, status) = transfer_runtime
                 .begin_upload_session(peer_identity, requested)
                 .await;
@@ -124,6 +159,7 @@ impl ListenerUploadQueue {
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
                 self.mark_waiting(rank);
+                self.emit_queue_rank(rank);
                 encode_queue_ranking(rank)
             }
             // Admission refused (master AddClientToQueue returned without
@@ -162,6 +198,7 @@ impl ListenerUploadQueue {
             };
             return self.send_status(transport, peer_addr, status).await;
         }
+        self.record_diag_peer(&peer_identity);
         let (session_handle, status) = transfer_runtime
             .begin_upload_session(peer_identity, requested)
             .await;
@@ -207,12 +244,15 @@ impl ListenerUploadQueue {
             transfer_runtime
                 .release_upload_session(upload_session_handle)
                 .await;
+            self.emit_slot_closed();
         }
         self.session = None;
         self.file_hash = None;
         self.granted_sent = false;
         self.last_queue_rank = None;
         self.last_queue_rank_sent_at = None;
+        self.diag_peer = None;
+        self.diag_peer_hash = None;
     }
 
     async fn send_status(
@@ -273,13 +313,18 @@ impl ListenerUploadQueue {
         self.granted_sent = false;
         self.last_queue_rank = Some(rank);
         self.last_queue_rank_sent_at = Some(now);
+        self.emit_queue_rank(rank);
         Ok(())
     }
 
     fn mark_granted_sent(&mut self) {
+        let newly_granted = !self.granted_sent;
         self.granted_sent = true;
         self.last_queue_rank = None;
         self.last_queue_rank_sent_at = None;
+        if newly_granted {
+            self.emit_slot_opened();
+        }
     }
 
     fn mark_waiting(&mut self, rank: u16) {

@@ -30,6 +30,7 @@ mod aich_tree;
 mod block_bitmap;
 mod callback;
 mod catalog;
+pub(crate) mod diag_sched;
 mod download_activity;
 mod download_coordinator;
 mod download_pick;
