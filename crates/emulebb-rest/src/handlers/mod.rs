@@ -23,6 +23,7 @@ pub(crate) mod kad;
 pub(crate) mod logs;
 pub(crate) mod searches;
 pub(crate) mod servers;
+pub(crate) mod shared_files;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
@@ -41,6 +42,11 @@ pub(crate) use searches::{
 pub(crate) use servers::{
     connect_server, create_server, delete_server, server, servers, servers_connect,
     servers_disconnect, servers_import_met_url, update_server,
+};
+pub(crate) use shared_files::{
+    create_shared_file, delete_shared_file, delete_shared_file_payload, reload_shared_directories,
+    shared_directories, shared_file, shared_file_comments, shared_file_ed2k_link, shared_files,
+    update_shared_directories, update_shared_file,
 };
 pub(crate) use uploads::{
     upload, upload_add_friend, upload_ban, upload_queue, upload_queue_client, upload_release_slot,
