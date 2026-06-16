@@ -21,6 +21,7 @@ pub(crate) mod categories;
 pub(crate) mod friends;
 pub(crate) mod kad;
 pub(crate) mod logs;
+pub(crate) mod searches;
 pub(crate) mod servers;
 pub(crate) mod uploads;
 
@@ -34,6 +35,9 @@ pub(crate) use categories::{
 pub(crate) use friends::{create_friend, delete_friend, friends};
 pub(crate) use kad::{kad, kad_bootstrap, kad_import_nodes_url, kad_recheck_firewall, kad_start, kad_stop};
 pub(crate) use logs::{clear_logs, logs};
+pub(crate) use searches::{
+    create_search, delete_search, delete_searches, download_search_result, search, searches,
+};
 pub(crate) use servers::{
     connect_server, create_server, delete_server, server, servers, servers_connect,
     servers_disconnect, servers_import_met_url, update_server,
