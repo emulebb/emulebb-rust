@@ -1,12 +1,12 @@
 # emulebb-rust
 
-`emulebb-rust` is the Rust headless client for the eMuleBB product family. It
-implements the eMuleBB `/api/v1` controller shape for aMuTorrent and keeps local
-client state plus indexing data in SQLite.
+`emulebb-rust` is the Rust headless client for the eMuleBB product family and the
+forward eD2K/Kad core. It owns the capability-gated `/api/v1` contract (the
+superset / source of truth) and is driven by **TrackMuleBB**, the forward eMuleBB
+Suite controller; it keeps local client state plus indexing data in SQLite.
 
-This repository was bootstrapped from the Kad and ED2K work in
-`p2p-overlord-agents`, but it is intentionally a local client product. The
-0.0.x line does not expose a coordinator API.
+The repository began from earlier Kad and ED2K work, but it is intentionally a
+local client product. The 0.0.x line does not expose a coordinator API.
 
 The 0.0.3 scope is core eMule client parity: configured binding, ED2K/Kad
 interoperability, search, sharing, transfers, uploads, queues, persistence,

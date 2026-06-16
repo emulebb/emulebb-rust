@@ -1,22 +1,23 @@
 openapi: 3.1.0
 info:
-  title: eMuleBB REST API (forward, emulebb-rust)
+  title: eMuleBB REST API (canonical superset, emulebb-rust)
   version: 1.0.0
   x-contract-version: "1.0.0"
-  x-contract-baseline: "eMuleBB 0.7.3 frozen contract"
-  summary: Forward eMuleBB /api/v1 contract, owned and evolved by emulebb-rust.
+  x-contract-baseline: "eMuleBB 0.7.3 contract"
+  summary: The one capability-gated /api/v1 contract; emulebb-rust owns the superset.
   description: >
-    Source-of-truth contract for the FORWARD `/api/v1` API, owned by
-    emulebb-rust (decision 2026-06-15). It is baselined on the frozen eMuleBB
-    `0.7.3` contract and now evolves on its own independent **contract version**
-    line (`x-contract-version`, semver), decoupled from any product release tag
-    and from the frozen MFC client. Implementers advertise their contract
-    version; controllers (TrackMuleBB) target a contract version range and
-    degrade by capability.
+    Source-of-truth for the single capability-gated `/api/v1` contract. There is
+    one contract; implementations differ by the capabilities they advertise, not
+    by a separate spec. emulebb-rust is the superset (it leads the contract
+    version and adds indexing/Arr capabilities); the frozen eMuleBB MFC client is
+    a subset advertising fewer capabilities. It is baselined on the eMuleBB
+    `0.7.3` contract and evolves on its own independent **contract version** line
+    (`x-contract-version`, semver), decoupled from any product release tag.
+    Controllers (TrackMuleBB) read `GET /api/v1/capabilities`, target a contract
+    version range, and call only advertised operations.
     Versioning policy: additive endpoints/fields bump the minor; breaking changes
-    bump the major with a documented migration. The frozen 0.7.3 contract
-    (`emulebb-tooling/docs/rest/REST-API-OPENAPI.yaml`) is the legacy lineage for
-    the MFC client + aMuTorrent and does not evolve.
+    bump the major with a documented migration. Capability model:
+    `emulebb-tooling/docs/active/API-V1-COMPATIBILITY.md`.
     The API uses `X-API-Key` authentication only; adapter compatibility
     (`/api/v2` qBit-compat, Torznab) must not weaken the native route shape.
 servers:
