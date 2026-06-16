@@ -3,15 +3,10 @@
 //! Extracted verbatim from `lib.rs` during the maintainability restructuring;
 //! behavior is unchanged.
 
-use axum::{
-    body::Bytes,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{body::Bytes, http::StatusCode, response::IntoResponse};
 use serde_json::{Value, json};
 
-use crate::dto::LogsClearRequest;
-use crate::envelope::{api_collection, api_error, api_ok, parse_required_json_body};
+use crate::handlers::prelude::*;
 use crate::log_buffer;
 
 pub(crate) async fn logs() -> impl IntoResponse {
