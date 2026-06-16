@@ -42,6 +42,10 @@ pub struct TraversalContact {
     pub id: NodeId,
     /// UDP endpoint used for Kad traffic.
     pub addr: SocketAddr,
+    /// eD2k TCP port carried by the RES contact entry, `0` when the source did
+    /// not advertise one. Threaded through so a lookup-learned routing contact
+    /// keeps its real eD2k TCP port instead of falling back to the UDP port.
+    pub tcp_port: u16,
     /// Highest Kad version known for this candidate.
     pub version: u8,
 }
@@ -503,6 +507,7 @@ fn insert_response_contact(
         contact: TraversalContact {
             id: entry.node_id,
             addr: SocketAddr::new(IpAddr::V4(entry.ip_addr()), entry.udp_port),
+            tcp_port: entry.tcp_port,
             version: entry.version,
         },
         state: CandidateState::Pending,

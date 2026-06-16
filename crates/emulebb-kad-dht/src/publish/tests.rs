@@ -11,6 +11,7 @@ fn close_publish_contact(distance_low_byte: u8, host: u8) -> TraversalContact {
     TraversalContact {
         id: NodeId::from_bytes(id),
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, host)), 4_600),
+        tcp_port: 0,
         version: 9,
     }
 }
@@ -51,6 +52,7 @@ fn select_publish_contacts_filters_far_contacts_before_fanout() {
     let far = TraversalContact {
         id: NodeId::from_bytes([0xFF; 16]),
         addr: "8.8.8.8:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
 
@@ -66,6 +68,7 @@ fn publish_tolerance_accepts_loopback_contacts_even_when_far() {
     let far_loopback = TraversalContact {
         id: NodeId::from_bytes([0xFF; 16]),
         addr: "127.0.0.10:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
 
@@ -84,6 +87,7 @@ fn publish_tolerance_accepts_exact_harness_keyword_target() {
             0xb6, 0xd1,
         ]),
         addr: "127.0.0.2:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
 

@@ -29,6 +29,7 @@ impl DhtNode {
                 .map(|c| TraversalContact {
                     id: c.id,
                     addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+                    tcp_port: c.tcp_port,
                     version: c.kad_version,
                 })
                 .collect::<Vec<_>>()
@@ -56,11 +57,20 @@ impl DhtNode {
                     IpAddr::V4(ip) => ip,
                     _ => continue,
                 };
+                // Prefer the real eD2k TCP port carried by the RES contact entry;
+                // fall back to the UDP port only when the source advertised none
+                // (tcp_port == 0), so a lookup-learned contact keeps the correct
+                // eD2k endpoint instead of the UDP port.
+                let tcp_port = if contact.tcp_port != 0 {
+                    contact.tcp_port
+                } else {
+                    contact.addr.port()
+                };
                 let c = Contact::new(
                     contact.id,
                     ip,
                     contact.addr.port(),
-                    contact.addr.port(), // use same port for tcp as fallback
+                    tcp_port,
                     contact.version,
                 );
                 self.inner
@@ -408,6 +418,7 @@ impl DhtNode {
                 .map(|c| TraversalContact {
                     id: c.id,
                     addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+                    tcp_port: c.tcp_port,
                     version: c.kad_version,
                 })
                 .collect(),

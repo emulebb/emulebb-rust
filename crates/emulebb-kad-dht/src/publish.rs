@@ -501,6 +501,7 @@ async fn get_initial(
         .map(|c| TraversalContact {
             id: c.id,
             addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+            tcp_port: c.tcp_port,
             version: c.kad_version,
         })
         .collect()

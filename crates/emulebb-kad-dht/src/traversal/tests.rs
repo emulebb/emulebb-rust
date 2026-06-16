@@ -28,6 +28,7 @@ fn test_candidate_sorting() {
             contact: TraversalContact {
                 id: NodeId::from_bytes([0xFF; 16]),
                 addr: "127.0.0.1:1".parse().unwrap(),
+                tcp_port: 0,
                 version: 9,
             },
             state: CandidateState::Pending,
@@ -37,6 +38,7 @@ fn test_candidate_sorting() {
             contact: TraversalContact {
                 id: NodeId::from_bytes([0x01; 16]),
                 addr: "127.0.0.1:2".parse().unwrap(),
+                tcp_port: 0,
                 version: 9,
             },
             state: CandidateState::Pending,
@@ -69,6 +71,35 @@ fn test_traversal_closest_limit_caps_non_store_walks_at_oracle_k() {
             20,
         ),
         K
+    );
+}
+
+#[test]
+fn test_insert_response_contact_threads_res_tcp_port() {
+    // A lookup-learned contact must keep the real eD2k TCP port carried by the
+    // RES entry, distinct from the Kad UDP port, so a routing contact built from
+    // it (node/search.rs) connects to the correct eD2k endpoint instead of the
+    // UDP port.
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let entry = ContactEntry {
+        node_id: NodeId::from_bytes([7; 16]),
+        ip: 0x01020304,
+        udp_port: 4672,
+        tcp_port: 4662,
+        version: 9,
+    };
+
+    insert_response_contact(&mut candidates, &mut seen, NodeId::ZERO, entry);
+
+    assert_eq!(candidates.len(), 1);
+    let contact = &candidates[0].contact;
+    assert_eq!(contact.addr.port(), 4672, "UDP endpoint port preserved");
+    assert_eq!(contact.tcp_port, 4662, "real eD2k TCP port threaded through");
+    assert_ne!(
+        contact.tcp_port,
+        contact.addr.port(),
+        "the TCP port must not collapse onto the UDP port"
     );
 }
 
@@ -215,6 +246,7 @@ fn test_passes_search_tolerance_with_lan_exemption() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0xFF; 16]),
         addr: "192.168.1.10:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     assert!(passes_search_tolerance(target, &contact));
@@ -226,6 +258,7 @@ fn test_passes_search_tolerance_rejects_far_contact() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0xFF; 16]),
         addr: "8.8.8.8:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     assert!(!passes_search_tolerance(target, &contact));
@@ -240,6 +273,7 @@ fn test_find_node_lookup_converged_ignores_farther_unfinished_candidates() {
                 addr: format!("127.0.0.1:{}", 4600 + u16::from(n))
                     .parse()
                     .unwrap(),
+                tcp_port: 0,
                 version: 9,
             },
             state: CandidateState::Responded,
@@ -250,6 +284,7 @@ fn test_find_node_lookup_converged_ignores_farther_unfinished_candidates() {
         contact: TraversalContact {
             id: NodeId::from_bytes([0xFF; 16]),
             addr: "127.0.0.1:4700".parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         },
         state: CandidateState::Pending,
@@ -268,6 +303,7 @@ fn test_find_node_lookup_converged_waits_for_unfinished_closer_candidate() {
                 addr: format!("127.0.0.1:{}", 4600 + u16::from(n))
                     .parse()
                     .unwrap(),
+                tcp_port: 0,
                 version: 9,
             },
             state: CandidateState::Responded,
@@ -278,6 +314,7 @@ fn test_find_node_lookup_converged_waits_for_unfinished_closer_candidate() {
         contact: TraversalContact {
             id: NodeId::from_bytes([0; 16]),
             addr: "127.0.0.1:4701".parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         },
         state: CandidateState::Inflight,
@@ -294,6 +331,7 @@ fn test_select_phase2_contacts_caps_fanout_at_oracle_k() {
         .map(|n| TraversalContact {
             id: NodeId::from_bytes([0, 0, 0, 0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             addr: format!("192.168.1.{}:4672", n).parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         })
         .collect();
@@ -309,6 +347,7 @@ fn test_select_phase2_contacts_respects_fanout_ceiling() {
         .map(|n| TraversalContact {
             id: NodeId::from_bytes([0, 0, 0, 0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             addr: format!("192.168.1.{}:4672", n).parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         })
         .collect();
@@ -332,6 +371,7 @@ async fn test_run_search_phase_collects_multiple_search_res_packets() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0x11; 16]),
         addr: "192.168.1.10:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     let (result_tx, mut result_rx) = mpsc::channel(8);
@@ -415,6 +455,7 @@ async fn test_run_search_phase_replays_plain_keyword_request_shape() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0x12; 16]),
         addr: "192.168.1.20:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
 
@@ -469,6 +510,7 @@ async fn test_run_search_phase_replays_restrictive_keyword_payload() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0x13; 16]),
         addr: "192.168.1.21:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     let restrictive_request = SearchKeyReq {
@@ -522,6 +564,7 @@ async fn test_run_search_phase_replays_source_request_wire_shape() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0x14; 16]),
         addr: "192.168.1.22:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     let source_request = SearchSourceReq {
@@ -591,11 +634,13 @@ async fn test_run_search_phase_walks_one_contact_per_jumpstart_tick() {
         TraversalContact {
             id: NodeId::from_bytes([0x21; 16]),
             addr: "192.168.1.31:4672".parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         },
         TraversalContact {
             id: NodeId::from_bytes([0x22; 16]),
             addr: "192.168.1.32:4672".parse().unwrap(),
+            tcp_port: 0,
             version: 9,
         },
     ];
@@ -667,6 +712,7 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
     let contact = TraversalContact {
         id: NodeId::from_bytes([0x12; 16]),
         addr: "127.0.0.1:4672".parse().unwrap(),
+        tcp_port: 0,
         version: 9,
     };
     let reply_addr = contact.addr;
