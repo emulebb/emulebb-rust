@@ -81,15 +81,12 @@ pub(super) fn emule_misc_options1() -> u32 {
     let secure_ident_version = EMULE_SECURE_IDENT_VERSION;
     let source_exchange_version = 4u32;
     let extended_requests_version = 2u32;
-    // Stock v0.72a advertises comment/rating packet acceptance here. The
-    // Rust client accepts and decodes OP_FILEDESC, while sending local comments still
-    // depends on a future local metadata surface.
+    // Stock v0.72a advertises comment/rating acceptance (we decode OP_FILEDESC).
     let comments_version = 1u32;
     // Recent stock eMule no longer advertises peer cache support.
     let peer_cache = 0u32;
     let no_view_shared_files = 1u32;
-    // Recent live-network captures and the local 0.72a source both advertise
-    // the packed/multipacket startup profile on the peer hello path.
+    // Recent captures + local 0.72a advertise the packed/multipacket startup.
     let multipacket = 1u32;
     let preview_supported = 0u32;
     (supports_aich << 29)
@@ -107,13 +104,10 @@ pub(super) fn emule_misc_options1() -> u32 {
 }
 
 pub(super) fn emule_misc_options2(connect_options: u8, direct_udp_callback: bool) -> u32 {
-    // Mirror the recent eMule hello profile instead of the older conservative
-    // advert. The runtime already exchanges the newer sources2, EXT2, and
-    // hashset-request2 startup path that recent peers expect.
+    // Mirror the recent eMule hello profile (sources2/EXT2/hashset-request2).
     let supports_file_identifiers = 1u32;
     let direct_udp_callback = u32::from(direct_udp_callback);
-    // Chat/captcha is still an `ITEM_032` parity gap, so do not advertise it
-    // until the peer-facing challenge/response surface exists.
+    // Chat/captcha is still an `ITEM_032` parity gap, so do not advertise it.
     let supports_captcha = 0u32;
     let supports_source_exchange2 = 1u32;
     let requires_crypt_layer = 0u32;
@@ -152,10 +146,9 @@ fn append_emule_hello_answer_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
 /// CT_MOD_VERSION string).
 const RUST_MOD_VERSION: &str = "emule-rust";
 
-/// Process-wide identity mode: when true, the hello adds a CT_MOD_VERSION tag
-/// publishing the real `emule-rust` identity; when false (default) the hello is
-/// the plain eMule tag set, indistinguishable from eMule Community. Set once
-/// from `Ed2kConfig.publish_emule_rust_identity` at startup.
+/// Process-wide identity mode: when true the hello adds a CT_MOD_VERSION tag
+/// publishing the `emule-rust` identity; when false (default) the hello is the
+/// plain eMule tag set. Set once from `Ed2kConfig.publish_emule_rust_identity`.
 static PUBLISH_RUST_IDENTITY: AtomicBool = AtomicBool::new(false);
 
 /// Select the advertised eD2k client identity (plain eMule/Community vs the real
@@ -169,9 +162,9 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
     // stock eMule Community 0.7-series client. Only when the operator opts in do
     // we append a CT_MOD_VERSION="emule-rust" tag to publish the real identity.
     let publish_rust = PUBLISH_RUST_IDENTITY.load(Ordering::Relaxed);
-    // Advertise the buddy link only while firewalled with a buddy (the snapshot
-    // is `Some` exactly then), mirroring `buddySnapshot.bShouldAdvertise` and the
-    // matching `GetHelloTagCount` +2 bump (CT_EMULE_BUDDYIP + CT_EMULE_BUDDYUDP).
+    // Advertise the buddy link only while firewalled with a buddy (snapshot is
+    // `Some` exactly then = `buddySnapshot.bShouldAdvertise`), with the matching
+    // +2 tag bump (CT_EMULE_BUDDYIP + CT_EMULE_BUDDYUDP).
     let buddy = hello_buddy_snapshot();
     let mut tag_count: u32 = if publish_rust { 7 } else { 6 };
     if buddy.is_some() {
@@ -183,17 +176,15 @@ fn append_recent_emule_hello_tags(payload: &mut Vec<u8>, identity: Ed2kHelloIden
     if publish_rust {
         push_ed2k_string_tag(payload, CT_MOD_VERSION, RUST_MOD_VERSION);
     }
-    // The Rust client only exposes one UDP surface today, so advertise the Kad port
-    // in both halves until a separate eD2k UDP listener exists.
+    // One UDP surface today: advertise the Kad port in both halves.
     push_ed2k_u32_tag(
         payload,
         CT_EMULE_UDPPORTS,
         (u32::from(identity.udp_port) << 16) | u32::from(identity.udp_port),
     );
     if let Some(buddy) = buddy {
-        // eMule stores GetIP() (network-byte-order in_addr); the tag value is that
-        // uint32, which equals the octets read little-endian (matching how the
-        // server source/client-id IPs are encoded elsewhere in the protocol).
+        // eMule stores GetIP() (in_addr); the tag value is that uint32, equal to
+        // the octets read little-endian (same convention as the other IP fields).
         push_ed2k_u32_tag(
             payload,
             CT_EMULE_BUDDYIP,
@@ -261,8 +252,8 @@ pub(super) struct DecodedEmuleInfoProfile {
     pub(super) accepts_comments: bool,
     pub(super) supports_secure_ident: bool,
     pub(super) supports_preview: bool,
-    /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, the
-    /// leading byte of OP_EMULEINFO). Feeds the old-client upload-score penalty.
+    /// Peer eMule compatibility version byte (eMule `m_byEmuleVersion`, leading
+    /// byte of OP_EMULEINFO); feeds the old-client upload-score penalty.
     pub(super) emule_version: u8,
 }
 
@@ -386,13 +377,11 @@ pub(super) struct DecodedHelloIdentity {
     pub(super) user_hash: [u8; 16],
     pub(super) client_id: u32,
     pub(super) tcp_port: u16,
-    /// Peer's eD2k client UDP port, from the low 16 bits of `CT_EMULE_UDPPORTS`
-    /// (eMule `m_nUDPPort`); `0` when not advertised. Threaded into the upload
-    /// queue to correlate inbound UDP source-reask by `(ip, udp_port)`.
+    /// Peer's eD2k client UDP port (low 16 bits of `CT_EMULE_UDPPORTS`, eMule
+    /// `m_nUDPPort`); `0` when not advertised. Correlates inbound UDP source-reask.
     pub(super) udp_port: u16,
-    /// Peer's Kad UDP port, from the high 16 bits of `CT_EMULE_UDPPORTS` (eMule
-    /// `m_nKadPort`); `0` when the peer is not Kad-reachable. Feeds the
-    /// firewalled-LowID callback admission guard (`!client->GetKadPort()`).
+    /// Peer's Kad UDP port (high 16 bits of `CT_EMULE_UDPPORTS`, eMule `m_nKadPort`);
+    /// `0` when not Kad-reachable. Feeds the firewalled-LowID callback guard.
     pub(super) kad_port: u16,
 }
 
@@ -413,6 +402,9 @@ pub(super) struct DecodedHelloProfile {
     pub(super) gpl_evildoer: bool,
     /// Fully-decoded `CT_EMULE_MISCOPTIONS1` sub-fields (oracle BaseClient.cpp:515-533).
     pub(super) misc_options1: super::hello_miscoptions::MiscOptions1,
+    /// Peer's advertised buddy endpoint (`CT_EMULE_BUDDYIP`/`CT_EMULE_BUDDYUDP`,
+    /// oracle BaseClient.cpp:492-510); `None` unless a LowID source advertised it.
+    pub(super) buddy: Option<super::hello_buddy::DecodedHelloBuddy>,
 }
 
 fn decode_hello_tag_u32(tag: &DecodedHelloTag<'_>) -> Option<u32> {
@@ -510,6 +502,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut supports_file_identifiers = false;
     let mut gpl_evildoer = false;
     let mut misc_options1 = super::hello_miscoptions::MiscOptions1::default();
+    let (mut buddy_ip, mut buddy_udp) = (None, None);
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
         if tag.tag_name == Some(CT_EMULE_VERSION) {
@@ -544,6 +537,12 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             identity.udp_port = udp_ports as u16;
             identity.kad_port = (udp_ports >> 16) as u16;
         }
+        // CT_EMULE_BUDDYIP/CT_EMULE_BUDDYUDP: a LowID source's buddy endpoint.
+        match tag.tag_name {
+            Some(CT_EMULE_BUDDYIP) => buddy_ip = decode_hello_tag_u32(&tag),
+            Some(CT_EMULE_BUDDYUDP) => buddy_udp = decode_hello_tag_u32(&tag),
+            _ => {}
+        }
         cursor = tag.remaining;
     }
 
@@ -560,6 +559,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         supports_file_identifiers,
         gpl_evildoer,
         misc_options1,
+        buddy: super::hello_buddy::DecodedHelloBuddy::from_tag_values(buddy_ip, buddy_udp),
     })
 }
 
