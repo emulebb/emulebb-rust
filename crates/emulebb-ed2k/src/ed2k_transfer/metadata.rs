@@ -140,7 +140,13 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
-    /// Persist only the canonical AICH root learned from peer file metadata.
+    /// Persist an AUTHORITATIVE AICH root (computed locally from a completed
+    /// file, or read back from persisted `.met`/manifest metadata). Such a root
+    /// is trusted on sight and promoted directly. For roots learned over the
+    /// wire from a single peer, use [`record_network_aich_root`] instead, which
+    /// requires corroboration before promotion.
+    ///
+    /// [`record_network_aich_root`]: Self::record_network_aich_root
     pub async fn reconcile_aich_root(
         &self,
         file_hash: &str,
@@ -164,6 +170,64 @@ impl Ed2kTransferRuntime {
             }
         }
         if changed {
+            self.store_manifest_unlocked(&manifest).await?;
+            self.upsert_verified_catalog_entry(&manifest).await;
+        }
+        Ok(manifest)
+    }
+
+    /// Record a NETWORK-LEARNED AICH root proposed by one peer at `from_ip`.
+    ///
+    /// A single peer's word is not authoritative: trusting it blindly would let
+    /// a hostile peer authorize ICH part salvage against attacker-chosen
+    /// recovery data. Mirroring `CAICHRecoveryHashSet::AddHash`/`SetStatus`
+    /// (`SHAHashSet.cpp:998-1018`), the proposed root is only promoted to the
+    /// salvage-authorizing `manifest.aich_root` once `>= MINUNIQUEIPS_TOTRUST`
+    /// (10) distinct IPs have proposed it AND it accounts for
+    /// `>= MINPERCENTAGE_TOTRUST` (92%) of all proposing IPs. Until then the
+    /// manifest's root is left unset, so salvage falls back to whole-part
+    /// re-download.
+    ///
+    /// If `manifest.aich_root` is already populated (authoritative, or already
+    /// promoted) this is a no-op beyond tracking. The MD4 hashset backstop
+    /// independently prevents corruption, so this is defense-in-depth + parity.
+    pub async fn record_network_aich_root(
+        &self,
+        file_hash: &str,
+        aich_root: Option<[u8; 20]>,
+        from_ip: std::net::IpAddr,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let Some(aich_root) = aich_root else {
+            return Ok(manifest);
+        };
+
+        // Already have a trusted root: nothing to promote. If a peer proposes a
+        // root that conflicts with the trusted one, ignore it (the trusted root
+        // wins); matching is harmless.
+        if manifest.aich_root.is_some() {
+            return Ok(manifest);
+        }
+
+        let octets = match from_ip {
+            std::net::IpAddr::V4(v4) => v4.octets(),
+            // IPv4-only runtime; ignore any non-IPv4 proposer for signer counting.
+            _ => return Ok(manifest),
+        };
+
+        let promoted = {
+            let mut map = self
+                .aich_root_corroboration
+                .lock()
+                .expect("aich corroboration mutex poisoned");
+            let accumulator = map.entry(file_hash.to_string()).or_default();
+            accumulator.record(aich_root, octets);
+            accumulator.trusted_root()
+        };
+
+        if let Some(trusted) = promoted {
+            manifest.aich_root = Some(hex::encode(trusted));
             self.store_manifest_unlocked(&manifest).await?;
             self.upsert_verified_catalog_entry(&manifest).await;
         }

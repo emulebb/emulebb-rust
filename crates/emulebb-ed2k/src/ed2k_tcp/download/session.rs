@@ -528,9 +528,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             hashset_answer.file_identifier.file_hash
                         );
                     }
+                    if hashset_answer.file_identifier.aich_root.is_some() {
+                        session_state.peer_advertised_aich_root = true;
+                    }
                     reconcile_download_manifest_metadata(
                         transfer_runtime,
                         file_hash_hex,
+                        peer_addr,
                         &mut manifest,
                         &mut request_file_identifier,
                         &hashset_answer.file_identifier,
@@ -663,8 +667,15 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             }
                         }
                     }
+                    if returned_aich_root.is_some() {
+                        session_state.peer_advertised_aich_root = true;
+                    }
                     manifest = transfer_runtime
-                        .reconcile_aich_root(file_hash_hex, returned_aich_root)
+                        .record_network_aich_root(
+                            file_hash_hex,
+                            returned_aich_root,
+                            peer_addr.ip(),
+                        )
                         .await?;
                     manifest = transfer_runtime
                         .reconcile_job_metadata(
@@ -731,9 +742,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             }
                         }
                     }
+                    if returned_identifier.aich_root.is_some() {
+                        session_state.peer_advertised_aich_root = true;
+                    }
                     reconcile_download_manifest_metadata(
                         transfer_runtime,
                         file_hash_hex,
+                        peer_addr,
                         &mut manifest,
                         &mut request_file_identifier,
                         &returned_identifier,
@@ -761,8 +776,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             returned_hash
                         );
                     }
+                    session_state.peer_advertised_aich_root = true;
                     manifest = transfer_runtime
-                        .reconcile_aich_root(file_hash_hex, Some(aich_root))
+                        .record_network_aich_root(
+                            file_hash_hex,
+                            Some(aich_root),
+                            peer_addr.ip(),
+                        )
                         .await?;
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                 }

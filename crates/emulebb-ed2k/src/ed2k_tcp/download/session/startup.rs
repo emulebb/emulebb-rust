@@ -209,8 +209,15 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
                     request_file_identifier,
                     Ed2kHashsetRequestOptions {
                         request_md4: true,
+                        // Request the AICH hashset only when a peer has advertised
+                        // an AICH root for this file. We can no longer key this off
+                        // a trusted `manifest.aich_root` (network-learned roots are
+                        // no longer promoted on first sight -- they need IP
+                        // corroboration), so track the peer-advertised signal
+                        // separately. This preserves the prior behaviour without
+                        // making the request depend on a trust decision.
                         request_aich: manifest.file_size > ED2K_PART_SIZE
-                            && request_file_identifier.aich_root.is_some(),
+                            && session_state.peer_advertised_aich_root,
                     },
                 )?
             } else {

@@ -19,6 +19,13 @@ pub(super) struct DownloadSessionState {
     pub(super) startup_file_requests_sent: bool,
     pub(super) startup_file_response_received: bool,
     pub(super) source_request_sent: bool,
+    /// Whether a peer's file identifier / startup metadata has advertised an
+    /// AICH root for this file. Gates the OP_HASHSETREQUEST2 `request_aich`
+    /// flag: we only fetch the AICH hashset when a peer signalled it has one.
+    /// This is just a "has the peer offered AICH" signal, NOT a trust decision
+    /// -- a network-learned root still needs IP corroboration before it can
+    /// authorize salvage (see `record_network_aich_root`).
+    pub(super) peer_advertised_aich_root: bool,
     pub(super) aich_file_hash_requested: bool,
     pub(super) hashset_requested: bool,
     pub(super) hashset_requested_at: Option<Instant>,
@@ -83,6 +90,7 @@ impl DownloadSessionState {
             startup_file_requests_sent: false,
             startup_file_response_received: false,
             source_request_sent: false,
+            peer_advertised_aich_root: false,
             aich_file_hash_requested: false,
             hashset_requested: false,
             hashset_requested_at: None,

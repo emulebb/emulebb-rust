@@ -238,6 +238,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
 pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
+    peer_addr: SocketAddr,
     manifest: &mut Ed2kResumeManifest,
     request_file_identifier: &mut Ed2kFileIdentifier,
     peer_file_identifier: &Ed2kFileIdentifier,
@@ -255,8 +256,11 @@ pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     *manifest = transfer_runtime
         .reconcile_job_metadata(file_hash_hex, learned_name, learned_size)
         .await?;
+    // The AICH root here is network-learned from a single peer, so it must be
+    // corroborated before it can authorize salvage (mirrors the master's
+    // untrusted-hash accumulation).
     *manifest = transfer_runtime
-        .reconcile_aich_root(file_hash_hex, peer_file_identifier.aich_root)
+        .record_network_aich_root(file_hash_hex, peer_file_identifier.aich_root, peer_addr.ip())
         .await?;
     *request_file_identifier = Ed2kFileIdentifier::from_manifest(manifest)?;
     Ok(())

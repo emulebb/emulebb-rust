@@ -26,6 +26,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
 
 mod aich_recovery;
+mod aich_trust;
 mod aich_tree;
 mod block_bitmap;
 mod callback;
@@ -154,6 +155,13 @@ pub struct Ed2kTransferRuntime {
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
     source_exchange_requests: Arc<Mutex<HashMap<SourceExchangeRequestKey, Instant>>>,
+    /// Per-file accumulator of network-proposed AICH roots and their distinct
+    /// proposing IPs. A network-learned root is only promoted to the
+    /// salvage-authorizing `manifest.aich_root` once it clears the master's
+    /// `MINUNIQUEIPS_TOTRUST`/`MINPERCENTAGE_TOTRUST` corroboration gate. The
+    /// signer set lives here (in-memory, live session state, never persisted);
+    /// the durable trust decision is the promoted `manifest.aich_root`.
+    aich_root_corroboration: Arc<StdMutex<HashMap<String, aich_trust::AichRootCorroboration>>>,
     download_activity: Arc<StdMutex<HashMap<String, Ed2kDownloadActivity>>>,
     /// Live per-source download state keyed by file hash -> peer endpoint, used
     /// to surface sourcesTransferring/partsAvailable and live transfer-source
@@ -262,6 +270,7 @@ impl Ed2kTransferRuntime {
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             source_exchange_requests: Arc::new(Mutex::new(HashMap::new())),
+            aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),

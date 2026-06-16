@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod aich_trust_corroboration;
 mod aich_tree;
 mod download_throttle;
 mod file_status_parts;
