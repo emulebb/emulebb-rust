@@ -742,6 +742,7 @@ impl EmulebbCore {
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                    reask_handle: Arc::clone(&self.ed2k_reask_handle),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -833,6 +834,7 @@ impl EmulebbCore {
                 4,
                 ed2k_public_ip.clone(),
                 network.ip_filter.clone(),
+                buddy_registry.clone(),
                 Arc::clone(&shutdown),
             )));
             // Re-engage consumer: when a reask reports a low queue rank, the loop
@@ -3522,6 +3524,10 @@ struct KadLocalStoreRuntime {
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     buddy_registry: BuddySocketRegistry,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
+    /// Lazily-read handle to the UDP reask loop, so a buddy link established here
+    /// can answer buddy-relayed `OP_REASKCALLBACKTCP` over UDP (source side). Read
+    /// at buddy-link spawn time because the reask loop starts after this task.
+    reask_handle: Arc<std::sync::Mutex<Option<ReaskSourceHandle>>>,
     network: Ed2kNetworkConfig,
 }
 
@@ -4153,12 +4159,16 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::FindBuddyRes(res) => {
+            // Snapshot the reask handle into an owned Option before the await so no
+            // MutexGuard is held across it (the future must stay Send).
+            let reask_handle = runtime.reask_handle.lock().unwrap().clone();
             handle_kad_find_buddy_res(
                 dht,
                 kad_buddy,
                 buddy_registry,
                 &runtime.reachability,
                 &runtime.transfer_runtime,
+                reask_handle,
                 network,
                 from,
                 res,
@@ -4300,12 +4310,14 @@ async fn handle_kad_find_buddy_req(
 /// Mirrors `Process_KADEMLIA_FINDBUDDY_RES`: verify the echoed `buddy_id`
 /// against our own Kad id, then record the buddy (oracle `RequestBuddy`). The
 /// buddy-management task keeps the TCP connection.
+#[allow(clippy::too_many_arguments)]
 async fn handle_kad_find_buddy_res(
     dht: &DhtNode,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
     buddy_registry: &BuddySocketRegistry,
     reachability: &ExternalReachability,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    reask_handle: Option<ReaskSourceHandle>,
     network: &Ed2kNetworkConfig,
     from: SocketAddr,
     res: FindBuddyRes,
@@ -4362,6 +4374,7 @@ async fn handle_kad_find_buddy_res(
             own_kad_id,
             transfer_runtime,
             registry,
+            reask_handle,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
             lost,
         })

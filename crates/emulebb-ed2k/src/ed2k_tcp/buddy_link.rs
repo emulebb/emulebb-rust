@@ -33,14 +33,16 @@ use tracing::{debug, info};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
-use super::codec::decode_kad_callback_payload;
+use super::codec::{decode_kad_callback_payload, decode_reask_callback_tcp_payload};
 use super::firewall_helper::{connect_callback_peer, is_connection_shutdown_error};
 use super::hello::{build_hello_responses, encode_emule_info_answer, encode_hello_request};
 use super::transport::{Ed2kTransport, EmuleTcpPacket};
 use super::{
     ED2K_CONNECTION_IDLE_TIMEOUT, Ed2kHelloIdentity, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
     OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER,
+    OP_REASKCALLBACKTCP,
 };
+use crate::ed2k_client_udp::ReaskSourceHandle;
 
 /// Buddy keepalive cadence. The oracle sets the next allowed buddy ping to
 /// `now + MIN2MS(10)` (`SetLastBuddyPingPongTime`) and sends one whenever
@@ -73,6 +75,11 @@ pub struct OutboundBuddyLinkOptions {
     pub transfer_runtime: Arc<Ed2kTransferRuntime>,
     /// The shared buddy-socket registry (outbound slot).
     pub registry: BuddySocketRegistry,
+    /// Handle to the UDP reask loop, so a buddy-relayed `OP_REASKCALLBACKTCP` can
+    /// be answered over UDP (source side). `None` when the reask transport is
+    /// disabled; the relay is then decoded-and-logged only (the downloader retries
+    /// or falls back to TCP), exactly as when no buddy is available.
+    pub reask_handle: Option<ReaskSourceHandle>,
     /// Connect/IO timeout.
     pub timeout: Duration,
     /// Notified once the buddy link has dropped, so the buddy-management loop can
@@ -94,6 +101,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         own_kad_id,
         transfer_runtime,
         registry,
+        reask_handle,
         timeout,
         lost,
     } = options;
@@ -133,6 +141,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         hello_identity,
         own_kad_id,
         &transfer_runtime,
+        reask_handle.as_ref(),
     )
     .await;
 
@@ -145,6 +154,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_buddy_link(
     transport: &mut Ed2kTransport,
     ping_timer: &mut tokio::time::Interval,
@@ -153,6 +163,7 @@ async fn drive_buddy_link(
     hello_identity: Ed2kHelloIdentity,
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    reask_handle: Option<&ReaskSourceHandle>,
 ) -> Result<()> {
     loop {
         let read = tokio::time::timeout(BUDDY_READ_POLL, transport.read_packet());
@@ -179,6 +190,7 @@ async fn drive_buddy_link(
                             hello_identity,
                             own_kad_id,
                             transfer_runtime,
+                            reask_handle,
                             packet,
                         )
                         .await?
@@ -198,6 +210,7 @@ async fn drive_buddy_link(
 }
 
 /// Handle one inbound packet on the held buddy socket. Returns `false` to close.
+#[allow(clippy::too_many_arguments)]
 async fn handle_buddy_packet(
     transport: &mut Ed2kTransport,
     bind_ip: Ipv4Addr,
@@ -205,6 +218,7 @@ async fn handle_buddy_packet(
     hello_identity: Ed2kHelloIdentity,
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    reask_handle: Option<&ReaskSourceHandle>,
     packet: EmuleTcpPacket,
 ) -> Result<bool> {
     match (packet.protocol, packet.opcode) {
@@ -259,6 +273,38 @@ async fn handle_buddy_packet(
                         ),
                     }
                 });
+            }
+            Ok(true)
+        }
+        (OP_EMULEPROT, OP_REASKCALLBACKTCP) => {
+            // Source side: our buddy relayed a reask from a downloader that could
+            // not reach us over client UDP. The frame carries the downloader's UDP
+            // endpoint + the requested file; answer it over UDP exactly as an
+            // inbound OP_REASKFILEPING (oracle ListenSocket.cpp OP_REASKCALLBACKTCP).
+            match decode_reask_callback_tcp_payload(&packet.payload) {
+                Ok(reask) => {
+                    if let Some(handle) = reask_handle {
+                        let dest = SocketAddr::new(IpAddr::V4(reask.dest_ip), reask.dest_port);
+                        // The answer is derived from the file hash + our live
+                        // upload-queue/catalog state (the relaying downloader's
+                        // udp-version/partstatus tail is not needed to answer).
+                        handle.answer_callback_tcp(dest, reask.file_hash);
+                        debug!(
+                            "buddy {buddy_addr} relayed OP_REASKCALLBACKTCP file_hash={} \
+                             requester={dest}; answering over UDP",
+                            reask.file_hash
+                        );
+                    } else {
+                        debug!(
+                            "buddy {buddy_addr} relayed OP_REASKCALLBACKTCP file_hash={} but UDP \
+                             reask is disabled; ignoring (downloader will retry/TCP)",
+                            reask.file_hash
+                        );
+                    }
+                }
+                Err(error) => debug!(
+                    "ignoring malformed OP_REASKCALLBACKTCP from buddy {buddy_addr}: {error:#}"
+                ),
             }
             Ok(true)
         }

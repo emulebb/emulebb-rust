@@ -4,20 +4,17 @@
 //! spawns it (on by default, gated by `Ed2kConfig.enable_udp_reask`).
 //!
 //! It registers a foreign-datagram handler on the shared socket (inbound reask
-//! packets that fail Kad decode arrive here), forwards them to an async task over
-//! a channel, and `select!`s that against a periodic tick that drives outbound
-//! reasks. All reask *decisions* live in the I/O-free [`super::ReaskService`];
-//! this is the thin async shell that performs the socket I/O.
+//! packets that fail Kad decode arrive here) and `select!`s that against a
+//! periodic tick. All reask *decisions* live in the I/O-free
+//! [`super::ReaskService`]; this is the thin async shell doing the socket I/O.
 //!
-//! Both directions are wired (off by default): the uploader **reciprocity**
-//! answer (via the runtime's global upload-queue `(ip,udp_port)` lookup) and the
-//! downloader **detach hook** — a download session that gets queued on a
-//! UDP-eligible peer sends a [`ReaskCommand`] over the command channel; the loop
-//! registers it as a `QueuedDetached` source and keeps its slot warm by periodic
-//! UDP reask (real per-file part status pulled from the transfer runtime). When a
-//! source exhausts its UDP-reask budget (`RetryTcp`), the loop drops it so core's
-//! normal source acquisition re-engages it over TCP. The whole loop stays gated
-//! behind `enable_udp_reask` until live-validated.
+//! Wired directions: the uploader **reciprocity** answer (global upload-queue
+//! `(ip,udp_port)` lookup), the downloader **detach hook** (a queued
+//! UDP-eligible source detaches onto periodic UDP reask, dropped on `RetryTcp`
+//! so core re-engages over TCP), and the **buddy relay** legs — as a source's
+//! buddy we relay an inbound `OP_REASKCALLBACKUDP` as `OP_REASKCALLBACKTCP`, and
+//! as the firewalled source we answer a relayed reask over UDP (both via
+//! [`super::buddy_relay`]). Gated behind `enable_udp_reask` (on by default).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -31,6 +28,7 @@ use tracing::{debug, trace};
 
 use super::service::{ReaskInboundOutcome, ReaskService, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
+use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::ipfilter::IpFilter;
 use crate::reachability::ExternalReachability;
@@ -50,6 +48,12 @@ pub enum ReaskCommand {
     },
     /// Drop a source by endpoint (transfer completed / no longer wanted).
     Remove { endpoint: (Ipv4Addr, u16) },
+    /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
+    /// *source*): our buddy forwarded a downloader's reask, answer it over UDP at
+    /// `dest` like an inbound `OP_REASKFILEPING` (oracle ListenSocket.cpp). Only the
+    /// file hash is carried (the reciprocity answer is keyed on it), keeping
+    /// `ReaskCommand`'s public surface free of crate-internal wire structs.
+    AnswerCallbackTcp { dest: SocketAddr, file_hash: Ed2kHash },
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -82,6 +86,12 @@ impl ReaskSourceHandle {
     /// Drop a source from reask state by endpoint. Best-effort.
     pub(crate) fn remove(&self, endpoint: (Ipv4Addr, u16)) {
         let _ = self.0.try_send(ReaskCommand::Remove { endpoint });
+    }
+
+    /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
+    /// Best-effort: a full/closed channel drops the answer (downloader retries/TCP).
+    pub(crate) fn answer_callback_tcp(&self, dest: std::net::SocketAddr, file_hash: Ed2kHash) {
+        let _ = self.0.try_send(ReaskCommand::AnswerCallbackTcp { dest, file_hash });
     }
 }
 
@@ -171,6 +181,7 @@ pub async fn run_ed2k_udp_reask_loop(
     udp_version: u8,
     public_ip: ExternalReachability,
     ip_filter: IpFilter,
+    buddy_registry: BuddySocketRegistry,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut service = ReaskService::new(user_hash, udp_version, public_ip.clone());
@@ -200,20 +211,23 @@ pub async fn run_ed2k_udp_reask_loop(
             maybe = rx.recv() => {
                 let Some((data, from)) = maybe else { break };
                 handle_inbound_datagram(
-                    &mut service,
-                    &dht,
-                    &transfer_runtime,
-                    &events,
-                    &ip_filter,
-                    public_ip.octets(),
-                    &data,
-                    from,
+                    &mut service, &dht, &transfer_runtime, &events, &ip_filter,
+                    &buddy_registry, udp_version, public_ip.octets(), &data, from,
                 )
                 .await;
             }
             maybe = commands.recv() => {
                 let Some(command) = maybe else { break };
-                apply_reask_command(&mut service, &events, command);
+                // Source side: AnswerCallbackTcp needs async UDP I/O, so it is
+                // handled here; the rest mutate sync reask state in apply_reask_command.
+                if let ReaskCommand::AnswerCallbackTcp { dest, file_hash } = command {
+                    super::buddy_relay::answer_buddy_relayed_reask(
+                        &dht, &transfer_runtime, public_ip.octets(), dest, file_hash,
+                    )
+                    .await;
+                } else {
+                    apply_reask_command(&mut service, &events, command);
+                }
             }
             _ = ticker.tick() => {
                 drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
@@ -266,22 +280,19 @@ async fn handle_inbound_datagram(
     transfer_runtime: &Ed2kTransferRuntime,
     events: &ReaskEventSender,
     ip_filter: &IpFilter,
+    buddy_registry: &BuddySocketRegistry,
+    our_udp_version: u8,
     our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
 ) {
     // Drop datagrams from a filtered/banned IP before any processing (master
-    // ClientUDPSocket.cpp: theApp.ipfilter->IsFiltered() at packet entry). The
-    // foreign-datagram path that delivered this is not covered by core's Kad
-    // IP-filter, so enforce it here.
+    // ClientUDPSocket.cpp IsFiltered; not covered by core's Kad IP-filter here).
     if is_filtered_reask_source(from, ip_filter) {
         trace!("ed2k udp reask: dropping inbound datagram from filtered IP {from}");
         return;
     }
-    trace!(
-        "ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}",
-        data.len(), hex_preview(data),
-    );
+    trace!("ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}", data.len(), hex_preview(data));
     match service.handle_inbound(data, from, Instant::now()) {
         ReaskInboundOutcome::RoutedReply {
             file_hash,
@@ -293,9 +304,7 @@ async fn handle_inbound_datagram(
             if matches!(action, ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD) {
                 service.remove_source(endpoint.0, endpoint.1);
             }
-            // Emit the loop->core events for this reply (lease release ordered
-            // before any re-engage). DropSource already dropped the source in the
-            // service; we only need to release its lease.
+            // Emit loop->core events (lease release ordered before any re-engage).
             for event in routed_reply_events(action, file_hash, endpoint) {
                 if let ReaskEvent::SourceReady { file_hash } = &event {
                     trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
@@ -304,8 +313,7 @@ async fn handle_inbound_datagram(
             }
         }
         ReaskInboundOutcome::AnswerNeeded { ping, from } => {
-            // Answer the peer's OP_REASKFILEPING from the global upload-queue +
-            // shared-catalog state (eMule's OP_REASKFILEPING reaction table).
+            // Answer the peer's OP_REASKFILEPING from upload-queue/catalog state.
             match transfer_runtime
                 .reask_reciprocity_reply(&ping, from, our_public_ip)
                 .await
@@ -316,11 +324,13 @@ async fn handle_inbound_datagram(
                     }
                 }
                 // Deliberate silence (force TCP / file mismatch); nothing to send.
-                None => trace!(
-                    "ed2k udp reask: inbound reask for {} from {from} answered with silence",
-                    ping.file_hash
-                ),
+                None => trace!("ed2k udp reask: inbound reask from {from} answered with silence"),
             }
+        }
+        ReaskInboundOutcome::BuddyRelay { callback, from } => {
+            super::buddy_relay::relay_buddy_reask_callback(
+                buddy_registry, &callback, from, our_udp_version,
+            );
         }
         ReaskInboundOutcome::Ignored => {}
     }
@@ -358,6 +368,8 @@ fn apply_reask_command(
                 let _ = events.send(ReaskEvent::SourceReleased { endpoint });
             }
         }
+        // Handled inline in the loop (needs async I/O); never routed here.
+        ReaskCommand::AnswerCallbackTcp { .. } => {}
     }
 }
 

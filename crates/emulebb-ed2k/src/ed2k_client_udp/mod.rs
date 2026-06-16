@@ -17,6 +17,7 @@
 //! are unused by design.
 #![allow(dead_code, unused_imports)]
 
+pub(crate) mod buddy_relay;
 pub(crate) mod codec;
 pub(crate) mod dispatch;
 pub(crate) mod outbound;

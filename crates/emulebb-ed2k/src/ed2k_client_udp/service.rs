@@ -40,8 +40,19 @@ pub(crate) enum ReaskInboundOutcome {
         ping: super::codec::ReaskFilePing,
         from: SocketAddr,
     },
-    /// Not a reask addressed to us (junk, a Kad packet, an unsolicited reply, an
-    /// unknown source, or a Phase-2 buddy relay) — the caller ignores it.
+    /// An inbound `OP_REASKCALLBACKUDP` — a downloader that cannot reach a
+    /// firewalled source over client UDP asked us (as the source's Kad buddy) to
+    /// relay its reask. The caller verifies the leading buddy-id against the
+    /// inbound buddy it serves and relays an `OP_REASKCALLBACKTCP` down the held
+    /// buddy socket (mirrors `ClientUDPSocket.cpp` `OP_REASKCALLBACKUDP`). `from`
+    /// is the requester's UDP endpoint, written into the relayed frame so the
+    /// firewalled source answers it over UDP.
+    BuddyRelay {
+        callback: super::codec::ReaskCallbackUdp,
+        from: SocketAddr,
+    },
+    /// Not a reask addressed to us (junk, a Kad packet, an unsolicited reply, or
+    /// an unknown source) — the caller ignores it.
     Ignored,
 }
 
@@ -151,8 +162,12 @@ impl ReaskService {
             },
             InboundReaskMessage::QueueFull => ReaskReply::QueueFull,
             InboundReaskMessage::FileNotFound => ReaskReply::FileNotFound,
-            // Phase-2 buddy relay (we are the buddy) is not handled yet.
-            InboundReaskMessage::CallbackUdp(_) => return ReaskInboundOutcome::Ignored,
+            // Buddy relay (we are the source's buddy): hand the decoded request +
+            // requester endpoint back so the caller can match the buddy-id against
+            // its served inbound buddy and relay it over the held buddy socket.
+            InboundReaskMessage::CallbackUdp(callback) => {
+                return ReaskInboundOutcome::BuddyRelay { callback, from };
+            }
         };
 
         // Correlate the reply to a source by endpoint, then by its file.
@@ -363,6 +378,26 @@ mod tests {
         // Routing for the endpoint is gone.
         let again = svc.handle_inbound(&fnf, peer_addr(), now);
         assert_eq!(again, ReaskInboundOutcome::Ignored);
+    }
+
+    #[test]
+    fn inbound_callback_udp_is_handed_back_for_buddy_relay() {
+        use crate::ed2k_client_udp::outbound::build_reask_callback_udp_datagram;
+        let now = Instant::now();
+        let mut svc = service();
+        // A downloader that can't reach a firewalled source over client UDP sends
+        // us (its buddy) an OP_REASKCALLBACKUDP. It is always plaintext.
+        let buddy_id = Ed2kHash::from_bytes([0x77; 16]);
+        let datagram =
+            build_reask_callback_udp_datagram(&buddy_id, &file_hash(), Some(&[true, false]), 3, 4);
+        match svc.handle_inbound(&datagram, peer_addr(), now) {
+            ReaskInboundOutcome::BuddyRelay { callback, from } => {
+                assert_eq!(callback.buddy_id, buddy_id);
+                assert_eq!(callback.file_hash, file_hash());
+                assert_eq!(from, peer_addr());
+            }
+            other => panic!("expected BuddyRelay, got {other:?}"),
+        }
     }
 
     #[test]
