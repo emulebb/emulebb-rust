@@ -26,6 +26,9 @@ use dto::*;
 mod envelope;
 use envelope::*;
 
+mod handlers;
+use handlers::*;
+
 mod responses;
 use responses::*;
 
@@ -1637,38 +1640,6 @@ async fn transfer_delete_files(
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
     }
-}
-
-async fn logs() -> impl IntoResponse {
-    let entries: Vec<Value> = log_buffer::recent_logs()
-        .into_iter()
-        .map(|record| {
-            json!({
-                "timestamp": record.timestamp,
-                "level": record.level,
-                "message": record.message,
-                "debug": record.debug,
-            })
-        })
-        .collect();
-    api_collection(entries)
-}
-
-async fn clear_logs(body: Bytes) -> impl IntoResponse {
-    let request = match parse_required_json_body::<LogsClearRequest>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    if !request.confirm_clear_logs {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "confirmClearLogs must be true",
-        )
-        .into_response();
-    }
-    log_buffer::clear_logs();
-    api_ok(json!({ "ok": true })).into_response()
 }
 
 async fn fallback() -> impl IntoResponse {
