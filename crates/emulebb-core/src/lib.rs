@@ -58,12 +58,13 @@ use emulebb_kad_dht::{
 };
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes,
-    HelloResAck, KAD_VERSION, KadPacket, PublishRes,
-    SearchRes, SearchResultEntry, Tag, constants::K,
+    HelloResAck, KAD_VERSION, KadPacket, PublishRes, Tag, constants::K,
     packet::ContactEntry,
 };
 #[cfg(test)]
-use emulebb_kad_proto::{SearchKeyReq, SearchNotesReq, SearchSourceReq};
+use emulebb_kad_proto::{
+    SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
+};
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 #[cfg(test)]
@@ -86,6 +87,7 @@ mod kad_buddy;
 mod kad_hello;
 mod kad_passive_replay;
 mod kad_snoop_entry;
+mod local_search_response;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
 mod profile_state;
@@ -140,6 +142,9 @@ use kad_passive_replay::{
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
+use local_search_response::send_local_search_response;
+#[cfg(test)]
+use local_search_response::split_stock_search_responses;
 use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
@@ -180,7 +185,6 @@ use views::{
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
-const LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES: usize = 1420;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
@@ -4458,74 +4462,6 @@ async fn record_kad_snoop_entry(snoop_queue: &Arc<Mutex<SnoopQueue>>, entry: Sno
             "recorded Kad search demand"
         );
     }
-}
-
-async fn send_local_search_response(dht: &DhtNode, to: SocketAddr, response: Option<SearchRes>) {
-    let Some(response) = response else {
-        return;
-    };
-    for response in split_stock_search_responses(response, LOCAL_SEARCH_RESPONSE_MAX_PACKET_BYTES) {
-        let _ = dht.send_packet(to, &KadPacket::SearchRes(response)).await;
-    }
-}
-
-fn split_stock_search_responses(response: SearchRes, max_packet_bytes: usize) -> Vec<SearchRes> {
-    if max_packet_bytes == 0 || response.results.len() <= 1 {
-        return vec![response];
-    }
-
-    let SearchRes {
-        sender_id,
-        target,
-        results,
-    } = response;
-    let mut pages = Vec::new();
-    let mut current = Vec::new();
-
-    for result in results {
-        if current.is_empty() {
-            current.push(result);
-            continue;
-        }
-
-        let mut candidate = current.clone();
-        candidate.push(result.clone());
-        if encoded_search_response_len(sender_id, target, &candidate) > max_packet_bytes {
-            pages.push(SearchRes {
-                sender_id,
-                target,
-                results: current,
-            });
-            current = vec![result];
-        } else {
-            current = candidate;
-        }
-    }
-
-    if !current.is_empty() {
-        pages.push(SearchRes {
-            sender_id,
-            target,
-            results: current,
-        });
-    }
-
-    pages
-}
-
-fn encoded_search_response_len(
-    sender_id: emulebb_kad_proto::NodeId,
-    target: emulebb_kad_proto::NodeId,
-    results: &[SearchResultEntry],
-) -> usize {
-    KadPacket::SearchRes(SearchRes {
-        sender_id,
-        target,
-        results: results.to_vec(),
-    })
-    .encode()
-    .map(|packet| packet.len())
-    .unwrap_or(usize::MAX)
 }
 
 fn parse_server_endpoint(endpoint: &str) -> Result<(String, u16)> {
