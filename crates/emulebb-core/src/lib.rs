@@ -91,6 +91,7 @@ mod ed2k_sources;
 mod kad_buddy;
 mod kad_hello;
 mod kad_passive_replay;
+mod kad_publish_schedule;
 mod kad_routing_maintenance;
 mod kad_snoop_entry;
 mod local_search_response;
@@ -284,6 +285,34 @@ struct Ed2kRuntime {
     /// the firewall check is disabled in config.
     kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,
     tasks: Vec<JoinHandle<()>>,
+    /// Detached per-transfer background download tasks for this session (FIX B3).
+    /// Aborted by `disconnect_ed2k`; a fresh handle is created per connect so a
+    /// later reconnect's tasks are never aborted by an earlier disconnect.
+    download_tasks: Arc<Mutex<JoinSet<()>>>,
+}
+
+/// RAII guard that removes a transfer hash from `active_download_attempts` on
+/// drop, so the dedup slot is freed on every exit path of a background download
+/// attempt — normal return, early return, *or* a panic that unwinds the task
+/// (FIX B2). The map lives behind an async mutex, so the cleanup is performed by
+/// a short detached task spawned from `Drop`.
+struct DownloadAttemptGuard {
+    core: EmulebbCore,
+    hash: String,
+}
+
+impl Drop for DownloadAttemptGuard {
+    fn drop(&mut self) {
+        let core = self.core.clone();
+        let hash = std::mem::take(&mut self.hash);
+        tokio::spawn(async move {
+            core.state
+                .lock()
+                .await
+                .active_download_attempts
+                .remove(&hash);
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -307,6 +336,12 @@ pub struct EmulebbCore {
     /// external eD2k TCP/UDP ports), read at hello/login-encode time. Fed by the
     /// server (OP_IDCHANGE), the STUN fallback, and the NAT-mapping sync.
     ed2k_reachability: ExternalReachability,
+    /// Tracks the detached per-transfer background download tasks for the current
+    /// connected session, so `disconnect_ed2k` can abort them (they are otherwise
+    /// untracked detached tasks that survive disconnect and orphan on shutdown).
+    /// Reset to a fresh `JoinSet` on each connect; the same handle is stored in
+    /// the session `Ed2kRuntime` and aborted on disconnect (FIX B3).
+    ed2k_download_tasks: Arc<Mutex<JoinSet<()>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -400,6 +435,7 @@ impl EmulebbCore {
             ed2k_runtime: Arc::new(Mutex::new(None)),
             ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
             ed2k_reachability: ExternalReachability::new(),
+            ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -674,6 +710,15 @@ impl EmulebbCore {
             return Ok(self.ed2k_status().await);
         }
 
+        // Start this session's background-download task set from empty (FIX B3):
+        // any handles left from a previous session were aborted on disconnect, so
+        // a fresh JoinSet keeps the per-session abort scoped and reconnect-safe.
+        {
+            let mut download_tasks = self.ed2k_download_tasks.lock().await;
+            download_tasks.abort_all();
+            *download_tasks = JoinSet::new();
+        }
+
         let (search_handle, search_inbox) = new_ed2k_server_search_channel(32);
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
@@ -745,9 +790,15 @@ impl EmulebbCore {
         }
         if network.kad_publish_shared_files {
             tasks.push(tokio::spawn(run_kad_shared_file_publish_loop(
-                dht.clone(),
-                Arc::clone(&self.ed2k_transfers),
-                network.clone(),
+                KadPublishLoopRuntime {
+                    dht: dht.clone(),
+                    transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                    ed2k_listener: Arc::clone(&ed2k_listener),
+                    server_state: Arc::clone(&server_state),
+                    kad_firewall: Arc::clone(&kad_firewall),
+                    kad_buddy: Arc::clone(&kad_buddy),
+                    network: network.clone(),
+                },
                 Arc::clone(&shutdown),
             )));
         }
@@ -965,6 +1016,7 @@ impl EmulebbCore {
             shutdown,
             kad_firewall_recheck,
             tasks,
+            download_tasks: Arc::clone(&self.ed2k_download_tasks),
         });
         drop(runtime_guard);
         Ok(self.ed2k_status().await)
@@ -979,6 +1031,9 @@ impl EmulebbCore {
             for task in runtime.tasks {
                 task.abort();
             }
+            // Abort this session's detached background-download tasks (FIX B3) so
+            // downloads do not survive disconnect or orphan on shutdown.
+            runtime.download_tasks.lock().await.abort_all();
             // WHY: REST disconnect must not hang behind network cleanup after a failed
             // server dial; the runtime has already been removed and tasks aborted.
             let _ = tokio::time::timeout(Duration::from_secs(2), runtime.nat.stop()).await;
@@ -2899,64 +2954,109 @@ impl EmulebbCore {
     /// severs that type-inference cycle while the spawn breaks the recursion at
     /// runtime. The dedup guard runs inside the spawned task.
     fn queue_ed2k_download_attempt(&self, transfer: Transfer) {
-        let hash = transfer.hash.clone();
         let core = self.clone();
-        tokio::spawn(async move {
-            {
-                let mut state = core.state.lock().await;
-                // WHY: REST resume returns before the peer transfer finishes, so repeated
-                // resume requests must not start duplicate writers for the same part file.
-                if !state.active_download_attempts.insert(hash.clone()) {
-                    return;
-                }
+        let task_core = self.clone();
+        let mut tasks = match self.ed2k_download_tasks.try_lock() {
+            Ok(tasks) => tasks,
+            Err(_) => {
+                // Contended only momentarily (connect reset / disconnect abort);
+                // block briefly on the async lock from a fresh spawn instead.
+                let spawn_core = self.clone();
+                tokio::spawn(async move {
+                    spawn_core
+                        .ed2k_download_tasks
+                        .lock()
+                        .await
+                        .spawn(Self::run_queued_ed2k_download_attempt(task_core, transfer));
+                });
+                return;
             }
-            let result = core.run_ed2k_download_attempt(&transfer).await;
-            let mut retry_downloading = false;
-            match result {
-                Ok(Some(next_state)) => {
-                    retry_downloading = next_state == "downloading";
-                    if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await
-                    {
-                        tracing::warn!(
-                            "failed to refresh ED2K transfer {hash} after download attempt: {error}"
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!("ED2K background download attempt failed for {hash}: {error:#}");
-                    if let Err(refresh_error) =
-                        core.refresh_transfer_from_manifest(&hash, "queued").await
-                    {
-                        tracing::warn!(
-                            "failed to refresh ED2K transfer {hash} after failed download attempt: {refresh_error}"
-                        );
-                    }
-                }
-            }
-            core.state
-                .lock()
-                .await
-                .active_download_attempts
-                .remove(&hash);
-            if retry_downloading {
-                core.queue_ed2k_download_retry(hash);
-            }
-        });
+        };
+        tasks.spawn(Self::run_queued_ed2k_download_attempt(core, transfer));
     }
 
     fn queue_ed2k_download_retry(&self, hash: String) {
         let core = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)).await;
-            let Some(transfer) = core.transfer(&hash).await else {
-                return;
-            };
-            if transfer.state != "downloading" {
+        let task_core = self.clone();
+        let mut tasks = match self.ed2k_download_tasks.try_lock() {
+            Ok(tasks) => tasks,
+            Err(_) => {
+                let spawn_core = self.clone();
+                tokio::spawn(async move {
+                    spawn_core
+                        .ed2k_download_tasks
+                        .lock()
+                        .await
+                        .spawn(Self::run_queued_ed2k_download_retry(task_core, hash));
+                });
                 return;
             }
-            core.queue_ed2k_download_attempt(transfer);
-        });
+        };
+        tasks.spawn(Self::run_queued_ed2k_download_retry(core, hash));
+    }
+
+    /// Body of one background download attempt, run as a tracked task.
+    ///
+    /// The dedup entry in `active_download_attempts` is inserted via an RAII guard
+    /// ([`DownloadAttemptGuard`]) so it is removed on every exit path — including a
+    /// panic that unwinds the task. Without the guard, a panic mid-attempt left the
+    /// hash in the set forever, permanently blocking the transfer from restarting
+    /// (FIX B2).
+    async fn run_queued_ed2k_download_attempt(core: EmulebbCore, transfer: Transfer) {
+        let hash = transfer.hash.clone();
+        // WHY: REST resume returns before the peer transfer finishes, so repeated
+        // resume requests must not start duplicate writers for the same part file.
+        let guard = {
+            let mut state = core.state.lock().await;
+            if !state.active_download_attempts.insert(hash.clone()) {
+                return;
+            }
+            DownloadAttemptGuard {
+                core: core.clone(),
+                hash: hash.clone(),
+            }
+        };
+
+        let result = core.run_ed2k_download_attempt(&transfer).await;
+        let mut retry_downloading = false;
+        match result {
+            Ok(Some(next_state)) => {
+                retry_downloading = next_state == "downloading";
+                if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await {
+                    tracing::warn!(
+                        "failed to refresh ED2K transfer {hash} after download attempt: {error}"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("ED2K background download attempt failed for {hash}: {error:#}");
+                if let Err(refresh_error) =
+                    core.refresh_transfer_from_manifest(&hash, "queued").await
+                {
+                    tracing::warn!(
+                        "failed to refresh ED2K transfer {hash} after failed download attempt: {refresh_error}"
+                    );
+                }
+            }
+        }
+        // Release the dedup slot before re-queueing so the retry can re-acquire it.
+        drop(guard);
+        if retry_downloading {
+            core.queue_ed2k_download_retry(hash);
+        }
+    }
+
+    /// Body of one delayed background download retry, run as a tracked task.
+    async fn run_queued_ed2k_download_retry(core: EmulebbCore, hash: String) {
+        tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)).await;
+        let Some(transfer) = core.transfer(&hash).await else {
+            return;
+        };
+        if transfer.state != "downloading" {
+            return;
+        }
+        core.queue_ed2k_download_attempt(transfer);
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -3516,24 +3616,42 @@ async fn run_kad_hello_intro_loop(
     }
 }
 
-async fn run_kad_shared_file_publish_loop(
+/// Shared inputs for the Kad shared-file (re)publish loop. Carries the
+/// firewall/buddy state so the loop can apply the master
+/// `CSharedFileList::Publish` gate (see [`kad_publish_schedule::kad_publish_allowed`]).
+struct KadPublishLoopRuntime {
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
+    ed2k_listener: Arc<TcpListener>,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    kad_buddy: Arc<Mutex<KadBuddyState>>,
     network: Ed2kNetworkConfig,
+}
+
+/// Re-scan cadence for the shared-file publish loop. The master `Publish()` runs
+/// off its 1s heartbeat gated by `KADEMLIAPUBLISHTIME` (2s); the actual
+/// (re)publish rate is bounded per-file by the 24h keyword / 5h source intervals,
+/// so this only controls how often we re-evaluate which files are due.
+const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 60;
+
+async fn run_kad_shared_file_publish_loop(
+    runtime: KadPublishLoopRuntime,
     shutdown: Arc<AtomicBool>,
 ) {
+    let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
     while !shutdown.load(Ordering::SeqCst) {
-        if !dht.is_bootstrapped() {
+        if !runtime.dht.is_bootstrapped() {
             tokio::time::sleep(Duration::from_secs(KAD_SHARED_FILE_PUBLISH_RETRY_SECS)).await;
             continue;
         }
 
-        if let Err(error) = publish_kad_shared_files(&dht, &transfer_runtime, &network).await {
+        if let Err(error) = publish_kad_due_shared_files(&runtime, &mut schedule).await {
             tracing::debug!("Kad shared-file publish cycle failed: {error:#}");
         }
 
-        let republish_secs = network.kad_republish_interval_secs.max(1);
-        for _ in 0..republish_secs {
+        let tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+        for _ in 0..tick_secs {
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
@@ -3542,17 +3660,59 @@ async fn run_kad_shared_file_publish_loop(
     }
 }
 
+/// Build the master `CSharedFileList::Publish` firewall/buddy gate input from the
+/// current firewall + buddy state.
+async fn kad_publish_gate_input(
+    runtime: &KadPublishLoopRuntime,
+) -> kad_publish_schedule::KadPublishGateInput {
+    let kad_connected = runtime.dht.is_bootstrapped();
+    let tcp_firewalled = current_tcp_firewalled(
+        &runtime.ed2k_listener,
+        &runtime.server_state,
+        &runtime.kad_firewall,
+    )
+    .await;
+    let udp_open = {
+        let firewall = runtime.kad_firewall.lock().await;
+        // The master term (IsFirewalledUDP(true) || !IsVerified()) is false only
+        // when the UDP port is verified open.
+        firewall.udp_open && firewall.udp_verified
+    };
+    let buddy_connected = runtime.kad_buddy.lock().await.has_outgoing_buddy();
+    kad_publish_schedule::KadPublishGateInput {
+        kad_connected,
+        tcp_firewalled,
+        buddy_connected,
+        udp_open,
+    }
+}
+
+/// One publish cycle: republish only the shared files whose per-file, per-kind
+/// master interval is due (keyword 24h / source 5h), and only while the master
+/// `CSharedFileList::Publish` firewall/buddy gate permits publishing.
 #[allow(clippy::cognitive_complexity)]
-async fn publish_kad_shared_files(
-    dht: &DhtNode,
-    transfer_runtime: &Ed2kTransferRuntime,
-    network: &Ed2kNetworkConfig,
+async fn publish_kad_due_shared_files(
+    runtime: &KadPublishLoopRuntime,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
 ) -> Result<usize> {
-    let manifests = kad_publishable_manifests(transfer_runtime.manifests().await?);
+    let manifests = kad_publishable_manifests(runtime.transfer_runtime.manifests().await?);
+    // Keep the per-file schedule from growing without bound: forget files that
+    // are no longer publishable (removed / no longer complete).
+    schedule.retain_only(manifests.iter().map(|m| m.file_hash.as_str()));
     if manifests.is_empty() {
         return Ok(0);
     }
 
+    // Master CSharedFileList::Publish gate (SharedFileList.cpp:3066-3076): do not
+    // emit PUBLISH_*_REQ while firewalled-and-unreachable (no buddy, UDP closed).
+    if !kad_publish_schedule::kad_publish_allowed(kad_publish_gate_input(runtime).await) {
+        tracing::debug!(
+            "Kad shared-file publish skipped: firewalled without buddy and UDP not verified-open"
+        );
+        return Ok(0);
+    }
+
+    let network = &runtime.network;
     let bind_addr = network.kad_bind_addr;
     let source_publish_identity = source_publish_client_hash(network.user_hash);
     let source_publish_settings = SourcePublishSettings {
@@ -3561,75 +3721,98 @@ async fn publish_kad_shared_files(
     };
     let mut keyword_totals = PublishAttemptStats::default();
     let mut source_totals = PublishAttemptStats::default();
+    let mut keyword_published = 0usize;
+    let mut source_published = 0usize;
     let item_count = manifests.len();
 
     for manifest in manifests {
+        let now = Instant::now();
         let file_hash: Ed2kHash = manifest.file_hash.parse()?;
-        let keyword_hash = keyword_target(&manifest.canonical_name);
-        let mut keyword_tags = vec![
-            Tag::filename(manifest.canonical_name.clone()),
-            Tag::filesize(manifest.file_size),
-            Tag::sources(1),
-        ];
-        if let Some(file_type) = ed2k_file_type_search_term(&manifest.canonical_name) {
-            keyword_tags.push(Tag::filetype(file_type));
-        }
-        let aich_hash = manifest
-            .aich_root
-            .as_deref()
-            .and_then(decode_aich_root_hex_for_publish);
-        match dht
-            .publish_keyword_with_class_and_fanout(
-                keyword_hash,
-                file_hash,
-                keyword_tags,
-                aich_hash,
-                RpcWorkClass::Publish,
-                network.kad_publish_contact_fanout,
-            )
-            .await
-        {
-            Ok(stats) => accumulate_publish_stats(&mut keyword_totals, stats),
-            Err(error) => {
-                tracing::debug!(
-                    file_hash = %manifest.file_hash,
-                    name = manifest.canonical_name,
-                    "Kad keyword publish failed: {error:#}"
-                );
+
+        if schedule.keyword_due(&manifest.file_hash, now) {
+            let keyword_hash = keyword_target(&manifest.canonical_name);
+            let mut keyword_tags = vec![
+                Tag::filename(manifest.canonical_name.clone()),
+                Tag::filesize(manifest.file_size),
+                Tag::sources(1),
+            ];
+            if let Some(file_type) = ed2k_file_type_search_term(&manifest.canonical_name) {
+                keyword_tags.push(Tag::filetype(file_type));
+            }
+            let aich_hash = manifest
+                .aich_root
+                .as_deref()
+                .and_then(decode_aich_root_hex_for_publish);
+            match runtime
+                .dht
+                .publish_keyword_with_class_and_fanout(
+                    keyword_hash,
+                    file_hash,
+                    keyword_tags,
+                    aich_hash,
+                    RpcWorkClass::Publish,
+                    network.kad_publish_contact_fanout,
+                )
+                .await
+            {
+                Ok(stats) => {
+                    accumulate_publish_stats(&mut keyword_totals, stats);
+                    // Mark published only on a successful attempt, mirroring the
+                    // master setting the next-publish time when the store search
+                    // was actually started.
+                    schedule.mark_keyword_published(&manifest.file_hash, now);
+                    keyword_published += 1;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        file_hash = %manifest.file_hash,
+                        name = manifest.canonical_name,
+                        "Kad keyword publish failed: {error:#}"
+                    );
+                }
             }
         }
 
-        let source_tags =
-            build_source_publish_tags(bind_addr, source_publish_settings, manifest.file_size);
-        match dht
-            .publish_source_with_class_and_fanout(
-                file_hash,
-                source_publish_identity,
-                source_tags,
-                RpcWorkClass::Publish,
-                network.kad_publish_contact_fanout,
-            )
-            .await
-        {
-            Ok(stats) => accumulate_publish_stats(&mut source_totals, stats),
-            Err(error) => {
-                tracing::debug!(
-                    file_hash = %manifest.file_hash,
-                    name = manifest.canonical_name,
-                    "Kad source publish failed: {error:#}"
-                );
+        if schedule.source_due(&manifest.file_hash, now) {
+            let source_tags =
+                build_source_publish_tags(bind_addr, source_publish_settings, manifest.file_size);
+            match runtime
+                .dht
+                .publish_source_with_class_and_fanout(
+                    file_hash,
+                    source_publish_identity,
+                    source_tags,
+                    RpcWorkClass::Publish,
+                    network.kad_publish_contact_fanout,
+                )
+                .await
+            {
+                Ok(stats) => {
+                    accumulate_publish_stats(&mut source_totals, stats);
+                    schedule.mark_source_published(&manifest.file_hash, now);
+                    source_published += 1;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        file_hash = %manifest.file_hash,
+                        name = manifest.canonical_name,
+                        "Kad source publish failed: {error:#}"
+                    );
+                }
             }
         }
     }
 
-    tracing::info!(
-        "Kad shared-file publish completed items={} keyword_attempted={} keyword_acked={} source_attempted={} source_acked={}",
-        item_count,
-        keyword_totals.attempted_contacts,
-        keyword_totals.acked_contacts,
-        source_totals.attempted_contacts,
-        source_totals.acked_contacts,
-    );
+    if keyword_published > 0 || source_published > 0 {
+        tracing::info!(
+            "Kad shared-file publish cycle items={} keyword_published={} keyword_acked={} source_published={} source_acked={}",
+            item_count,
+            keyword_published,
+            keyword_totals.acked_contacts,
+            source_published,
+            source_totals.acked_contacts,
+        );
+    }
 
     Ok(item_count)
 }
@@ -4775,8 +4958,22 @@ where
             // held (acquired in spawn_pending_ed2k_direct_downloads) so the next
             // source can claim it.
             transfer_runtime.release_source_connection();
-            let (peer_addr, source, result) =
-                joined.context("ED2K direct download worker panicked")?;
+            let (peer_addr, source, result) = match joined {
+                Ok(joined) => joined,
+                Err(join_error) => {
+                    // The worker panicked. Returning here without draining the
+                    // remaining in-flight tasks would leak their connection-budget
+                    // slots permanently (their release_source_connection never
+                    // runs), eventually stalling the whole download subsystem.
+                    // Abort and drain the rest, releasing one slot per task.
+                    active_downloads.abort_all();
+                    while active_downloads.join_next().await.is_some() {
+                        transfer_runtime.release_source_connection();
+                    }
+                    return Err(anyhow::Error::new(join_error)
+                        .context("ED2K direct download worker panicked"));
+                }
+            };
             match result {
                 Ok(Ed2kPeerDownloadOutcome::Completed) => {
                     let manifest = transfer_runtime.manifest(&file_hash_hex).await?;
@@ -5487,6 +5684,7 @@ mod tests {
             shutdown: Arc::clone(&shutdown),
             kad_firewall_recheck: None,
             tasks: vec![dht_task],
+            download_tasks: Arc::clone(&core.ed2k_download_tasks),
         });
 
         let status = core.status().await;
@@ -6625,6 +6823,59 @@ mod tests {
             connect_timeout: Duration::from_secs(1),
             max_parallel_download_peers: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn direct_download_scheduler_releases_all_slots_on_worker_panic() {
+        // A panicking download worker must not leak the connection-budget slots
+        // held by the other in-flight workers: the error path drains and releases
+        // every remaining slot before returning (FIX B1).
+        let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
+            completed_ed2k_transfer_runtime("emulebb-core-direct-download-panic").await;
+        let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
+        let mut options = direct_download_options(
+            Arc::clone(&transfer_runtime),
+            secure_ident,
+            file_hash_hex,
+            file_name,
+            file_size,
+            vec![
+                direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001),
+                direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 11), 41002),
+                direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 12), 41003),
+            ],
+        );
+        // Spawn all sources at once so several slots are in flight when one panics.
+        options.max_parallel_download_peers = 3;
+
+        let result = run_ed2k_direct_downloads(options, move |_bind_ip,
+                                                               _source,
+                                                               _hello_identity,
+                                                               _secure_ident,
+                                                               _transfer_runtime,
+                                                               _file_name,
+                                                               _file_size,
+                                                               _connect_timeout| async move {
+            // Yield first so all three workers are spawned (and hold a slot)
+            // before the panic unwinds, exercising the drain path.
+            tokio::task::yield_now().await;
+            panic!("simulated download worker panic");
+        })
+        .await;
+
+        assert!(result.is_err(), "a worker panic propagates as an error");
+
+        // Every acquired connection-budget slot must have been released; if a
+        // slot leaked, active_connections would be non-zero. Probe via a fresh
+        // acquire and inspect the reported occupancy before the probe.
+        let decision = transfer_runtime.try_acquire_source_connection_detailed();
+        // active_connections counts AFTER this probe acquired one slot, so it must
+        // be exactly 1 (the probe itself) with no leaked predecessors.
+        assert_eq!(
+            decision.active_connections, 1,
+            "all worker slots were released after the panic (no budget leak)"
+        );
+        transfer_runtime.release_source_connection();
     }
 
     #[tokio::test]
