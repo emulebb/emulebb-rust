@@ -9,8 +9,7 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime};
 
 use super::super::{
-    DecodedEmuleInfoProfile, ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-    ED2K_SECURE_IDENT_SIGNATURE_NEEDED, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kSecureIdent,
+    DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kSecureIdent,
     Ed2kTransport, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHREQUEST,
     OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
     OP_ASKSHAREDDIRSANS, OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR,
@@ -30,13 +29,11 @@ use super::super::{
     decode_emule_queue_ranking_payload, decode_exact_file_hash_payload,
     decode_file_status_availability, decode_file_status_body_availability, decode_hashset_answer,
     decode_hashset_answer2, decode_hello_answer_profile, decode_hello_profile,
-    decode_optional_file_hash_payload, decode_public_key_payload, decode_request_filename_answer,
-    decode_request_filename_answer_body, decode_secident_state, decode_signature_payload,
-    dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send,
-    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_emule_info_answer,
-    encode_packet, encode_port_test_answer, encode_public_ip_answer,
-    handle_aich_recovery_answer, is_connection_shutdown_error, try_send_secure_ident_signature,
-    validate_file_status_part_count, verify_peer_secure_ident_signature,
+    decode_optional_file_hash_payload, decode_request_filename_answer,
+    decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_recv,
+    dump_ed2k_tcp_download_send, encode_aich_recovery_answer, encode_aich_recovery_failure_answer,
+    encode_emule_info_answer, encode_port_test_answer, encode_public_ip_answer,
+    handle_aich_recovery_answer, is_connection_shutdown_error, validate_file_status_part_count,
 };
 use super::{
     ActiveDownloadPiece, AichRecoveryRequestState, DownloadRequestWindowState,
@@ -47,6 +44,7 @@ use super::{
 mod browse;
 mod notify;
 mod parts;
+mod secure_ident;
 mod startup;
 mod state;
 
@@ -429,107 +427,33 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     apply_emule_info_profile(&mut session_state, emule_info_profile);
                 }
                 (OP_EMULEPROT, OP_SECIDENTSTATE) => {
-                    let (state, challenge) = decode_secident_state(&packet.payload)?;
-                    session_state.peer_secure_ident.peer_challenge_from = Some(challenge);
-                    if state != 0 {
-                        session_state.peer_secure_ident.pending_signature = true;
-                    }
-                    if state == ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED {
-                        let public_key = encode_packet(
-                            OP_EMULEPROT,
-                            OP_PUBLICKEY,
-                            &secure_ident.public_key_payload()?,
-                        );
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "public_key",
-                            &public_key,
-                        );
-                        transport.write_all(&public_key).await.with_context(|| {
-                            format!("failed to send OP_PUBLICKEY to {peer_addr}")
-                        })?;
-                    }
-                    if !try_send_secure_ident_signature(
+                    secure_ident::handle_secident_state(
                         transport,
                         peer_addr,
                         secure_ident,
-                        &mut session_state.peer_secure_ident,
+                        &mut session_state,
+                        &packet.payload,
                     )
-                    .await?
-                        && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
-                        && !session_state.peer_secure_ident.requested_peer_key
-                    {
-                        let secure_ident_probe = begin_secure_ident_probe(&mut session_state.peer_secure_ident);
-                        dump_ed2k_tcp_download_send(
-                            peer_addr,
-                            transport.mode,
-                            "secure_ident_probe",
-                            &secure_ident_probe,
-                        );
-                        transport
-                            .write_all(&secure_ident_probe)
-                            .await
-                            .with_context(|| {
-                                format!("failed to send fallback OP_SECIDENTSTATE to {peer_addr}")
-                            })?;
-                        session_state.secure_ident_started = true;
-                    }
+                    .await?;
                 }
                 (OP_EMULEPROT, OP_PUBLICKEY) => {
-                    session_state.peer_secure_ident.peer_public_key =
-                        Some(decode_public_key_payload(&packet.payload)?);
-                    let _ = try_send_secure_ident_signature(
+                    secure_ident::handle_public_key(
                         transport,
                         peer_addr,
                         secure_ident,
-                        &mut session_state.peer_secure_ident,
+                        &mut session_state,
+                        &packet.payload,
                     )
                     .await?;
                 }
                 (OP_EMULEPROT, OP_SIGNATURE) => {
-                    match decode_signature_payload(&packet.payload) {
-                        Ok(signature) => {
-                            // RSA-verify the uploader's identity (we issued the
-                            // challenge in our OP_PUBLICKEY exchange). We have no
-                            // learned external IP on this outbound path, so a V2
-                            // REMOTECLIENT signature verifies only when the peer
-                            // could know its own IP (eMule behaves the same when
-                            // LocalIP is unknown).
-                            let verified = verify_peer_secure_ident_signature(
-                                secure_ident,
-                                &mut session_state.peer_secure_ident,
-                                &signature,
-                                peer_addr,
-                                None,
-                            );
-                            dump_ed2k_tcp_download_meta(
-                                peer_addr,
-                                Some(transport.mode),
-                                if verified {
-                                    "secure_ident_signature_verified"
-                                } else {
-                                    "secure_ident_signature_unverified"
-                                },
-                                format!(
-                                    "signature_len={} challenge_ip_kind={} verified={verified}",
-                                    signature.signature_len,
-                                    signature
-                                        .challenge_ip_kind
-                                        .map(|kind| kind.to_string())
-                                        .unwrap_or_else(|| "none".to_string())
-                                ),
-                            );
-                        }
-                        Err(error) => {
-                            dump_ed2k_tcp_download_meta(
-                                peer_addr,
-                                Some(transport.mode),
-                                "secure_ident_signature_invalid",
-                                format!("error={error:#}"),
-                            );
-                        }
-                    }
+                    secure_ident::handle_signature(
+                        transport,
+                        peer_addr,
+                        secure_ident,
+                        &mut session_state,
+                        &packet.payload,
+                    );
                 }
                 (OP_EMULEPROT, OP_PUBLICIP_REQ) => {
                     if let std::net::IpAddr::V4(peer_ip) = peer_addr.ip() {
