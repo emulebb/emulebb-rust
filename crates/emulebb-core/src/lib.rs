@@ -151,7 +151,8 @@ use local_search_response::send_local_search_response;
 #[cfg(test)]
 use local_search_response::split_stock_search_responses;
 use preferences::{
-    apply_preferences_update, default_preferences, ed2k_upload_queue_policy_from_preferences,
+    apply_preferences_update, default_preferences,
+    ed2k_download_limit_bytes_per_sec_from_preferences, ed2k_upload_queue_policy_from_preferences,
     initial_ed2k_upload_queue_policy, preferences_update_is_empty,
 };
 use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
@@ -330,12 +331,15 @@ impl EmulebbCore {
             has_persisted_preferences,
             &core_state.preferences,
         );
+        let download_limit_bytes_per_sec =
+            ed2k_download_limit_bytes_per_sec_from_preferences(&core_state.preferences);
         let ed2k_transfers = if ed2k_network.is_some() {
             Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
                 &transfer_root,
                 metadata_store.clone(),
                 &Ed2kConfig {
                     upload_queue: upload_queue_policy,
+                    download_limit_bytes_per_sec,
                     ..Ed2kConfig::default()
                 },
             )?
@@ -345,6 +349,7 @@ impl EmulebbCore {
                 metadata_store.clone(),
                 &Ed2kConfig {
                     upload_queue: upload_queue_policy,
+                    download_limit_bytes_per_sec,
                     ..Ed2kConfig::default()
                 },
             )?
@@ -465,6 +470,11 @@ impl EmulebbCore {
                 self.ed2k_network
                     .as_ref()
                     .map(|network| &network.config.upload_queue),
+                &preferences,
+            ))
+            .await;
+        self.ed2k_transfers
+            .apply_download_limit(ed2k_download_limit_bytes_per_sec_from_preferences(
                 &preferences,
             ))
             .await;

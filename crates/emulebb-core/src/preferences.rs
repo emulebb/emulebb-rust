@@ -151,6 +151,15 @@ pub(crate) fn ed2k_upload_queue_policy_from_preferences(
     policy
 }
 
+/// The global (cross-transfer) download payload budget in bytes per second
+/// derived from the `downloadLimitKiBps` preference. Mirrors how the upload
+/// limit is derived from `uploadLimitKiBps` (see
+/// `ed2k_upload_queue_policy_from_preferences`). Threaded into the transfer
+/// runtime's shared download throttle.
+pub(crate) fn ed2k_download_limit_bytes_per_sec_from_preferences(preferences: &Preferences) -> u64 {
+    u64::from(preferences.download_limit_ki_bps) * 1024
+}
+
 pub(crate) fn initial_ed2k_upload_queue_policy(
     base: Option<&Ed2kUploadQueuePolicyConfig>,
     has_persisted_preferences: bool,
