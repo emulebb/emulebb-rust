@@ -10,6 +10,7 @@ mod aich;
 mod buddy;
 mod file_status;
 mod hashset;
+mod multipacket;
 mod source_exchange;
 mod upload;
 
@@ -38,17 +39,18 @@ pub(super) use source_exchange::{
 const MAX_CLIENT_MSG_LEN: usize = 450;
 
 use super::{
-    Ed2kFileIdentifier, MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_AICHFILEHASHANS,
-    OP_AICHFILEHASHREQ, OP_ASKSHAREDDENIEDANS,
-    OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEREQANSNOFIL, OP_FILESTATUS,
-    OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER,
-    OP_MULTIPACKETANSWER_EXT2, OP_PACKEDPROT, OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING,
-    OP_REQFILENAMEANSWER, OP_REQUESTFILENAME, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
+    MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_ASKSHAREDDENIEDANS,
+    OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEREQANSNOFIL, OP_PACKEDPROT,
+    OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
     OP_SETREQFILEID, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
 };
 pub(super) use hashset::{
     decode_hashset_answer, decode_hashset_answer2, decode_hashset_request2, encode_hashset_answer,
     encode_hashset_answer2, encode_hashset_request, encode_hashset_request2,
+};
+pub(super) use multipacket::{
+    PeerSourceExchangeRequest, encode_multipacket_answer, encode_multipacket_ext2_answer,
+    encode_multipacket_ext2_request, encode_multipacket_request,
 };
 pub(super) use upload::{
     build_upload_part_packets, decode_compressed_part_fragment, decode_request_parts_payload,
@@ -552,119 +554,6 @@ pub(super) fn decode_request_filename_answer(payload: &[u8]) -> Result<(Ed2kHash
     let file_hash = decode_file_hash_payload(payload)?;
     let (file_name, _) = decode_request_filename_answer_body(&payload[16..])?;
     Ok((file_hash, file_name))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PeerSourceExchangeRequest {
-    None,
-    V1,
-    V2,
-}
-
-pub(super) fn encode_multipacket_ext2_request(
-    file_identifier: &Ed2kFileIdentifier,
-    manifest: &Ed2kResumeManifest,
-    source_exchange_request: PeerSourceExchangeRequest,
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(64);
-    file_identifier.encode_into(&mut payload);
-    payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(manifest));
-    if manifest.file_size > ED2K_PART_SIZE {
-        payload.push(OP_SETREQFILEID);
-    }
-    match source_exchange_request {
-        PeerSourceExchangeRequest::None => {}
-        PeerSourceExchangeRequest::V1 => payload.push(OP_REQUESTSOURCES),
-        PeerSourceExchangeRequest::V2 => {
-            payload.push(OP_REQUESTSOURCES2);
-            payload.extend_from_slice(&encode_request_sources2_subpayload());
-        }
-    }
-    encode_packet(OP_EMULEPROT, OP_MULTIPACKET_EXT2, &payload)
-}
-
-pub(super) fn encode_multipacket_request(
-    file_hash: &Ed2kHash,
-    manifest: &Ed2kResumeManifest,
-    use_ext_envelope: bool,
-    source_exchange_request: PeerSourceExchangeRequest,
-    include_aich_request: bool,
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(64);
-    payload.extend_from_slice(&file_hash.0);
-    if use_ext_envelope {
-        payload.extend_from_slice(&manifest.file_size.to_le_bytes());
-    }
-    payload.push(OP_REQUESTFILENAME);
-    payload.extend_from_slice(&encode_request_filename_ext_info(manifest));
-    if manifest.file_size > ED2K_PART_SIZE {
-        payload.push(OP_SETREQFILEID);
-    }
-    match source_exchange_request {
-        PeerSourceExchangeRequest::None => {}
-        PeerSourceExchangeRequest::V1 => payload.push(OP_REQUESTSOURCES),
-        PeerSourceExchangeRequest::V2 => {
-            payload.push(OP_REQUESTSOURCES2);
-            payload.extend_from_slice(&encode_request_sources2_subpayload());
-        }
-    }
-    if include_aich_request {
-        payload.push(OP_AICHFILEHASHREQ);
-    }
-    let opcode = if use_ext_envelope {
-        OP_MULTIPACKET_EXT
-    } else {
-        OP_MULTIPACKET
-    };
-    encode_packet(OP_EMULEPROT, opcode, &payload)
-}
-
-pub(super) fn encode_multipacket_ext2_answer(
-    file_identifier: &Ed2kFileIdentifier,
-    file_name: &str,
-    include_filename_answer: bool,
-    include_file_status: bool,
-) -> Result<Vec<u8>> {
-    let mut payload = Vec::with_capacity(64);
-    file_identifier.encode_into(&mut payload);
-    if include_filename_answer {
-        payload.push(OP_REQFILENAMEANSWER);
-        payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
-    }
-    if include_file_status {
-        payload.push(OP_FILESTATUS);
-        payload.extend_from_slice(&encode_file_status_body_complete());
-    }
-    Ok(encode_packet(
-        OP_EMULEPROT,
-        OP_MULTIPACKETANSWER_EXT2,
-        &payload,
-    ))
-}
-
-pub(super) fn encode_multipacket_answer(
-    file_hash: &Ed2kHash,
-    file_name: &str,
-    include_filename_answer: bool,
-    include_file_status: bool,
-    aich_root: Option<[u8; 20]>,
-) -> Result<Vec<u8>> {
-    let mut payload = Vec::with_capacity(64);
-    payload.extend_from_slice(&file_hash.0);
-    if include_filename_answer {
-        payload.push(OP_REQFILENAMEANSWER);
-        payload.extend_from_slice(&encode_request_filename_answer_body(file_name)?);
-    }
-    if include_file_status {
-        payload.push(OP_FILESTATUS);
-        payload.extend_from_slice(&encode_file_status_body_complete());
-    }
-    if let Some(aich_root) = aich_root {
-        payload.push(OP_AICHFILEHASHANS);
-        payload.extend_from_slice(&aich_root);
-    }
-    Ok(encode_packet(OP_EMULEPROT, OP_MULTIPACKETANSWER, &payload))
 }
 
 pub(super) fn encode_request_filename_answer(
