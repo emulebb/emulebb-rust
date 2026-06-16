@@ -359,16 +359,22 @@ impl Ed2kTransferRuntime {
         end: u64,
     ) -> Result<Option<Vec<u8>>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
-        let manifest = self.load_manifest_unlocked(&hash_hex).await?;
-        if !manifest
-            .verified_ranges
-            .iter()
-            .any(|range| start >= range.start && end <= range.end)
-        {
-            return Ok(None);
-        }
-        let payload_path = self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME);
+        // Read the manifest geometry (verified-range check + payload path) under
+        // the manifest_io lock, then drop it before touching the payload file, so
+        // the file open/seek/read does not hold the lock and serialize concurrent
+        // uploads/downloads against each other (FIX B4b).
+        let payload_path = {
+            let _guard = self.manifest_io.lock().await;
+            let manifest = self.load_manifest_unlocked(&hash_hex).await?;
+            if !manifest
+                .verified_ranges
+                .iter()
+                .any(|range| start >= range.start && end <= range.end)
+            {
+                return Ok(None);
+            }
+            self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME)
+        };
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)
             .open(&payload_path)
