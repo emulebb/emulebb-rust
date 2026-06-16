@@ -333,3 +333,54 @@ impl ListenerUploadQueue {
         self.last_queue_rank_sent_at = Some(tokio::time::Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use emulebb_kad_proto::Ed2kHash;
+
+    use super::ListenerUploadQueue;
+    use crate::ed2k_transfer::Ed2kTransferRuntime;
+    use crate::paths::unique_test_dir;
+
+    /// FIX 5 invariant: the upload slot must be reclaimed on EVERY exit path.
+    /// `handle_connection` now always falls through to `release` (the loop body
+    /// runs inside a fallible scope, so an in-loop `?` lands in `result` instead
+    /// of escaping past the release). This test proves the property the
+    /// fall-through relies on: `release` frees the runtime slot and is safe to
+    /// call again (idempotent), so calling it after an in-loop release -- or on
+    /// an error path that already released -- never panics or double-frees.
+    #[tokio::test]
+    async fn release_reclaims_slot_and_is_idempotent() {
+        let root = unique_test_dir("ed2k-listener-upload-release");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)), 4662);
+        let identity = super::super::upload_peer_identity_from_socket(peer_addr);
+        let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+
+        let mut queue = ListenerUploadQueue::new();
+        // An empty queue grants the first requester a slot.
+        let _reply = queue
+            .start_upload_reply(&runtime, identity, &file_hash)
+            .await;
+        assert_eq!(
+            runtime.upload_queue_snapshot().await.len(),
+            1,
+            "the granted session must occupy a slot"
+        );
+
+        // First release frees the slot.
+        queue.release(&runtime).await;
+        assert!(
+            runtime.upload_queue_snapshot().await.is_empty(),
+            "release must reclaim the slot deterministically"
+        );
+
+        // The unconditional post-loop release (or an error path that already
+        // released) calling it a second time must be a harmless no-op.
+        queue.release(&runtime).await;
+        assert!(runtime.upload_queue_snapshot().await.is_empty());
+    }
+}

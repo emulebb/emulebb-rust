@@ -183,7 +183,15 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // and forward relayed OP_CALLBACK frames pushed by handle_kad_callback_req.
     let mut buddy_hold: Option<InboundBuddyHold> = None;
 
-    let result = loop {
+    // Run the session loop inside a fallible async scope so that EVERY exit
+    // path -- a clean `break`, a propagated `?` I/O error, or any other early
+    // return from the loop body -- lands in `result` and falls through to the
+    // unconditional `upload_queue.release(...)` below. The master always frees
+    // the slot on teardown (`CUpDownClient::Disconnected`, BaseClient.cpp:1172);
+    // without this wrapper an in-loop `?` would skip the release and leave the
+    // slot pinned until the idle reaper reclaimed it.
+    let result: Result<()> = async {
+        loop {
         let read_timeout = upload_queue.read_timeout();
         // While serving as an inbound buddy, also drain relay frames (OP_CALLBACK)
         // that handle_kad_callback_req pushes down this held socket.
@@ -854,7 +862,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 break Ok(());
             }
         }
-    };
+        }
+    }
+    .await;
 
     upload_queue.release(transfer_runtime).await;
     // Release the inbound buddy slot when the held session ends so the
