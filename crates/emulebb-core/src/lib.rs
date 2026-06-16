@@ -61,9 +61,11 @@ use emulebb_kad_dht::{
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes,
     HelloResAck, KAD_VERSION, KadPacket, NodeId, PublishRes, SearchKeyReq, SearchNotesReq,
-    SearchRes, SearchResultEntry, SearchSourceReq, Tag, TagValue, constants::K,
-    packet::ContactEntry, tag_name,
+    SearchRes, SearchResultEntry, SearchSourceReq, Tag, constants::K,
+    packet::ContactEntry,
 };
+#[cfg(test)]
+use emulebb_kad_proto::tag_name;
 use emulebb_metadata::MetadataStore;
 use md4::{Digest, Md4};
 use serde_json::json;
@@ -87,6 +89,7 @@ mod profile_state;
 mod search_query;
 mod search_state;
 mod shared_directories;
+mod source_publish;
 mod views;
 use categories::{
     PR_NORMAL, apply_category_create, apply_category_update, default_categories,
@@ -109,6 +112,9 @@ use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
 use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
+use source_publish::{
+    SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
+};
 
 pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
@@ -6079,71 +6085,6 @@ fn source_key(source: &Ed2kFoundSource) -> (Ipv4Addr, u16, Option<[u8; 16]>, Opt
         source.user_hash,
         source.obfuscation_options,
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SourcePublishSettings {
-    tcp_port: u16,
-    obfuscation_enabled: bool,
-}
-
-fn emule_high_id_source_type(file_size: u64) -> u32 {
-    if file_size > EMULE_LARGE_FILE_SIZE_THRESHOLD {
-        4
-    } else {
-        1
-    }
-}
-
-fn emule_kad_chunk_order(bytes: [u8; 16]) -> [u8; 16] {
-    let mut ordered = [0u8; 16];
-    for (dst, src) in ordered.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
-        dst.copy_from_slice(&[src[3], src[2], src[1], src[0]]);
-    }
-    ordered
-}
-
-fn source_publish_client_hash(ed2k_user_hash: [u8; 16]) -> NodeId {
-    NodeId::from_bytes(emule_kad_chunk_order(ed2k_user_hash))
-}
-
-fn emule_source_encryption_options(obfuscation_enabled: bool) -> u8 {
-    emule_connect_options(obfuscation_enabled)
-}
-
-fn build_source_publish_tags(
-    bind_addr: SocketAddr,
-    source_publish_settings: SourcePublishSettings,
-    file_size: u64,
-) -> Vec<Tag> {
-    let mut tags = vec![
-        Tag::new_short(
-            tag_name::SOURCETYPE,
-            TagValue::UInt(u64::from(emule_high_id_source_type(file_size))),
-        ),
-        Tag::new_short(
-            tag_name::SOURCEPORT,
-            TagValue::UInt(u64::from(source_publish_settings.tcp_port)),
-        ),
-    ];
-    if let SocketAddr::V4(addr) = bind_addr {
-        tags.push(Tag::new_short(
-            tag_name::SOURCEIP,
-            TagValue::U32(u32::from_be_bytes(addr.ip().octets())),
-        ));
-    }
-    tags.push(Tag::new_short(
-        tag_name::SOURCEUPORT,
-        TagValue::U16(bind_addr.port()),
-    ));
-    tags.push(Tag::filesize(file_size));
-    tags.push(Tag::new_short(
-        tag_name::ENCRYPTION,
-        TagValue::U8(emule_source_encryption_options(
-            source_publish_settings.obfuscation_enabled,
-        )),
-    ));
-    tags
 }
 
 fn ed2k_file_type_search_term(name: &str) -> Option<&'static str> {
