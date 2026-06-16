@@ -416,40 +416,101 @@ async fn source_exchange_peers(
     source_exchange_peers_excluding(transfer_runtime, requested, Some(exclude_ipv4)).await
 }
 
+/// Max sources advertised in one OP_ANSWERSOURCES(2) reply (eMule
+/// `CreateSrcInfoPacket` caps at `nCount > 500`, i.e. it emits up to 501).
+const MAX_SOURCE_EXCHANGE_ENTRIES: usize = 501;
+
+/// eMule LowID test for a source whose advertised IPv4 we treat as its client-id
+/// (`CUpDownClient::HasLowID`: `GetUserIDHybrid() < 16777216`). A LowID source is
+/// firewalled and not directly dialable, so it must never be offered as a source
+/// in a source-exchange reply (oracle `CreateSrcInfoPacket` skips `HasLowID()`).
+fn source_ip_is_low_id(ip: Ipv4Addr) -> bool {
+    // eMule encodes the client-id from the IP as little-endian octets, so a LowID
+    // (`GetUserIDHybrid() < 16777216`) is equivalently an IP whose final octet is
+    // zero. The unspecified address is never a valid direct-dial source.
+    let client_id = u32::from_le_bytes(ip.octets());
+    client_id < 0x0100_0000 || ip.is_unspecified()
+}
+
+/// `true` when a source is eligible to be offered in a source-exchange reply:
+/// direct-dialable (non-LowID, non-zero TCP port) and not the requester itself.
+fn source_exchange_eligible(
+    ip: Ipv4Addr,
+    tcp_port: u16,
+    exclude_ipv4: Option<Ipv4Addr>,
+) -> bool {
+    // Never echo the requester back to itself as a source.
+    tcp_port != 0 && exclude_ipv4 != Some(ip) && !source_ip_is_low_id(ip)
+}
+
 async fn source_exchange_peers_excluding(
     transfer_runtime: &Ed2kTransferRuntime,
     requested: &Ed2kHash,
     exclude_ipv4: Option<Ipv4Addr>,
 ) -> Result<Vec<SourceExchangePeer>> {
-    let manifest = transfer_runtime.manifest(&requested.to_string()).await?;
-    Ok(manifest
-        .sources
-        .iter()
-        .filter_map(|source| {
-            let parsed_ip = source.ip.parse::<Ipv4Addr>().ok()?;
-            // Never echo the requester back to itself as a source.
-            if exclude_ipv4 == Some(parsed_ip) {
-                return None;
-            }
-            let ip = parsed_ip.octets();
-            if source.tcp_port == 0 {
-                return None;
-            }
-            let user_hash = source
-                .user_hash
-                .as_deref()
-                .and_then(|hash| hex::decode(hash).ok())
-                .and_then(|bytes| bytes.try_into().ok());
-            Some(SourceExchangePeer {
-                ip,
-                tcp_port: source.tcp_port,
-                server_ip: 0,
-                server_port: 0,
-                user_hash,
-                connect_options: 0,
-            })
-        })
-        .collect())
+    let requested_hex = requested.to_string();
+    let mut peers: Vec<SourceExchangePeer> = Vec::new();
+    let mut seen: std::collections::HashSet<(Ipv4Addr, u16)> = std::collections::HashSet::new();
+
+    // Prefer live download sources (currently connected, verified direct-dial
+    // peers) over stale persisted manifest hints — these are the sources eMule
+    // would actually offer (`IsLiveSource`). They are deduped by (ip, port).
+    for live in transfer_runtime.live_download_sources(&requested_hex) {
+        let IpAddr::V4(ipv4) = live.endpoint.ip() else {
+            continue;
+        };
+        let tcp_port = live.endpoint.port();
+        if !source_exchange_eligible(ipv4, tcp_port, exclude_ipv4) {
+            continue;
+        }
+        if !seen.insert((ipv4, tcp_port)) {
+            continue;
+        }
+        peers.push(SourceExchangePeer {
+            ip: ipv4.octets(),
+            tcp_port,
+            server_ip: 0,
+            server_port: 0,
+            user_hash: live.user_hash,
+            connect_options: 0,
+        });
+        if peers.len() >= MAX_SOURCE_EXCHANGE_ENTRIES {
+            return Ok(peers);
+        }
+    }
+
+    // Fill the remainder from persisted manifest hints, applying the same
+    // non-LowID / non-zero-port eligibility filter and (ip, port) dedup.
+    let manifest = transfer_runtime.manifest(&requested_hex).await?;
+    for source in &manifest.sources {
+        let Ok(parsed_ip) = source.ip.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if !source_exchange_eligible(parsed_ip, source.tcp_port, exclude_ipv4) {
+            continue;
+        }
+        if !seen.insert((parsed_ip, source.tcp_port)) {
+            continue;
+        }
+        let user_hash = source
+            .user_hash
+            .as_deref()
+            .and_then(|hash| hex::decode(hash).ok())
+            .and_then(|bytes| bytes.try_into().ok());
+        peers.push(SourceExchangePeer {
+            ip: parsed_ip.octets(),
+            tcp_port: source.tcp_port,
+            server_ip: 0,
+            server_port: 0,
+            user_hash,
+            connect_options: 0,
+        });
+        if peers.len() >= MAX_SOURCE_EXCHANGE_ENTRIES {
+            break;
+        }
+    }
+
+    Ok(peers)
 }
 
 pub(in crate::ed2k_tcp) async fn handle_aich_file_hash_request(
@@ -494,4 +555,41 @@ async fn send_nofile(
         .write_all(&reply)
         .await
         .with_context(|| format!("failed to send OP_FILEREQANSNOFIL to {peer_addr}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_id_sources_are_filtered() {
+        // LowID: eMule GetUserIDHybrid() < 0x01000000, i.e. final octet zero.
+        assert!(source_ip_is_low_id(Ipv4Addr::new(5, 0, 0, 0)));
+        assert!(source_ip_is_low_id(Ipv4Addr::new(200, 1, 2, 0)));
+        assert!(source_ip_is_low_id(Ipv4Addr::UNSPECIFIED));
+        // A normal HighID source (non-zero final octet) is eligible — including
+        // LAN sources used by the test harness as stand-ins for real peers.
+        assert!(!source_ip_is_low_id(Ipv4Addr::new(45, 82, 80, 155)));
+        assert!(!source_ip_is_low_id(Ipv4Addr::new(10, 20, 30, 41)));
+    }
+
+    #[test]
+    fn eligibility_requires_port_non_self_and_highid() {
+        let public = Ipv4Addr::new(45, 82, 80, 155);
+        // Eligible: public IP, real port, not the requester.
+        assert!(source_exchange_eligible(public, 4662, None));
+        assert!(source_exchange_eligible(public, 4662, Some(Ipv4Addr::new(1, 2, 3, 4))));
+        // Zero port is never dialable.
+        assert!(!source_exchange_eligible(public, 0, None));
+        // Never echo the requester back to itself.
+        assert!(!source_exchange_eligible(public, 4662, Some(public)));
+        // LowID source is excluded even with a non-zero port.
+        assert!(!source_exchange_eligible(Ipv4Addr::new(7, 0, 0, 0), 4662, None));
+    }
+
+    #[test]
+    fn source_exchange_cap_matches_oracle() {
+        // eMule caps at nCount > 500, i.e. up to 501 entries per reply.
+        assert_eq!(MAX_SOURCE_EXCHANGE_ENTRIES, 501);
+    }
 }
