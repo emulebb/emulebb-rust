@@ -421,10 +421,22 @@ async fn drive_reask_tick(
     };
     for (addr, datagram) in out.send {
         match dht.send_raw_datagram(addr, &datagram).await {
-            Ok(()) => trace!(
-                "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
-                datagram.len(), hex_preview(&datagram),
-            ),
+            Ok(()) => {
+                trace!(
+                    "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
+                    datagram.len(),
+                    hex_preview(&datagram),
+                );
+                // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP source
+                // reask actually went out on the wire to `addr`.
+                crate::diag_event::emit(
+                    "sched",
+                    "reask_sent",
+                    "info",
+                    serde_json::json!({ "peer": addr.to_string() }),
+                    serde_json::json!({ "outcome": "sent", "transport": "udp" }),
+                );
+            }
             Err(err) => trace!("ed2k udp reask: send to {addr} failed: {err}"),
         }
     }

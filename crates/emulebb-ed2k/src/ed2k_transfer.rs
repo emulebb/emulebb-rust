@@ -77,6 +77,40 @@ pub(crate) use upload_queue::{
 pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
 pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};
 
+/// Outcome of a global connection-budget acquisition attempt, carrying the
+/// occupancy + binding cap so the caller can emit the `conn_budget`
+/// `diag_event_v1` event (uniform-diagnostics-v2 schema §3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ed2kConnectionBudgetDecision {
+    /// Whether a budget slot was granted (`outcome` admit vs deny).
+    pub admitted: bool,
+    /// Live concurrent source-connection count after the decision.
+    pub active_connections: usize,
+    /// Configured concurrent-connection cap (0 = unlimited).
+    pub connection_cap: usize,
+    /// Which cap denied the slot, when `admitted` is false.
+    pub deny_reason: Option<Ed2kConnectionBudgetDenyReason>,
+}
+
+/// Why a connection-budget slot was denied (`denyReason`, schema §3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ed2kConnectionBudgetDenyReason {
+    /// The concurrent-connection cap was full (`concurrent_cap`).
+    ConcurrentCap,
+    /// The per-window new-connection rate was exhausted (`window_cap`).
+    WindowCap,
+}
+
+impl Ed2kConnectionBudgetDenyReason {
+    /// Stable wire token for the `denyReason` field.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConcurrentCap => "concurrent_cap",
+            Self::WindowCap => "window_cap",
+        }
+    }
+}
+
 /// Canonical ED2K part size used by eMule-compatible file hashing.
 pub const ED2K_PART_SIZE: u64 = 9_728_000;
 /// Canonical eMule upload block size used inside one ED2K part request.
@@ -246,10 +280,28 @@ impl Ed2kTransferRuntime {
         byte_count: u64,
         now: Instant,
     ) -> Ed2kDownloadThrottleReservation {
-        self.download_throttle
-            .lock()
-            .await
-            .reserve_download_payload(byte_count, now)
+        let (reservation, limit_bytes_per_sec) = {
+            let mut throttle = self.download_throttle.lock().await;
+            let reservation = throttle.reserve_download_payload(byte_count, now);
+            (reservation, throttle.limit_bytes_per_sec())
+        };
+        // `throttle_applied` (uniform-diagnostics-v2 schema §3.5): the shared
+        // inbound rate limiter delayed this read. `delayMs` is S (exact timing
+        // differs per client); `limitBytesPerSec` is C (the configured limit).
+        if !reservation.delay.is_zero() {
+            crate::diag_event::emit(
+                "sched",
+                "throttle_applied",
+                "info",
+                serde_json::json!({}),
+                serde_json::json!({
+                    "outcome": "applied",
+                    "delayMs": u64::try_from(reservation.delay.as_millis()).unwrap_or(u64::MAX),
+                    "limitBytesPerSec": limit_bytes_per_sec,
+                }),
+            );
+        }
+        reservation
     }
 
     /// Replace the active global download rate limit (0 = unlimited). Threaded
@@ -273,10 +325,36 @@ impl Ed2kTransferRuntime {
     /// per-window new-connection rate allow it. A `false` means the caller must
     /// leave the source for the next cycle (never drop it).
     pub fn try_acquire_source_connection(&self) -> bool {
-        self.download_coordinator
+        self.try_acquire_source_connection_detailed().admitted
+    }
+
+    /// Like [`try_acquire_source_connection`] but also reports the connection
+    /// budget occupancy and (on a deny) the limiting cap, so the caller can emit
+    /// the `conn_budget` `diag_event_v1` event (schema §3.5) with real
+    /// `activeConnections` / `connectionCap` / `denyReason` values.
+    pub fn try_acquire_source_connection_detailed(&self) -> Ed2kConnectionBudgetDecision {
+        let mut coordinator = self
+            .download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
-            .try_acquire_connection(Instant::now())
+            .expect("download coordinator mutex poisoned");
+        let config = coordinator.config();
+        let active_before = coordinator.active_connections();
+        let admitted = coordinator.try_acquire_connection(Instant::now());
+        let deny_reason = if admitted {
+            None
+        } else if config.max_connections != 0 && active_before >= config.max_connections {
+            Some(Ed2kConnectionBudgetDenyReason::ConcurrentCap)
+        } else {
+            // The concurrent cap was not the binding limit, so the per-window
+            // new-connection rate (`m_OpenSocketsInterval`) denied it.
+            Some(Ed2kConnectionBudgetDenyReason::WindowCap)
+        };
+        Ed2kConnectionBudgetDecision {
+            admitted,
+            active_connections: coordinator.active_connections(),
+            connection_cap: config.max_connections,
+            deny_reason,
+        }
     }
 
     /// Release a source connection budget slot when an outgoing peer connection

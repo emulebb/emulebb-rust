@@ -82,6 +82,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod categories;
+mod diag_sched;
 mod download_source_registry;
 mod ed2k_buddy_reask;
 mod ed2k_net_drivers;
@@ -2764,6 +2765,7 @@ impl EmulebbCore {
             if !self.ed2k_transfers.can_engage_file_source(file_source_count) {
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
+                crate::diag_sched::source_dropped(file_hash, source);
                 continue;
             }
             let registry_lease = state
@@ -2771,9 +2773,11 @@ impl EmulebbCore {
                 .lease_best_for_file(source, file_hash);
             if registry_lease.is_some() && state.active_download_peer_endpoints.insert(endpoint) {
                 acquired.push(source.clone());
+                crate::diag_sched::source_engaged(file_hash, source);
             } else {
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
+                crate::diag_sched::source_dropped(file_hash, source);
             }
         }
         (acquired, deferred)
@@ -2836,6 +2840,7 @@ impl EmulebbCore {
                 else {
                     continue;
                 };
+                crate::diag_sched::source_swapped(current_file_hash, &candidate.file_hash, source);
                 if !seen_targets.insert(candidate.file_hash.clone()) {
                     continue;
                 }
@@ -4889,7 +4894,11 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         // the new-connection per-5s rate across ALL transfers. When no slot is
         // available, leave the source pending (push it back) for the next cycle
         // rather than dropping it, and stop spawning this round.
-        if !context.transfer_runtime.try_acquire_source_connection() {
+        let budget = context
+            .transfer_runtime
+            .try_acquire_source_connection_detailed();
+        crate::diag_sched::conn_budget(budget, context.file_hash_hex, &source);
+        if !budget.admitted {
             pending_sources.push_front(source);
             tracing::debug!(
                 "ED2K direct download deferred by connection budget file_hash={} active={}",
