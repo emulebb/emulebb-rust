@@ -256,6 +256,115 @@ pub fn dump_kad_udp_packet(
             error
         );
     }
+    drop(guard);
+
+    // uniform-diagnostics-v2 (lane D2): also emit the converged `kad_udp`
+    // `diag_event_v1` record from the same data (schema §3.2). The `ts` is UTC
+    // millis with a trailing `Z` (normalised; the v1 `udp_packet_v1` line above
+    // keeps its legacy local-time `ts` during migration). Hex stays UPPER for
+    // Kad parity. Optional fields are omitted when not known rather than faked.
+    emit_kad_udp_diag_event(direction, peer, wire_payload, decoded_payload, &summary);
+}
+
+fn emit_kad_udp_diag_event(
+    direction: &'static str,
+    peer: SocketAddr,
+    wire_payload: &[u8],
+    decoded_payload: &[u8],
+    summary: &KadUdpDumpSummary,
+) {
+    let severity = if summary.drop_reason.is_some() {
+        "low"
+    } else {
+        "info"
+    };
+    let mut keys = serde_json::Map::new();
+    keys.insert("peer".to_string(), serde_json::json!(peer.to_string()));
+    keys.insert(
+        "protocolMarker".to_string(),
+        serde_json::json!(summary.protocol),
+    );
+    if let Some(opcode) = summary.opcode {
+        keys.insert("opcode".to_string(), serde_json::json!(opcode));
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("direction".to_string(), serde_json::json!(direction));
+    body.insert(
+        "protocolMarker".to_string(),
+        serde_json::json!(summary.protocol),
+    );
+    if let Some(opcode) = summary.opcode {
+        body.insert("opcode".to_string(), serde_json::json!(opcode));
+    }
+    if let Some(opcode_name) = summary.opcode_name {
+        body.insert("opcodeName".to_string(), serde_json::json!(opcode_name));
+    }
+    body.insert("wireLen".to_string(), serde_json::json!(wire_payload.len()));
+    body.insert(
+        "wireHex".to_string(),
+        serde_json::json!(capped_hex_upper(wire_payload)),
+    );
+    body.insert(
+        "decodedLen".to_string(),
+        serde_json::json!(decoded_payload.len()),
+    );
+    body.insert(
+        "decodedHex".to_string(),
+        serde_json::json!(capped_hex_upper(decoded_payload)),
+    );
+    body.insert(
+        "rawObfuscated".to_string(),
+        serde_json::json!(summary.raw_obfuscated),
+    );
+    if let Some(requested) = summary.requested_obfuscation {
+        body.insert("requestedObfuscation".to_string(), serde_json::json!(requested));
+    }
+    if let Some(transport_mode) = summary.transport_mode {
+        body.insert("transportMode".to_string(), serde_json::json!(transport_mode));
+    }
+    if let Some(receiver_verify_key) = summary.receiver_verify_key {
+        body.insert(
+            "receiverVerifyKey".to_string(),
+            serde_json::json!(receiver_verify_key),
+        );
+    }
+    if let Some(sender_verify_key) = summary.sender_verify_key {
+        body.insert(
+            "senderVerifyKey".to_string(),
+            serde_json::json!(sender_verify_key),
+        );
+    }
+    if let Some(valid) = summary.receiver_verify_key_valid {
+        body.insert("receiverVerifyKeyValid".to_string(), serde_json::json!(valid));
+    }
+    if let Some(tracked) = summary.tracked_request_opcode {
+        body.insert("trackedRequestOpcode".to_string(), serde_json::json!(tracked));
+    }
+    if let Some(drop_reason) = summary.drop_reason {
+        body.insert("dropReason".to_string(), serde_json::json!(drop_reason));
+    }
+
+    crate::diag_event::emit(
+        "kad_udp",
+        "packet",
+        severity,
+        serde_json::Value::Object(keys),
+        serde_json::Value::Object(body),
+    );
+}
+
+/// Cap on hex-encoded bytes emitted per packet (schema §3.2: 4 KiB), matching the
+/// eD2k TCP dump cap so the converged dumps stay byte-comparable.
+const MAX_DIAG_HEX_BYTES: usize = 4 * 1024;
+
+fn capped_hex_upper(bytes: &[u8]) -> String {
+    let slice = if bytes.len() > MAX_DIAG_HEX_BYTES {
+        &bytes[..MAX_DIAG_HEX_BYTES]
+    } else {
+        bytes
+    };
+    encode_hex_upper(slice)
 }
 
 fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
