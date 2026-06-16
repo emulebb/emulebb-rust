@@ -1,3 +1,4 @@
+use crate::node::concurrency::SearchConcurrency;
 use crate::traversal::{
     KadIpFilter, KadResContactSink, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
 };
@@ -22,6 +23,32 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(SEARCH_TIMEOUT_SECS);
 /// turning inbound harvest volume into backpressure on the traversal loop.
 const SEARCH_RESULT_STREAM_BUFFER: usize = 2048;
 
+/// Outcome of trying to claim a search/publish concurrency permit for a stream.
+enum AcquireOutcome {
+    /// A permit was acquired; hold it for the lifetime of the stream task.
+    Permit(Option<crate::node::concurrency::SearchPermit>),
+    /// A same-target search is already in flight: drop/coalesce this one.
+    Duplicate,
+    /// No concurrency guard was supplied (e.g. unit tests), so run unbounded.
+    Unbounded,
+}
+
+/// Acquire a per-target concurrency permit for a streaming search, when a guard
+/// is present. Returns [`AcquireOutcome::Duplicate`] for an in-flight target so
+/// the caller drops the stream (oracle `CSearchManager::AlreadySearchingFor`).
+async fn acquire_search_permit(
+    concurrency: Option<SearchConcurrency>,
+    target: NodeId,
+) -> AcquireOutcome {
+    match concurrency {
+        Some(guard) => match guard.acquire(target).await {
+            Some(permit) => AcquireOutcome::Permit(Some(permit)),
+            None => AcquireOutcome::Duplicate,
+        },
+        None => AcquireOutcome::Unbounded,
+    }
+}
+
 /// Full notes-search identity so the stream builder stays request-shaped while
 /// the public helper surface avoids long argument lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,39 +69,9 @@ fn map_source_search_result(
     SourceResult::from_tags(requested_file_hash, source_id, tags)
 }
 
-/// Run a keyword search. Returns a Stream of results.
-#[allow(clippy::too_many_arguments)]
-pub fn search_keywords(
-    rpc: RpcManager,
-    initial: Vec<TraversalContact>,
-    target: NodeId,
-    result_cap: usize,
-    phase2_fanout: usize,
-    cancel: CancellationToken,
-    work_class: RpcWorkClass,
-    ip_filter: Option<KadIpFilter>,
-    res_contact_sink: Option<KadResContactSink>,
-) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
-    search_keywords_by_request(
-        rpc,
-        initial,
-        SearchKeyReq {
-            target,
-            start_position: 0,
-            restrictive_payload: Vec::new(),
-        },
-        result_cap,
-        phase2_fanout,
-        cancel,
-        work_class,
-        ip_filter,
-        res_contact_sink,
-    )
-}
-
 /// Run a keyword search using a prebuilt Kad keyword request shape.
 #[allow(clippy::too_many_arguments)]
-pub fn search_keywords_by_request(
+pub(crate) fn search_keywords_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: SearchKeyReq,
@@ -84,10 +81,18 @@ pub fn search_keywords_by_request(
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
+    concurrency: Option<SearchConcurrency>,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(SEARCH_RESULT_STREAM_BUFFER);
     let request_target = request.target;
     tokio::spawn(async move {
+        // Oracle CSearchManager: drop a duplicate same-target keyword search and
+        // cap concurrent traversals. Held for the lifetime of this stream task.
+        let _permit = match acquire_search_permit(concurrency, request_target).await {
+            AcquireOutcome::Permit(permit) => permit,
+            AcquireOutcome::Duplicate => return,
+            AcquireOutcome::Unbounded => None,
+        };
         let (raw_tx, mut raw_rx) =
             mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {
@@ -184,7 +189,7 @@ pub fn search_keywords_by_request(
 
 /// Run a source search using a prebuilt Kad source request shape.
 #[allow(clippy::too_many_arguments)]
-pub fn search_sources_by_request(
+pub(crate) fn search_sources_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: SearchSourceReq,
@@ -194,12 +199,19 @@ pub fn search_sources_by_request(
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
+    concurrency: Option<SearchConcurrency>,
 ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SourceResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = request.target;
     let requested_file_hash = Ed2kHash::from_bytes(target.to_be_bytes());
 
     tokio::spawn(async move {
+        // Oracle CSearchManager: dedup the source search by target + cap concurrency.
+        let _permit = match acquire_search_permit(concurrency, target).await {
+            AcquireOutcome::Permit(permit) => permit,
+            AcquireOutcome::Duplicate => return,
+            AcquireOutcome::Unbounded => None,
+        };
         let (raw_tx, mut raw_rx) =
             mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {
@@ -253,7 +265,7 @@ pub fn search_sources_by_request(
 
 /// Run a notes search.
 #[allow(clippy::too_many_arguments)]
-pub fn search_notes(
+pub(crate) fn search_notes(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
     request: NotesSearchRequest,
@@ -263,11 +275,18 @@ pub fn search_notes(
     work_class: RpcWorkClass,
     ip_filter: Option<KadIpFilter>,
     res_contact_sink: Option<KadResContactSink>,
+    concurrency: Option<SearchConcurrency>,
 ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<NoteResult>(SEARCH_RESULT_STREAM_BUFFER);
     let target = NodeId::from_be_bytes(request.file_hash.0);
 
     tokio::spawn(async move {
+        // Oracle CSearchManager: dedup the notes search by target + cap concurrency.
+        let _permit = match acquire_search_permit(concurrency, target).await {
+            AcquireOutcome::Permit(permit) => permit,
+            AcquireOutcome::Duplicate => return,
+            AcquireOutcome::Unbounded => None,
+        };
         let (raw_tx, mut raw_rx) =
             mpsc::channel::<(Ed2kHash, Vec<emulebb_kad_proto::Tag>)>(SEARCH_RESULT_STREAM_BUFFER);
         let config = TraversalConfig {

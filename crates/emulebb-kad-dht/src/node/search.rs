@@ -22,6 +22,12 @@ impl DhtNode {
         target: &NodeId,
         work_class: RpcWorkClass,
     ) -> Result<Vec<TraversalContact>, DhtError> {
+        // Oracle CSearchManager: drop a duplicate same-target lookup and cap the
+        // number of concurrent traversals. The permit is held until the lookup
+        // returns (or unwinds), releasing the slot + target on drop.
+        let Some(_permit) = self.acquire_search_permit(*target).await else {
+            return Ok(Vec::new());
+        };
         let initial = {
             let rt = self.inner.routing_table.lock().await;
             rt.get_closest(target, K)
@@ -192,6 +198,7 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
+            Some(self.search_concurrency()),
         )
     }
 
@@ -308,6 +315,7 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
+            Some(self.search_concurrency()),
         )
     }
 
@@ -410,6 +418,7 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
+            Some(self.search_concurrency()),
         )
     }
 

@@ -33,6 +33,11 @@ impl DhtNode {
         work_class: RpcWorkClass,
         publish_contact_fanout: usize,
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        // Oracle CSearchManager: a keyword store traversal for an already in-flight
+        // target is dropped, and concurrent traversals are capped. Held to return.
+        let Some(_permit) = self.acquire_search_permit(keyword_hash).await else {
+            return Ok(crate::publish::PublishAttemptStats::default());
+        };
         crate::publish::publish_keyword(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -76,6 +81,11 @@ impl DhtNode {
         work_class: RpcWorkClass,
         publish_contact_fanout: usize,
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        // Oracle CSearchManager: dedup/cap the source store traversal by target.
+        let target = NodeId::from_be_bytes(file_hash.0);
+        let Some(_permit) = self.acquire_search_permit(target).await else {
+            return Ok(crate::publish::PublishAttemptStats::default());
+        };
         crate::publish::publish_source(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -119,6 +129,11 @@ impl DhtNode {
         work_class: RpcWorkClass,
         publish_contact_fanout: usize,
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        // Oracle CSearchManager: dedup/cap the notes store traversal by target.
+        let target = NodeId::from_be_bytes(file_hash.0);
+        let Some(_permit) = self.acquire_search_permit(target).await else {
+            return Ok(crate::publish::PublishAttemptStats::default());
+        };
         crate::publish::publish_notes(
             &self.inner.rpc,
             &self.inner.routing_table,

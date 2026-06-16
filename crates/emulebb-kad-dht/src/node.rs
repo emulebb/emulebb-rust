@@ -6,6 +6,7 @@
 //! wire-facing role of each call rather than only the local implementation.
 
 mod bootstrap;
+pub(crate) mod concurrency;
 mod config;
 mod contact_helpers;
 mod legacy_challenge;
@@ -14,6 +15,7 @@ mod routing;
 mod search;
 mod transport;
 
+use concurrency::SearchConcurrency;
 use legacy_challenge::LegacyChallengeTracker;
 
 pub use config::DhtConfig;
@@ -30,16 +32,17 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 
 struct DhtInner {
     own_id: NodeId,
     routing_table: Arc<Mutex<RoutingTable>>,
     rpc: RpcManager,
     config: DhtConfig,
-    /// Semaphore for limiting concurrent searches. Reserved for future use.
-    #[allow(dead_code)]
-    semaphore: Semaphore,
+    /// Per-target dedup + bounded concurrency for search/publish traversals
+    /// (oracle `CSearchManager::AlreadySearchingFor` + the concurrent-search
+    /// cap). Acquired around every `run_traversal` invocation.
+    search_concurrency: SearchConcurrency,
     bootstrapped: std::sync::atomic::AtomicBool,
     /// Pending pre-v8 contact-verification challenges (oracle
     /// `CPacketTracking::listChallengeRequests`).
@@ -136,7 +139,7 @@ impl DhtNode {
             },
         );
 
-        let semaphore = Semaphore::new(config.max_concurrent_searches);
+        let search_concurrency = SearchConcurrency::new(config.max_concurrent_searches);
 
         // RES-contact ingestion channel (oracle AddUnfiltered): a dedicated drain
         // task owns the routing-table add-path so traversal can fire-and-forget
@@ -150,7 +153,7 @@ impl DhtNode {
                 routing_table,
                 rpc,
                 config,
-                semaphore,
+                search_concurrency,
                 bootstrapped: std::sync::atomic::AtomicBool::new(false),
                 legacy_challenges: Mutex::new(LegacyChallengeTracker::default()),
                 ip_filter: std::sync::OnceLock::new(),
@@ -286,6 +289,27 @@ impl DhtNode {
                 version: entry.version,
             });
         })
+    }
+
+    /// Acquire a per-target search/publish concurrency permit (oracle
+    /// `CSearchManager::AlreadySearchingFor` + concurrent-search cap).
+    ///
+    /// Returns `None` when a traversal for the same target is already in flight,
+    /// so the caller drops/coalesces the duplicate; otherwise it waits for a free
+    /// concurrency slot and returns an RAII permit that frees the slot and the
+    /// target on drop (every exit path, including unwind).
+    pub(crate) async fn acquire_search_permit(
+        &self,
+        target: NodeId,
+    ) -> Option<concurrency::SearchPermit> {
+        self.inner.search_concurrency.acquire(target).await
+    }
+
+    /// A clone of this node's search/publish concurrency guard, for the streaming
+    /// search builders that acquire the permit inside their spawned task (they
+    /// return the stream synchronously and so cannot `.await` here).
+    pub(crate) fn search_concurrency(&self) -> concurrency::SearchConcurrency {
+        self.inner.search_concurrency.clone()
     }
 
     /// Send an already-framed datagram on the shared Kad UDP socket without Kad
