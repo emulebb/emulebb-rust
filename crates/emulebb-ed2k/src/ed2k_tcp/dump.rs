@@ -40,7 +40,7 @@ use super::{
 const ED2K_TCP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-tcp-dump-";
 
 #[derive(Debug, Serialize)]
-struct Ed2kTcpDumpRecord<'a> {
+pub(super) struct Ed2kTcpDumpRecord<'a> {
     schema: &'static str,
     source: &'static str,
     ts_utc: String,
@@ -48,21 +48,21 @@ struct Ed2kTcpDumpRecord<'a> {
     trace_key: String,
     state_id: String,
     state_label: &'a str,
-    flow: &'static str,
-    phase: &'a str,
-    direction: &'a str,
-    remote_addr: String,
-    transport_mode: &'a str,
-    protocol: Option<&'static str>,
-    protocol_marker: Option<u8>,
-    opcode: Option<u8>,
-    opcode_name: Option<&'static str>,
-    raw_len: Option<usize>,
-    raw_hex: Option<String>,
-    payload_len: Option<usize>,
-    payload_hex: Option<String>,
-    payload_hex_truncated: Option<bool>,
-    note: Option<String>,
+    pub(super) flow: &'static str,
+    pub(super) phase: &'a str,
+    pub(super) direction: &'a str,
+    pub(super) remote_addr: String,
+    pub(super) transport_mode: &'a str,
+    pub(super) protocol: Option<&'static str>,
+    pub(super) protocol_marker: Option<u8>,
+    pub(super) opcode: Option<u8>,
+    pub(super) opcode_name: Option<&'static str>,
+    pub(super) raw_len: Option<usize>,
+    pub(super) raw_hex: Option<String>,
+    pub(super) payload_len: Option<usize>,
+    pub(super) payload_hex: Option<String>,
+    pub(super) payload_hex_truncated: Option<bool>,
+    pub(super) note: Option<String>,
 }
 
 /// Cap on hex-encoded bytes emitted per packet, matching the eMuleBB diagnostic
@@ -285,16 +285,21 @@ pub(super) fn canonical_ed2k_recv_phase<'a>(
 }
 
 fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
-    let Ok(line) = serde_json::to_string(record) else {
-        return;
-    };
-    let Ok(mut guard) = ed2k_tcp_dump_file().lock() else {
-        return;
-    };
-    let Some(file) = guard.as_mut() else {
-        return;
-    };
-    let _ = writeln!(file, "{line}");
+    if let Ok(line) = serde_json::to_string(record) {
+        if let Ok(mut guard) = ed2k_tcp_dump_file().lock() {
+            if let Some(file) = guard.as_mut() {
+                let _ = writeln!(file, "{line}");
+            }
+        }
+    }
+
+    // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`
+    // `diag_event_v1` record from the SAME data (schema §3.1). The legacy
+    // `ed2k_packet_v1` line above is kept during migration. Both writes are
+    // already behind the `packet-diagnostics` feature (the only callers of this
+    // fn are the feature-gated send/recv/meta builders). The mapping itself lives
+    // in the sibling `diag_event` module to keep this file within budget.
+    super::diag_event::emit_ed2k_tcp_diag_event(record);
 }
 
 #[cfg(feature = "packet-diagnostics")]

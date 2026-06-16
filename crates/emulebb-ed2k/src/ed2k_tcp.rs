@@ -34,6 +34,7 @@ use emulebb_kad_proto::Ed2kHash;
 mod aich_salvage;
 mod buddy_link;
 mod codec;
+mod diag_event;
 mod download;
 mod dump;
 mod firewall_helper;
