@@ -208,14 +208,14 @@ impl ReaskService {
                     .push((SocketAddr::new(ip.into(), port), action));
             }
             let info = info_for(file_hash);
-            for ((ip, port), datagram) in set.due_datagrams(
+            for (dest, datagram) in set.due_datagrams(
                 now,
                 info.part_status.as_deref(),
                 info.complete_source_count,
                 self.our_udp_version,
                 self.public_ip.octets(),
             ) {
-                out.send.push((SocketAddr::new(ip.into(), port), datagram));
+                out.send.push((dest, datagram));
             }
         }
         out
@@ -266,6 +266,37 @@ mod tests {
         let src = ReaskSource::new(peer_v4(), file_hash(), 4, now)
             .with_obfuscation(PEER_HASH, true);
         svc.register_source(file_hash(), src);
+    }
+
+    #[test]
+    fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
+        use super::super::codec::{OP_REASKCALLBACKUDP, decode_reask_callback_udp};
+        use super::super::state::ReaskSource;
+
+        let now = Instant::now();
+        let mut svc = service();
+        // A firewalled LowID source (unreachable over direct client UDP) whose Kad
+        // buddy endpoint + id are known: the tick must originate an
+        // OP_REASKCALLBACKUDP to the BUDDY, not a direct ping to the source.
+        let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
+        let buddy_endpoint = (Ipv4Addr::new(203, 0, 113, 80), 5000);
+        let buddy_id = [0x99u8; 16];
+        let src = ReaskSource::new(source_endpoint, file_hash(), 4, now)
+            .with_buddy(true, Some(buddy_endpoint), Some(buddy_id));
+        svc.register_source(file_hash(), src);
+
+        let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
+            part_status: Some(vec![true, false]),
+            complete_source_count: 4,
+        });
+        assert_eq!(out.send.len(), 1);
+        let (dest, datagram) = &out.send[0];
+        assert_eq!(*dest, SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1));
+        assert_eq!(datagram[0], 0xC5); // OP_EMULEPROT, plaintext
+        assert_eq!(datagram[1], OP_REASKCALLBACKUDP);
+        let decoded = decode_reask_callback_udp(&datagram[2..], 4).unwrap();
+        assert_eq!(decoded.buddy_id.0, buddy_id);
+        assert_eq!(decoded.file_hash, file_hash());
     }
 
     #[test]

@@ -30,7 +30,11 @@ use emulebb_kad_dht::DhtNode;
 use emulebb_kad_proto::{Ed2kHash, NodeId};
 use tracing::trace;
 
+use emulebb_kad_proto::Ed2kHash as KadEd2kHash;
+
 use super::codec::{OP_REASKCALLBACKUDP, encode_reask_callback_udp};
+use super::outbound::build_reask_callback_udp_datagram;
+use super::state::ReaskSource;
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 
@@ -85,6 +89,37 @@ pub(crate) fn encode_reask_callback_tcp_relay(
     frame.push(OP_REASKCALLBACKTCP);
     frame.extend_from_slice(&body);
     frame
+}
+
+/// Downloader-origination of `OP_REASKCALLBACKUDP` (oracle
+/// `DownloadClient.cpp:1840-1862` `UDPReaskForDownload` LowID branch). When a
+/// queued source is a firewalled LowID client we cannot reach over direct client
+/// UDP, but we know its Kad buddy (`HasLowID() && GetBuddyIP() && GetBuddyPort()
+/// && HasValidBuddyID()`), build the buddy-relayed reask `[buddy_id][file_hash]
+/// [reask tail]` and target it at the source's **buddy** endpoint, which relays
+/// it on to the firewalled source as `OP_REASKCALLBACKTCP`.
+///
+/// Returns `(buddy_socket_addr, datagram)` when the source qualifies, else `None`
+/// (HighID, or buddy endpoint/id unknown — the caller then uses the direct ping /
+/// TCP path unchanged). The datagram is always **plaintext** (the buddy's Kad
+/// version is unknown — oracle sends it unencrypted, `SendPacket(..., false, ...)`);
+/// [`build_reask_callback_udp_datagram`] enforces this.
+#[must_use]
+pub(super) fn build_downloader_callback_origination(
+    source: &ReaskSource,
+    our_part_status: Option<&[bool]>,
+    complete_source_count: u16,
+    our_udp_version: u8,
+) -> Option<(SocketAddr, Vec<u8>)> {
+    let ((buddy_ip, buddy_port), buddy_id) = source.buddy_reask_target()?;
+    let datagram = build_reask_callback_udp_datagram(
+        &KadEd2kHash::from_bytes(buddy_id),
+        &source.file_hash,
+        our_part_status,
+        complete_source_count,
+        our_udp_version,
+    );
+    Some((SocketAddr::new(buddy_ip.into(), buddy_port), datagram))
 }
 
 /// Relay an inbound `OP_REASKCALLBACKUDP` to the firewalled client we serve as a
