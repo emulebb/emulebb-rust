@@ -17,8 +17,12 @@ use crate::{
     KadSourcePublishSnapshot, matches_restrictive_keyword_payload,
 };
 
+mod entry_store;
 mod size_tags;
 
+use entry_store::{
+    DedupEntry, TargetedEntry, TimedEntry, oldest_target_entry_index, purge_expired, upsert_entry,
+};
 use size_tags::{
     is_integer_tag_value, search_response, stock_first_file_size, stock_first_filename,
     stock_first_keyword_source_file_size, stock_notes_file_size_matches_request,
@@ -712,36 +716,6 @@ fn source_entry_id(publisher_id: NodeId) -> Ed2kHash {
     Ed2kHash::from_bytes(publisher_id.to_be_bytes())
 }
 
-fn purge_expired<T>(entries: &mut Vec<T>, ttl: Duration, now: DateTime<Utc>)
-where
-    T: TimedEntry,
-{
-    entries.retain(|entry| entry.observed_at() + ttl > now);
-}
-
-fn upsert_entry<T>(entries: &mut Vec<T>, capacity: usize, dedup_key: String, entry: T)
-where
-    T: TimedEntry + DedupEntry,
-{
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|candidate| candidate.dedup_key() == dedup_key)
-    {
-        *existing = entry;
-        return;
-    }
-
-    if entries.len() >= capacity
-        && let Some((oldest_index, _)) = entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, candidate)| candidate.observed_at())
-    {
-        entries.remove(oldest_index);
-    }
-    entries.push(entry);
-}
-
 fn upsert_source_entry(
     entries: &mut Vec<StoredSourcePublish>,
     per_file_capacity: usize,
@@ -821,15 +795,6 @@ fn upsert_notes_entry(
     entries.push(entry);
 }
 
-fn oldest_target_entry_index<T>(entries: &[T], target: NodeId) -> Option<usize>
-where
-    T: TargetedEntry,
-{
-    entries
-        .iter()
-        .position(|candidate| candidate.target() == target)
-}
-
 fn stock_source_publish_load(
     entries: &[StoredSourcePublish],
     target: NodeId,
@@ -900,18 +865,6 @@ fn notes_replacement_matches(
         candidate.target == target
             && (candidate.publisher_ip == publisher_ip || candidate.publisher_id == publisher_id)
     })
-}
-
-trait TimedEntry {
-    fn observed_at(&self) -> DateTime<Utc>;
-}
-
-trait DedupEntry {
-    fn dedup_key(&self) -> &str;
-}
-
-trait TargetedEntry {
-    fn target(&self) -> NodeId;
 }
 
 impl TimedEntry for StoredKeywordPublish {
