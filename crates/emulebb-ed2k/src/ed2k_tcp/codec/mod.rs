@@ -6,11 +6,18 @@ use flate2::read::ZlibDecoder;
 
 use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferState};
 
+mod aich;
 mod buddy;
 mod hashset;
 mod source_exchange;
 mod upload;
 
+pub(super) use aich::{
+    AichRecoveryAnswer, decode_aich_file_hash_answer,
+    decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
+    encode_aich_file_hash_answer, encode_aich_file_hash_request, encode_aich_recovery_answer,
+    encode_aich_recovery_failure_answer, encode_aich_recovery_request,
+};
 pub(in crate::ed2k_tcp) use buddy::{
     encode_buddy_ping, encode_buddy_pong, encode_kad_callback_relay,
 };
@@ -24,8 +31,8 @@ pub(super) use source_exchange::{
 const MAX_CLIENT_MSG_LEN: usize = 450;
 
 use super::{
-    Ed2kFileIdentifier, MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_AICHANSWER,
-    OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ASKSHAREDDENIEDANS,
+    Ed2kFileIdentifier, MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_AICHFILEHASHANS,
+    OP_AICHFILEHASHREQ, OP_ASKSHAREDDENIEDANS,
     OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEREQANSNOFIL, OP_FILESTATUS,
     OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER,
     OP_MULTIPACKETANSWER_EXT2, OP_PACKEDPROT, OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING,
@@ -354,88 +361,6 @@ pub(super) fn decode_preview_answer_payload(payload: &[u8]) -> Result<PreviewAns
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct AichRecoveryRequest {
-    pub(super) file_hash: Ed2kHash,
-    pub(super) part: u16,
-    pub(super) master_hash: [u8; 20],
-}
-
-/// Encode an OP_AICHREQUEST soliciting ICH block recovery for one corrupt part,
-/// mirroring `CUpDownClient::SendAICHRequest`:
-/// `<file hash 16><part u16 LE><master hash 20>`.
-pub(super) fn encode_aich_recovery_request(
-    file_hash: &Ed2kHash,
-    part: u16,
-    master_hash: [u8; 20],
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(16 + 2 + 20);
-    payload.extend_from_slice(&file_hash.0);
-    payload.extend_from_slice(&part.to_le_bytes());
-    payload.extend_from_slice(&master_hash);
-    encode_packet(OP_EMULEPROT, OP_AICHREQUEST, &payload)
-}
-
-pub(super) fn decode_aich_recovery_request_payload(payload: &[u8]) -> Result<AichRecoveryRequest> {
-    if payload.len() != 38 {
-        anyhow::bail!("invalid OP_AICHREQUEST payload size {}", payload.len());
-    }
-    Ok(AichRecoveryRequest {
-        file_hash: Ed2kHash(payload[..16].try_into().unwrap()),
-        part: u16::from_le_bytes(payload[16..18].try_into().unwrap()),
-        master_hash: payload[18..38].try_into().unwrap(),
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct AichRecoveryAnswer {
-    pub(super) file_hash: Ed2kHash,
-    pub(super) part: Option<u16>,
-    pub(super) master_hash: Option<[u8; 20]>,
-    pub(super) recovery_payload_len: usize,
-}
-
-pub(super) fn decode_aich_recovery_answer_payload(payload: &[u8]) -> Result<AichRecoveryAnswer> {
-    if payload.len() == 16 {
-        return Ok(AichRecoveryAnswer {
-            file_hash: Ed2kHash(payload[..16].try_into().unwrap()),
-            part: None,
-            master_hash: None,
-            recovery_payload_len: 0,
-        });
-    }
-    if payload.len() < 38 {
-        anyhow::bail!("short OP_AICHANSWER payload {}", payload.len());
-    }
-    Ok(AichRecoveryAnswer {
-        file_hash: Ed2kHash(payload[..16].try_into().unwrap()),
-        part: Some(u16::from_le_bytes(payload[16..18].try_into().unwrap())),
-        master_hash: Some(payload[18..38].try_into().unwrap()),
-        recovery_payload_len: payload.len() - 38,
-    })
-}
-
-pub(super) fn encode_aich_recovery_failure_answer(file_hash: &Ed2kHash) -> Vec<u8> {
-    encode_packet(OP_EMULEPROT, OP_AICHANSWER, &file_hash.0)
-}
-
-/// Encode a successful OP_AICHANSWER carrying real recovery data, mirroring
-/// `CUpDownClient::ProcessAICHRequest`'s success packet:
-/// `<file hash 16><part u16><master hash 20><recovery body>`.
-pub(super) fn encode_aich_recovery_answer(
-    file_hash: &Ed2kHash,
-    part: u16,
-    master_hash: [u8; 20],
-    recovery_body: &[u8],
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(16 + 2 + 20 + recovery_body.len());
-    payload.extend_from_slice(&file_hash.0);
-    payload.extend_from_slice(&part.to_le_bytes());
-    payload.extend_from_slice(&master_hash);
-    payload.extend_from_slice(recovery_body);
-    encode_packet(OP_EMULEPROT, OP_AICHANSWER, &payload)
-}
-
 pub(super) fn encode_accept_upload_req() -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ, &[])
 }
@@ -544,17 +469,6 @@ pub(super) fn encode_request_filename(
     payload.extend_from_slice(&file_hash.0);
     payload.extend_from_slice(&ext_info);
     encode_packet(OP_EDONKEYPROT, OP_REQUESTFILENAME, &payload)
-}
-
-pub(super) fn encode_aich_file_hash_request(file_hash: &Ed2kHash) -> Vec<u8> {
-    encode_packet(OP_EMULEPROT, OP_AICHFILEHASHREQ, &file_hash.0)
-}
-
-pub(super) fn encode_aich_file_hash_answer(file_hash: &Ed2kHash, aich_root: [u8; 20]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(36);
-    payload.extend_from_slice(&file_hash.0);
-    payload.extend_from_slice(&aich_root);
-    encode_packet(OP_EMULEPROT, OP_AICHFILEHASHANS, &payload)
 }
 
 pub(super) fn encode_set_req_file_id(file_hash: &Ed2kHash) -> Vec<u8> {
@@ -846,15 +760,5 @@ pub(super) fn encode_request_filename_answer(
         OP_EDONKEYPROT,
         OP_REQFILENAMEANSWER,
         &payload,
-    ))
-}
-
-pub(super) fn decode_aich_file_hash_answer(payload: &[u8]) -> Result<(Ed2kHash, [u8; 20])> {
-    if payload.len() < 36 {
-        anyhow::bail!("short OP_AICHFILEHASHANS payload {}", payload.len());
-    }
-    Ok((
-        Ed2kHash::from_bytes(payload[..16].try_into()?),
-        payload[16..36].try_into()?,
     ))
 }
