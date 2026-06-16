@@ -635,6 +635,10 @@ pub struct Ed2kNetworkConfig {
     pub kad_publish_contact_fanout: usize,
     pub kad_hello_intro_interval_secs: u64,
     pub kad_hello_intro_fanout: usize,
+    /// Whether the periodic routing-table maintenance loop runs (oracle
+    /// `CRoutingZone` OnBigTimer/OnSmallTimer: bucket refresh + dead-contact
+    /// expiry + stale-contact HELLO re-probe). Default on.
+    pub kad_routing_maintenance_enabled: bool,
     /// Whether the requester-side Kad UDP firewall self-check is driven.
     pub kad_udp_firewall_check_enabled: bool,
     /// Seconds between Kad UDP firewall self-check rounds (gentle cadence).

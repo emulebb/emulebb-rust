@@ -91,6 +91,7 @@ mod ed2k_sources;
 mod kad_buddy;
 mod kad_hello;
 mod kad_passive_replay;
+mod kad_routing_maintenance;
 mod kad_snoop_entry;
 mod local_search_response;
 mod preferences;
@@ -759,6 +760,20 @@ impl EmulebbCore {
                 network.clone(),
                 Arc::clone(&shutdown),
             )));
+        }
+        // Periodic routing-table maintenance (oracle CRoutingZone timers): bucket
+        // refresh (OnBigTimer -> RandomLookup) + dead-contact expiry and
+        // stale-contact HELLO re-probe (OnSmallTimer).
+        if network.kad_routing_maintenance_enabled {
+            tasks.push(tokio::spawn(
+                kad_routing_maintenance::run_kad_routing_maintenance_loop(
+                    dht.clone(),
+                    Arc::clone(&ed2k_listener),
+                    Arc::clone(&server_state),
+                    Arc::clone(&kad_firewall),
+                    Arc::clone(&shutdown),
+                ),
+            ));
         }
         if let (Some(kad_local_store), Some(kad_snoop_queue)) = (
             self.kad_local_store.as_ref().map(Arc::clone),
@@ -5110,6 +5125,7 @@ mod tests {
             kad_publish_contact_fanout: 4,
             kad_hello_intro_interval_secs: 300,
             kad_hello_intro_fanout: 2,
+            kad_routing_maintenance_enabled: true,
             kad_udp_firewall_check_enabled: true,
             kad_udp_firewall_check_interval_secs: 600,
             kad_tcp_firewall_check_enabled: true,

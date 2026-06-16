@@ -98,6 +98,9 @@ pub struct KadListenerConfig {
     pub tcp_firewall_check_interval_secs: u64,
     /// Kad LowID buddy/firewalled-callback subsystem (default on).
     pub buddy_enabled: bool,
+    /// Periodic routing-table maintenance loop (bucket refresh + dead-contact
+    /// expiry + stale-contact re-probe). Default on.
+    pub routing_maintenance_enabled: bool,
     pub snoop_queue_dedup_window_secs: u64,
     pub snoop_queue_general_max_queries_per_600s: u32,
     pub snoop_queue_general_drain_cooldown_secs: u64,
@@ -157,6 +160,7 @@ impl Default for KadListenerConfig {
             tcp_firewall_check_enabled: true,
             tcp_firewall_check_interval_secs: 600,
             buddy_enabled: true,
+            routing_maintenance_enabled: true,
             snoop_queue_dedup_window_secs: 28_800,
             snoop_queue_general_max_queries_per_600s: 24,
             snoop_queue_general_drain_cooldown_secs: 900,
@@ -234,6 +238,7 @@ impl DaemonConfig {
             kad_tcp_firewall_check_enabled: self.kad.tcp_firewall_check_enabled,
             kad_tcp_firewall_check_interval_secs: self.kad.tcp_firewall_check_interval_secs.max(60),
             kad_buddy_enabled: self.kad.buddy_enabled,
+            kad_routing_maintenance_enabled: self.kad.routing_maintenance_enabled,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
             vpn_guard: VpnGuardConfig {

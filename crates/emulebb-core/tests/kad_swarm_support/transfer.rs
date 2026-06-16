@@ -130,6 +130,7 @@ fn test_network_config(
         kad_tcp_firewall_check_enabled: false,
         kad_tcp_firewall_check_interval_secs: 600,
         kad_buddy_enabled: false,
+        kad_routing_maintenance_enabled: false,
         nat_config: NatConfig {
             enabled: false,
             ..NatConfig::default()
