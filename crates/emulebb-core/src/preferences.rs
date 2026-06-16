@@ -11,6 +11,7 @@
 
 use anyhow::{Result, ensure};
 use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
+use emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig;
 
 use crate::{Preferences, PreferencesUpdate};
 
@@ -158,6 +159,25 @@ pub(crate) fn ed2k_upload_queue_policy_from_preferences(
 /// runtime's shared download throttle.
 pub(crate) fn ed2k_download_limit_bytes_per_sec_from_preferences(preferences: &Preferences) -> u64 {
     u64::from(preferences.download_limit_ki_bps) * 1024
+}
+
+/// The shared download-coordinator config derived from the live REST
+/// preferences (`maxConnections` / `maxConnectionsPerFiveSeconds` /
+/// `maxSourcesPerFile`), mirroring the eMule controls
+/// `GetMaxConnections` / `GetMaxConperFive` / `GetConfiguredMaxSourcesPerFile`.
+/// Applied at startup and on every preferences update, like the download limit.
+/// The connection window and reask pacing interval keep their master-derived
+/// defaults (5s window, ~10s reask floor) since the REST surface does not expose
+/// them.
+pub(crate) fn ed2k_download_coordinator_config_from_preferences(
+    preferences: &Preferences,
+) -> Ed2kDownloadCoordinatorConfig {
+    Ed2kDownloadCoordinatorConfig {
+        max_connections: preferences.max_connections as usize,
+        max_connections_per_window: preferences.max_connections_per_five_seconds as usize,
+        max_sources_per_file: preferences.max_sources_per_file as usize,
+        ..Ed2kDownloadCoordinatorConfig::default()
+    }
 }
 
 pub(crate) fn initial_ed2k_upload_queue_policy(

@@ -49,6 +49,19 @@ impl DownloadSourceRegistry {
         self.peers.values().map(Vec::len).sum()
     }
 
+    /// Number of distinct source candidates registered for `file_hash` across
+    /// all peers. This is the per-file source count the download coordinator
+    /// checks against the soft/UDP per-file caps (eMule
+    /// `CPartFile::GetSourceCount`). The same per-file source state A4AF-lite
+    /// will later read to bias selection across files.
+    pub(crate) fn candidate_count_for_file(&self, file_hash: &str) -> usize {
+        self.peers
+            .values()
+            .flat_map(|candidates| candidates.iter())
+            .filter(|candidate| candidate.file_hash == file_hash)
+            .count()
+    }
+
     pub(crate) fn a4af_candidate_count(&self) -> usize {
         self.peers
             .values()

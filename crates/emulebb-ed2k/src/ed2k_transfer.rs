@@ -31,6 +31,7 @@ mod block_bitmap;
 mod callback;
 mod catalog;
 mod download_activity;
+mod download_coordinator;
 mod download_pick;
 mod download_throttle;
 mod hashset;
@@ -50,6 +51,10 @@ mod upload_queue;
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+use download_coordinator::{
+    DEFAULT_CONNECTION_WINDOW, DEFAULT_REASK_PACING_INTERVAL, Ed2kDownloadCoordinator,
+};
+pub use download_coordinator::Ed2kDownloadCoordinatorConfig;
 use download_throttle::Ed2kDownloadThrottle;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
 #[cfg(test)]
@@ -110,6 +115,16 @@ pub struct Ed2kTransferRuntime {
     /// `CDownloadQueue::Process` `downspeed` budget). The symmetric counterpart
     /// to the upload-side `reserve_upload_payload` limiter. Unlimited by default.
     download_throttle: Arc<Mutex<Ed2kDownloadThrottle>>,
+    /// Shared cross-transfer download coordinator enforcing the global controls
+    /// the per-transfer task model lacks: the connection budget (concurrent cap
+    /// + new-connection per-window rate, eMule `CListenSocket::TooManySockets`),
+    /// the per-file soft/UDP source caps (eMule
+    /// `GetMaxSourcePerFileSoft`/`GetMaxSourcePerFileUDP`), and global UDP reask
+    /// round-robin pacing (eMule `CDownloadQueue::Process` `m_udcounter`). One
+    /// per runtime, consulted by the per-transfer driver and the reask loop. A
+    /// `std::sync::Mutex` because every decision is instant (no await held), so
+    /// the download closure / reask path can consult it without `.await`.
+    download_coordinator: Arc<StdMutex<Ed2kDownloadCoordinator>>,
     next_upload_connection_id: AtomicU64,
     /// Monotonic payload bytes received/sent since the runtime started, for the
     /// REST `sessionDownloadedBytes`/`sessionUploadedBytes` stats (oracle
@@ -136,6 +151,7 @@ impl Ed2kTransferRuntime {
             metadata,
             Ed2kUploadQueueConfig::default(),
             0,
+            Ed2kDownloadCoordinatorConfig::default(),
         )
     }
 
@@ -150,6 +166,7 @@ impl Ed2kTransferRuntime {
             metadata,
             upload_queue_config_from_policy(&config.upload_queue),
             config.download_limit_bytes_per_sec,
+            download_coordinator_config_from_policy(config),
         )
     }
 
@@ -168,6 +185,7 @@ impl Ed2kTransferRuntime {
             metadata,
             upload_queue_config,
             0,
+            Ed2kDownloadCoordinatorConfig::default(),
         )
     }
 
@@ -176,6 +194,7 @@ impl Ed2kTransferRuntime {
         metadata: MetadataStore,
         upload_queue_config: Ed2kUploadQueueConfig,
         download_limit_bytes_per_sec: u64,
+        coordinator_config: Ed2kDownloadCoordinatorConfig,
     ) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
@@ -197,6 +216,9 @@ impl Ed2kTransferRuntime {
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,
+            ))),
+            download_coordinator: Arc::new(StdMutex::new(Ed2kDownloadCoordinator::new(
+                coordinator_config,
             ))),
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
@@ -245,6 +267,65 @@ impl Ed2kTransferRuntime {
         self.download_throttle.lock().await.limit_bytes_per_sec()
     }
 
+    /// Try to claim a global connection budget slot for one new outgoing source
+    /// connection (eMule `CListenSocket::TooManySockets` inverted). Returns
+    /// `true` and reserves the slot when both the concurrent cap and the
+    /// per-window new-connection rate allow it. A `false` means the caller must
+    /// leave the source for the next cycle (never drop it).
+    pub fn try_acquire_source_connection(&self) -> bool {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .try_acquire_connection(Instant::now())
+    }
+
+    /// Release a source connection budget slot when an outgoing peer connection
+    /// closes (the counterpart to [`try_acquire_source_connection`]).
+    pub fn release_source_connection(&self) {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .release_connection();
+    }
+
+    /// Whether one more source may be engaged over TCP for a file already
+    /// holding `current_source_count` sources (eMule `GetMaxSourcePerFileSoft`).
+    pub fn can_engage_file_source(&self, current_source_count: usize) -> bool {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .can_engage_source(current_source_count)
+    }
+
+    /// Whether a file holding `current_source_count` sources may issue a UDP
+    /// source reask (eMule `GetMaxSourcePerFileUDP`).
+    pub fn can_reask_file_via_udp(&self, current_source_count: usize) -> bool {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .can_reask_via_udp(current_source_count)
+    }
+
+    /// Round-robin the next file index due for a global UDP source reask,
+    /// enforcing the minimum global inter-reask interval (eMule
+    /// `CDownloadQueue::Process` `m_udcounter` rotation + `SendNextUDPPacket`).
+    /// `None` means the pacing floor has not elapsed or nothing is eligible.
+    pub fn next_reask_file_slot(&self, file_count: usize) -> Option<usize> {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .next_reask_slot(file_count, Instant::now())
+    }
+
+    /// Replace the active download coordinator configuration (live preference
+    /// change). Counters are preserved; the new caps apply on the next decision.
+    pub fn apply_download_coordinator_config(&self, config: Ed2kDownloadCoordinatorConfig) {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .set_config(config);
+    }
+
     pub(crate) async fn should_request_source_exchange(
         &self,
         file_hash: &str,
@@ -265,6 +346,21 @@ impl Ed2kTransferRuntime {
             requests.insert(key, now);
         }
         allowed
+    }
+}
+
+/// Build the shared download-coordinator config from the daemon/core
+/// `Ed2kConfig`, mirroring the eMule defaults
+/// (`GetMaxConnections`/`GetMaxConperFive`/`GetDefaultMaxSourcesPerFile`).
+pub fn download_coordinator_config_from_policy(
+    config: &Ed2kConfig,
+) -> Ed2kDownloadCoordinatorConfig {
+    Ed2kDownloadCoordinatorConfig {
+        max_connections: config.max_concurrent_downloads,
+        max_connections_per_window: config.max_new_connections_per_five_seconds,
+        connection_window: DEFAULT_CONNECTION_WINDOW,
+        max_sources_per_file: config.max_sources_per_file,
+        reask_pacing_interval: DEFAULT_REASK_PACING_INTERVAL,
     }
 }
 

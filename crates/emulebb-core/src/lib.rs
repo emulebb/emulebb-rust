@@ -152,6 +152,7 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 use preferences::{
     apply_preferences_update, default_preferences,
+    ed2k_download_coordinator_config_from_preferences,
     ed2k_download_limit_bytes_per_sec_from_preferences, ed2k_upload_queue_policy_from_preferences,
     initial_ed2k_upload_queue_policy, preferences_update_is_empty,
 };
@@ -354,6 +355,13 @@ impl EmulebbCore {
                 },
             )?
         };
+        // Drive the shared download coordinator from the live REST preferences
+        // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
+        // like the download throttle, so REST preference changes apply to the
+        // global connection budget + per-file source caps.
+        ed2k_transfers.apply_download_coordinator_config(
+            ed2k_download_coordinator_config_from_preferences(&core_state.preferences),
+        );
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);
             match metadata_store
@@ -478,6 +486,13 @@ impl EmulebbCore {
                 &preferences,
             ))
             .await;
+        // Apply the global connection budget + per-file source caps live, like
+        // the download limit (eMule GetMaxConnections / GetMaxConperFive /
+        // GetConfiguredMaxSourcesPerFile preference changes take effect at once).
+        self.ed2k_transfers
+            .apply_download_coordinator_config(
+                ed2k_download_coordinator_config_from_preferences(&preferences),
+            );
         Ok(preferences)
     }
 
@@ -2718,8 +2733,20 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         let mut acquired = Vec::new();
         let mut deferred = 0usize;
+        // Per-file source cap (eMule GetMaxSourcePerFileSoft > GetSourceCount):
+        // a file stops engaging new sources past its soft cap. The coordinator
+        // (on the transfer runtime) owns the cap; the per-file source count
+        // comes from the registry.
         for source in sources {
             let endpoint = source_endpoint_key(source);
+            let file_source_count = state
+                .download_source_registry
+                .candidate_count_for_file(file_hash);
+            if !self.ed2k_transfers.can_engage_file_source(file_source_count) {
+                state.download_source_registry.release_peer(source);
+                deferred = deferred.saturating_add(1);
+                continue;
+            }
             let registry_lease = state
                 .download_source_registry
                 .lease_best_for_file(source, file_hash);
@@ -4613,6 +4640,10 @@ where
         );
 
         while let Some(joined) = active_downloads.join_next().await {
+            // Release the global connection budget slot this finished download
+            // held (acquired in spawn_pending_ed2k_direct_downloads) so the next
+            // source can claim it.
+            transfer_runtime.release_source_connection();
             let (peer_addr, source, result) =
                 joined.context("ED2K direct download worker panicked")?;
             match result {
@@ -4628,7 +4659,10 @@ where
                     );
                     if manifest.completed {
                         active_downloads.abort_all();
-                        while active_downloads.join_next().await.is_some() {}
+                        // Release the budget slot held by each aborted download.
+                        while active_downloads.join_next().await.is_some() {
+                            transfer_runtime.release_source_connection();
+                        }
                         return Ok(DirectDownloadOutcome {
                             completed: true,
                             accepted_incomplete_peers,
@@ -4743,6 +4777,20 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         let Some(source) = pending_sources.pop_front() else {
             break;
         };
+        // Global connection budget (eMule CListenSocket::TooManySockets): the
+        // shared coordinator caps concurrent outgoing source connections and
+        // the new-connection per-5s rate across ALL transfers. When no slot is
+        // available, leave the source pending (push it back) for the next cycle
+        // rather than dropping it, and stop spawning this round.
+        if !context.transfer_runtime.try_acquire_source_connection() {
+            pending_sources.push_front(source);
+            tracing::debug!(
+                "ED2K direct download deferred by connection budget file_hash={} active={}",
+                context.file_hash_hex,
+                active_downloads.len()
+            );
+            break;
+        }
         let transfer_runtime = Arc::clone(context.transfer_runtime);
         let secure_ident = Arc::clone(context.secure_ident);
         let download_peer = context.download_peer.clone();

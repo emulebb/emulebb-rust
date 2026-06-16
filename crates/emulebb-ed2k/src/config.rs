@@ -21,8 +21,19 @@ pub struct Ed2kConfig {
     pub keepalive_secs: u64,
     /// Maximum lifetime of one ED2K server session before rotating endpoints.
     pub session_rotation_secs: u64,
-    /// Maximum number of ED2K download jobs allowed to run at once.
+    /// Overall cap on concurrent outgoing source connections across all
+    /// transfers, consulted by the shared download coordinator before opening a
+    /// new peer connection (eMule `thePrefs.GetMaxConnections()`, default 500
+    /// from `GetRecommendedMaxConnections`). 0 disables the concurrent cap.
+    /// This is the wired meaning of the former dead `max_concurrent_downloads`.
     pub max_concurrent_downloads: usize,
+    /// Maximum new outgoing source connections admitted per 5s window (eMule
+    /// `thePrefs.GetMaxConperFive()`, default 50). 0 disables the rate limiter.
+    pub max_new_connections_per_five_seconds: usize,
+    /// Configured `maxSources` per file; the soft (TCP) and UDP per-file source
+    /// caps derive from this like eMule (`GetDefaultMaxSourcesPerFile` = 600,
+    /// soft = `min(*9/10, 1000)`, UDP = `min(*3/4, 100)`). 0 disables the cap.
+    pub max_sources_per_file: usize,
     /// Maximum number of direct ED2K peers one download may keep in flight.
     pub max_parallel_download_peers: usize,
     /// Maximum number of one-shot ED2K servers to probe for a keyword search.
@@ -92,7 +103,11 @@ impl Default for Ed2kConfig {
             reconnect_interval_secs: 30,
             keepalive_secs: 60,
             session_rotation_secs: 0,
-            max_concurrent_downloads: 1,
+            // eMule GetRecommendedMaxConnections default ceiling (500) /
+            // GetDefaultMaxConperFive (50) / GetDefaultMaxSourcesPerFile (600).
+            max_concurrent_downloads: 500,
+            max_new_connections_per_five_seconds: 50,
+            max_sources_per_file: 600,
             max_parallel_download_peers: 2,
             keyword_server_attempt_budget: 3,
             exact_hash_keyword_server_attempt_budget: 4,
@@ -130,7 +145,12 @@ mod tests {
     fn default_ed2k_config_limits_active_download_fanout() {
         let config = Ed2kConfig::default();
 
-        assert_eq!(config.max_concurrent_downloads, 1);
+        // Global download coordinator caps default to the eMule master values:
+        // GetRecommendedMaxConnections (500), GetDefaultMaxConperFive (50), and
+        // GetDefaultMaxSourcesPerFile (600).
+        assert_eq!(config.max_concurrent_downloads, 500);
+        assert_eq!(config.max_new_connections_per_five_seconds, 50);
+        assert_eq!(config.max_sources_per_file, 600);
         assert_eq!(config.max_parallel_download_peers, 2);
         assert_eq!(config.keyword_server_attempt_budget, 3);
         assert_eq!(config.exact_hash_keyword_server_attempt_budget, 4);
