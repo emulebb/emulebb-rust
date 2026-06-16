@@ -142,6 +142,12 @@ pub enum Ed2kPeerDownloadOutcome {
     /// socket onto the UDP reask loop (eMuleBB `QueuedDetached`); the driver must not
     /// reconnect (the reask loop keeps the slot warm + re-engages on UDP failure).
     QueuedDetachedForUdpReask,
+    /// The peer reported No Needed Parts for this file (eMuleBB `OP_OUTOFPARTREQS`
+    /// / `DS_NONEEDEDPARTS`): we already hold every part it offers, or it lacks the
+    /// parts we still need. The driver runs the A4AF-lite NNP swap
+    /// (`CUpDownClient::SwapToAnotherFile`): if the source serves another wanted
+    /// file in the registry it is swapped to that file instead of being dropped.
+    NoNeededParts,
 }
 
 pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
@@ -817,7 +823,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "out_of_part_requests",
                         format!("file_hash={file_hash_hex}"),
                     );
-                    return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                    // No Needed Parts (eMuleBB DS_NONEEDEDPARTS): the driver may swap
+                    // this source to another wanted file it serves (A4AF-lite
+                    // SwapToAnotherFile) rather than drop it.
+                    return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_CLIENT_ID) => {
                     let change = decode_client_id_change_payload(&packet.payload)?;

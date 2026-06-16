@@ -339,6 +339,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         Ed2kPeerDownloadOutcome::Completed => break Ok(()),
                         Ed2kPeerDownloadOutcome::AcceptedButIncomplete => break Ok(()),
                         Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask => break Ok(()),
+                        // Inbound callback downloads have no cross-transfer driver to
+                        // run the A4AF-lite swap; treat NNP like accepted-incomplete.
+                        Ed2kPeerDownloadOutcome::NoNeededParts => break Ok(()),
                     }
                 }
             }

@@ -153,6 +153,12 @@ pub async fn download_file_from_peer(
                 "queued_detached_udp_reask",
                 format!("file_hash={file_hash_hex}"),
             ),
+            Ok(Ed2kPeerDownloadOutcome::NoNeededParts) => dump_ed2k_tcp_download_meta(
+                peer_addr,
+                Some(transport.mode),
+                "no_needed_parts",
+                format!("file_hash={file_hash_hex}"),
+            ),
             Err(error) => dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport.mode),
