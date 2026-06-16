@@ -180,24 +180,41 @@ pub(crate) async fn run_ed2k_reask_reengage(
         let Some(event) = events.recv().await else {
             break;
         };
-        match event {
-            ReaskEvent::SourceReleased { endpoint } => {
-                // The reask loop dropped a detached source: free the lease it kept
-                // (active_download_peer_endpoints + the registry) so the next
-                // download cycle — or the SourceReady that follows — can re-acquire
-                // and reconnect this endpoint over TCP. Without this the endpoint
-                // stays leased forever and acquire_direct_download_source_leases
-                // defers it, leaking the lease and killing re-engage.
-                core.release_direct_download_source_leases(&[endpoint]).await;
-            }
-            ReaskEvent::SourceReady { file_hash } => {
-                let hash = file_hash.to_string();
-                let Some(transfer) = core.transfer(&hash).await else {
-                    continue;
-                };
-                if transfer.state == "downloading" {
-                    core.queue_ed2k_download_attempt(transfer);
-                }
+        // Isolate each event: a transient panic while handling one event must not
+        // tear down the whole consumer, which would permanently stop source-lease
+        // releases (leaking leases and killing re-engage) (FIX B4a). Handling runs
+        // in a spawned task we await, so a panic surfaces as a JoinError we log and
+        // skip, keeping the loop alive.
+        let handler_core = core.clone();
+        let handle = tokio::spawn(handle_reask_event(handler_core, event));
+        if let Err(join_error) = handle.await {
+            tracing::warn!(
+                "ED2K reask re-engage event handler panicked; continuing: {join_error}"
+            );
+        }
+    }
+}
+
+/// Handle a single reask re-engage event. Isolated so a panic here cannot tear
+/// down [`run_ed2k_reask_reengage`].
+async fn handle_reask_event(core: EmulebbCore, event: ReaskEvent) {
+    match event {
+        ReaskEvent::SourceReleased { endpoint } => {
+            // The reask loop dropped a detached source: free the lease it kept
+            // (active_download_peer_endpoints + the registry) so the next
+            // download cycle — or the SourceReady that follows — can re-acquire
+            // and reconnect this endpoint over TCP. Without this the endpoint
+            // stays leased forever and acquire_direct_download_source_leases
+            // defers it, leaking the lease and killing re-engage.
+            core.release_direct_download_source_leases(&[endpoint]).await;
+        }
+        ReaskEvent::SourceReady { file_hash } => {
+            let hash = file_hash.to_string();
+            let Some(transfer) = core.transfer(&hash).await else {
+                return;
+            };
+            if transfer.state == "downloading" {
+                core.queue_ed2k_download_attempt(transfer);
             }
         }
     }
