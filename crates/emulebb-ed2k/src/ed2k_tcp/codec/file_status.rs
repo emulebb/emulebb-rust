@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::ed2k_transfer::ED2K_PART_SIZE;
+use crate::ed2k_transfer::ed2k_part_count;
 
 use super::super::{OP_EDONKEYPROT, OP_FILESTATUS};
 use super::encode_packet;
@@ -57,8 +57,10 @@ pub(in crate::ed2k_tcp) fn validate_file_status_part_count(
 }
 
 fn expected_file_status_part_count(file_size: u64) -> u16 {
-    let part_count = file_size.div_ceil(ED2K_PART_SIZE);
-    u16::try_from(part_count).unwrap_or(u16::MAX)
+    // OP_FILESTATUS carries eMule's `m_iED2KPartCount` (size / PARTSIZE + 1),
+    // NOT the data-part count, so a real eMule peer's status at an exact
+    // PARTSIZE multiple has one more bit than `div_ceil` would expect.
+    ed2k_part_count(file_size)
 }
 
 /// Encode a standalone OP_FILESTATUS packet from a file hash and a pre-built

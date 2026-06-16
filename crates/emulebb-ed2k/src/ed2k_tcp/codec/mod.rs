@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use flate2::read::ZlibDecoder;
 
-use crate::ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferState};
+use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, ed2k_part_count};
 
 mod aich;
 mod buddy;
@@ -355,21 +355,26 @@ pub(super) fn encode_start_upload_req(file_hash: &Ed2kHash) -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_STARTUPLOADREQ, &file_hash.0)
 }
 
-pub(super) fn ed2k_file_part_count(file_size: u64) -> u16 {
-    if file_size == 0 {
-        return 0;
-    }
-    u16::try_from(file_size.div_ceil(ED2K_PART_SIZE)).unwrap_or(u16::MAX)
-}
-
+/// Encode the OP_REQUESTFILENAME / multipacket ext-info: the embedded
+/// `CPartFile::WritePartStatus` partstatus (u16 ED2K part count + one
+/// `IsCompleteBD(uPart)` bit per ED2K part, LSB-first) followed by the
+/// CompleteSourcesCount u16 (here always 0). The ED2K part count
+/// ([`crate::ed2k_transfer::ed2k_part_count`]) is one more than the data-part
+/// count at an exact PARTSIZE multiple; that trailing EOF slice is always
+/// complete, so it is marked `true`.
 pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) -> Vec<u8> {
-    let piece_count = u16::try_from(manifest.pieces.len()).unwrap_or(u16::MAX);
-    let bitfield_len = usize::from(piece_count).div_ceil(8);
+    let ed2k_part_count = ed2k_part_count(manifest.file_size);
+    let data_part_count = manifest.pieces.len();
+    let bitfield_len = usize::from(ed2k_part_count).div_ceil(8);
     let mut payload = Vec::with_capacity(2 + bitfield_len + 2);
-    payload.extend_from_slice(&piece_count.to_le_bytes());
+    payload.extend_from_slice(&ed2k_part_count.to_le_bytes());
     let mut current_byte = 0u8;
-    for (index, piece) in manifest.pieces.iter().enumerate() {
-        if piece.state == Ed2kTransferState::Verified {
+    for index in 0..usize::from(ed2k_part_count) {
+        // Data parts follow their verified state; the trailing exact-multiple
+        // EOF slice (index >= data_part_count) is always complete.
+        let complete = index >= data_part_count
+            || manifest.pieces[index].state == Ed2kTransferState::Verified;
+        if complete {
             current_byte |= 1 << (index % 8);
         }
         if index % 8 == 7 {
@@ -377,7 +382,7 @@ pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) ->
             current_byte = 0;
         }
     }
-    if piece_count % 8 != 0 {
+    if ed2k_part_count % 8 != 0 {
         payload.push(current_byte);
     }
     payload.extend_from_slice(&0u16.to_le_bytes());
@@ -389,7 +394,9 @@ pub(super) fn skip_request_filename_ext_info(payload: &[u8], file_size: u64) -> 
         anyhow::bail!("short OP_REQUESTFILENAME ext-info payload");
     }
     let part_count = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
-    let expected_parts = usize::from(ed2k_file_part_count(file_size));
+    // ext-info partstatus carries m_iED2KPartCount (size/PARTSIZE+1), not the
+    // data-part count.
+    let expected_parts = usize::from(ed2k_part_count(file_size));
     let bitfield_len = part_count.div_ceil(8);
     let expected_len = 2 + bitfield_len + 2;
     if payload.len() < expected_len {

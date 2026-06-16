@@ -102,6 +102,28 @@ fn file_status_validates_stock_part_count() {
 }
 
 #[test]
+fn file_status_part_count_uses_ed2k_count_at_exact_partsize_multiple() {
+    // eMule's OP_FILESTATUS carries `m_iED2KPartCount` = size / PARTSIZE + 1
+    // (KnownFile.cpp:769). At an exact PARTSIZE multiple the ED2K part count is
+    // one MORE than the data-part count, so a real eMule peer's status for a
+    // 2*PARTSIZE file has 3 bits. Validate must ACCEPT that 3 and REJECT the
+    // data-part count 2 that `div_ceil` would have produced.
+    let exact_multiple = ED2K_PART_SIZE * 2;
+    validate_file_status_part_count(3, exact_multiple).unwrap();
+    validate_file_status_part_count(0, exact_multiple).unwrap();
+    assert!(validate_file_status_part_count(2, exact_multiple).is_err());
+
+    // A non-multiple size: data-part and ED2K-part counts coincide, so the old
+    // div_ceil and the new helper still agree.
+    let non_multiple = ED2K_PART_SIZE * 2 + 1;
+    validate_file_status_part_count(3, non_multiple).unwrap();
+    assert!(validate_file_status_part_count(2, non_multiple).is_err());
+
+    // A sub-PARTSIZE file: 1 data part, 1 ED2K part (the table's first row).
+    validate_file_status_part_count(1, ED2K_PART_SIZE - 1).unwrap();
+}
+
+#[test]
 fn exact_file_hash_payload_rejects_stock_exact_context_trailing_bytes() {
     let file_hash = Ed2kHash([0x51; 16]);
     let mut payload = file_hash.0.to_vec();

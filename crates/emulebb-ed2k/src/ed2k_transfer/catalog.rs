@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::{HashType, PopularHash};
 use emulebb_kad_proto::Ed2kHash;
 
-use super::{ED2K_PART_SIZE, Ed2kResumeManifest};
+use super::{ED2K_PART_SIZE, Ed2kResumeManifest, ed2k_part_count};
 /// Shared ED2K advertised file catalog used by the long-lived server session.
 pub type Ed2kSharedCatalog = Arc<RwLock<Vec<Ed2kSharedEntry>>>;
 
@@ -33,7 +33,9 @@ pub struct Ed2kSharedEntry {
     #[serde(default)]
     pub aich_root: Option<String>,
     /// Per-ED2K-part availability for an in-progress download ("share while
-    /// downloading"). One entry per ED2K part (`ceil(file_size / PARTSIZE)`),
+    /// downloading"). One entry per ED2K part (`ed2k_part_count(file_size)` =
+    /// `size / PARTSIZE + 1`, i.e. eMule `m_iED2KPartCount`, one more than the
+    /// data-part count at exact PARTSIZE multiples),
     /// `true` when that part is fully verified and safe to serve. For a fully
     /// verified file this is empty: the entry serves the whole file and the
     /// part-status answer collapses to the master "complete" sentinel
@@ -129,18 +131,32 @@ impl Ed2kSharedEntry {
     }
 }
 
-/// Derive the per-ED2K-part complete bitmap from verified byte ranges. A part is
-/// complete only when its whole `[part_start, part_end)` byte span lies inside a
-/// single verified range, mirroring `CPartFile::IsCompleteBD(uPart)` (the whole
-/// part is gap-free). The trailing part may be shorter than `PARTSIZE`.
+/// Derive the per-ED2K-part complete bitmap from verified byte ranges, one bit
+/// per `CKnownFile::m_iED2KPartCount` part exactly as
+/// `CPartFile::WritePartStatus` iterates `0..GetED2KPartCount()` and writes
+/// `IsCompleteBD(uPart)`. The vector length is therefore [`ed2k_part_count`],
+/// which is one MORE than the data-part count at exact PARTSIZE multiples.
+///
+/// For a normal part the whole `[part_start, part_end)` byte span must lie
+/// inside a single verified range (`IsCompleteBD(uPart)` is gap-free over the
+/// part). The trailing extra part at an exact multiple has `part_start ==
+/// file_size` (EOF): `IsCompleteBD` clamps `end` to `file_size - 1`, yielding
+/// `start > end`, so its gap/buffer scan finds nothing and returns `true`. We
+/// mirror that by treating any zero-length (`part_start >= file_size`) part as
+/// complete.
 fn complete_parts_from_ranges(file_size: u64, ranges: &[Ed2kSharedRange]) -> Vec<bool> {
     if file_size == 0 {
         return Vec::new();
     }
-    let part_count = file_size.div_ceil(ED2K_PART_SIZE);
+    let part_count = u64::from(ed2k_part_count(file_size));
     (0..part_count)
         .map(|part| {
             let part_start = part * ED2K_PART_SIZE;
+            if part_start >= file_size {
+                // Trailing EOF slice at an exact PARTSIZE multiple: zero length,
+                // always complete (eMule `IsCompleteBD` start > end -> true).
+                return true;
+            }
             let part_end = (part_start + ED2K_PART_SIZE).min(file_size);
             ranges
                 .iter()

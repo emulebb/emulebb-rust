@@ -114,6 +114,22 @@ impl Ed2kConnectionBudgetDenyReason {
 
 /// Canonical ED2K part size used by eMule-compatible file hashing.
 pub const ED2K_PART_SIZE: u64 = 9_728_000;
+
+/// Part count used by OP_FILESTATUS / the OP_REQUESTFILENAME ext-info
+/// partstatus, i.e. eMule's `CKnownFile::m_iED2KPartCount`. This is
+/// `size / PARTSIZE + 1` for non-empty files (KnownFile.cpp:769), one MORE
+/// than the data-part count at exact PARTSIZE multiples: the trailing extra
+/// part is the zero-length EOF slice eMule always treats complete. Empty files
+/// map to 0 (the complete-file sentinel domain). NOTE: this is NOT the data /
+/// MD4-hashing part count (`size.div_ceil(PARTSIZE)`); use `div_ceil` for piece
+/// geometry and hashing, and this for every wire partstatus count/length.
+#[must_use]
+pub fn ed2k_part_count(file_size: u64) -> u16 {
+    if file_size == 0 {
+        return 0;
+    }
+    u16::try_from(file_size / ED2K_PART_SIZE + 1).unwrap_or(u16::MAX)
+}
 /// Canonical eMule upload block size used inside one ED2K part request.
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
 const PAYLOAD_FILE_NAME: &str = "pieces.bin";
