@@ -6,7 +6,9 @@ use std::{
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime};
+use crate::ed2k_transfer::{
+    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState,
+};
 
 use super::super::{
     DecodedEmuleInfoProfile, Ed2kFileIdentifier, Ed2kHelloIdentity, Ed2kSecureIdent,
@@ -580,14 +582,24 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         u16::try_from(availability.len()).unwrap_or(u16::MAX),
                         manifest.file_size,
                     )?;
-                    session_state.peer_part_bitmap = Some(record_source_part_availability(
+                    let bitmap = record_source_part_availability(
                         transfer_runtime,
                         file_hash_hex,
                         peer_addr,
                         session_state.peer_user_hash,
                         availability,
                         manifest.pieces.len(),
-                    ));
+                    );
+                    if !peer_holds_needed_part(&manifest, &bitmap) {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "no_needed_parts_filestatus",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
+                    }
+                    session_state.peer_part_bitmap = Some(bitmap);
                     session_state.startup_file_response_received = true;
                 }
                 (OP_EMULEPROT, OP_MULTIPACKETANSWER) => {
@@ -662,6 +674,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         )
                         .await?;
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
+                    if let Some(bitmap) = session_state.peer_part_bitmap.as_deref()
+                        && !peer_holds_needed_part(&manifest, bitmap)
+                    {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "no_needed_parts_multipacket",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
+                    }
                     session_state.startup_file_response_received = true;
                 }
                 (OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2) => {
@@ -717,6 +740,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         returned_file_name.as_deref(),
                     )
                     .await?;
+                    if let Some(bitmap) = session_state.peer_part_bitmap.as_deref()
+                        && !peer_holds_needed_part(&manifest, bitmap)
+                    {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "no_needed_parts_multipacket_ext2",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
+                    }
                     session_state.startup_file_response_received = true;
                 }
                 (OP_EMULEPROT, OP_AICHFILEHASHANS) => {
@@ -1138,4 +1172,90 @@ fn record_source_part_availability(
         bitmap.clone(),
     );
     bitmap
+}
+
+/// Whether the connected peer advertises at least one part we still need.
+///
+/// A part is "needed" while it is not yet `Verified` (Missing/Requested/Written).
+/// The peer holds nothing needed when, for every part it advertises, our copy is
+/// already complete-and-verified. This mirrors the master `ProcessFileStatus`
+/// `IsPartAvailable` scan (`DownloadClient.cpp` `ProcessFileStatus`): if the peer
+/// offers no part we still want, the source is `DS_NONEEDEDPARTS`.
+///
+/// Note: this must only be consulted when the manifest is *not* complete (the
+/// downloader loop returns `Completed` before reaching the session body when the
+/// whole file is verified), so a `false` here is a genuine No-Needed-Parts
+/// source, never a finished download.
+#[must_use]
+fn peer_holds_needed_part(manifest: &Ed2kResumeManifest, peer_bitmap: &[bool]) -> bool {
+    manifest.pieces.iter().enumerate().any(|(position, piece)| {
+        piece.state != Ed2kTransferState::Verified
+            && peer_bitmap.get(position).copied().unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Ed2kResumeManifest, Ed2kTransferState, peer_holds_needed_part};
+    use crate::ed2k_transfer::{Ed2kPieceState, Ed2kTransferJob};
+
+    fn manifest_with_states(states: &[Ed2kTransferState]) -> Ed2kResumeManifest {
+        let job = Ed2kTransferJob {
+            file_hash: "0".repeat(32),
+            canonical_name: "sample.bin".to_string(),
+            file_size: u64::try_from(states.len()).unwrap_or(0) * 9_728_000,
+            piece_size: 9_728_000,
+        };
+        let mut manifest = Ed2kResumeManifest::new(&job);
+        // Resize the piece list to the requested state vector and stamp states.
+        manifest.pieces = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| Ed2kPieceState {
+                piece_index: u32::try_from(index).unwrap_or(0),
+                state: *state,
+                bytes_written: 0,
+                block_bitmap: None,
+            })
+            .collect();
+        manifest
+    }
+
+    #[test]
+    fn peer_offering_only_already_verified_parts_is_no_needed_parts() {
+        // We already hold (verified) part 0; we still need part 1. The peer
+        // advertises only part 0 -> nothing we need -> No Needed Parts.
+        let manifest =
+            manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
+        let peer_bitmap = [true, false];
+        assert!(!peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
+
+    #[test]
+    fn peer_offering_a_part_we_still_need_is_not_no_needed_parts() {
+        // We still need part 1 and the peer advertises it -> a usable source.
+        let manifest =
+            manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
+        let peer_bitmap = [true, true];
+        assert!(peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
+
+    #[test]
+    fn requested_part_still_counts_as_needed() {
+        // A part claimed by this session (Requested) is not yet ours, so a peer
+        // advertising it is still a usable source.
+        let manifest =
+            manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Requested]);
+        let peer_bitmap = [false, true];
+        assert!(peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
+
+    #[test]
+    fn shorter_peer_bitmap_treats_absent_slots_as_unavailable() {
+        // A truncated bitmap must not panic and absent slots are "not held".
+        let manifest =
+            manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
+        let peer_bitmap = [true];
+        assert!(!peer_holds_needed_part(&manifest, &peer_bitmap));
+    }
 }
