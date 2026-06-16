@@ -16,10 +16,15 @@ pub(crate) mod prelude {
     pub(crate) use crate::responses::*;
 }
 
+pub(crate) mod app;
 pub(crate) mod kad;
 pub(crate) mod logs;
 pub(crate) mod uploads;
 
+pub(crate) use app::{
+    app, capture_diagnostic_dump, preferences, shutdown_app, snapshot, stats, status,
+    trigger_diagnostic_crash_test, update_preferences,
+};
 pub(crate) use kad::{kad, kad_bootstrap, kad_import_nodes_url, kad_recheck_firewall, kad_start, kad_stop};
 pub(crate) use logs::{clear_logs, logs};
 pub(crate) use uploads::{
