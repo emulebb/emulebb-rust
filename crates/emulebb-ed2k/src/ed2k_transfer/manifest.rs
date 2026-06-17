@@ -23,7 +23,10 @@ pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {
 }
 
 pub(super) fn piece_count(file_size: u64, piece_size: u64) -> u32 {
-    if file_size == 0 {
+    // Defensive guard: a piece_size of 0 (e.g. from a corrupt persisted row that
+    // slipped past load-time validation) would make div_ceil panic with a
+    // divide-by-zero. Treat it as "no pieces" instead of aborting.
+    if file_size == 0 || piece_size == 0 {
         return 0;
     }
     u32::try_from(file_size.div_ceil(piece_size)).unwrap_or(u32::MAX)
@@ -83,6 +86,24 @@ pub(super) fn verify_piece_against_manifest(
         return Ok(digest == expected);
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piece_count_with_zero_piece_size_does_not_panic() {
+        // A piece_size of 0 with a non-zero file size must return 0 rather than
+        // panicking with a divide-by-zero in div_ceil.
+        assert_eq!(piece_count(1024, 0), 0);
+    }
+
+    #[test]
+    fn piece_count_normal_case() {
+        // 3 full pieces + a partial -> 4 pieces.
+        assert_eq!(piece_count(10, 3), 4);
+    }
 }
 
 pub(super) fn rebuild_verified_ranges(manifest: &mut Ed2kResumeManifest) {

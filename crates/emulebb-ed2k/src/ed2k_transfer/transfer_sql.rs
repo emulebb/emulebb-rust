@@ -59,6 +59,17 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
 pub(super) fn manifest_from_metadata(
     manifest: MetadataTransferManifest,
 ) -> Result<Ed2kResumeManifest> {
+    // `piece_size` is read straight from the persisted manifest row. A corrupt
+    // or hand-edited DB row with piece_size==0 while file_size>0 would later
+    // panic with a divide-by-zero in piece_count (file_size.div_ceil(0)).
+    // Reject such a row on load so it never reaches the coordinator.
+    if manifest.piece_size == 0 && manifest.file_size > 0 {
+        anyhow::bail!(
+            "invalid persisted manifest for {}: piece_size=0 with file_size={}",
+            manifest.file_hash,
+            manifest.file_size
+        );
+    }
     Ok(Ed2kResumeManifest {
         file_hash: manifest.file_hash,
         canonical_name: manifest.canonical_name,
@@ -135,5 +146,53 @@ fn transfer_state_from_sql(value: &str) -> Result<Ed2kTransferState> {
         "Written" => Ok(Ed2kTransferState::Written),
         "Verified" => Ok(Ed2kTransferState::Verified),
         _ => anyhow::bail!("unknown ED2K transfer piece state {value:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_row(file_size: u64, piece_size: u64) -> MetadataTransferManifest {
+        MetadataTransferManifest {
+            file_hash: "00000000000000000000000000000000".to_string(),
+            canonical_name: "f.bin".to_string(),
+            file_size,
+            piece_size,
+            completed: false,
+            md4_hashset_acquired: false,
+            md4_hashset: Vec::new(),
+            aich_hashset_acquired: false,
+            aich_root: None,
+            aich_hashset: Vec::new(),
+            verified_ranges: Vec::new(),
+            pieces: Vec::new(),
+            sources: Vec::new(),
+            upload_priority: String::new(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            control_state: None,
+            transfer_row_removed: false,
+        }
+    }
+
+    #[test]
+    fn rejects_zero_piece_size_with_nonzero_file_size() {
+        // Corrupt/hand-edited row: piece_size=0, file_size>0. Must be rejected on
+        // load so the divide-by-zero in piece_count is never reached.
+        let err = manifest_from_metadata(manifest_row(1024, 0)).unwrap_err();
+        assert!(
+            err.to_string().contains("piece_size=0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_zero_piece_size_for_empty_file() {
+        // A zero-length file legitimately has no pieces; piece_size==0 there is
+        // harmless and must not be rejected.
+        let manifest = manifest_from_metadata(manifest_row(0, 0)).expect("empty file loads");
+        assert_eq!(manifest.file_size, 0);
     }
 }
