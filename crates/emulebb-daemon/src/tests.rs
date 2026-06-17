@@ -699,3 +699,29 @@ fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
     assert_eq!(network.kad_hello_intro_interval_secs, 1);
     assert_eq!(network.kad_hello_intro_fanout, 0);
 }
+
+#[tokio::test]
+async fn graceful_teardown_disconnects_and_is_idempotent() {
+    // Mirrors what `run()` does after the REST server stops on any shutdown
+    // trigger (REST shutdown, Ctrl-C, SIGTERM): the ordered network teardown
+    // runs `disconnect_ed2k` (NAT release + task abort + lease reset). Signals
+    // can't be raised deterministically in a unit test, so this drives the
+    // teardown function directly and asserts it (a) leaves ed2k disconnected,
+    // (b) is safe to call twice (idempotent, no double-free / panic), and
+    // (c) completes well within the bounded timeout.
+    let core = Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+
+    let teardown = async {
+        graceful_teardown(&core).await;
+        // Second call must not panic or hang: the runtime is already gone.
+        graceful_teardown(&core).await;
+    };
+    tokio::time::timeout(SHUTDOWN_TEARDOWN_TIMEOUT * 3, teardown)
+        .await
+        .expect("graceful teardown must finish within the bounded timeout");
+
+    assert!(
+        !core.status().await.ed2k.connected,
+        "ed2k must be disconnected after graceful teardown"
+    );
+}

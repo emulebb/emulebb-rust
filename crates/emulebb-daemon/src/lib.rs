@@ -372,6 +372,87 @@ impl KadListenerConfig {
     }
 }
 
+/// Upper bound on the graceful network teardown so a wedged provider can never
+/// hang daemon shutdown indefinitely. `disconnect_ed2k` already times the NAT
+/// `stop()` out at ~2s; this is a belt-and-braces cap over the whole teardown
+/// (lease reset + task aborts + NAT release) in case a future step blocks.
+const SHUTDOWN_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait for any shutdown trigger: a REST `POST /app/shutdown` (`shutdown_rx`),
+/// Ctrl-C (SIGINT on unix, console close on Windows), or — on unix — SIGTERM
+/// (systemd / container stop). Returns once the first trigger fires.
+async fn wait_for_shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
+    let rest_shutdown = async {
+        while shutdown_rx.changed().await.is_ok() {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            Err(error) => {
+                // Without a SIGTERM handler we still honour SIGINT and REST; log
+                // and continue rather than aborting startup.
+                tracing::warn!(%error, "failed to install SIGTERM handler");
+                tokio::select! {
+                    _ = rest_shutdown => info!("shutdown requested via REST"),
+                    result = tokio::signal::ctrl_c() => match result {
+                        Ok(()) => info!("shutdown requested via Ctrl-C"),
+                        Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
+                    },
+                }
+                return;
+            }
+        };
+        tokio::select! {
+            _ = rest_shutdown => info!("shutdown requested via REST"),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => info!("shutdown requested via Ctrl-C"),
+                Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
+            },
+            _ = sigterm.recv() => info!("shutdown requested via SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = rest_shutdown => info!("shutdown requested via REST"),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => info!("shutdown requested via Ctrl-C"),
+                Err(error) => tracing::warn!(%error, "ctrl_c handler error"),
+            },
+        }
+    }
+}
+
+/// Ordered, bounded, idempotent network teardown run after the REST server has
+/// stopped accepting requests. Releases UPnP/NAT port mappings, aborts the
+/// session + detached download tasks, and resets download-source leases via
+/// `core.disconnect_ed2k()`. Wrapped in a hard timeout so a wedged provider can
+/// never block process exit; `disconnect_ed2k` is itself idempotent (a second
+/// call simply finds no runtime), so this is safe to call more than once.
+///
+/// SQLite is finalised by dropping the last `Arc<EmulebbCore>` once the caller
+/// returns: the metadata store commits per write transaction (synchronous=FULL,
+/// WAL), so closing the connection on drop is a clean flush with no in-memory
+/// state to lose.
+async fn graceful_teardown(core: &Arc<EmulebbCore>) {
+    info!("running graceful network teardown");
+    match tokio::time::timeout(SHUTDOWN_TEARDOWN_TIMEOUT, core.disconnect_ed2k()).await {
+        Ok(_status) => info!("graceful network teardown complete (NAT mappings released)"),
+        Err(_) => tracing::warn!(
+            timeout_secs = SHUTDOWN_TEARDOWN_TIMEOUT.as_secs(),
+            "graceful network teardown timed out; forcing shutdown"
+        ),
+    }
+}
+
 pub async fn run(config: DaemonConfig) -> Result<()> {
     fs::create_dir_all(&config.runtime_dir)
         .with_context(|| format!("failed to create {}", config.runtime_dir.display()))?;
@@ -384,9 +465,10 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         config.transfer_root(),
         ed2k_network,
     )?);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(
-        core,
+        Arc::clone(&core),
         RestConfig {
             api_key: config.rest.api_key.clone(),
         },
@@ -395,15 +477,14 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let rest_bind_addr = config.rest_bind_addr()?;
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            while shutdown_rx.changed().await.is_ok() {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-            }
-        })
-        .await?;
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(wait_for_shutdown_signal(shutdown_rx))
+        .await;
+    // Whatever stopped the server (REST shutdown, Ctrl-C, or SIGTERM), tear the
+    // network stack down cleanly before exiting so port mappings are released
+    // and SQLite finalises. Done unconditionally, even on a serve error.
+    graceful_teardown(&core).await;
+    serve_result?;
     Ok(())
 }
 
