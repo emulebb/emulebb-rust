@@ -19,6 +19,17 @@ pub(super) fn validate_preferences_patch_body_fields(
     preferences::validate_preferences_patch_body_fields(object)
 }
 
+pub(super) fn validate_destructive_confirmation_body_field(
+    object: &JsonObject,
+    field: &'static str,
+    message: &'static str,
+) -> Result<(), Box<Response>> {
+    if object.get(field).and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(invalid_body_error(message));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_transfer_add_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     let has_link = object.contains_key("link");
     let has_links = object.contains_key("links");

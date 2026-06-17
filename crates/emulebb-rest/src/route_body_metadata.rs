@@ -14,13 +14,13 @@ use axum::{
 use crate::envelope::{api_error, json_error_message};
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
-    validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_paused_body_field, validate_preferences_patch_body_fields,
-    validate_search_create_body_fields, validate_server_create_body_fields,
-    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
-    validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
-    validate_url_import_body_fields,
+    validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
+    validate_kad_bootstrap_body_fields, validate_paused_body_field,
+    validate_preferences_patch_body_fields, validate_search_create_body_fields,
+    validate_server_create_body_fields, validate_server_patch_body_fields,
+    validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
+    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
+    validate_transfer_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -102,7 +102,8 @@ fn validate_route_specific_body_fields(
         return validate_shared_file_add_body_fields(object);
     }
     if method == "PATCH" && path == "/api/v1/shared-directories" {
-        return validate_shared_directories_patch_body_fields(object);
+        validate_shared_directories_patch_body_fields(object)?;
+        return validate_destructive_confirmation_body(method, path, object);
     }
     if method == "PATCH" && path == "/api/v1/app/preferences" {
         return validate_preferences_patch_body_fields(object);
@@ -134,7 +135,7 @@ fn validate_route_specific_body_fields(
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
-    Ok(())
+    validate_destructive_confirmation_body(method, path, object)
 }
 
 fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {
@@ -144,6 +145,11 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_FILE_ADD: &[&str] = &["path"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
+    const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
+    const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
+    const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
+    const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
+    const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const PREFERENCES_PATCH: &[&str] = &[
         "uploadLimitKiBps",
         "downloadLimitKiBps",
@@ -187,6 +193,21 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return Some(SHARED_DIRECTORIES_PATCH);
+    }
+    if method == "POST" && path == "/api/v1/app/shutdown" {
+        return Some(CONFIRM_SHUTDOWN);
+    }
+    if method == "POST" && path == "/api/v1/diagnostics/dumps" {
+        return Some(DIAGNOSTIC_DUMP);
+    }
+    if method == "POST" && path == "/api/v1/diagnostics/crash-tests" {
+        return Some(CONFIRM_CRASH);
+    }
+    if method == "POST" && path == "/api/v1/transfers/operations/clear-completed" {
+        return Some(CONFIRM_CLEAR_COMPLETED);
+    }
+    if method == "POST" && path == "/api/v1/logs/operations/clear" {
+        return Some(CONFIRM_CLEAR_LOGS);
     }
     if method == "PATCH" && path == "/api/v1/app/preferences" {
         return Some(PREFERENCES_PATCH);
@@ -272,6 +293,43 @@ fn uses_url_import_body(method: &str, path: &str) -> bool {
             path,
             "/api/v1/servers/operations/import-met-url" | "/api/v1/kad/operations/import-nodes-url"
         )
+}
+
+fn validate_destructive_confirmation_body(
+    method: &str,
+    path: &str,
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if let Some((field, message)) = destructive_confirmation_field(method, path) {
+        validate_destructive_confirmation_body_field(object, field, message)?;
+    }
+    Ok(())
+}
+
+fn destructive_confirmation_field(
+    method: &str,
+    path: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (method, path) {
+        ("POST", "/api/v1/app/shutdown") => {
+            Some(("confirmShutdown", "confirmShutdown must be true"))
+        }
+        ("POST", "/api/v1/diagnostics/dumps") => Some(("confirmDump", "confirmDump must be true")),
+        ("POST", "/api/v1/diagnostics/crash-tests") => {
+            Some(("confirmCrash", "confirmCrash must be true"))
+        }
+        ("POST", "/api/v1/transfers/operations/clear-completed") => Some((
+            "confirmClearCompleted",
+            "confirmClearCompleted must be true",
+        )),
+        ("POST", "/api/v1/logs/operations/clear") => {
+            Some(("confirmClearLogs", "confirmClearLogs must be true"))
+        }
+        ("PATCH", "/api/v1/shared-directories") => {
+            Some(("confirmReplaceRoots", "confirmReplaceRoots must be true"))
+        }
+        _ => None,
+    }
 }
 
 fn api_segments(path: &str) -> Option<Vec<&str>> {

@@ -649,6 +649,54 @@ async fn shared_directories_patch_body_uses_mfc_root_validation() {
 }
 
 #[tokio::test]
+async fn destructive_confirmation_bodies_use_mfc_validation() {
+    let app = test_router();
+    let cases = [
+        (
+            "POST",
+            "/api/v1/app/shutdown",
+            r#"{}"#,
+            "confirmShutdown must be true",
+        ),
+        (
+            "POST",
+            "/api/v1/diagnostics/dumps",
+            r#"{"confirmDump":false,"fullMemory":false}"#,
+            "confirmDump must be true",
+        ),
+        (
+            "POST",
+            "/api/v1/diagnostics/crash-tests",
+            r#"{"confirmCrash":"true"}"#,
+            "confirmCrash must be true",
+        ),
+        (
+            "POST",
+            "/api/v1/transfers/operations/clear-completed",
+            r#"{"confirmClearCompleted":false}"#,
+            "confirmClearCompleted must be true",
+        ),
+        (
+            "POST",
+            "/api/v1/logs/operations/clear",
+            r#"{"confirmClearLogs":false}"#,
+            "confirmClearLogs must be true",
+        ),
+        (
+            "PATCH",
+            "/api/v1/shared-directories",
+            r#"{"roots":["C:/Shared"],"confirmReplaceRoots":false}"#,
+            "confirmReplaceRoots must be true",
+        ),
+    ];
+
+    for (method, uri, body, expected_message) in cases {
+        assert_invalid_json_response(app.clone(), method, uri, body.to_string(), expected_message)
+            .await;
+    }
+}
+
+#[tokio::test]
 async fn server_create_body_uses_mfc_validation() {
     let app = test_router();
     let cases = [
