@@ -52,8 +52,12 @@ pub(crate) fn load_core_state(
         }
     }
 
+    let searches = crate::search_state::load_searches(metadata)?;
+    let next_search_id = crate::search_state::next_numeric_search_id(&searches);
+
     Ok(CoreState {
-        searches: crate::search_state::load_searches(metadata)?,
+        searches,
+        next_search_id,
         transfers: HashMap::new(),
         preferences,
         categories,

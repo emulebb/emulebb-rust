@@ -8,6 +8,33 @@ use emulebb_metadata::{
 
 use crate::{Search, SearchResult};
 
+pub(crate) fn next_numeric_search_id(searches: &HashMap<String, Search>) -> u32 {
+    searches
+        .keys()
+        .filter_map(|id| id.parse::<u32>().ok())
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1)
+        .max(1)
+}
+
+pub(crate) fn allocate_search_id(
+    searches: &HashMap<String, Search>,
+    next_search_id: u32,
+) -> Result<(String, u32)> {
+    let mut candidate = next_search_id.max(1);
+    loop {
+        let search_id = candidate.to_string();
+        if !searches.contains_key(&search_id) {
+            let next_search_id = candidate.checked_add(1).unwrap_or(1).max(1);
+            return Ok((search_id, next_search_id));
+        }
+        candidate = candidate
+            .checked_add(1)
+            .context("search id space exhausted")?;
+    }
+}
+
 pub(crate) fn load_searches(metadata: &MetadataStore) -> Result<HashMap<String, Search>> {
     metadata
         .load_searches()?

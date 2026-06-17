@@ -12,7 +12,7 @@ async fn category_id_body_uses_mfc_unsigned_validation() {
         ),
         (
             "POST",
-            "/api/v1/searches/search-1/results/00112233445566778899aabbccddeeff/operations/download",
+            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
             r#"{"categoryId":%s}"#,
         ),
     ];
@@ -52,7 +52,7 @@ async fn paused_body_uses_mfc_boolean_validation() {
         assert_invalid_json_response(
             app.clone(),
             "POST",
-            "/api/v1/searches/search-1/results/00112233445566778899aabbccddeeff/operations/download",
+            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
             format!(r#"{{"paused":{value}}}"#),
             "paused must be a boolean",
         )

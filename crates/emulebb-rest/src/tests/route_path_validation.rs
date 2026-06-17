@@ -43,6 +43,34 @@ async fn category_id_path_uses_mfc_unsigned_validation() {
 }
 
 #[tokio::test]
+async fn search_id_path_uses_mfc_unsigned_validation() {
+    let cases = [
+        (
+            "GET",
+            "/api/v1/searches/search-1",
+            "searchId must be an unsigned decimal string",
+        ),
+        (
+            "DELETE",
+            "/api/v1/searches/-1",
+            "searchId must be an unsigned decimal string",
+        ),
+        (
+            "POST",
+            "/api/v1/searches/4294967296/results/00112233445566778899aabbccddeeff/operations/download",
+            "searchId is out of range",
+        ),
+    ];
+    for (method, uri, expected_message) in cases {
+        let (status, value) = path_error_value(method, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {uri}");
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], expected_message);
+        assert_eq!(value["error"]["details"], json!({}));
+    }
+}
+
+#[tokio::test]
 async fn hash_path_parameters_use_mfc_lowercase_hex_validation() {
     let cases = [
         (
@@ -105,6 +133,7 @@ async fn endpoint_path_parameters_use_mfc_address_port_validation() {
 async fn valid_path_parameters_still_reach_handlers() {
     let accepted_routes = [
         ("GET", "/api/v1/categories/0"),
+        ("GET", "/api/v1/searches/1"),
         ("GET", "/api/v1/servers/local:4661"),
         ("GET", "/api/v1/uploads/192.0.2.1:4662"),
         ("GET", "/api/v1/transfers/00112233445566778899aabbccddeeff"),

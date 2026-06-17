@@ -257,6 +257,7 @@ struct DirectDownloadSpawnContext<'a, DownloadFn> {
 #[derive(Debug)]
 struct CoreState {
     searches: HashMap<String, Search>,
+    next_search_id: u32,
     transfers: HashMap<String, Transfer>,
     preferences: Preferences,
     categories: BTreeMap<u32, Category>,
@@ -1307,11 +1308,14 @@ impl EmulebbCore {
     }
 
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
-        let search_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         // Local index results are cheap, so include them immediately.
-        let mut results = Vec::new();
         let indexed = self.index.lock().await.search(&request.query, 200)?;
+        let mut state = self.state.lock().await;
+        let (search_id, next_search_id) =
+            search_state::allocate_search_id(&state.searches, state.next_search_id)?;
+        state.next_search_id = next_search_id;
+        let mut results = Vec::new();
         results.extend(
             indexed
                 .into_iter()
@@ -1334,11 +1338,8 @@ impl EmulebbCore {
             results,
         };
         search_state::persist_search(&self.metadata_store, &search)?;
-        self.state
-            .lock()
-            .await
-            .searches
-            .insert(search_id.clone(), search.clone());
+        state.searches.insert(search_id.clone(), search.clone());
+        drop(state);
         let core = self.clone();
         tokio::spawn(async move {
             core.run_background_search(search_id, request).await;
@@ -6809,6 +6810,7 @@ mod tests {
             .unwrap();
         // Local index results are present immediately while the search starts
         // "running"; it flips to "completed" once the background pass finishes.
+        assert_eq!(search.id, "1");
         assert_eq!(search.status, "running");
         assert_eq!(search.results.len(), 1);
         let mut completed = search;

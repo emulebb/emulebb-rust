@@ -248,6 +248,9 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             validate_bounded_path_uint(category_id, u32::MAX as u64, "categoryId")?
         }
         ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
+        ("GET" | "DELETE", ["searches", search_id]) => {
+            validate_bounded_path_uint(search_id, u32::MAX as u64, "searchId")?
+        }
         ("GET" | "PATCH" | "DELETE", ["servers", server_id])
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
             validate_endpoint_path_token(server_id, "serverId")?
@@ -278,13 +281,16 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
             "POST",
             [
                 "searches",
-                _search_id,
+                search_id,
                 "results",
                 hash,
                 "operations",
                 "download",
             ],
-        ) => validate_lowercase_md4_hex(hash, "hash")?,
+        ) => {
+            validate_bounded_path_uint(search_id, u32::MAX as u64, "searchId")?;
+            validate_lowercase_md4_hex(hash, "hash")?;
+        }
         _ => {}
     }
     Ok(())

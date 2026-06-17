@@ -254,7 +254,7 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
 async fn query_routes_use_canonical_error_envelope() {
     let cases = [
         ("GET", "/api/v1/snapshot?unsupportedQuery=true"),
-        ("GET", "/api/v1/searches/search-1?unsupportedQuery=true"),
+        ("GET", "/api/v1/searches/1?unsupportedQuery=true"),
         ("DELETE", "/api/v1/searches?unsupportedQuery=true"),
         ("GET", "/api/v1/shared-files?unsupportedQuery=true"),
         (
@@ -469,12 +469,12 @@ async fn boolean_query_values_use_mfc_validation_messages() {
         ),
         (
             "GET",
-            "/api/v1/searches/search-1?includeEvidence=yes",
+            "/api/v1/searches/1?includeEvidence=yes",
             "includeEvidence must be true or false",
         ),
         (
             "GET",
-            "/api/v1/searches/search-1?exactTotal=yes",
+            "/api/v1/searches/1?exactTotal=yes",
             "exactTotal must be true or false",
         ),
     ];
