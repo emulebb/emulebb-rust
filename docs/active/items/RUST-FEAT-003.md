@@ -3,7 +3,7 @@ id: RUST-FEAT-003
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/3
 title: VPN — pin eD2K TCP egress to the tunnel interface (fail-closed)
-status: OPEN
+status: IN_PROGRESS
 priority: Major
 category: feature
 labels: [vpn, ed2k, tcp, anonymity, binding]
@@ -34,8 +34,11 @@ for calling rust "perfectly functional".
 
 - Kad UDP is egress-pinned to the tunnel `ifIndex` (`IP_UNICAST_IF`; socket2 is
   Unix-only for this, so Windows uses raw `windows-sys setsockopt`).
-- eD2K TCP connect/listen sockets are not yet pinned to the tunnel ifIndex. See
-  [[vpn-binding-solid-ip-unicast-if]].
+- eD2K TCP outbound connects and listener bind now use the configured P2P bind IP
+  path, and VPN Guard confirmation now requires the effective bind IP to be on
+  the named bind interface or on a detected VPN-looking interface.
+- Remaining work is static/leak-proof coverage for the tunnel ifIndex guarantee
+  and live validation that fail-closed behavior holds when the tunnel is absent.
 
 ## Intended Shape
 
@@ -51,9 +54,10 @@ for calling rust "perfectly functional".
 
 ## Acceptance Criteria
 
-- [ ] eD2K TCP outbound connects are pinned to the tunnel ifIndex (fail-closed:
+- [x] eD2K TCP outbound connects use the configured P2P bind path.
+- [ ] eD2K TCP outbound connects are proven pinned to the tunnel ifIndex (fail-closed:
       no tunnel → no eD2K TCP egress).
-- [ ] eD2K TCP listener bound consistently with the VPN binding model.
+- [x] eD2K TCP listener bound consistently with the VPN binding model.
 - [ ] UPnP/port-forwarding over the VPN interface still works.
 - [ ] A static/bind-policy test asserts eD2K TCP egress is tunnel-pinned.
 
