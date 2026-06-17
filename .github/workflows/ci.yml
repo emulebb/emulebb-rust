@@ -38,31 +38,19 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Build workspace
-        shell: bash
-        env:
-          MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
-        run: cargo build --workspace --locked
-
-      - name: Test workspace (core suite)
-        shell: bash
+      - name: Rust build/test gate
         env:
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
           X_LOCAL_IP: 127.0.0.1
-        # The kad_swarm multi-node networking tests stay isolated with serialized
-        # execution while their cross-node transfer timing is investigated
-        # (tracked: RUST-BUG-001). Both steps gate the matrix.
-        run: cargo test --workspace --locked -- --skip local_kad_swarm
-
-      - name: Test kad_swarm (isolated)
-        shell: bash
-        env:
-          MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
-          X_LOCAL_IP: 127.0.0.1
-        run: cargo test -p emulebb-core --test kad_swarm --locked -- --test-threads=1
+        run: python tools/rust_quality_gate.py ci-test
 
   quality:
     name: policy + format + clippy
@@ -81,14 +69,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Rust client policy guard
-        run: python tools/check_rust_client_policy.py
-
-      - name: Format check
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust quality gate
+        run: python tools/rust_quality_gate.py quick
 
   supply-chain:
     name: cargo-deny (advisories)
