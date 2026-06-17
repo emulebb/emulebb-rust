@@ -188,6 +188,15 @@ pub(in crate::ed2k_tcp) fn inflate_compressed_part_fragment(
     let mut bytes = Vec::new();
     let mut finished = false;
 
+    // Decompression-bomb guard. The fully inflated stream for this part can never
+    // legitimately exceed the requested piece span (`end - start`, itself bounded
+    // by ED2K_PART_SIZE). A single crafted fragment (compressed input <=
+    // MAX_ED2K_PACKET_LEN) could otherwise inflate to ~2 GB transiently before
+    // the post-fragment `uncompressed_written > piece_len` check fires. We cap
+    // the accumulated output incrementally (mirroring the OP_PACKEDPROT path) so
+    // the oversized allocation never happens.
+    let max_uncompressed_output = pending.end.saturating_sub(pending.start);
+
     while !remaining.is_empty() {
         let mut output = [0u8; 16 * 1024];
         let total_in_before = pending.inflater.total_in();
@@ -200,6 +209,16 @@ pub(in crate::ed2k_tcp) fn inflate_compressed_part_fragment(
         let produced =
             usize::try_from(pending.inflater.total_out() - total_out_before).unwrap_or(0);
         if produced != 0 {
+            let accumulated = pending
+                .uncompressed_written
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(produced).unwrap_or(u64::MAX));
+            if accumulated > max_uncompressed_output {
+                anyhow::bail!(
+                    "OP_COMPRESSEDPART inflate exceeded expected piece length {} bytes",
+                    max_uncompressed_output
+                );
+            }
             bytes.extend_from_slice(&output[..produced]);
         }
         remaining = &remaining[consumed..];
@@ -240,6 +259,16 @@ pub(in crate::ed2k_tcp) fn inflate_compressed_part_fragment(
             let produced =
                 usize::try_from(pending.inflater.total_out() - total_out_before).unwrap_or(0);
             if produced != 0 {
+                let accumulated = pending
+                    .uncompressed_written
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                    .saturating_add(u64::try_from(produced).unwrap_or(u64::MAX));
+                if accumulated > max_uncompressed_output {
+                    anyhow::bail!(
+                        "OP_COMPRESSEDPART inflate exceeded expected piece length {} bytes",
+                        max_uncompressed_output
+                    );
+                }
                 bytes.extend_from_slice(&output[..produced]);
             }
             match status {

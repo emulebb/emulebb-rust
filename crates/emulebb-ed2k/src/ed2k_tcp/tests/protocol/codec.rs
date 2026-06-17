@@ -769,6 +769,35 @@ fn compressed_part_fragments_inflate_across_multiple_packets() {
 }
 
 #[test]
+fn compressed_part_fragment_rejects_decompression_bomb() {
+    // A crafted fragment whose zlib body inflates far beyond the requested piece
+    // span must be rejected incrementally, without first materializing the huge
+    // uncompressed buffer. Here the part claims a 1 KiB span but the compressed
+    // body would inflate to 4 MiB.
+    let huge = vec![0x00u8; 4 * 1024 * 1024];
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&huge).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut pending = super::PendingCompressedPart {
+        piece_index: 0,
+        start: 0,
+        end: 1024,
+        advertised_compressed_len: compressed.len(),
+        compressed_received: 0,
+        uncompressed_written: 0,
+        inflater: flate2::Decompress::new(true),
+    };
+
+    let err = super::inflate_compressed_part_fragment(&mut pending, &compressed)
+        .expect_err("oversized inflate must be rejected");
+    assert!(
+        err.to_string().contains("exceeded expected piece length"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn packed_peer_payload_decodes_to_emule_protocol() {
     let payload = vec![0xCA, 0xFE, 0xBA, 0xBE];
     let packed = encode_packed_packet(super::OP_PUBLICKEY, &payload).unwrap();

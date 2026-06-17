@@ -84,6 +84,36 @@ fn test_packed_packet_decode() {
 }
 
 #[test]
+fn test_packed_packet_decompression_bomb_rejected() {
+    // A crafted 0xE5 packet whose zlib body inflates far past the Kad cap must be
+    // rejected as DecompressError without performing the unbounded allocation.
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
+
+    // Highly compressible payload that inflates well beyond
+    // MAX_DECOMPRESSED_KAD_PACKET_LEN (64 KB). 1 MiB of zeros compresses to a
+    // tiny body, so the compressed input stays small while the inflated output
+    // would be huge.
+    let bomb = vec![0u8; 1024 * 1024];
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&bomb).unwrap();
+    let compressed = encoder.finish().unwrap();
+    assert!(
+        compressed.len() < MAX_DECOMPRESSED_KAD_PACKET_LEN,
+        "compressed bomb input should be small"
+    );
+
+    let mut packed = vec![OP_KADEMLIAPACKEDPROT, opcode::PING];
+    packed.extend_from_slice(&compressed);
+
+    let err = KadPacket::decode(&packed).unwrap_err();
+    assert!(
+        matches!(err, ProtoError::DecompressError),
+        "expected DecompressError, got {err:?}"
+    );
+}
+
+#[test]
 fn test_hello_req_v10_with_tags_roundtrip() {
     let pkt = KadPacket::HelloReq(HelloReq {
         node_id: NodeId::from_bytes([0xAA; 16]),

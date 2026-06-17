@@ -30,6 +30,14 @@ use codec::{
     write_search_res, write_search_source_req,
 };
 
+/// Hard cap on the inflated size of a `0xE5` (OP_KADEMLIAPACKEDPROT) Kad2
+/// packet. Kad UDP datagrams (and thus the compressed input) are bounded by the
+/// recv buffer at roughly 8 KB, and the largest legitimately decoded Kad2 packet
+/// is a SEARCH_RES batch that stays well under a few KB. 64 KB is a generous but
+/// bounded ceiling that no legitimate Kad packet reaches, while preventing a
+/// crafted zlib bomb from expanding into an unbounded allocation.
+const MAX_DECOMPRESSED_KAD_PACKET_LEN: usize = 64 * 1024;
+
 fn require_body_len(opcode: u8, body: &[u8], expected: usize) -> Result<(), ProtoError> {
     if body.len() == expected {
         Ok(())
@@ -106,11 +114,21 @@ impl KadPacket {
         let (op, body_cow): (u8, std::borrow::Cow<[u8]>) = if buf[0] == OP_KADEMLIAPACKEDPROT {
             use flate2::read::ZlibDecoder;
             use std::io::Read;
-            let mut decoder = ZlibDecoder::new(&buf[2..]);
+            // Decompression-bomb guard: the compressed body fits the Kad UDP recv
+            // buffer (~8 KB), and the largest legitimate decoded Kad2 packet
+            // (a full SEARCH_RES batch) stays well under a few KB. Cap the
+            // inflated output at MAX_DECOMPRESSED_KAD_PACKET_LEN so a crafted
+            // input cannot expand ~1000:1 into an unbounded allocation. Reading
+            // one byte past the cap proves overflow and is rejected.
+            let mut decoder =
+                ZlibDecoder::new(&buf[2..]).take(MAX_DECOMPRESSED_KAD_PACKET_LEN as u64 + 1);
             let mut decompressed = Vec::new();
             decoder
                 .read_to_end(&mut decompressed)
                 .map_err(|_| ProtoError::DecompressError)?;
+            if decompressed.len() > MAX_DECOMPRESSED_KAD_PACKET_LEN {
+                return Err(ProtoError::DecompressError);
+            }
             (buf[1], std::borrow::Cow::Owned(decompressed))
         } else if buf[0] == OP_KADEMLIAHEADER {
             (buf[1], std::borrow::Cow::Borrowed(&buf[2..]))
