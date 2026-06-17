@@ -697,6 +697,32 @@ async fn destructive_confirmation_bodies_use_mfc_validation() {
 }
 
 #[tokio::test]
+async fn diagnostic_dump_body_uses_mfc_full_memory_validation() {
+    let app = test_router();
+    let cases = [
+        (
+            r#"{"confirmDump":true,"fullMemory":"false"}"#,
+            "fullMemory must be a boolean",
+        ),
+        (
+            r#"{"confirmDump":false,"fullMemory":"false"}"#,
+            "confirmDump must be true",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/diagnostics/dumps",
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn server_create_body_uses_mfc_validation() {
     let app = test_router();
     let cases = [

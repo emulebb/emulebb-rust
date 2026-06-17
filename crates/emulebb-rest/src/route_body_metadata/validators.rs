@@ -50,11 +50,15 @@ pub(super) fn validate_transfer_add_body_fields(object: &JsonObject) -> Result<(
 }
 
 pub(super) fn validate_paused_body_field(object: &JsonObject) -> Result<(), Box<Response>> {
-    if object
-        .get("paused")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        return Err(invalid_body_error("paused must be a boolean"));
+    validate_optional_boolean_body_field(object, "paused")
+}
+
+pub(super) fn validate_optional_boolean_body_field(
+    object: &JsonObject,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    if object.get(field).is_some_and(|value| !value.is_boolean()) {
+        return Err(invalid_body_error(format!("{field} must be a boolean")));
     }
     Ok(())
 }

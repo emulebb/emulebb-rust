@@ -15,12 +15,13 @@ use crate::envelope::{api_error, json_error_message};
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
     validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
-    validate_kad_bootstrap_body_fields, validate_paused_body_field,
-    validate_preferences_patch_body_fields, validate_search_create_body_fields,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
-    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
-    validate_transfer_patch_body_fields, validate_url_import_body_fields,
+    validate_kad_bootstrap_body_fields, validate_optional_boolean_body_field,
+    validate_paused_body_field, validate_preferences_patch_body_fields,
+    validate_search_create_body_fields, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
+    validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
+    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -134,6 +135,10 @@ fn validate_route_specific_body_fields(
     }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
+    }
+    if method == "POST" && path == "/api/v1/diagnostics/dumps" {
+        validate_destructive_confirmation_body(method, path, object)?;
+        return validate_optional_boolean_body_field(object, "fullMemory");
     }
     validate_destructive_confirmation_body(method, path, object)
 }
