@@ -171,7 +171,7 @@ pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
 };
 use shared_directories::{
-    collect_shared_directory_files, refresh_shared_directory_row, shared_directory_from_index,
+    refresh_shared_directory_row, scan_shared_directory_roots, shared_directory_from_index,
     shared_directory_to_index, shared_directory_update_parts,
 };
 
@@ -1870,11 +1870,10 @@ impl EmulebbCore {
 
     pub async fn reload_shared_directories(&self) -> Result<Vec<LocalShare>> {
         let roots = self.state.lock().await.shared_directories.clone();
-        let mut file_paths = Vec::new();
-        for root in roots {
-            collect_shared_directory_files(Path::new(&root.path), root.recursive, &mut file_paths)
-                .with_context(|| format!("failed to scan shared directory {}", root.path))?;
-        }
+        // The recursive directory walk is synchronous and may be large, so the
+        // helper runs it off the async executor via spawn_blocking to avoid
+        // stalling a tokio worker thread.
+        let mut file_paths = scan_shared_directory_roots(roots).await?;
         file_paths.sort();
         file_paths.dedup();
 

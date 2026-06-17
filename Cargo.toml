@@ -48,6 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
+walkdir = "2"
 
 [patch.crates-io]
 rupnp = { git = "https://github.com/Threepwood-7/rupnp", tag = "v3.0.0-overlord.1" }
