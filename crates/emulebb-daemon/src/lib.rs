@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig, NetworkInterface, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
-    ipfilter, ipfilter::IpFilter, resolve_bind_ip,
+    ipfilter, ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
@@ -23,7 +23,7 @@ pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard;
 
-use bind_config::ensure_p2p_bind_ip_on_interface;
+use bind_config::{ensure_p2p_bind_ip_on_interface, resolve_p2p_bind_interface_ip};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -317,13 +317,7 @@ impl DaemonConfig {
         else {
             bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
         };
-        let resolved =
-            resolve_bind_ip(interfaces, Some(bind_interface), None).with_context(|| {
-                format!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address")
-            })?;
-        resolved.parse::<Ipv4Addr>().with_context(|| {
-            format!("p2pBindInterface {bind_interface:?} resolved to non-IPv4 address {resolved:?}")
-        })
+        resolve_p2p_bind_interface_ip(interfaces, bind_interface)
     }
 
     fn vpn_binding_confirmed(&self, bind_ip: Ipv4Addr, interfaces: &[NetworkInterface]) -> bool {

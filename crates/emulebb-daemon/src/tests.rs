@@ -611,6 +611,36 @@ fn p2p_bind_interface_resolves_configured_interface_ipv4() {
 }
 
 #[test]
+fn p2p_bind_interface_matches_name_case_insensitively() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(temp.path().to_path_buf(), None);
+    config.p2p_bind_interface = Some("HIDE.ME".to_string());
+
+    let bind_ip = config
+        .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
+        .unwrap();
+
+    assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
+}
+
+#[test]
+fn p2p_bind_interface_rejects_ambiguous_case_insensitive_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(temp.path().to_path_buf(), None);
+    config.p2p_bind_interface = Some("hide.me".to_string());
+
+    let error = config
+        .resolve_p2p_bind_ip_from_interfaces(&[
+            iface("hide.me", "10.44.55.66"),
+            iface("HIDE.ME", "10.44.55.67"),
+        ])
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("ambiguous"));
+}
+
+#[test]
 fn p2p_bind_ip_and_interface_accept_matching_pair() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(

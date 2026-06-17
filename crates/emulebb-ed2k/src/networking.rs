@@ -152,7 +152,7 @@ pub fn resolve_bind_ip(
     let selected_name = bind_interface?;
     interfaces
         .iter()
-        .find(|iface| iface.name == selected_name)
+        .find(|iface| iface.name.trim().eq_ignore_ascii_case(selected_name))
         .and_then(|iface| {
             iface
                 .addresses
@@ -298,6 +298,16 @@ mod tests {
         assert_eq!(
             resolve_bind_ip(&interfaces, Some("hide.me"), Some("10.99.99.2")).as_deref(),
             Some("10.99.99.2")
+        );
+    }
+
+    #[test]
+    fn resolve_bind_ip_matches_interface_case_insensitively() {
+        let interfaces = vec![iface("hide.me", true, false, "10.10.10.2")];
+
+        assert_eq!(
+            resolve_bind_ip(&interfaces, Some("HIDE.ME"), None).as_deref(),
+            Some("10.10.10.2")
         );
     }
 
