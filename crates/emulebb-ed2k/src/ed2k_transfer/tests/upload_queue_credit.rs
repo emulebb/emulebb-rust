@@ -57,6 +57,56 @@ async fn upload_queue_scores_waiters_with_persisted_peer_credits() {
 }
 
 #[tokio::test]
+async fn disabled_credit_system_gives_everyone_the_neutral_ratio() {
+    // eMule !thePrefs.GetCreditSystem(): with the credit system off, a peer with
+    // large persisted credits gets the neutral 1.0 ratio like everyone, so it
+    // does NOT jump ahead of a plain waiter enqueued earlier (contrast the
+    // enabled case which promotes it to rank 1).
+    let root = unique_test_dir("ed2k-upload-queue-credit-disabled");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    runtime.set_credit_system_enabled(false);
+    let file_hash = Ed2kHash::from_bytes([0xC1; 16]);
+    let credited_user_hash = [0xC3; 16];
+    runtime
+        .record_peer_credit_totals(credited_user_hash, 1_048_576, 20 * 1_048_576)
+        .unwrap();
+
+    let now = Instant::now();
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0xC1, 0x0A00_00C1), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (regular_handle, regular_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0xC2, 0x0A00_00C2), &file_hash, now)
+        .await;
+    assert_eq!(regular_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let (credited_handle, credited_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(3, credited_user_hash[0], 0x0A00_00C3),
+            &file_hash,
+            now,
+        )
+        .await;
+    assert_eq!(credited_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    // Scoring keeps the credited peer behind: no credit weighting applied.
+    let scored_at = now + Duration::from_secs(1);
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(&credited_handle, false, scored_at)
+            .await,
+        Ed2kUploadSessionStatus::Waiting { rank: 2 }
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(&regular_handle, false, scored_at)
+            .await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+}
+
+#[tokio::test]
 async fn unverified_ident_earns_no_credit_ratio_bonus() {
     // A4: eMule `GetScoreRatio` returns the neutral 1.0 for a peer that is not
     // IS_IDENTIFIED (crypto available), so an unverified peer must not jump ahead

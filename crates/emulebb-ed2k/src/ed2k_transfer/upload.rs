@@ -270,7 +270,19 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
+    /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).
+    /// When disabled every peer scores the neutral 1.0 credit ratio.
+    pub fn set_credit_system_enabled(&self, enabled: bool) {
+        self.credit_system_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
     fn peer_credit_score_permille(&self, peer: &Ed2kUploadPeerIdentity) -> i128 {
+        // Credit system off (eMule !thePrefs.GetCreditSystem()): everyone gets the
+        // neutral 1.0 ratio, so stored bytes never weight the queue order.
+        if !self.credit_system_enabled.load(Ordering::Relaxed) {
+            return DEFAULT_CREDIT_SCORE_PERMILLE;
+        }
         peer.user_hash
             .map(hex::encode)
             .and_then(|user_hash| self.metadata.peer_credit_by_hash(&user_hash).ok().flatten())

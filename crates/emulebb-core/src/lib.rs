@@ -411,6 +411,9 @@ impl EmulebbCore {
         ed2k_transfers.apply_download_coordinator_config(
             ed2k_download_coordinator_config_from_preferences(&core_state.preferences),
         );
+        // Apply the credit-system toggle at startup too (eMule
+        // thePrefs.GetCreditSystem()); update_preferences keeps it live thereafter.
+        ed2k_transfers.set_credit_system_enabled(core_state.preferences.credit_system);
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);
             match metadata_store
@@ -543,6 +546,10 @@ impl EmulebbCore {
             .apply_download_coordinator_config(
                 ed2k_download_coordinator_config_from_preferences(&preferences),
             );
+        // Apply the credit-system toggle live (eMule thePrefs.GetCreditSystem()):
+        // when off, upload scoring uses the neutral 1.0 credit ratio for everyone.
+        self.ed2k_transfers
+            .set_credit_system_enabled(preferences.credit_system);
         Ok(preferences)
     }
 
@@ -582,6 +589,12 @@ impl EmulebbCore {
     pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {
         ensure!(!address.trim().is_empty(), "address must not be empty");
         ensure!(port != 0, "port must be between 1 and 65535");
+        // The Kademlia network must be enabled (eMule thePrefs.GetNetworkKademlia());
+        // when off, Kad is refused / not started.
+        ensure!(
+            self.state.lock().await.preferences.network_kademlia,
+            "Kademlia network is disabled in preferences (networkKademlia=false)"
+        );
         self.set_kad_running(true).await;
         Ok(kad_status_from_running(self.state.lock().await.kad_running))
     }
@@ -695,6 +708,12 @@ impl EmulebbCore {
     }
 
     async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
+        // The eD2k network must be enabled (eMule thePrefs.GetNetworkED2K()); when
+        // off, the server connect is refused and no eD2k auto-ops run.
+        ensure!(
+            self.state.lock().await.preferences.network_ed2k,
+            "eD2k network is disabled in preferences (networkEd2k=false)"
+        );
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
@@ -5844,6 +5863,50 @@ mod tests {
         assert_eq!(preferences.queue_size, 4_000);
         assert_eq!(policy.active_slots, 4);
         assert_eq!(policy.waiting_capacity, 4_000);
+    }
+
+    #[tokio::test]
+    async fn network_kademlia_disabled_refuses_kad_bootstrap() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        // Disable the Kademlia network (eMule thePrefs.GetNetworkKademlia() == false).
+        core.update_preferences(PreferencesUpdate {
+            network_kademlia: Some(false),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+        let err = core
+            .bootstrap_kad("203.0.113.9", 4672)
+            .await
+            .expect_err("Kad bootstrap must be refused when networkKademlia=false");
+        assert!(err.to_string().contains("Kademlia network is disabled"));
+        // Re-enabling lets Kad start again.
+        core.update_preferences(PreferencesUpdate {
+            network_kademlia: Some(true),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+        assert!(core.bootstrap_kad("203.0.113.9", 4672).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn network_ed2k_disabled_refuses_server_connect() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        // Disable the eD2k network (eMule thePrefs.GetNetworkED2K() == false): the
+        // server connect is refused on the preference gate (before any network
+        // config / VPN-guard checks).
+        core.update_preferences(PreferencesUpdate {
+            network_ed2k: Some(false),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+        let err = core
+            .connect_ed2k()
+            .await
+            .expect_err("eD2k connect must be refused when networkEd2k=false");
+        assert!(err.to_string().contains("eD2k network is disabled"));
     }
 
     #[test]

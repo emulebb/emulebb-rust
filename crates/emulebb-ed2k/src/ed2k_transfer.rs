@@ -15,7 +15,7 @@ use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, atomic::AtomicU64},
+    sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, AtomicU64}},
     time::{Duration, Instant},
 };
 
@@ -190,6 +190,12 @@ pub struct Ed2kTransferRuntime {
     /// `theStats.sessionReceivedBytes`/`sessionSentBytes`). In-memory only.
     session_downloaded_bytes: AtomicU64,
     session_uploaded_bytes: AtomicU64,
+    /// Whether the credit system weights upload scoring (eMule
+    /// `thePrefs.GetCreditSystem()`). When false, every peer gets the neutral 1.0
+    /// credit ratio (`DEFAULT_CREDIT_SCORE_PERMILLE`) so stored bytes never alter
+    /// the queue order. Set from the upload-queue policy at startup and on every
+    /// preferences update; an atomic so the lock-free credit-score path reads it.
+    credit_system_enabled: AtomicBool,
     /// In-memory client ban store (eMule `CClientList` ban lists), keyed by IP +
     /// user hash with a 4h `CLIENTBANTIME` TTL. Shared with the inbound listener,
     /// the download driver, the UDP reask runtime, and core via this runtime's
@@ -288,6 +294,7 @@ impl Ed2kTransferRuntime {
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
+            credit_system_enabled: AtomicBool::new(true),
             ban_store: Arc::new(crate::ban_store::BanStore::new()),
         };
         // Credit aging on startup: drop peer credit rows last seen > 150 days ago

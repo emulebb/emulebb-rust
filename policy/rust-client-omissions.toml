@@ -37,3 +37,43 @@ stock_behavior = "Classic eMule can request a media preview from a peer (OP_REQU
 rust_behavior = "The Rust client decodes and logs inbound OP_REQUESTPREVIEW / OP_PREVIEWANSWER for diagnostics but never generates a preview answer and never requests previews; there is no frame-extraction or preview surface."
 reason = "Preview is a rarely-used interactive media feature: answering it needs a heavy media frame-extraction dependency and opens an untrusted-media decode surface, with no eMuleBB /api/v1 route to drive or expose it. Deliberately omitted (operator decision 2026-06-15); it is not advertised as required."
 compatibility = "Does not affect eD2K or Kad wire compatibility; an unanswered preview request simply yields no preview, exactly as a stock peer that has the feature disabled."
+
+[[omissions]]
+id = "pref-auto-connect"
+area = "preferences"
+stock_behavior = "Classic eMule auto-connects to the eD2K server / Kad on startup when 'Connect on startup' (autoConnect) is enabled."
+rust_behavior = "The Rust client accepts, persists and echoes the autoConnect preference for REST-contract compatibility, but does not drive any startup auto-connect from it; network connect is initiated explicitly via the REST control plane."
+reason = "Auto-connect is an eMule GUI startup behavior with no clean headless mapping: the headless client is driven by an external controller that decides when to connect, so a startup auto-connect flag is intentionally not wired."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+
+[[omissions]]
+id = "pref-safe-server-connect"
+area = "preferences"
+stock_behavior = "Classic eMule's 'Safe connect' (safeServerConnect) gates how aggressively it cycles through servers when auto-connecting."
+rust_behavior = "The Rust client accepts, persists and echoes the safeServerConnect preference for REST-contract compatibility, but does not drive server-cycling behavior from it; server selection is explicit via the REST control plane."
+reason = "Safe-server-connect is an eMule GUI auto-connect tuning knob tied to the GUI server-cycling behavior, which the headless model does not implement (connect targets are chosen by the external controller)."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+
+[[omissions]]
+id = "pref-new-auto-up"
+area = "preferences"
+stock_behavior = "Classic eMule's newAutoUp toggles auto-management of the upload priority for newly added shared files in the GUI."
+rust_behavior = "The Rust client accepts, persists and echoes the newAutoUp preference for REST-contract compatibility, but does not drive a global new-file auto-upload-priority behavior from it; upload priority is set per file via the REST control plane."
+reason = "newAutoUp is an eMule GUI default-priority convenience with no clean headless mapping: per-file upload priority is managed explicitly over REST, so a global GUI default flag is intentionally not wired."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+
+[[omissions]]
+id = "pref-new-auto-down"
+area = "preferences"
+stock_behavior = "Classic eMule's newAutoDown toggles auto-management of the download priority for newly added downloads in the GUI."
+rust_behavior = "The Rust client accepts, persists and echoes the newAutoDown preference for REST-contract compatibility, but does not drive a global new-file auto-download-priority behavior from it; download priority is set per transfer via the REST control plane."
+reason = "newAutoDown is an eMule GUI default-priority convenience with no clean headless mapping: per-transfer download priority is managed explicitly over REST, so a global GUI default flag is intentionally not wired."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+
+[[omissions]]
+id = "pref-download-auto-broadband-io"
+area = "preferences"
+stock_behavior = "Classic eMule's downloadAutoBroadbandIo enables an adaptive disk/broadband IO tuning mode in the GUI."
+rust_behavior = "The Rust client accepts, persists and echoes the downloadAutoBroadbandIo preference for REST-contract compatibility, but does not drive any adaptive IO tuning from it; the transfer runtime uses its own fixed IO/throttle model."
+reason = "downloadAutoBroadbandIo is an eMule GUI adaptive-IO convenience with no clean headless mapping: the headless transfer runtime has its own IO and throttle model, so the GUI auto-IO flag is intentionally not wired."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
