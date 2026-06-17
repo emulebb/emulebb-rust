@@ -105,6 +105,11 @@ async fn run_small_timer_sweep(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
 ) {
+    // Sweep the inbound flood tracker on the same minute cadence: its per-(IP,
+    // bucket) token buckets and flood bans are only aged lazily on access, so
+    // idle entries would otherwise accumulate without bound.
+    dht.prune_packet_tracker();
+
     let mut probes = dht.routing_small_timer_maintenance().await;
     probes.truncate(MAX_PROBES_PER_SWEEP);
     let local_ip = dht.bind_addr().ok().map(|addr| addr.ip());

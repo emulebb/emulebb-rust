@@ -241,6 +241,14 @@ impl DhtNode {
         self.inner.rpc.observability()
     }
 
+    /// Prune expired inbound flood-tracking buckets and lapsed flood bans. The
+    /// inbound packet tracker ages entries only lazily on access, so idle
+    /// buckets and expired bans must be swept periodically (driven by the Kad
+    /// routing-maintenance small timer) to keep its memory bounded.
+    pub fn prune_packet_tracker(&self) {
+        self.inner.rpc.prune_packet_tracker();
+    }
+
     /// Register a handler for inbound UDP datagrams that are not Kad packets —
     /// e.g. eD2k client UDP reask sharing the Kad port. Pass-through to the inner
     /// RPC manager; at-most-once, `None` until set (no foreign handling). See

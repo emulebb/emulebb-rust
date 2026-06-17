@@ -171,6 +171,14 @@ impl RpcManager {
         self.inner.transport.send_raw(addr, data).await
     }
 
+    /// Prune expired inbound flood-tracking buckets and lapsed flood bans. The
+    /// inbound `PacketTracker` only ages entries lazily on access, so idle
+    /// (IP, bucket) buckets and expired bans accumulate forever without this
+    /// sweep. Call periodically from the Kad maintenance loop.
+    pub fn prune_packet_tracker(&self) {
+        self.inner.tracker.lock().unwrap().prune();
+    }
+
     /// Number of in-flight pending request entries. Test-only window onto the
     /// pending map used to assert the RAII pending guard cleans up after an
     /// aborted (dropped) request future.

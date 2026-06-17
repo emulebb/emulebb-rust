@@ -539,6 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn prune_drops_idle_buckets_and_expired_bans() {
+        // Short request window so an idle BootstrapReq bucket fully refills (and
+        // becomes prunable) within a unit-test sleep.
+        let mut tracker =
+            PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_millis(50));
+        let addr = key("4.3.2.1", PacketTrackerBucket::BootstrapReq);
+        let _ = tracker.record_and_check(addr);
+        // A flood ban already in the past must be dropped by prune.
+        let banned_ip = parse_ip("9.9.9.9");
+        tracker
+            .banned_until
+            .insert(banned_ip, Instant::now() - Duration::from_secs(1));
+        // Fresh state survives an immediate prune.
+        tracker.prune();
+        assert_eq!(tracker.buckets.len(), 1, "fresh bucket must survive prune");
+        // Idle past the full-refill window, then prune sheds bucket and ban.
+        std::thread::sleep(Duration::from_millis(70));
+        tracker.prune();
+        assert!(tracker.buckets.is_empty(), "idle bucket must be pruned");
+        assert!(tracker.banned_until.is_empty(), "expired ban must be pruned");
+    }
+
+    #[test]
     fn token_bucket_bans_at_massive_flood_threshold() {
         // CallbackReq: 1 per minute -> cap 60000ms, cost 60000ms. The massive
         // threshold is tokens < -3*cap = -180000, reached once the deficit
