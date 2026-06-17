@@ -175,6 +175,7 @@ use shared_directories::{
 };
 
 mod rest_model;
+mod rest_model_serde;
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,

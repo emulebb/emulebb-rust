@@ -47,6 +47,9 @@ mod rest_test_support;
 #[path = "tests/route_app.rs"]
 mod route_app_tests;
 #[cfg(test)]
+#[path = "tests/route_body_validation.rs"]
+mod route_body_validation_tests;
+#[cfg(test)]
 #[path = "tests/route_entities.rs"]
 mod route_entities_tests;
 #[cfg(test)]

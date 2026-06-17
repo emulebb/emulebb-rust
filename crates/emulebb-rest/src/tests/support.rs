@@ -28,7 +28,7 @@ pub(crate) async fn assert_invalid_json_response(
     app: Router,
     method: &str,
     uri: &str,
-    body: &'static str,
+    body: impl Into<Body>,
     expected_message: &str,
 ) {
     let response = app
@@ -38,7 +38,7 @@ pub(crate) async fn assert_invalid_json_response(
                 .uri(uri)
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
-                .body(Body::from(body))
+                .body(body.into())
                 .unwrap(),
         )
         .await

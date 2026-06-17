@@ -231,13 +231,21 @@ pub(crate) fn structured_error_message(message: String) -> String {
     if let Some(field) = unknown_json_field(&message) {
         return format!("unknown JSON field: {field}");
     }
-    message
+    trim_json_location(message)
 }
 
 pub(crate) fn unknown_json_field(message: &str) -> Option<&str> {
     let (_, rest) = message.split_once("unknown field `")?;
     let (field, _) = rest.split_once('`')?;
     Some(field)
+}
+
+pub(crate) fn trim_json_location(message: String) -> String {
+    if let Some((prefix, _)) = message.rsplit_once(" at line ") {
+        prefix.to_string()
+    } else {
+        message
+    }
 }
 
 pub(crate) fn optional_json_body<T>(body: &[u8]) -> Result<T, serde_json::Error>

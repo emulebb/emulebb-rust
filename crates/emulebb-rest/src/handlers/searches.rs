@@ -114,8 +114,12 @@ pub(crate) async fn download_search_result(
     let request = match optional_json_body::<SearchResultDownloadCreate>(&body) {
         Ok(request) => request,
         Err(error) => {
-            return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string())
-                .into_response();
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                json_error_message(&error),
+            )
+            .into_response();
         }
     };
     match state

@@ -264,7 +264,10 @@ pub struct TransferCreate {
     pub link: Option<String>,
     #[serde(default)]
     pub links: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
+    )]
     pub category_id: Option<u32>,
     #[serde(default)]
     pub category_name: Option<String>,
@@ -279,7 +282,10 @@ pub struct TransferUpdate {
     pub name: Option<String>,
     #[serde(default)]
     pub priority: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
+    )]
     pub category_id: Option<u32>,
     #[serde(default)]
     pub category_name: Option<String>,
@@ -288,7 +294,10 @@ pub struct TransferUpdate {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchResultDownloadCreate {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
+    )]
     pub category_id: Option<u32>,
     #[serde(default)]
     pub category_name: Option<String>,
@@ -311,11 +320,17 @@ pub struct Category {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CategoryCreate {
     pub name: String,
-    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
+    )]
     pub path: NullableStringField,
     #[serde(default)]
     pub comment: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_nullable_u32_field")]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_u32_field"
+    )]
     pub color: NullableU32Field,
     #[serde(default)]
     pub priority: Option<CategoryPriorityValue>,
@@ -326,11 +341,17 @@ pub struct CategoryCreate {
 pub struct CategoryUpdate {
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_string_field"
+    )]
     pub path: NullableStringField,
     #[serde(default)]
     pub comment: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_nullable_u32_field")]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_nullable_u32_field"
+    )]
     pub color: NullableU32Field,
     #[serde(default)]
     pub priority: Option<CategoryPriorityValue>,
@@ -701,36 +722,4 @@ impl VpnGuardStatus {
 
 pub(crate) fn default_search_method() -> String {
     "automatic".to_string()
-}
-
-pub(crate) fn deserialize_nullable_string_field<'de, D>(
-    deserializer: D,
-) -> std::result::Result<NullableStringField, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Null => Ok(NullableStringField::Null(())),
-        serde_json::Value::String(value) => Ok(NullableStringField::Value(value)),
-        _ => Err(serde::de::Error::custom("path must be a string or null")),
-    }
-}
-
-pub(crate) fn deserialize_nullable_u32_field<'de, D>(
-    deserializer: D,
-) -> std::result::Result<NullableU32Field, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Null => Ok(NullableU32Field::Null(())),
-        serde_json::Value::Number(value) => value
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .map(NullableU32Field::Value)
-            .ok_or_else(|| serde::de::Error::custom("color must be null or an RGB integer")),
-        _ => Err(serde::de::Error::custom(
-            "color must be null or an RGB integer",
-        )),
-    }
 }
