@@ -108,6 +108,44 @@ async fn download_activity_reports_average_speed_until_stale() {
 }
 
 #[tokio::test]
+async fn stale_download_sources_are_evicted_on_next_write() {
+    // A long-running transfer must not accumulate one inner-map entry per
+    // endpoint ever observed: a later write opportunistically drops entries
+    // older than the staleness window (30s), leaving only the live peer.
+    let root = unique_test_dir("ed2k-transfer-source-eviction");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let file_hash = "00112233445566778899aabbccddeeff";
+
+    let stale_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4662));
+    let fresh_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 4662));
+
+    runtime.note_download_source_bytes_at(file_hash, stale_peer, Some([0x01; 16]), 4_096, now);
+    {
+        let sources = runtime.download_sources.lock().unwrap();
+        assert_eq!(sources.get(file_hash).map(|peers| peers.len()), Some(1));
+    }
+
+    // A write well past the staleness window for a different peer must evict the
+    // now-stale entry, leaving only the fresh peer.
+    let later = now + Duration::from_secs(31);
+    runtime.note_download_source_bytes_at(file_hash, fresh_peer, Some([0x02; 16]), 4_096, later);
+    {
+        let sources = runtime.download_sources.lock().unwrap();
+        let peers = sources.get(file_hash).expect("file entry present");
+        assert_eq!(peers.len(), 1, "stale peer should have been evicted");
+        assert!(
+            peers.contains_key(&fresh_peer.to_string()),
+            "fresh peer retained"
+        );
+        assert!(
+            !peers.contains_key(&stale_peer.to_string()),
+            "stale peer dropped"
+        );
+    }
+}
+
+#[tokio::test]
 async fn download_speed_tracks_sliding_window_not_whole_transfer() {
     // B4: the reported rate must be a short sliding-window average (master
     // CalculateDownloadRate), so a recent burst is not diluted by an early

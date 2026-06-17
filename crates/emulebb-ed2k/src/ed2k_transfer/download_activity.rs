@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -136,9 +136,14 @@ impl Ed2kTransferRuntime {
         let Ok(mut sources) = self.download_sources.lock() else {
             return;
         };
-        let entry = sources
-            .entry(file_hash.to_string())
-            .or_default()
+        let peers = sources.entry(file_hash.to_string()).or_default();
+        // Opportunistically evict stale peers so a long-running transfer's inner
+        // map stays bounded to the live set rather than growing with every
+        // endpoint ever observed (entries were previously only freed on transfer
+        // removal). The peer we are about to touch uses the freshest `now`, so it
+        // is never a candidate for eviction here.
+        evict_stale_sources(peers, now);
+        let entry = peers
             .entry(peer.to_string())
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
@@ -171,9 +176,9 @@ impl Ed2kTransferRuntime {
         let Ok(mut sources) = self.download_sources.lock() else {
             return;
         };
-        let entry = sources
-            .entry(file_hash.to_string())
-            .or_default()
+        let peers = sources.entry(file_hash.to_string()).or_default();
+        evict_stale_sources(peers, now);
+        let entry = peers
             .entry(peer.to_string())
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
@@ -356,6 +361,14 @@ impl Ed2kTransferRuntime {
 
 fn is_stale(last_seen_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_seen_at) > DOWNLOAD_ACTIVITY_STALE_AFTER
+}
+
+/// Drop per-source entries last seen beyond the staleness window, keeping the
+/// inner per-peer map bounded to the live set. Called opportunistically from the
+/// `note_*` write paths so a long-running transfer does not accumulate one entry
+/// per endpoint ever observed.
+fn evict_stale_sources(peers: &mut HashMap<String, Ed2kSourceActivity>, now: Instant) {
+    peers.retain(|_, peer| !is_stale(peer.last_seen_at, now));
 }
 
 fn is_transferring(peer: &Ed2kSourceActivity, now: Instant) -> bool {
