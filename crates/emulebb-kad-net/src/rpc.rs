@@ -170,6 +170,14 @@ impl RpcManager {
     ) -> Result<(), crate::error::NetError> {
         self.inner.transport.send_raw(addr, data).await
     }
+
+    /// Number of in-flight pending request entries. Test-only window onto the
+    /// pending map used to assert the RAII pending guard cleans up after an
+    /// aborted (dropped) request future.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.inner.pending.lock().unwrap().len()
+    }
 }
 
 #[cfg(test)]

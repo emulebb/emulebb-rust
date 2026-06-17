@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -8,11 +9,56 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use super::packet_info::{is_publish_opcode, opcode_name, outbound_transport_reason};
-use super::{PendingEntry, RpcManager, RpcWorkClass};
+use super::{PendingEntry, RpcInner, RpcManager, RpcWorkClass};
 use crate::error::NetError;
 use crate::obfuscation::OutboundKadEncryptionMode;
 use crate::rate_limit::RateLimiter;
 use crate::wire_dump::{KadUdpDumpSummary, dump_kad_udp_packet};
+
+/// RAII guard that guarantees a pending-request entry is removed from the
+/// `RpcManager` map exactly once, even if the awaiting request future is
+/// dropped (cancelled/aborted) before it can run its own removal arms.
+///
+/// Traversal lookups routinely abort outstanding query tasks the moment the
+/// closest set converges (`JoinSet::abort_all`), so the awaiting
+/// `timeout(rx)` future of an aborted task never resolves and never runs the
+/// inline `pending.remove(&id)` arms. Without this guard those entries leak,
+/// and every inbound RES then pays an O(n) scan over the ever-growing map.
+struct PendingGuard {
+    inner: Arc<RpcInner>,
+    id: u64,
+    /// Set once the entry has been removed by an explicit path so the Drop
+    /// removal becomes a no-op (avoids a redundant lock acquisition).
+    removed: bool,
+}
+
+impl PendingGuard {
+    fn new(inner: Arc<RpcInner>, id: u64) -> Self {
+        Self {
+            inner,
+            id,
+            removed: false,
+        }
+    }
+
+    /// Remove the entry now and return it, marking the guard satisfied so Drop
+    /// does no further work.
+    fn take(&mut self) -> Option<PendingEntry> {
+        if self.removed {
+            return None;
+        }
+        self.removed = true;
+        self.inner.pending.lock().unwrap().remove(&self.id)
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if !self.removed {
+            self.inner.pending.lock().unwrap().remove(&self.id);
+        }
+    }
+}
 
 impl RpcManager {
     /// Send a packet to addr and wait for a response matching expected_opcode.
@@ -61,6 +107,12 @@ impl RpcManager {
             );
         }
 
+        // From here on the entry is owned by an RAII guard: if this future is
+        // dropped (e.g. a converged traversal aborts its query tasks) before any
+        // explicit removal arm runs, Drop still evicts the entry so it cannot
+        // leak. Each explicit arm uses `guard.take()` to consume it deterministically.
+        let mut guard = PendingGuard::new(Arc::clone(&self.inner), id);
+
         if is_publish_opcode(packet.opcode()) || is_publish_opcode(expected_opcode) {
             debug!(
                 "kad publish pending add pending_id={} request_opcode={} expected_opcode={} to={} timeout_ms={}",
@@ -73,23 +125,24 @@ impl RpcManager {
         }
 
         if let Err(e) = self.send_with_class(addr, packet, work_class).await {
-            self.inner.pending.lock().unwrap().remove(&id);
+            guard.take();
             return Err(e);
         }
 
         match timeout(timeout_duration, rx).await {
-            Ok(Ok(pkt)) => Ok(pkt),
+            Ok(Ok(pkt)) => {
+                // The receive loop already removed the entry on match; mark the
+                // guard satisfied so its Drop does not re-lock the map.
+                guard.take();
+                Ok(pkt)
+            }
             Ok(Err(_)) => {
-                self.inner.pending.lock().unwrap().remove(&id);
+                guard.take();
                 Err(NetError::ChannelClosed)
             }
             Err(_) => {
-                let elapsed_ms = self
-                    .inner
-                    .pending
-                    .lock()
-                    .unwrap()
-                    .remove(&id)
+                let elapsed_ms = guard
+                    .take()
                     .map(|entry| entry.created_at.elapsed().as_millis())
                     .unwrap_or_default();
                 if is_publish_opcode(packet.opcode()) || is_publish_opcode(expected_opcode) {
