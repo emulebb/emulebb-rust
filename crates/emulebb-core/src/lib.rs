@@ -6061,7 +6061,7 @@ mod tests {
         network.vpn_guard = VpnGuardConfig {
             enabled: true,
             mode: "block".to_string(),
-            allowed_public_ip_cidrs: "203.0.113.0/24".to_string(),
+            allowed_public_ip_cidrs: "8.8.8.0/24".to_string(),
         };
         network.vpn_interface_bound = true;
         let core = EmulebbCore::new_with_network(
@@ -6079,7 +6079,7 @@ mod tests {
         assert!(err.to_string().contains("blocked by VPN guard"));
         assert!(err.to_string().contains("public IP is unknown"));
 
-        core.ed2k_reachability.set(Ipv4Addr::new(203, 0, 113, 25));
+        core.ed2k_reachability.set(Ipv4Addr::new(8, 8, 8, 8));
         assert!(core.start_kad().await.is_ok());
     }
 
