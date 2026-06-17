@@ -303,8 +303,8 @@ async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response
         return next.run(request).await;
     };
     if let Some(query) = request.uri().query() {
-        for name in match parse_query_field_names(query) {
-            Ok(names) => names,
+        for (name, value) in match parse_query_fields(query) {
+            Ok(fields) => fields,
             Err(response) => return *response,
         } {
             if !allowed_query_fields.contains(&name.as_str()) {
@@ -312,6 +312,14 @@ async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",
                     format!("unknown query parameter: {name}"),
+                )
+                .into_response();
+            }
+            if name == "state" && !is_transfer_state_name(&value) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    "state must be one of downloading, paused, queued, checking, completing, completed, error, missingfiles",
                 )
                 .into_response();
             }
@@ -376,7 +384,7 @@ fn is_ascii_whitespace_only(body: &[u8]) -> bool {
     body.iter().all(|byte| byte.is_ascii_whitespace())
 }
 
-fn parse_query_field_names(query: &str) -> Result<Vec<String>, Box<Response>> {
+fn parse_query_fields(query: &str) -> Result<Vec<(String, String)>, Box<Response>> {
     let fields = serde_urlencoded::from_str::<Vec<(String, String)>>(query).map_err(|error| {
         Box::new(
             api_error(
@@ -388,8 +396,7 @@ fn parse_query_field_names(query: &str) -> Result<Vec<String>, Box<Response>> {
         )
     })?;
     let mut seen = HashSet::new();
-    let mut names = Vec::with_capacity(fields.len());
-    for (name, _) in fields {
+    for (name, _) in &fields {
         if !seen.insert(name.clone()) {
             return Err(Box::new(
                 api_error(
@@ -400,9 +407,22 @@ fn parse_query_field_names(query: &str) -> Result<Vec<String>, Box<Response>> {
                 .into_response(),
             ));
         }
-        names.push(name);
     }
-    Ok(names)
+    Ok(fields)
+}
+
+fn is_transfer_state_name(value: &str) -> bool {
+    matches!(
+        value,
+        "downloading"
+            | "paused"
+            | "queued"
+            | "checking"
+            | "completing"
+            | "completed"
+            | "error"
+            | "missingfiles"
+    )
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

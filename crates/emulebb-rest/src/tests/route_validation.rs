@@ -441,3 +441,37 @@ async fn pagination_rejects_out_of_range_bounds_with_details() {
     let (status, _value) = error_value("/api/v1/transfers?limit=10&offset=5").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn transfers_reject_unknown_state_query_values() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/transfers?state=bogus")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        value["error"]["message"],
+        "state must be one of downloading, paused, queued, checking, completing, completed, error, missingfiles"
+    );
+
+    let accepted = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/transfers?state=paused")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
