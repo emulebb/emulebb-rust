@@ -54,10 +54,15 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
         let config = config.clone();
         let status_config = config.clone();
         let mappings = mappings.to_vec();
-        let outcome =
-            task::spawn_blocking(move || reconcile_blocking(&backend_name, &config, &mappings))
-                .await
-                .context("miniupnpc reconcile task failed")??;
+        // Snapshot the previously-recorded mappings so the blocking reconcile can
+        // delete a stale external port if the gateway granted a different one last
+        // cycle (defensive; most IGDs honor the requested port).
+        let previous_mappings = status.read().await.mappings.clone();
+        let outcome = task::spawn_blocking(move || {
+            reconcile_blocking(&backend_name, &config, &mappings, &previous_mappings)
+        })
+        .await
+        .context("miniupnpc reconcile task failed")??;
 
         info!(
             "UPnP backend {} selected gateway {} local_ip={} external_ip={}",
@@ -128,6 +133,7 @@ fn reconcile_blocking(
     backend_name: &str,
     config: &NatConfig,
     mappings: &[MappingSpec],
+    previous_mappings: &[MappedEndpoint],
 ) -> Result<ReconcileOutcome> {
     let gateway = discover_gateway(config).context("gateway discovery failed")?;
     let local_ip = gateway_local_ip(config, &gateway).with_context(|| {
@@ -157,6 +163,34 @@ fn reconcile_blocking(
             .preferred_external_port
             .unwrap_or_else(|| spec.local_addr.port());
         let internal_ip = mapping_internal_ip(config, spec, &local_ip).to_string();
+        // Defensive remap cleanup: if a prior cycle recorded this mapping on a
+        // different external port, delete the stale one before recording the new
+        // port so a gateway-driven port change does not leak the old mapping.
+        if let Some(previous_port) = previous_mappings
+            .iter()
+            .find(|previous| {
+                previous.name == spec.name && previous.protocol == spec.protocol
+            })
+            .map(|previous| previous.external_addr.port())
+            .filter(|previous_port| *previous_port != external_port)
+        {
+            if let Err(error) =
+                gateway.delete_port_mapping(previous_port, spec.protocol.as_upnp_token())
+            {
+                warn!(
+                    "UPnP backend {} failed to delete stale {} mapping external_port={}: {}",
+                    backend_name,
+                    spec.name,
+                    previous_port,
+                    error
+                );
+            } else {
+                info!(
+                    "UPnP backend {} deleted stale {} mapping external_port={} (remapped to {})",
+                    backend_name, spec.name, previous_port, external_port
+                );
+            }
+        }
         if let Err(error) = gateway
             .add_port_mapping(
                 external_port,
