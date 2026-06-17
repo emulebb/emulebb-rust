@@ -17,7 +17,11 @@ pub(crate) async fn kad(State(state): State<RestState>) -> impl IntoResponse {
 
 pub(crate) async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.start_kad().await {
-        Ok(status) => api_ok(kad_response(&status, &state.core.vpn_guard_status())).into_response(),
+        Ok(_) => api_ok(kad_response(
+            &state.core.status().await.kad,
+            &state.core.vpn_guard_status(),
+        ))
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -83,7 +87,11 @@ pub(crate) async fn kad_bootstrap(
         .bootstrap_kad(&request.address, request.port)
         .await
     {
-        Ok(status) => api_ok(kad_response(&status, &state.core.vpn_guard_status())).into_response(),
+        Ok(_) => api_ok(kad_response(
+            &state.core.status().await.kad,
+            &state.core.vpn_guard_status(),
+        ))
+        .into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
