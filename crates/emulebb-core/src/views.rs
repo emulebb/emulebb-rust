@@ -500,6 +500,29 @@ pub(crate) fn apply_server_connection_flags(
     server.current = server.connected || server.connecting;
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ServerLiveDetails {
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) users: Option<u32>,
+    pub(crate) files: Option<u32>,
+}
+
+pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLiveDetails) {
+    if let Some(name) = live.name.as_ref() {
+        server.name = name.clone();
+    }
+    if let Some(description) = live.description.as_ref() {
+        server.description = description.clone();
+    }
+    if let Some(users) = live.users {
+        server.users = u64::from(users);
+    }
+    if let Some(files) = live.files {
+        server.files = u64::from(files);
+    }
+}
+
 pub(crate) fn validate_server_update(update: &ServerUpdate) -> Result<()> {
     if let Some(priority) = update.priority.as_deref() {
         let _ = validate_server_priority(priority)?;
@@ -524,37 +547,5 @@ pub(crate) fn server_endpoint_from_create(request: &ServerCreate) -> Result<Stri
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{apply_server_connection_flags, server_info_from_parts};
-
-    #[test]
-    fn server_connection_flags_mark_connecting_server_current() {
-        let mut server = server_info_from_parts("203.0.113.9", 4661, None, None, true, None, None);
-
-        apply_server_connection_flags(&mut server, None, Some("203.0.113.9:4661"));
-
-        assert!(server.current);
-        assert!(server.connecting);
-        assert!(!server.connected);
-    }
-
-    #[test]
-    fn server_connection_flags_prefer_connected_and_clear_stale_flags() {
-        let mut server = server_info_from_parts(
-            "203.0.113.9",
-            4661,
-            None,
-            None,
-            true,
-            Some("203.0.113.9:4661"),
-            None,
-        );
-        server.connecting = true;
-
-        apply_server_connection_flags(&mut server, Some("198.51.100.4:4661"), None);
-
-        assert!(!server.current);
-        assert!(!server.connecting);
-        assert!(!server.connected);
-    }
-}
+#[path = "views_tests.rs"]
+mod tests;
