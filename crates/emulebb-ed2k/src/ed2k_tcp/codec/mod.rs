@@ -40,7 +40,8 @@ const MAX_CLIENT_MSG_LEN: usize = 450;
 
 use super::{
     MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_ASKSHAREDDENIEDANS,
-    OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEREQANSNOFIL, OP_PACKEDPROT,
+    OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEDESC, OP_FILEREQANSNOFIL,
+    OP_PACKEDPROT,
     OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
     OP_SETREQFILEID, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
 };
@@ -537,6 +538,25 @@ pub(super) fn decode_shared_files_dir_answer_payload(
 pub(super) struct FileDescription {
     pub(super) rating: u8,
     pub(super) comment: String,
+}
+
+/// Encode the `OP_FILEDESC` body: `<rating u8><LongString comment>` where
+/// `LongString` is `<u32 LE byte-length><UTF-8 bytes>` (oracle
+/// `UploadClient.cpp:SendCommentInfo` + `SafeFile.cpp:WriteLongString`). Modern
+/// peers advertise unicode support, so the comment is written as UTF-8.
+fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
+    let comment_bytes = comment.as_bytes();
+    let mut body = Vec::with_capacity(1 + 4 + comment_bytes.len());
+    body.push(rating);
+    body.extend_from_slice(&u32::try_from(comment_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    body.extend_from_slice(comment_bytes);
+    body
+}
+
+/// Encode a complete `OP_FILEDESC` packet (`OP_EMULEPROT` opcode `0x61`) carrying
+/// the served file's rating + comment, mirroring `UploadClient.cpp:SendCommentInfo`.
+pub(super) fn encode_file_desc(rating: u8, comment: &str) -> Vec<u8> {
+    encode_packet(OP_EMULEPROT, OP_FILEDESC, &encode_file_description_body(rating, comment))
 }
 
 pub(super) fn decode_file_description_payload(payload: &[u8]) -> Result<FileDescription> {

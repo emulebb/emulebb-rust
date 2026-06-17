@@ -3976,8 +3976,13 @@ async fn publish_kad_due_shared_files(
     };
     let mut keyword_totals = PublishAttemptStats::default();
     let mut source_totals = PublishAttemptStats::default();
+    let mut notes_totals = PublishAttemptStats::default();
     let mut keyword_published = 0usize;
     let mut source_published = 0usize;
+    let mut notes_published = 0usize;
+    // Our Kad node id is the notes publisher identity (master STORENOTES writes
+    // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
+    let notes_publisher_id = runtime.dht.own_id();
     let item_count = manifests.len();
 
     for manifest in manifests {
@@ -4056,16 +4061,67 @@ async fn publish_kad_due_shared_files(
                 }
             }
         }
+
+        // Notes (comment/rating) publish: only for files that actually carry a
+        // user-set comment/rating, on the 24h notes interval (master
+        // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
+        // and source so an un-annotated file never emits a notes publish.
+        if kad_publish_schedule::file_has_publishable_note(&manifest.comment, manifest.rating)
+            && schedule.notes_due(&manifest.file_hash, now)
+        {
+            // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
+            // DESCRIPTION (non-empty only), FILESIZE.
+            let mut notes_tags = vec![Tag::filename(manifest.canonical_name.clone())];
+            if manifest.rating > 0 {
+                notes_tags.push(Tag::new_short(
+                    emulebb_kad_proto::tag_name::FILERATING,
+                    emulebb_kad_proto::TagValue::UInt(u64::from(manifest.rating)),
+                ));
+            }
+            if !manifest.comment.is_empty() {
+                notes_tags.push(Tag::new_short(
+                    emulebb_kad_proto::tag_name::DESCRIPTION,
+                    emulebb_kad_proto::TagValue::String(manifest.comment.clone()),
+                ));
+            }
+            notes_tags.push(Tag::filesize(manifest.file_size));
+            match runtime
+                .dht
+                .publish_notes_with_class_and_fanout(
+                    file_hash,
+                    notes_publisher_id,
+                    notes_tags,
+                    RpcWorkClass::Publish,
+                    network.kad_publish_contact_fanout,
+                )
+                .await
+            {
+                Ok(stats) => {
+                    accumulate_publish_stats(&mut notes_totals, stats);
+                    schedule.mark_notes_published(&manifest.file_hash, now);
+                    notes_published += 1;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        file_hash = %manifest.file_hash,
+                        name = manifest.canonical_name,
+                        "Kad notes publish failed: {error:#}"
+                    );
+                }
+            }
+        }
     }
 
-    if keyword_published > 0 || source_published > 0 {
+    if keyword_published > 0 || source_published > 0 || notes_published > 0 {
         tracing::info!(
-            "Kad shared-file publish cycle items={} keyword_published={} keyword_acked={} source_published={} source_acked={}",
+            "Kad shared-file publish cycle items={} keyword_published={} keyword_acked={} source_published={} source_acked={} notes_published={} notes_acked={}",
             item_count,
             keyword_published,
             keyword_totals.acked_contacts,
             source_published,
             source_totals.acked_contacts,
+            notes_published,
+            notes_totals.acked_contacts,
         );
     }
 

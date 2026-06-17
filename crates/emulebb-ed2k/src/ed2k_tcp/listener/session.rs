@@ -175,6 +175,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let mut requested_file_hash: Option<Ed2kHash> = None;
     let mut peer_supports_aich = false;
     let mut peer_supports_file_identifiers = false;
+    // Peer's advertised comment-acceptance version (oracle m_byAcceptCommentVer);
+    // gates whether we propagate our user-set comment/rating via OP_FILEDESC.
+    let mut peer_accept_comment_version: u8 = 0;
     let mut peer_upload_identity = upload_peer_identity_from_socket(peer_addr);
     let mut upload_queue = ListenerUploadQueue::new();
     // Inbound Kad buddy hold: set once this connecting peer is recognized as the
@@ -257,6 +260,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 let hello_profile = decode_hello_profile(&packet.payload)?;
                 peer_supports_aich = hello_profile.supports_aich;
                 peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
+                // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer
+                // (bits 4-7). Capture it so OP_REQUESTFILENAME can answer with
+                // OP_FILEDESC when we have a comment/rating to share.
+                peer_accept_comment_version =
+                    hello_profile.misc_options1.accept_comment_version;
                 peer_upload_identity =
                     upload_peer_identity_from_hello(peer_addr, &hello_profile);
                 // Obfuscate UDP reasks to peers whose TCP session is obfuscated.
@@ -399,6 +407,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     &mut transport,
                     peer_addr,
                     &packet.payload,
+                    peer_accept_comment_version,
                 )
                 .await?;
             }
@@ -574,6 +583,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     // client (IsEmuleClient()).
                     peer_upload_identity.emule_version = profile.emule_version;
                     peer_upload_identity.is_emule_client = true;
+                    // OP_EMULEINFO can also advertise comment acceptance (oracle
+                    // BaseClient.cpp ProcessMuleInfoPacket m_byAcceptCommentVer);
+                    // honour it without downgrading a higher hello-advertised one.
+                    if profile.accepts_comments && peer_accept_comment_version == 0 {
+                        peer_accept_comment_version = 1;
+                    }
                 }
                 let reply = encode_emule_info_answer(reachability.advertised_udp_port(kad_udp_port));
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "emule_info_answer", &reply);

@@ -17,8 +17,8 @@ use super::super::super::codec::{
     decode_hashset_request2, decode_request_sources_payload, encode_aich_file_hash_answer,
     encode_answer_sources, encode_answer_sources2, encode_file_req_ans_nofil, encode_file_status,
     encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
-    encode_multipacket_ext2_answer, encode_request_filename_answer, skip_request_filename_ext_info,
-    source_exchange_entry_count,
+    encode_file_desc, encode_multipacket_ext2_answer, encode_request_filename_answer,
+    skip_request_filename_ext_info, source_exchange_entry_count,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
@@ -207,11 +207,25 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
     Ok(Some(requested))
 }
 
+/// Whether to send an `OP_FILEDESC` (comment/rating) for a served file. Mirrors
+/// the oracle `UploadClient.cpp:SendCommentInfo` gate: only when the peer
+/// advertised comment acceptance (`m_byAcceptCommentVer >= 1`) AND the served
+/// file has a non-empty rating OR comment. Pure so the gating is unit-testable.
+#[must_use]
+pub(in crate::ed2k_tcp) fn should_send_file_desc(
+    peer_accept_comment_version: u8,
+    rating: u8,
+    comment: &str,
+) -> bool {
+    peer_accept_comment_version >= 1 && (rating != 0 || !comment.is_empty())
+}
+
 pub(in crate::ed2k_tcp) async fn handle_request_filename(
     transfer_runtime: &Ed2kTransferRuntime,
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     payload: &[u8],
+    peer_accept_comment_version: u8,
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
     let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
@@ -224,6 +238,20 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
         .write_all(&reply)
         .await
         .with_context(|| format!("failed to send OP_REQFILENAMEANSWER to {peer_addr}"))?;
+    // Propagate the user-set comment/rating right after the filename answer, like
+    // the oracle (ListenSocket.cpp OP_REQUESTFILENAME -> SendCommentInfo). Only
+    // for a file we actually serve, when the peer accepts comments and we have a
+    // non-empty rating/comment to send.
+    if let Ok(manifest) = transfer_runtime.manifest(&requested.to_string()).await {
+        if should_send_file_desc(peer_accept_comment_version, manifest.rating, &manifest.comment) {
+            let desc = encode_file_desc(manifest.rating, &manifest.comment);
+            dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "file_desc", &desc);
+            transport
+                .write_all(&desc)
+                .await
+                .with_context(|| format!("failed to send OP_FILEDESC to {peer_addr}"))?;
+        }
+    }
     Ok(Some(requested))
 }
 
@@ -591,5 +619,37 @@ mod tests {
     fn source_exchange_cap_matches_oracle() {
         // eMule caps at nCount > 500, i.e. up to 501 entries per reply.
         assert_eq!(MAX_SOURCE_EXCHANGE_ENTRIES, 501);
+    }
+
+    #[test]
+    fn file_desc_send_gate_matches_oracle() {
+        // Oracle SendCommentInfo gate: only when the peer accepts comments
+        // (m_byAcceptCommentVer >= 1) AND there is a non-empty rating OR comment.
+        assert!(should_send_file_desc(1, 3, "great file"));
+        assert!(should_send_file_desc(1, 0, "comment only"));
+        assert!(should_send_file_desc(2, 4, ""));
+        // Peer does not accept comments -> never send.
+        assert!(!should_send_file_desc(0, 5, "rated"));
+        // Nothing to share (no rating, no comment) -> never send.
+        assert!(!should_send_file_desc(1, 0, ""));
+    }
+
+    #[test]
+    fn file_desc_encodes_oracle_layout_and_round_trips() {
+        use super::super::super::super::codec::decode_file_description_payload;
+        let frame = encode_file_desc(3, "nice");
+        // Full eD2k frame: [OP_EMULEPROT][len u32 LE][OP_FILEDESC=0x61][body].
+        assert_eq!(frame[0], 0xC5); // OP_EMULEPROT
+        assert_eq!(frame[5], 0x61); // OP_FILEDESC
+        let declared = u32::from_le_bytes(frame[1..5].try_into().unwrap()) as usize;
+        let body = &frame[6..];
+        assert_eq!(declared, body.len() + 1, "len counts opcode + body");
+        // Body: [rating u8][u32 LE len][UTF-8 comment].
+        assert_eq!(body[0], 3);
+        assert_eq!(u32::from_le_bytes(body[1..5].try_into().unwrap()), 4);
+        assert_eq!(&body[5..9], b"nice");
+        let decoded = decode_file_description_payload(body).unwrap();
+        assert_eq!(decoded.rating, 3);
+        assert_eq!(decoded.comment, "nice");
     }
 }

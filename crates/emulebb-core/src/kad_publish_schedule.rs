@@ -29,6 +29,11 @@ pub(crate) const KAD_KEYWORD_REPUBLISH_INTERVAL: Duration = Duration::from_secs(
 /// Opcodes.h:76.
 pub(crate) const KAD_SOURCE_REPUBLISH_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 
+/// Master notes (comment/rating) republish interval:
+/// `KADEMLIAREPUBLISHTIMEN = HR2S(24)` (24h), Opcodes.h:77
+/// (`CKnownFile::PublishNotes`).
+pub(crate) const KAD_NOTES_REPUBLISH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Inputs to the master `CSharedFileList::Publish` firewall/buddy gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KadPublishGateInput {
@@ -64,10 +69,19 @@ pub(crate) fn kad_publish_allowed(input: KadPublishGateInput) -> bool {
     !firewalled_and_unreachable
 }
 
+/// Whether a file has any user-set comment/rating worth publishing as a Kad note
+/// (master `CKnownFile::PublishNotes`: `!GetFileComment().IsEmpty() ||
+/// GetFileRating() > 0`). Pure so the notes gating is unit-testable.
+#[must_use]
+pub(crate) fn file_has_publishable_note(comment: &str, rating: u8) -> bool {
+    !comment.is_empty() || rating > 0
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct FilePublishState {
     last_keyword: Option<Instant>,
     last_source: Option<Instant>,
+    last_notes: Option<Instant>,
 }
 
 /// Tracks per-file keyword/source last-publish times so each kind is only
@@ -108,6 +122,22 @@ impl KadPublishSchedule {
     /// Record that the file's source was (re)published at `now`.
     pub(crate) fn mark_source_published(&mut self, file_hash: &str, now: Instant) {
         self.files.entry(file_hash.to_string()).or_default().last_source = Some(now);
+    }
+
+    /// Whether the file's notes (comment/rating) publish is due (never published,
+    /// or the 24h notes interval has elapsed). The caller additionally gates this
+    /// on the file actually having a comment/rating (master
+    /// `CKnownFile::PublishNotes`: only when `!comment.IsEmpty() || rating > 0`).
+    pub(crate) fn notes_due(&self, file_hash: &str, now: Instant) -> bool {
+        match self.files.get(file_hash).and_then(|s| s.last_notes) {
+            None => true,
+            Some(last) => now.duration_since(last) >= KAD_NOTES_REPUBLISH_INTERVAL,
+        }
+    }
+
+    /// Record that the file's notes were (re)published at `now`.
+    pub(crate) fn mark_notes_published(&mut self, file_hash: &str, now: Instant) {
+        self.files.entry(file_hash.to_string()).or_default().last_notes = Some(now);
     }
 
     /// Drop bookkeeping for files no longer shared, so the map cannot grow
@@ -221,6 +251,36 @@ mod tests {
         // Keyword remains gated until 24h from its own publish.
         let t10h = t0 + 2 * KAD_SOURCE_REPUBLISH_INTERVAL;
         assert!(!sched.keyword_due(HASH, t10h));
+    }
+
+    #[test]
+    fn notes_gated_by_24h_interval_and_track_independently() {
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        // Never published -> due.
+        assert!(sched.notes_due(HASH, t0));
+        sched.mark_notes_published(HASH, t0);
+
+        let almost = t0 + KAD_NOTES_REPUBLISH_INTERVAL - Duration::from_secs(1);
+        assert!(!sched.notes_due(HASH, almost));
+        let due = t0 + KAD_NOTES_REPUBLISH_INTERVAL;
+        assert!(sched.notes_due(HASH, due));
+
+        // Notes track independently of keyword/source: a keyword publish does not
+        // reset the notes timer.
+        sched.mark_keyword_published(HASH, almost);
+        assert!(!sched.notes_due(HASH, almost));
+    }
+
+    #[test]
+    fn notes_publish_only_for_commented_or_rated_files() {
+        // Master CKnownFile::PublishNotes gate: only when comment non-empty OR
+        // rating > 0; an un-annotated file is never published as a note even when
+        // its interval is due.
+        assert!(file_has_publishable_note("nice file", 0));
+        assert!(file_has_publishable_note("", 4));
+        assert!(file_has_publishable_note("comment", 5));
+        assert!(!file_has_publishable_note("", 0));
     }
 
     #[test]
