@@ -7,6 +7,22 @@ reason = "Workspace policy records SX1 live source exchange as intentionally rem
 compatibility = "Stock-compatible for the supported surface because unsupported SX1 is not advertised or acted on; an SX1-only peer simply yields no exchanged sources, and an unsolicited SX1 answer is ignored."
 
 [[omissions]]
+id = "conn-rate-rolling-five-second-window"
+area = "ed2k"
+stock_behavior = "eMule's connection-rate limiter (CListenSocket::TooManySockets, ListenSocket.cpp:2652-2654) compares a per-Process-tick accumulator m_OpenSocketsInterval against GetMaxConperFive(), and the accumulator is reset by CListenSocket::Process roughly once per second so the 'per five seconds' budget is enforced as a series of short per-tick batches rather than a true sliding window."
+rust_behavior = "The Rust shared download coordinator instead enforces the new-connection rate as a conservative rolling 5-second sliding window (download_coordinator.rs recent_connection_grants: a grant is counted for a full DEFAULT_CONNECTION_WINDOW=5s and only then ages out), so at most GetMaxConperFive() new outgoing connections are admitted in ANY 5s span. The concurrent cap (GetMaxConnections), the per-5s rate value, and the half-open cap (GetMaxHalfConnections, default 50) are all matched; only the rate-window MODEL is the conservative sliding variant rather than eMule's per-tick reset."
+reason = "Deliberate divergence (operator decision option B, connection-management safe subset): a VPN'd headless client must be gentle and avoid connection-rate bans, and a true rolling window can never burst above the per-5s budget the way eMule's per-tick batches can. The conservative window is strictly less aggressive than the master."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it only makes outbound connection pacing equal-or-gentler than the master. A peer/server sees the same protocol, just never a per-tick burst."
+
+[[omissions]]
+id = "conn-rate-spike-modifier"
+area = "ed2k"
+stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (the 'spike' modifier in CListenSocket::TooManySockets, ListenSocket.cpp:2653), which transiently RAISES the allowed new-connection rate above GetMaxConperFive() under certain conditions."
+rust_behavior = "The Rust coordinator does not implement the spike modifier: the per-window new-connection budget is a flat max_connections_per_window (GetMaxConperFive) with no upward spike scaling."
+reason = "Deliberate divergence (operator decision option B): the spike modifier is only meaningful under eMule's aggressive per-Process-tick rate model (which the Rust client intentionally does not adopt, see conn-rate-rolling-five-second-window). A burst-raising modifier is the opposite of the be-gentle/no-ban posture for a VPN'd headless client, so it is intentionally omitted."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it only keeps the outbound connection rate at or below the flat per-5s budget (never spiking above it), i.e. equal-or-gentler than the master."
+
+[[omissions]]
 id = "ipv6-ed2k-kad"
 area = "ed2k-kad"
 stock_behavior = "Some modern clients may have protocol-adjacent IPv6 connectivity support."
