@@ -59,6 +59,27 @@ async fn malformed_json_uses_canonical_error_envelope() {
 }
 
 #[tokio::test]
+async fn json_body_must_be_an_object_like_mfc() {
+    let cases = [
+        ("POST", "/api/v1/app/shutdown", "[]"),
+        ("POST", "/api/v1/transfers", "[]"),
+        ("PATCH", "/api/v1/categories/1", "\"name\""),
+        ("POST", "/api/v1/kad/operations/start", "true"),
+    ];
+
+    for (method, uri, body) in cases {
+        assert_invalid_json_response(
+            test_router(),
+            method,
+            uri,
+            body.to_string(),
+            "JSON body must be an object",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn json_body_requires_json_content_type() {
     let response = test_router()
         .oneshot(

@@ -1,7 +1,8 @@
 //! REST JSON body metadata validation shared by the route middleware.
 //!
-//! The ordering mirrors the MFC route seam: unknown fields first, category
-//! selector normalization/validation, then route-specific body rules.
+//! The ordering mirrors the MFC route seam: object-shape validation, unknown
+//! fields, category selector normalization/validation, then route-specific body
+//! rules.
 
 use axum::{
     http::StatusCode,
@@ -18,9 +19,6 @@ pub(crate) fn validate_json_body_fields(
     path: &str,
     body: &[u8],
 ) -> Result<(), Box<Response>> {
-    if route_body_fields(method, path).is_none() {
-        return Ok(());
-    }
     let value = serde_json::from_slice::<serde_json::Value>(body).map_err(|error| {
         Box::new(
             api_error(
@@ -32,7 +30,7 @@ pub(crate) fn validate_json_body_fields(
         )
     })?;
     let Some(object) = value.as_object() else {
-        return Ok(());
+        return Err(invalid_body_error("JSON body must be an object"));
     };
     validate_allowed_body_fields(method, path, object)?;
     validate_category_selector_body(method, path, object)?;
