@@ -8,6 +8,7 @@ use crate::ed2k_transfer::{Ed2kResumeManifest, Ed2kTransferState, ed2k_part_coun
 
 mod aich;
 mod buddy;
+mod file_desc;
 mod file_status;
 mod hashset;
 mod multipacket;
@@ -23,6 +24,7 @@ pub(super) use aich::{
 pub(in crate::ed2k_tcp) use buddy::{
     encode_buddy_ping, encode_buddy_pong, encode_kad_callback_relay,
 };
+pub(super) use file_desc::{decode_file_description_payload, encode_file_desc};
 #[cfg(test)]
 pub(super) use file_status::decode_file_status_payload;
 pub(super) use file_status::{
@@ -534,57 +536,6 @@ pub(super) fn decode_shared_files_dir_answer_payload(
         file_count: files.file_count,
         entry_bytes: files.entry_bytes,
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FileDescription {
-    pub(super) rating: u8,
-    pub(super) comment: String,
-}
-
-/// Encode the `OP_FILEDESC` body: `<rating u8><LongString comment>` where
-/// `LongString` is `<u32 LE byte-length><UTF-8 bytes>` (oracle
-/// `UploadClient.cpp:SendCommentInfo` + `SafeFile.cpp:WriteLongString`). Modern
-/// peers advertise unicode support, so the comment is written as UTF-8.
-fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
-    let comment_bytes = comment.as_bytes();
-    let mut body = Vec::with_capacity(1 + 4 + comment_bytes.len());
-    body.push(rating);
-    body.extend_from_slice(
-        &u32::try_from(comment_bytes.len())
-            .unwrap_or(u32::MAX)
-            .to_le_bytes(),
-    );
-    body.extend_from_slice(comment_bytes);
-    body
-}
-
-/// Encode a complete `OP_FILEDESC` packet (`OP_EMULEPROT` opcode `0x61`) carrying
-/// the served file's rating + comment, mirroring `UploadClient.cpp:SendCommentInfo`.
-pub(super) fn encode_file_desc(rating: u8, comment: &str) -> Vec<u8> {
-    encode_packet(
-        OP_EMULEPROT,
-        OP_FILEDESC,
-        &encode_file_description_body(rating, comment),
-    )
-}
-
-pub(super) fn decode_file_description_payload(payload: &[u8]) -> Result<FileDescription> {
-    if payload.len() < 5 {
-        anyhow::bail!("short OP_FILEDESC payload {}", payload.len());
-    }
-    let rating = payload[0];
-    let comment_len = usize::try_from(u32::from_le_bytes(payload[1..5].try_into().unwrap()))
-        .context("OP_FILEDESC comment length overflow")?;
-    if payload.len() < 5 + comment_len {
-        anyhow::bail!(
-            "short OP_FILEDESC comment {} expected {}",
-            payload.len() - 5,
-            comment_len
-        );
-    }
-    let comment = String::from_utf8_lossy(&payload[5..5 + comment_len]).into_owned();
-    Ok(FileDescription { rating, comment })
 }
 
 pub(super) fn decode_request_filename_answer(payload: &[u8]) -> Result<(Ed2kHash, String)> {

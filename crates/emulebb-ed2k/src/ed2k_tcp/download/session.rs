@@ -1238,7 +1238,6 @@ mod tests {
             piece_size: 9_728_000,
         };
         let mut manifest = Ed2kResumeManifest::new(&job);
-        // Resize the piece list to the requested state vector and stamp states.
         manifest.pieces = states
             .iter()
             .enumerate()
@@ -1254,8 +1253,6 @@ mod tests {
 
     #[test]
     fn peer_offering_only_already_verified_parts_is_no_needed_parts() {
-        // We already hold (verified) part 0; we still need part 1. The peer
-        // advertises only part 0 -> nothing we need -> No Needed Parts.
         let manifest =
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
         let peer_bitmap = [true, false];
@@ -1264,7 +1261,6 @@ mod tests {
 
     #[test]
     fn peer_offering_a_part_we_still_need_is_not_no_needed_parts() {
-        // We still need part 1 and the peer advertises it -> a usable source.
         let manifest =
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
         let peer_bitmap = [true, true];
@@ -1273,8 +1269,6 @@ mod tests {
 
     #[test]
     fn requested_part_still_counts_as_needed() {
-        // A part claimed by this session (Requested) is not yet ours, so a peer
-        // advertising it is still a usable source.
         let manifest =
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Requested]);
         let peer_bitmap = [false, true];
@@ -1283,7 +1277,6 @@ mod tests {
 
     #[test]
     fn shorter_peer_bitmap_treats_absent_slots_as_unavailable() {
-        // A truncated bitmap must not panic and absent slots are "not held".
         let manifest =
             manifest_with_states(&[Ed2kTransferState::Verified, Ed2kTransferState::Missing]);
         let peer_bitmap = [true];

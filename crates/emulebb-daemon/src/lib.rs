@@ -20,6 +20,7 @@ use tracing::info;
 
 pub mod log_layer;
 pub use log_layer::LogBufferLayer;
+mod vpn_guard;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -319,30 +320,7 @@ impl DaemonConfig {
     }
 
     fn vpn_binding_confirmed(&self, bind_ip: Ipv4Addr, interfaces: &[NetworkInterface]) -> bool {
-        let bind_ip_text = bind_ip.to_string();
-        let ip_on_vpn_candidate = interfaces.iter().any(|iface| {
-            iface.is_vpn_candidate
-                && iface
-                    .addresses
-                    .iter()
-                    .any(|address| address.address == bind_ip_text)
-        });
-        let named_interface_matches = self
-            .p2p_bind_interface
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some_and(|bind_interface| {
-                interfaces.iter().any(|iface| {
-                    iface.name == bind_interface
-                        && iface
-                            .addresses
-                            .iter()
-                            .any(|address| address.address == bind_ip_text)
-                })
-            });
-
-        ip_on_vpn_candidate || named_interface_matches
+        vpn_guard::binding_confirmed(bind_ip, self.p2p_bind_interface.as_deref(), interfaces)
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {

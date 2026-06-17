@@ -2,7 +2,33 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 
-use crate::VpnGuardConfig;
+use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardStatus};
+
+pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -> VpnGuardStatus {
+    let guard = &network.vpn_guard;
+    // Master parity (GetVpnGuardModeRestToken): the REST mode token is "block"
+    // when guarding is enabled in a blocking mode, otherwise "off".
+    let blocking = guard.enabled
+        && (guard.mode.eq_ignore_ascii_case("block") || guard.mode.eq_ignore_ascii_case("enforce"));
+    let interface_block_reason = if blocking && !network.vpn_interface_bound {
+        Some("public P2P bind is not VPN-confirmed".to_string())
+    } else {
+        None
+    };
+    let public_ip_block_reason = blocking
+        .then(|| public_ip_block_reason(guard, public_ip))
+        .flatten();
+    let startup_block_reason = interface_block_reason
+        .or(public_ip_block_reason)
+        .unwrap_or_default();
+    VpnGuardStatus {
+        enabled: guard.enabled,
+        mode: if blocking { "block" } else { "off" }.to_string(),
+        allowed_public_ip_cidrs: guard.allowed_public_ip_cidrs.clone(),
+        startup_blocked: !startup_block_reason.is_empty(),
+        startup_block_reason,
+    }
+}
 
 pub(crate) fn public_ip_block_reason(
     guard: &VpnGuardConfig,

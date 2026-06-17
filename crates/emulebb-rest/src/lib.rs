@@ -13,6 +13,10 @@ mod responses;
 mod routes;
 pub use routes::{router, router_with_shutdown};
 
+#[cfg(test)]
+#[path = "tests/app.rs"]
+mod app_tests;
+
 // Re-exported at the crate root so the sibling modules can reach the shared
 // dto types and the upload list helper via `crate::...` paths.
 pub(crate) use dto::*;
@@ -298,52 +302,6 @@ mod tests {
         // Valid pagination succeeds.
         let (status, _value) = error_value("/api/v1/transfers?limit=10&offset=5").await;
         assert_eq!(status, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn app_returns_evelope_with_capabilities() {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/app")
-                    .header("X-API-Key", "secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["meta"]["apiVersion"], "v1");
-        assert_eq!(value["data"]["name"], "eMuleBB Rust");
-        assert_eq!(value["data"]["capabilities"]["rest.emulebb.v1"], true);
-    }
-
-    #[tokio::test]
-    async fn capabilities_returns_contract_version_and_capability_list() {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/capabilities")
-                    .header("X-API-Key", "secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["contractVersion"], "1.0.0");
-        assert_eq!(value["data"]["apiVersion"], "1");
-        assert!(
-            value["data"]["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|capability| capability == "rest.emulebb.v1")
-        );
     }
 
     #[tokio::test]

@@ -563,10 +563,6 @@ mod tests {
         assert_eq!(zone.count(), K);
     }
 
-    // Leaf at a depth/zone_index that defeats the first two `OnBigTimer`
-    // disjuncts (`zone_index < KK`, `level < KBASE`), so the third
-    // `GetRemaining() >= 0.8*K` disjunct alone decides. Contacts share the
-    // depth-bit=false side (stay in this leaf) on distinct /24s.
     fn make_leaf_with_size(size: usize) -> RoutingZone {
         let mut zone = RoutingZone {
             depth: KBASE as u32,
@@ -595,9 +591,6 @@ mod tests {
 
     #[test]
     fn big_timer_random_lookup_selects_sparse_leaf_not_full_leaf() {
-        // eMule `OnBigTimer`: third disjunct `GetRemaining() >= 0.8*K` (FREE
-        // slots) fires for a nearly EMPTY bin (`size <= 0.2*K`), filling sparse
-        // zones first. K = 10: fires for size <= 2, not for size >= 3.
         assert!(gate_fires(&make_leaf_with_size(0)));
         assert!(gate_fires(&make_leaf_with_size(2))); // exactly 0.2*K
         assert!(!gate_fires(&make_leaf_with_size(3)));
