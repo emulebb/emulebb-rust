@@ -198,6 +198,35 @@ impl BinRead for Tag {
     }
 }
 
+/// Bytes still readable from `reader` between the current position and the end.
+fn remaining_bytes<R: Read + Seek>(reader: &mut R) -> std::io::Result<u64> {
+    let pos = reader.stream_position()?;
+    let end = reader.seek(std::io::SeekFrom::End(0))?;
+    reader.seek(std::io::SeekFrom::Start(pos))?;
+    Ok(end.saturating_sub(pos))
+}
+
+/// Reads `len` bytes, but never pre-allocates beyond the bytes that actually
+/// remain in the stream. A bogus length (e.g. a tag claiming ~4 GB on a short
+/// cursor) cannot succeed, so we reject it up front instead of committing a
+/// huge zeroed `Vec` that `read_exact` would only fail on afterwards.
+/// Legitimate tags (len <= remaining) read exactly `len` bytes.
+fn read_len_capped_bytes<R: Read + Seek>(reader: &mut R, len: usize) -> BinResult<Vec<u8>> {
+    let remaining = remaining_bytes(reader).map_err(binrw::Error::Io)? as usize;
+    if len > remaining {
+        let pos = reader.stream_position().unwrap_or(0);
+        return Err(binrw::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("tag declares {len} bytes but only {remaining} remain at pos {pos}"),
+        )));
+    }
+    let mut data = vec![0u8; len];
+    reader
+        .read_exact(&mut data)
+        .map_err(|e| binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string())))?;
+    Ok(data)
+}
+
 impl Tag {
     pub(crate) fn read_with_mode<R: Read + Seek>(
         reader: &mut R,
@@ -213,11 +242,7 @@ impl Tag {
             TagName::Short(name_byte)
         } else {
             let name_len: u16 = reader.read_type(endian)?;
-            let mut name_bytes = vec![0u8; name_len as usize];
-            reader.read_exact(&mut name_bytes).map_err(|e| {
-                let _pos = reader.stream_position().unwrap_or(0);
-                binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string()))
-            })?;
+            let name_bytes = read_len_capped_bytes(reader, name_len as usize)?;
             // eMule often writes single-byte numeric IDs as a 1-byte "long" name
             // instead of using the 0x80 short-name flag. Normalize to Short.
             if name_bytes.len() == 1 {
@@ -236,10 +261,7 @@ impl Tag {
             0x02 => {
                 // String: u16 length + bytes
                 let str_len: u16 = reader.read_type(endian)?;
-                let mut str_bytes = vec![0u8; str_len as usize];
-                reader
-                    .read_exact(&mut str_bytes)
-                    .map_err(|e| binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string())))?;
+                let str_bytes = read_len_capped_bytes(reader, str_len as usize)?;
                 TagValue::String(decode_string_bytes(&str_bytes, mode))
             }
             0x03 => {
@@ -258,19 +280,13 @@ impl Tag {
                 // BOOLARRAY: u16 len + skip bytes => store as Blob
                 let arr_len: u16 = reader.read_type(endian)?;
                 let byte_count = (arr_len as usize).div_ceil(8);
-                let mut data = vec![0u8; byte_count];
-                reader
-                    .read_exact(&mut data)
-                    .map_err(|e| binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string())))?;
+                let data = read_len_capped_bytes(reader, byte_count)?;
                 TagValue::Blob(data)
             }
             0x07 => {
                 // BLOB: u32 len + bytes
                 let blob_len: u32 = reader.read_type(endian)?;
-                let mut data = vec![0u8; blob_len as usize];
-                reader
-                    .read_exact(&mut data)
-                    .map_err(|e| binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string())))?;
+                let data = read_len_capped_bytes(reader, blob_len as usize)?;
                 TagValue::Blob(data)
             }
             0x08 => {
@@ -284,10 +300,7 @@ impl Tag {
             0x0A => {
                 // BSOB: u8 len + bytes
                 let bsob_len: u8 = reader.read_type(endian)?;
-                let mut data = vec![0u8; bsob_len as usize];
-                reader
-                    .read_exact(&mut data)
-                    .map_err(|e| binrw::Error::Io(std::io::Error::new(e.kind(), e.to_string())))?;
+                let data = read_len_capped_bytes(reader, bsob_len as usize)?;
                 TagValue::SmallBlob(data)
             }
             0x0B => {
@@ -531,5 +544,44 @@ mod tests {
         let mut buf = Cursor::new(vec![0x89, tag_name::SOURCES, 0x07]);
         let tag = Tag::read_le(&mut buf).unwrap();
         assert_eq!(tag, Tag::new_short(tag_name::SOURCES, TagValue::U8(7)));
+    }
+
+    #[test]
+    fn test_blob_tag_with_bogus_length_errors_without_huge_alloc() {
+        // type 0x07 (BLOB), short name marker, name byte, then a u32 length of
+        // 0xFFFFFFFF (~4 GB) with no payload following. The capped reader must
+        // reject this immediately instead of pre-allocating a 4 GB Vec.
+        let mut buf = Cursor::new(vec![
+            0x80 | 0x07,
+            tag_name::SOURCES,
+            0xFF,
+            0xFF,
+            0xFF,
+            0xFF,
+        ]);
+        let result = Tag::read_le(&mut buf);
+        assert!(
+            result.is_err(),
+            "a blob length far beyond the cursor must error, not allocate"
+        );
+    }
+
+    #[test]
+    fn test_string_tag_with_bogus_length_errors_without_huge_alloc() {
+        // type 0x02 (String), short name marker, name byte, then a u16 length of
+        // 0xFFFF with no payload following.
+        let mut buf = Cursor::new(vec![0x80 | 0x02, tag_name::FILENAME, 0xFF, 0xFF]);
+        let result = Tag::read_le(&mut buf);
+        assert!(
+            result.is_err(),
+            "a string length far beyond the cursor must error, not allocate"
+        );
+    }
+
+    #[test]
+    fn test_blob_tag_with_valid_length_still_decodes() {
+        // A well-formed BLOB tag must still round-trip through the capped reader.
+        let t = Tag::new_short(tag_name::SOURCES, TagValue::Blob(vec![1, 2, 3, 4]));
+        assert_eq!(roundtrip(&t), t);
     }
 }
