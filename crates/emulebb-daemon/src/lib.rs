@@ -220,6 +220,7 @@ impl DaemonConfig {
         };
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
+        let detected_interfaces = detect_interfaces().unwrap_or_default();
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
@@ -248,7 +249,7 @@ impl DaemonConfig {
                 mode: self.vpn_guard.mode.clone(),
                 allowed_public_ip_cidrs: self.vpn_guard.allowed_public_ip_cidrs.clone(),
             },
-            vpn_interface_bound: self.p2p_bind_interface.is_some(),
+            vpn_interface_bound: self.vpn_binding_confirmed(bind_ip, &detected_interfaces),
             ip_filter,
             ip_filter_path: self
                 .ip_filter
@@ -315,6 +316,33 @@ impl DaemonConfig {
         resolved.parse::<Ipv4Addr>().with_context(|| {
             format!("p2pBindInterface {bind_interface:?} resolved to non-IPv4 address {resolved:?}")
         })
+    }
+
+    fn vpn_binding_confirmed(&self, bind_ip: Ipv4Addr, interfaces: &[NetworkInterface]) -> bool {
+        let bind_ip_text = bind_ip.to_string();
+        let ip_on_vpn_candidate = interfaces.iter().any(|iface| {
+            iface.is_vpn_candidate
+                && iface
+                    .addresses
+                    .iter()
+                    .any(|address| address.address == bind_ip_text)
+        });
+        let named_interface_matches = self
+            .p2p_bind_interface
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|bind_interface| {
+                interfaces.iter().any(|iface| {
+                    iface.name == bind_interface
+                        && iface
+                            .addresses
+                            .iter()
+                            .any(|address| address.address == bind_ip_text)
+                })
+            });
+
+        ip_on_vpn_candidate || named_interface_matches
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {

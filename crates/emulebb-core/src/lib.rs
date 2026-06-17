@@ -105,6 +105,7 @@ mod shared_dir_monitor;
 mod shared_directories;
 mod source_publish;
 mod upload_view;
+mod vpn_guard;
 mod views;
 use categories::{
     PR_NORMAL, apply_category_create, apply_category_update, default_categories,
@@ -720,17 +721,25 @@ impl EmulebbCore {
         let blocking = guard.enabled
             && (guard.mode.eq_ignore_ascii_case("block")
                 || guard.mode.eq_ignore_ascii_case("enforce"));
-        let startup_blocked = blocking && !network.vpn_interface_bound;
+        let interface_block_reason = if blocking && !network.vpn_interface_bound {
+            Some("public P2P bind is not VPN-confirmed".to_string())
+        } else {
+            None
+        };
+        let public_ip_block_reason = if blocking {
+            vpn_guard::public_ip_block_reason(guard, self.ed2k_reachability.get())
+        } else {
+            None
+        };
+        let startup_block_reason = interface_block_reason
+            .or(public_ip_block_reason)
+            .unwrap_or_default();
         VpnGuardStatus {
             enabled: guard.enabled,
             mode: if blocking { "block" } else { "off" }.to_string(),
             allowed_public_ip_cidrs: guard.allowed_public_ip_cidrs.clone(),
-            startup_blocked,
-            startup_block_reason: if startup_blocked {
-                "public P2P bind is not VPN-confirmed (no VPN interface bind)".to_string()
-            } else {
-                String::new()
-            },
+            startup_blocked: !startup_block_reason.is_empty(),
+            startup_block_reason,
         }
     }
 

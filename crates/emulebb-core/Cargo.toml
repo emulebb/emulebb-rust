@@ -18,6 +18,7 @@ emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 hex = "0.4"
+ipnet = "2"
 md4 = "0.10"
 notify.workspace = true
 notify-debouncer-full.workspace = true

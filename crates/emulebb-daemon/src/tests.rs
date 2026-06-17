@@ -35,6 +35,10 @@ fn config_with_rest_bind(runtime_dir: PathBuf, bind_addr: Option<SocketAddr>) ->
 }
 
 fn iface(name: &str, ip: &str) -> NetworkInterface {
+    iface_with_vpn(name, ip, false)
+}
+
+fn iface_with_vpn(name: &str, ip: &str, is_vpn_candidate: bool) -> NetworkInterface {
     NetworkInterface {
         name: name.to_string(),
         description: None,
@@ -43,7 +47,7 @@ fn iface(name: &str, ip: &str) -> NetworkInterface {
             address: ip.to_string(),
         }],
         is_loopback: false,
-        is_vpn_candidate: false,
+        is_vpn_candidate,
         has_default_route: false,
     }
 }
@@ -636,6 +640,45 @@ fn p2p_bind_interface_requires_matching_ipv4_interface() {
 
     assert!(error.contains("p2pBindInterface"));
     assert!(error.contains("did not resolve"));
+}
+
+#[test]
+fn vpn_binding_is_confirmed_by_named_interface_or_vpn_ip() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(temp.path().to_path_buf(), None);
+    config.p2p_bind_interface = Some("hide.me".to_string());
+
+    assert!(config.vpn_binding_confirmed(
+        "10.44.55.66".parse().unwrap(),
+        &[iface("hide.me", "10.44.55.66")]
+    ));
+
+    let ip_only = config_with_server(
+        temp.path().to_path_buf(),
+        Some("10.44.55.66".parse().unwrap()),
+    );
+    assert!(ip_only.vpn_binding_confirmed(
+        "10.44.55.66".parse().unwrap(),
+        &[iface_with_vpn("hide.me", "10.44.55.66", true)]
+    ));
+}
+
+#[test]
+fn vpn_binding_does_not_treat_mismatched_name_as_confirmed() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(
+        temp.path().to_path_buf(),
+        Some("192.0.2.10".parse().unwrap()),
+    );
+    config.p2p_bind_interface = Some("hide.me".to_string());
+
+    assert!(!config.vpn_binding_confirmed(
+        "192.0.2.10".parse().unwrap(),
+        &[
+            iface("Ethernet", "192.0.2.10"),
+            iface_with_vpn("hide.me", "10.44.55.66", true),
+        ],
+    ));
 }
 
 #[test]

@@ -656,8 +656,8 @@ pub struct Ed2kNetworkConfig {
     pub config: Ed2kConfig,
     /// Configured VPN-binding guard.
     pub vpn_guard: VpnGuardConfig,
-    /// Whether the P2P bind was resolved from a named interface (e.g. the VPN
-    /// adapter) rather than a raw address — the guard's confirmation signal.
+    /// Whether the effective P2P bind IP is confirmed to belong to a named bind
+    /// interface or a detected VPN-looking interface.
     pub vpn_interface_bound: bool,
     /// IPv4 range filter (ipfilter.dat). Empty when no filter is configured.
     /// Shares its backing across clones so a reload is observed live.

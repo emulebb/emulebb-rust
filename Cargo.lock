@@ -457,6 +457,7 @@ dependencies = [
  "emulebb-kad-routing",
  "emulebb-metadata",
  "hex",
+ "ipnet",
  "md4",
  "notify",
  "notify-debouncer-full",
