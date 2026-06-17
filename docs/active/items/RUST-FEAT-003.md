@@ -37,8 +37,8 @@ for calling rust "perfectly functional".
 - eD2K TCP outbound connects and listener bind now use the configured P2P bind IP
   path, and VPN Guard confirmation now requires the effective bind IP to be on
   the named bind interface or on a detected VPN-looking interface.
-- Remaining work is static/leak-proof coverage for the tunnel ifIndex guarantee
-  and live validation that fail-closed behavior holds when the tunnel is absent.
+- Remaining work is live validation that fail-closed behavior holds when the
+  tunnel is absent, plus UPnP/port-forwarding validation over the VPN interface.
 
 ## Intended Shape
 
@@ -55,11 +55,11 @@ for calling rust "perfectly functional".
 ## Acceptance Criteria
 
 - [x] eD2K TCP outbound connects use the configured P2P bind path.
-- [ ] eD2K TCP outbound connects are proven pinned to the tunnel ifIndex (fail-closed:
+- [x] eD2K TCP outbound connects are proven pinned to the tunnel ifIndex (fail-closed:
       no tunnel → no eD2K TCP egress).
 - [x] eD2K TCP listener bound consistently with the VPN binding model.
 - [ ] UPnP/port-forwarding over the VPN interface still works.
-- [ ] A static/bind-policy test asserts eD2K TCP egress is tunnel-pinned.
+- [x] A static/bind-policy test asserts eD2K TCP egress is tunnel-pinned.
 
 ## Validation
 

@@ -76,16 +76,16 @@ impl Ed2kTransport {
                 anyhow::bail!("IPv6 callback peer connections are not supported yet: {peer_addr}")
             }
         };
+        let bind_if_index = required_bind_if_index(bind_ip)?;
         socket
             .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
             .with_context(|| format!("failed to bind outgoing eD2k socket to {bind_ip}"))?;
         // Pin egress to the VPN tunnel interface (IP_UNICAST_IF) before connect so
         // the SYN + payload leave via the tunnel, not just bound by source IP —
-        // solid VPN binding (eMule ApplyConfiguredIpv4UnicastInterface). No-op when
-        // bind_ip resolves to no interface (e.g. unspecified bind).
+        // solid VPN binding (eMule ApplyConfiguredIpv4UnicastInterface).
         emulebb_kad_dht::socket_opts::pin_egress_to_interface(
             socket2::SockRef::from(&socket),
-            crate::networking::resolve_bind_if_index(bind_ip),
+            Some(bind_if_index),
         )
         .with_context(|| {
             format!("failed to pin eD2k egress to the bind interface for {bind_ip}")
@@ -254,6 +254,12 @@ impl Ed2kTransport {
     }
 }
 
+fn required_bind_if_index(bind_ip: Ipv4Addr) -> Result<u32> {
+    crate::networking::resolve_bind_if_index(bind_ip)
+        .filter(|index| *index != 0)
+        .with_context(|| format!("eD2k TCP bind IP {bind_ip} is not assigned to a local interface"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::OP_HELLO;
@@ -290,6 +296,17 @@ mod tests {
         bytes.extend_from_slice(&packet_length.to_le_bytes());
         bytes.push(opcode);
         bytes
+    }
+
+    #[test]
+    fn outgoing_tcp_requires_resolved_bind_interface_index() {
+        let err = required_bind_if_index(Ipv4Addr::new(203, 0, 113, 234))
+            .expect_err("unassigned bind IP must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("not assigned to a local interface")
+        );
     }
 
     #[tokio::test]
