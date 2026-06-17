@@ -13,6 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "policy" / "rust-client.toml"
 OMISSIONS_PATH = ROOT / "policy" / "rust-client-omissions.toml"
+P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
+    "crates/emulebb-core/src/lib.rs",
+    "crates/emulebb-core/src/kad_hello.rs",
+    "crates/emulebb-ed2k/src/ed2k_tcp/transport.rs",
+    "crates/emulebb-ed2k/src/ed2k_tcp/listener/mod.rs",
+    "crates/emulebb-ed2k/src/ed2k_server/session.rs",
+    "crates/emulebb-ed2k/src/ed2k_server/udp_runtime.rs",
+)
 
 
 def main() -> int:
@@ -23,6 +31,7 @@ def main() -> int:
     errors.extend(check_review_reporting(policy, omissions))
     errors.extend(check_rust_file_sizes(policy))
     errors.extend(check_ipv4_only(policy))
+    errors.extend(check_p2p_bind_fail_closed_boundaries())
     if errors:
         print("rust client policy check failed:", file=sys.stderr)
         for error in errors:
@@ -136,6 +145,52 @@ def check_ipv4_only(policy: dict) -> list[str]:
     for path in missing_allowlist:
         errors.append(f"IPv6 mention allowlist path does not exist: {path}")
     return errors
+
+
+def check_p2p_bind_fail_closed_boundaries() -> list[str]:
+    """Reject optional tunnel pinning in public P2P data-plane boundaries."""
+    errors = []
+    for rel in P2P_BIND_FAIL_CLOSED_BOUNDARIES:
+        path = ROOT / rel
+        if not path.exists():
+            errors.append(f"P2P bind fail-closed boundary path does not exist: {rel}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "resolve_bind_if_index(" in text:
+            errors.append(
+                f"{rel} uses optional bind ifIndex resolution; use require_bind_if_index "
+                "before opening public P2P sockets"
+            )
+        for call in function_calls(text, "pin_egress_to_interface"):
+            if "None" in call:
+                errors.append(f"{rel} pins public P2P egress with no interface index")
+            if "resolve_bind_if_index(" in call:
+                errors.append(f"{rel} pins public P2P egress from optional ifIndex resolution")
+    return errors
+
+
+def function_calls(text: str, name: str) -> list[str]:
+    calls = []
+    needle = f"{name}("
+    start = 0
+    while True:
+        index = text.find(needle, start)
+        if index == -1:
+            return calls
+        depth = 0
+        for cursor in range(index + len(name), len(text)):
+            char = text[cursor]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(text[index : cursor + 1])
+                    start = cursor + 1
+                    break
+        else:
+            calls.append(text[index:])
+            return calls
 
 
 if __name__ == "__main__":

@@ -49,3 +49,8 @@ keeps it true over time.
 
 - Pairs with RUST-FEAT-003 (eD2K TCP egress pin). Both are release-blockers per the
   WORKSPACE-POLICY Network Safety invariant. Cross-product sibling: QBBB-FEAT-004.
+- 2026-06-17: Added a blocking static Python policy guard for the supported
+  public P2P boundary files. The guard rejects regressions that use optional
+  bind-ifIndex resolution or explicit no-index egress pinning on those paths.
+  This is CI coverage against known leak regressions, but it does not satisfy
+  the dynamic tunnel-down packet-observation acceptance criteria above.
