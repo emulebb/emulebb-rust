@@ -13,8 +13,20 @@ pub struct Ed2kConfig {
     pub obfuscation_enabled: bool,
     /// Optional one-shot ED2K server search probe term used for parity runs.
     pub probe_search_term: Option<String>,
-    /// Timeout for one outbound ED2K server connection attempt.
+    /// Timeout for one outbound direct ED2K *peer* connection attempt (the
+    /// connect + handshake budget for a download source). eMule reaps a pending
+    /// peer connection at `SEC2MS(45)` (ClientList.cpp:1059) but keeps the direct
+    /// connect budget conservative (~15-20s); this is the direct-peer floor.
     pub connect_timeout_secs: u64,
+    /// Timeout for one outbound ED2K *server* connection attempt. eMule ages a
+    /// pending server connection out at `CONSERVTIMEOUT = SEC2MS(25)`
+    /// (Opcodes.h:109); this is the server-connect floor (default 25).
+    pub server_connect_timeout_secs: u64,
+    /// Budget for a LowID source *callback* round-trip (request a callback via
+    /// the server and wait for the peer to connect back). eMule reaps a pending
+    /// connecting client — including a LowID callback wait — at `SEC2MS(45)`
+    /// (ClientList.cpp:1059); this is the callback-wait floor (default 45).
+    pub callback_timeout_secs: u64,
     /// Delay before retrying the next ED2K server endpoint.
     pub reconnect_interval_secs: u64,
     /// Idle interval before the client refreshes the ED2K server session.
@@ -30,6 +42,12 @@ pub struct Ed2kConfig {
     /// Maximum new outgoing source connections admitted per 5s window (eMule
     /// `thePrefs.GetMaxConperFive()`, default 50). 0 disables the rate limiter.
     pub max_new_connections_per_five_seconds: usize,
+    /// Maximum number of simultaneously half-open outgoing source connections
+    /// (granted a slot but TCP+hello handshake not yet complete), consulted by
+    /// the shared download coordinator as the third `CListenSocket::TooManySockets`
+    /// term (eMule `thePrefs.GetMaxHalfConnections()`, default 50,
+    /// `GetDefaultMaxHalfConnections`). 0 disables the half-open cap.
+    pub max_half_open_connections: usize,
     /// Configured `maxSources` per file; the soft (TCP) and UDP per-file source
     /// caps derive from this like eMule (`GetDefaultMaxSourcesPerFile` = 600,
     /// soft = `min(*9/10, 1000)`, UDP = `min(*3/4, 100)`). 0 disables the cap.
@@ -106,6 +124,12 @@ impl Default for Ed2kConfig {
             obfuscation_enabled: true,
             probe_search_term: None,
             connect_timeout_secs: 15,
+            // eMule CONSERVTIMEOUT (Opcodes.h:109) = SEC2MS(25) for a pending
+            // server connection attempt.
+            server_connect_timeout_secs: 25,
+            // eMule ClientList.cpp:1059 reaps a pending connecting client
+            // (incl. a LowID callback wait) at SEC2MS(45).
+            callback_timeout_secs: 45,
             reconnect_interval_secs: 30,
             keepalive_secs: 60,
             session_rotation_secs: 0,
@@ -113,6 +137,8 @@ impl Default for Ed2kConfig {
             // GetDefaultMaxConperFive (50) / GetDefaultMaxSourcesPerFile (600).
             max_concurrent_downloads: 500,
             max_new_connections_per_five_seconds: 50,
+            // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
+            max_half_open_connections: 50,
             max_sources_per_file: 600,
             max_parallel_download_peers: 2,
             keyword_server_attempt_budget: 3,
@@ -159,6 +185,8 @@ mod tests {
         // GetDefaultMaxSourcesPerFile (600).
         assert_eq!(config.max_concurrent_downloads, 500);
         assert_eq!(config.max_new_connections_per_five_seconds, 50);
+        // eMule GetDefaultMaxHalfConnections (Preferences.h:1132).
+        assert_eq!(config.max_half_open_connections, 50);
         assert_eq!(config.max_sources_per_file, 600);
         assert_eq!(config.max_parallel_download_peers, 2);
         assert_eq!(config.keyword_server_attempt_budget, 3);
@@ -171,5 +199,16 @@ mod tests {
         assert_eq!(config.download_limit_bytes_per_sec, 0);
         // eMule DeadServerRetry default is 1.
         assert_eq!(config.dead_server_retries, 1);
+    }
+
+    #[test]
+    fn default_connect_timeout_budgets_match_emule_reach() {
+        let config = Ed2kConfig::default();
+        // Direct peer connect stays conservative (~15s).
+        assert_eq!(config.connect_timeout_secs, 15);
+        // eMule CONSERVTIMEOUT (Opcodes.h:109) = SEC2MS(25) for server connect.
+        assert_eq!(config.server_connect_timeout_secs, 25);
+        // eMule ClientList.cpp:1059 reaps a LowID callback wait at SEC2MS(45).
+        assert_eq!(config.callback_timeout_secs, 45);
     }
 }

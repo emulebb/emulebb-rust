@@ -15,7 +15,7 @@ use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, AtomicU64}},
+    sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, AtomicU64, AtomicUsize}},
     time::{Duration, Instant},
 };
 
@@ -37,6 +37,7 @@ mod download_coordinator;
 mod download_pick;
 mod download_throttle;
 mod hashset;
+mod inbound_admission;
 mod ingest;
 mod manifest;
 mod metadata;
@@ -58,6 +59,7 @@ use download_coordinator::{
 };
 pub use download_coordinator::Ed2kDownloadCoordinatorConfig;
 use download_throttle::Ed2kDownloadThrottle;
+pub use inbound_admission::Ed2kInboundConnectionGuard;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
@@ -184,6 +186,13 @@ pub struct Ed2kTransferRuntime {
     /// `std::sync::Mutex` because every decision is instant (no await held), so
     /// the download closure / reask path can consult it without `.await`.
     download_coordinator: Arc<StdMutex<Ed2kDownloadCoordinator>>,
+    /// Live count of inbound (accepted) eD2k peer connections currently being
+    /// handled. The listener admits a new inbound connection only while this is
+    /// under the concurrent-connection cap (eMule `CListenSocket::OnAccept`
+    /// refuses/stops accepting when `TooManySockets()`), then decrements it on
+    /// every handler exit path. An `AtomicUsize` so the listener's accept loop
+    /// can check/bump it without holding the coordinator mutex across an await.
+    inbound_connections: Arc<AtomicUsize>,
     next_upload_connection_id: AtomicU64,
     /// Monotonic payload bytes received/sent since the runtime started, for the
     /// REST `sessionDownloadedBytes`/`sessionUploadedBytes` stats (oracle
@@ -291,6 +300,7 @@ impl Ed2kTransferRuntime {
             download_coordinator: Arc::new(StdMutex::new(Ed2kDownloadCoordinator::new(
                 coordinator_config,
             ))),
+            inbound_connections: Arc::new(AtomicUsize::new(0)),
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
@@ -424,8 +434,22 @@ impl Ed2kTransferRuntime {
         }
     }
 
+    /// Signal that a granted outgoing source connection has completed its TCP
+    /// connect + hello handshake, transitioning it from half-open to established
+    /// (eMule `m_nHalfOpen` decrement). Frees a half-open budget slot for a new
+    /// connect. Called by the download driver once the peer session reaches the
+    /// connected/hello-done point. Saturating: a no-op when nothing is half-open.
+    pub fn mark_connection_established(&self) {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .mark_connection_established();
+    }
+
     /// Release a source connection budget slot when an outgoing peer connection
-    /// closes (the counterpart to [`try_acquire_source_connection`]).
+    /// closes (the counterpart to [`try_acquire_source_connection`]). Decrements
+    /// the established bucket first, falling back to the half-open bucket for a
+    /// connection that closed before it ever handshaked; both saturate.
     pub fn release_source_connection(&self) {
         self.download_coordinator
             .lock()
@@ -504,6 +528,7 @@ pub fn download_coordinator_config_from_policy(
         max_connections: config.max_concurrent_downloads,
         max_connections_per_window: config.max_new_connections_per_five_seconds,
         connection_window: DEFAULT_CONNECTION_WINDOW,
+        max_half_open_connections: config.max_half_open_connections,
         max_sources_per_file: config.max_sources_per_file,
         reask_pacing_interval: DEFAULT_REASK_PACING_INTERVAL,
     }

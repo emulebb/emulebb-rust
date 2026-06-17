@@ -45,6 +45,12 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 500;
 /// Master `CPreferences::GetDefaultMaxConperFive()`: at most 50 new outgoing
 /// connections may be opened within one 5s window.
 pub const DEFAULT_MAX_CONNECTIONS_PER_WINDOW: usize = 50;
+/// Master `CPreferences::GetDefaultMaxHalfConnections()` (Preferences.h:1132):
+/// at most 50 outgoing connections may be simultaneously *half-open* (TCP
+/// connect + hello handshake not yet completed). This is the third term of
+/// `CListenSocket::TooManySockets` (`m_nHalfOpen >= GetMaxHalfConnections()`,
+/// ListenSocket.cpp:2654).
+pub const DEFAULT_MAX_HALF_OPEN_CONNECTIONS: usize = 50;
 /// Master `m_OpenSocketsInterval` window length for the new-connection rate.
 pub const DEFAULT_CONNECTION_WINDOW: Duration = Duration::from_secs(5);
 /// Master `CPreferences::GetDefaultMaxSourcesPerFile()`: 600 sources/file.
@@ -72,6 +78,11 @@ pub struct Ed2kDownloadCoordinatorConfig {
     pub max_connections_per_window: usize,
     /// Sliding window length for the new-connection rate limiter.
     pub connection_window: Duration,
+    /// Maximum number of simultaneously *half-open* outgoing source connections
+    /// (granted a slot but not yet TCP+hello established). Master
+    /// `CListenSocket::TooManySockets` half-open term (`m_nHalfOpen >=
+    /// GetMaxHalfConnections()`, default 50). 0 disables the half-open cap.
+    pub max_half_open_connections: usize,
     /// Configured `maxSources` per file; the soft/UDP caps derive from this
     /// exactly like the master (`* 9/10` clamped, `* 3/4` clamped). 0 disables
     /// the per-file cap.
@@ -86,6 +97,7 @@ impl Default for Ed2kDownloadCoordinatorConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_connections_per_window: DEFAULT_MAX_CONNECTIONS_PER_WINDOW,
             connection_window: DEFAULT_CONNECTION_WINDOW,
+            max_half_open_connections: DEFAULT_MAX_HALF_OPEN_CONNECTIONS,
             max_sources_per_file: DEFAULT_MAX_SOURCES_PER_FILE,
             reask_pacing_interval: DEFAULT_REASK_PACING_INTERVAL,
         }
@@ -118,8 +130,14 @@ impl Ed2kDownloadCoordinatorConfig {
 #[derive(Debug)]
 pub struct Ed2kDownloadCoordinator {
     config: Ed2kDownloadCoordinatorConfig,
-    /// Live count of outgoing source connections holding a budget slot.
-    active_connections: usize,
+    /// Live count of outgoing source connections that hold a budget slot but
+    /// have NOT yet completed their TCP connect + hello handshake (master
+    /// `m_nHalfOpen`). A granted slot starts here and moves to
+    /// `established_connections` once [`mark_connection_established`] is called.
+    half_open_connections: usize,
+    /// Live count of outgoing source connections whose TCP+hello handshake has
+    /// completed (master: an `m_nHalfOpen`-decremented, fully-open socket).
+    established_connections: usize,
     /// Timestamps of new connections admitted within the current window, oldest
     /// first (master `m_OpenSocketsInterval` accumulator over a 5s window).
     recent_connection_grants: VecDeque<Instant>,
@@ -134,7 +152,8 @@ impl Ed2kDownloadCoordinator {
     pub fn new(config: Ed2kDownloadCoordinatorConfig) -> Self {
         Self {
             config,
-            active_connections: 0,
+            half_open_connections: 0,
+            established_connections: 0,
             recent_connection_grants: VecDeque::new(),
             reask_cursor: 0,
             last_reask_at: None,
@@ -151,19 +170,36 @@ impl Ed2kDownloadCoordinator {
         self.config = config;
     }
 
+    /// Total live outgoing source connections holding a budget slot, i.e. the
+    /// half-open plus established buckets (master `GetOpenSockets()` for the
+    /// outgoing-source subset). This is the value the concurrent cap compares.
     pub fn active_connections(&self) -> usize {
-        self.active_connections
+        self.half_open_connections + self.established_connections
+    }
+
+    /// Live count of half-open (not-yet-established) outgoing source connections
+    /// (master `m_nHalfOpen`).
+    pub fn half_open_connections(&self) -> usize {
+        self.half_open_connections
+    }
+
+    /// Live count of established (TCP+hello complete) outgoing source connections.
+    pub fn established_connections(&self) -> usize {
+        self.established_connections
     }
 
     /// Try to claim a global connection budget slot for one new outgoing source
     /// connection (master `CListenSocket::TooManySockets` inverted). Returns
-    /// `true` and reserves the slot when BOTH the concurrent cap and the
-    /// per-window new-connection rate allow it; `false` otherwise, in which case
-    /// the caller leaves the source for the next cycle (never drops it).
+    /// `true` and reserves the slot — as a *half-open* connection — when the
+    /// concurrent cap, the per-window new-connection rate, AND the half-open cap
+    /// (master `m_nHalfOpen >= GetMaxHalfConnections()`) all allow it; `false`
+    /// otherwise, in which case the caller leaves the source for the next cycle
+    /// (never drops it). The granted connection stays half-open until
+    /// [`mark_connection_established`] is called once its handshake completes.
     pub fn try_acquire_connection(&mut self, now: Instant) -> bool {
         self.expire_connection_window(now);
         if self.config.max_connections != 0
-            && self.active_connections >= self.config.max_connections
+            && self.active_connections() >= self.config.max_connections
         {
             return false;
         }
@@ -172,16 +208,41 @@ impl Ed2kDownloadCoordinator {
         {
             return false;
         }
-        self.active_connections += 1;
+        // Half-open cap (master TooManySockets third term): refuse a new
+        // outgoing connect while too many handshakes are already in flight.
+        if self.config.max_half_open_connections != 0
+            && self.half_open_connections >= self.config.max_half_open_connections
+        {
+            return false;
+        }
+        self.half_open_connections += 1;
         self.recent_connection_grants.push_back(now);
         true
     }
 
+    /// Transition one half-open connection to established once its TCP connect +
+    /// hello handshake has completed (master: the `m_nHalfOpen` decrement on a
+    /// fully-open socket). Frees one half-open budget slot for a new connect.
+    /// Saturating: a no-op when there is no half-open connection to promote.
+    pub fn mark_connection_established(&mut self) {
+        if self.half_open_connections > 0 {
+            self.half_open_connections -= 1;
+            self.established_connections += 1;
+        }
+    }
+
     /// Release a previously acquired connection budget slot when a source
-    /// connection closes. Does not touch the rate-limiter window: the new
+    /// connection closes. Decrements the established bucket first (the common
+    /// case once a connection has handshaked) and falls back to the half-open
+    /// bucket for a connection that closed before it ever established. Both
+    /// decrements saturate. Does not touch the rate-limiter window: the new
     /// connection was already counted toward this window's rate.
     pub fn release_connection(&mut self) {
-        self.active_connections = self.active_connections.saturating_sub(1);
+        if self.established_connections > 0 {
+            self.established_connections -= 1;
+        } else {
+            self.half_open_connections = self.half_open_connections.saturating_sub(1);
+        }
     }
 
     /// Whether `file_hash` may engage one more source over TCP given how many
@@ -248,6 +309,7 @@ mod tests {
             max_connections: 3,
             max_connections_per_window: 2,
             connection_window: Duration::from_secs(5),
+            max_half_open_connections: 50,
             max_sources_per_file: 600,
             reask_pacing_interval: Duration::from_secs(10),
         }
@@ -324,6 +386,77 @@ mod tests {
         // After the window elapses the rate budget refills.
         let after_window = start + Duration::from_secs(5) + Duration::from_millis(1);
         assert!(coordinator.try_acquire_connection(after_window));
+    }
+
+    #[test]
+    fn half_open_cap_denies_a_grant_once_too_many_handshakes_are_in_flight() {
+        let mut coordinator = Ed2kDownloadCoordinator::new(Ed2kDownloadCoordinatorConfig {
+            // High concurrent + rate caps so only the half-open cap binds.
+            max_connections: 100,
+            max_connections_per_window: 0,
+            max_half_open_connections: 2,
+            ..test_config()
+        });
+        let now = Instant::now();
+        // Two grants fill the half-open budget.
+        assert!(coordinator.try_acquire_connection(now));
+        assert!(coordinator.try_acquire_connection(now));
+        assert_eq!(coordinator.half_open_connections(), 2);
+        // Third grant is denied by the half-open cap even though the concurrent
+        // cap (100) is nowhere near full.
+        assert!(!coordinator.try_acquire_connection(now));
+        assert_eq!(coordinator.active_connections(), 2);
+    }
+
+    #[test]
+    fn establishing_a_connection_frees_half_open_budget() {
+        let mut coordinator = Ed2kDownloadCoordinator::new(Ed2kDownloadCoordinatorConfig {
+            max_connections: 100,
+            max_connections_per_window: 0,
+            max_half_open_connections: 1,
+            ..test_config()
+        });
+        let now = Instant::now();
+        // One grant exhausts the half-open budget.
+        assert!(coordinator.try_acquire_connection(now));
+        assert!(!coordinator.try_acquire_connection(now));
+        // Completing the handshake moves it half-open -> established, which frees
+        // the half-open slot so the next connect is admitted again.
+        coordinator.mark_connection_established();
+        assert_eq!(coordinator.half_open_connections(), 0);
+        assert_eq!(coordinator.established_connections(), 1);
+        assert!(coordinator.try_acquire_connection(now));
+        assert_eq!(coordinator.active_connections(), 2);
+    }
+
+    #[test]
+    fn release_saturates_from_both_half_open_and_established_states() {
+        let mut coordinator = Ed2kDownloadCoordinator::new(Ed2kDownloadCoordinatorConfig {
+            max_connections: 100,
+            max_connections_per_window: 0,
+            max_half_open_connections: 50,
+            ..test_config()
+        });
+        let now = Instant::now();
+        // One established (acquired + handshaked) and one still half-open.
+        assert!(coordinator.try_acquire_connection(now));
+        coordinator.mark_connection_established();
+        assert!(coordinator.try_acquire_connection(now));
+        assert_eq!(coordinator.established_connections(), 1);
+        assert_eq!(coordinator.half_open_connections(), 1);
+        // Release prefers the established bucket, then the half-open bucket.
+        coordinator.release_connection();
+        assert_eq!(coordinator.established_connections(), 0);
+        assert_eq!(coordinator.half_open_connections(), 1);
+        coordinator.release_connection();
+        assert_eq!(coordinator.half_open_connections(), 0);
+        // Extra releases saturate at zero (no underflow).
+        coordinator.release_connection();
+        coordinator.release_connection();
+        assert_eq!(coordinator.active_connections(), 0);
+        // mark_connection_established is also a no-op with nothing half-open.
+        coordinator.mark_connection_established();
+        assert_eq!(coordinator.established_connections(), 0);
     }
 
     #[test]

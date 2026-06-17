@@ -2758,8 +2758,16 @@ impl EmulebbCore {
         self.register_download_source_candidates(&transfer, &sources)
             .await;
         let hello_identity = self.ed2k_hello_identity(network);
+        // Direct peer connect stays conservative (~15s); the LowID callback wait
+        // gets eMule's full reach (ClientList.cpp:1059 SEC2MS(45)) so a firewalled
+        // source has time to connect back.
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
-        let callback_timeout = Duration::from_secs(network.config.connect_timeout_secs.max(30));
+        let callback_timeout = Duration::from_secs(
+            network
+                .config
+                .callback_timeout_secs
+                .max(network.config.connect_timeout_secs),
+        );
         let max_peers = network.config.max_parallel_download_peers.max(1);
         let shared_catalog = self.ed2k_transfers.shared_catalog();
         let shared_catalog_snapshot = shared_catalog.read().await.clone();

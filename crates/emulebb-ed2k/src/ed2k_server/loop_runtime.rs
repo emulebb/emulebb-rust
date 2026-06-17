@@ -38,7 +38,8 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         state: Arc::clone(&state),
         kad_firewall,
         keepalive_interval: Duration::from_secs(config.keepalive_secs.max(1)),
-        connect_timeout: Duration::from_secs(config.connect_timeout_secs.max(1)),
+        // Server connect budget (eMule CONSERVTIMEOUT = SEC2MS(25), Opcodes.h:109).
+        connect_timeout: Duration::from_secs(config.server_connect_timeout_secs.max(1)),
         rotation_interval: (config.session_rotation_secs > 0)
             .then(|| Duration::from_secs(config.session_rotation_secs)),
         shutdown: Arc::clone(&shutdown),

@@ -103,6 +103,11 @@ pub async fn download_file_from_peer(
             "connect_ready",
             format!("file_hash={file_hash_hex}"),
         );
+        // The outbound TCP connect + hello handshake has completed, so the global
+        // connection-budget slot acquired for this source transitions from
+        // half-open to established (eMule `m_nHalfOpen` decrement on OnConnect),
+        // freeing the half-open budget for the next pending source connect.
+        transfer_runtime.mark_connection_established();
         let source_exchange_allowed = transfer_runtime
             .should_request_source_exchange(
                 &file_hash_hex,

@@ -91,6 +91,18 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                         continue;
                     }
                 }
+                // Inbound-accept admission cap (eMule CListenSocket::OnAccept ->
+                // TooManySockets): refuse a new inbound connection once the live
+                // inbound count is at/over the concurrent-connection cap. The
+                // returned guard decrements the counter on every handler exit
+                // path; close (drop) the just-accepted socket when over the cap.
+                let Some(inbound_guard) = transfer_runtime.try_admit_inbound_connection() else {
+                    debug!(
+                        "refusing inbound eD2k connection from {peer_addr}: at concurrent-connection cap"
+                    );
+                    drop(stream);
+                    continue;
+                };
                 // Pin the accepted socket's egress to the VPN tunnel (IP_UNICAST_IF),
                 // best-effort: the socket already sources from the VPN bind IP, so a
                 // pin failure does not justify dropping an inbound connection.
@@ -108,6 +120,9 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 let reachability = reachability.clone();
                 let buddy_registry = buddy_registry.clone();
                 tokio::spawn(async move {
+                    // Hold the admission guard for the whole handler so the
+                    // inbound slot is released on every exit path (Drop).
+                    let _inbound_guard = inbound_guard;
                     if let Err(error) = session::handle_connection(
                         stream,
                         peer_addr,
