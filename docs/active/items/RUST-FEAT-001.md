@@ -37,6 +37,12 @@ and TCP-fallback re-engage (~64 tests, clippy-clean). The omission is recorded i
 live validation (Rust↔Rust, then gentle Rust↔stock) before flipping the flag on.**
 The original pre-implementation audit below is retained as provenance.
 
+**Update 2026-06-17 — enabled by default; metadata hardening in progress.** Kad
+source conversion now preserves non-zero `FT_SOURCEUPORT` for HighID as well as
+firewalled-buddy sources, so UDP-reask reachability metadata is not lost before a
+TCP hello can refresh it. Remaining work is live interoperability validation and
+closing any defects found during that validation.
+
 - No client UDP socket exists; `crates/emulebb-ed2k/src/ed2k_tcp/` has no reask
   opcode handling. The gap is **inherited verbatim** from
   `p2p-overlord-agents` (`overlord-agent-emule`), from which the eD2K stack was

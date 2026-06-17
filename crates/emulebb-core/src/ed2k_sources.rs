@@ -340,7 +340,7 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed
         source_server: None,
         buddy_id,
         buddy_endpoint,
-        source_udp_port: firewalled_buddy.then_some(result.udp_port),
+        source_udp_port: (result.udp_port != 0).then_some(result.udp_port),
     }
 }
 
@@ -563,3 +563,6 @@ pub(crate) fn merge_download_sources(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
