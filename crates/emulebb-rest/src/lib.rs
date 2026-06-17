@@ -580,7 +580,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         let data = &value["data"];
-        assert_eq!(data["app"]["name"], "eMuleBB Rust");
+        assert_eq!(data["app"]["name"], "eMuleBB");
         assert_eq!(data["status"]["lifecycle"]["state"], "running");
         assert_eq!(data["transfers"].as_array().unwrap().len(), 1);
         assert_eq!(data["sharedFiles"].as_array().unwrap().len(), 1);

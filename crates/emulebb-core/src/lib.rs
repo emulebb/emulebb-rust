@@ -476,21 +476,28 @@ impl EmulebbCore {
 
     pub fn app_info(&self) -> AppInfo {
         AppInfo {
-            name: "eMuleBB Rust".to_string(),
+            name: "eMuleBB".to_string(),
             version: self.version.clone(),
-            api_version: "1".to_string(),
+            api_version: "v1".to_string(),
             lifecycle: AppLifecycle {
                 state: "running".to_string(),
             },
             capabilities: vec![
-                "client.headless".to_string(),
-                "network.ed2k".to_string(),
-                "network.kad".to_string(),
-                "rest.emulebb.v1".to_string(),
-                "search.keyword".to_string(),
-                "transfer.downloads".to_string(),
-                "share.localFiles".to_string(),
-                "indexing.localFts".to_string(),
+                "transfers".to_string(),
+                "searches".to_string(),
+                "servers".to_string(),
+                "sharedFiles".to_string(),
+                "sharedDirectories".to_string(),
+                "uploads".to_string(),
+                "logs".to_string(),
+                "categoriesRead".to_string(),
+                "categoryAssignment".to_string(),
+                "categoryCrud".to_string(),
+                "renameFile".to_string(),
+                "transferDetails".to_string(),
+                "fileRatingComment".to_string(),
+                "friends".to_string(),
+                "peerControls".to_string(),
             ],
         }
     }

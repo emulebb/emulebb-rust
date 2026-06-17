@@ -38,8 +38,16 @@ async fn app_returns_evelope_with_capabilities() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["meta"]["apiVersion"], "v1");
-    assert_eq!(value["data"]["name"], "eMuleBB Rust");
-    assert_eq!(value["data"]["capabilities"]["rest.emulebb.v1"], true);
+    assert_eq!(value["data"]["apiVersion"], "v1");
+    assert_eq!(value["data"]["name"], "eMuleBB");
+    assert_eq!(value["data"]["capabilities"]["transfers"], true);
+    assert_eq!(value["data"]["capabilities"]["sharedDirectories"], true);
+    assert_eq!(value["data"]["capabilities"]["peerControls"], true);
+    assert!(
+        value["data"]["capabilities"]
+            .get("rest.emulebb.v1")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -58,9 +66,16 @@ async fn capabilities_returns_contract_version_and_capability_list() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["contractVersion"], "1.0.0");
-    assert_eq!(value["data"]["apiVersion"], "1");
+    assert_eq!(value["data"]["apiVersion"], "v1");
     assert!(
         value["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "transfers")
+    );
+    assert!(
+        !value["data"]["capabilities"]
             .as_array()
             .unwrap()
             .iter()
