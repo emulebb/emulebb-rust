@@ -84,7 +84,7 @@ async fn capabilities_returns_contract_version_and_capability_list() {
 }
 
 #[tokio::test]
-async fn snapshot_limit_clamps_like_master() {
+async fn snapshot_limit_rejects_out_of_range_values_like_master() {
     let zero_response = test_router()
         .oneshot(
             Request::builder()
@@ -95,7 +95,7 @@ async fn snapshot_limit_clamps_like_master() {
         )
         .await
         .unwrap();
-    assert_eq!(zero_response.status(), StatusCode::OK);
+    assert_eq!(zero_response.status(), StatusCode::BAD_REQUEST);
 
     let large_response = test_router()
         .oneshot(
@@ -107,16 +107,15 @@ async fn snapshot_limit_clamps_like_master() {
         )
         .await
         .unwrap();
-    assert_eq!(large_response.status(), StatusCode::OK);
+    assert_eq!(large_response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(large_response.into_body(), usize::MAX)
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert!(value["data"]["transfers"].as_array().unwrap().len() <= 1000);
-    assert!(value["data"]["sharedFiles"].as_array().unwrap().len() <= 1000);
-    assert!(value["data"]["uploads"].as_array().unwrap().len() <= 1000);
-    assert!(value["data"]["uploadQueue"].as_array().unwrap().len() <= 1000);
-    assert!(value["data"]["logs"].as_array().unwrap().len() <= 1000);
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(value["error"]["message"], "limit is out of range");
+    assert_eq!(value["error"]["details"]["field"], "limit");
+    assert_eq!(value["error"]["details"]["constraint"], "1..1000");
 }
 
 #[tokio::test]

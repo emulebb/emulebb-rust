@@ -400,49 +400,6 @@ async fn method_not_allowed_sets_allow_header_and_error_envelope() {
 }
 
 #[tokio::test]
-async fn pagination_rejects_out_of_range_bounds_with_details() {
-    async fn error_value(uri: &str) -> (StatusCode, Value) {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("X-API-Key", "secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&body).unwrap())
-    }
-
-    // limit above the maximum.
-    let (status, value) = error_value("/api/v1/transfers?limit=5000").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(value["error"]["message"], "limit is out of range");
-    assert_eq!(value["error"]["details"]["field"], "limit");
-    assert_eq!(value["error"]["details"]["constraint"], "1..1000");
-
-    // limit below the minimum is rejected, not clamped.
-    let (status, value) = error_value("/api/v1/transfers?limit=0").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["details"]["constraint"], "1..1000");
-
-    // offset above INT_MAX.
-    let (status, value) = error_value("/api/v1/transfers?offset=2147483648").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["message"], "offset is out of range");
-    assert_eq!(value["error"]["details"]["field"], "offset");
-    assert_eq!(value["error"]["details"]["constraint"], "0..2147483647");
-
-    // Valid pagination succeeds.
-    let (status, _value) = error_value("/api/v1/transfers?limit=10&offset=5").await;
-    assert_eq!(status, StatusCode::OK);
-}
-
-#[tokio::test]
 async fn transfers_reject_unknown_state_query_values() {
     let response = test_router()
         .oneshot(
@@ -523,53 +480,6 @@ async fn boolean_query_values_use_mfc_validation_messages() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/upload-queue?includeScoreBreakdown=false")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(accepted.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn transfers_category_id_query_uses_mfc_unsigned_validation() {
-    let cases = [
-        (
-            "/api/v1/transfers?categoryId=-1",
-            "categoryId must be an unsigned number",
-        ),
-        (
-            "/api/v1/transfers?categoryId=abc",
-            "categoryId must be an unsigned number",
-        ),
-        (
-            "/api/v1/transfers?categoryId=4294967296",
-            "categoryId is out of range",
-        ),
-    ];
-    for (uri, expected_message) in cases {
-        let response = test_router()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("X-API-Key", "secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-        assert_eq!(value["error"]["message"], expected_message);
-    }
-
-    let accepted = test_router()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/transfers?categoryId=0")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),

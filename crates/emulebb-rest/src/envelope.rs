@@ -104,7 +104,7 @@ pub(crate) fn api_meta() -> Value {
 }
 
 pub(crate) fn snapshot_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(100).clamp(PAGE_LIMIT_MIN, PAGE_LIMIT_MAX)
+    limit.unwrap_or(100)
 }
 
 pub(crate) fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {

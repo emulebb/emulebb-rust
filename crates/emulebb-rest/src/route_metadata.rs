@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::envelope::api_error;
+use crate::envelope::{api_error, out_of_range_response};
 
 pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response {
     let method = request.method().as_str();
@@ -34,6 +34,22 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                 )
                 .into_response();
             }
+            if name == "limit"
+                && let Err(error) = parse_bounded_query_value(&value, 1, 1000, "limit")
+            {
+                return query_scalar_error_response(error).into_response();
+            }
+            if name == "offset"
+                && let Err(error) = parse_bounded_query_value(&value, 0, i32::MAX as u64, "offset")
+            {
+                return query_scalar_error_response(error).into_response();
+            }
+            if name == "categoryId"
+                && let Err(error) =
+                    parse_bounded_query_value(&value, 0, u32::MAX as u64, "categoryId")
+            {
+                return query_scalar_error_response(error).into_response();
+            }
             if name == "state" && !is_transfer_state_name(&value) {
                 return api_error(
                     StatusCode::BAD_REQUEST,
@@ -49,15 +65,6 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
                     format!("{name} must be true or false"),
                 )
                 .into_response();
-            }
-            if name == "categoryId" {
-                match parse_u32_query_value(&value) {
-                    Ok(()) => {}
-                    Err(message) => {
-                        return api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message)
-                            .into_response();
-                    }
-                }
             }
         }
     }
@@ -172,17 +179,54 @@ fn is_boolean_query_value(value: &str) -> bool {
     matches!(value, "true" | "false")
 }
 
-fn parse_u32_query_value(value: &str) -> Result<(), &'static str> {
+#[derive(Clone, Copy)]
+enum QueryScalarError {
+    NotUnsigned {
+        field: &'static str,
+    },
+    OutOfRange {
+        field: &'static str,
+        min: u64,
+        max: u64,
+    },
+}
+
+fn parse_bounded_query_value(
+    value: &str,
+    min: u64,
+    max: u64,
+    field: &'static str,
+) -> Result<(), QueryScalarError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("categoryId must be an unsigned number");
+        return Err(QueryScalarError::NotUnsigned { field });
     }
     let value = value
         .parse::<u64>()
-        .map_err(|_| "categoryId must be an unsigned number")?;
-    if value > u32::MAX as u64 {
-        return Err("categoryId is out of range");
+        .map_err(|_| QueryScalarError::NotUnsigned { field })?;
+    if value < min || value > max {
+        return Err(QueryScalarError::OutOfRange { field, min, max });
     }
     Ok(())
+}
+
+fn query_scalar_error_response(error: QueryScalarError) -> Response {
+    match error {
+        QueryScalarError::NotUnsigned { field } => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            format!("{field} must be an unsigned number"),
+        )
+        .into_response(),
+        QueryScalarError::OutOfRange { field, min, max } if matches!(field, "limit" | "offset") => {
+            out_of_range_response(field, min, max)
+        }
+        QueryScalarError::OutOfRange { field, .. } => api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            format!("{field} is out of range"),
+        )
+        .into_response(),
+    }
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

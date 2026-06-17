@@ -67,7 +67,7 @@ async fn logs_limit_matches_master_query_semantics() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 3);
 
-    let zero_is_clamped = app
+    let zero_is_rejected = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/logs?limit=0")
@@ -77,12 +77,13 @@ async fn logs_limit_matches_master_query_semantics() {
         )
         .await
         .unwrap();
-    assert_eq!(zero_is_clamped.status(), StatusCode::OK);
-    let body = to_bytes(zero_is_clamped.into_body(), usize::MAX)
+    assert_eq!(zero_is_rejected.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(zero_is_rejected.into_body(), usize::MAX)
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(value["error"]["message"], "limit is out of range");
     log_buffer::clear_logs();
 }
 
