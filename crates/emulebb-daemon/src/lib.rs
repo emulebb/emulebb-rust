@@ -2,14 +2,15 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
-    NatConfig, NetworkInterface, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent,
-    ipfilter, ipfilter::IpFilter,
+    NatConfig, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent, ipfilter,
+    ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
@@ -21,9 +22,7 @@ use tracing::info;
 mod bind_config;
 pub mod log_layer;
 pub use log_layer::LogBufferLayer;
-mod vpn_guard;
-
-use bind_config::{ensure_p2p_bind_ip_on_interface, resolve_p2p_bind_interface_ip};
+mod vpn_guard_monitor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -225,6 +224,7 @@ impl DaemonConfig {
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
         let detected_interfaces = detect_interfaces().unwrap_or_default();
+        let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, &detected_interfaces);
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
@@ -248,12 +248,14 @@ impl DaemonConfig {
             kad_routing_maintenance_enabled: self.kad.routing_maintenance_enabled,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
+            p2p_bind_interface: self.p2p_bind_interface.clone(),
             vpn_guard: VpnGuardConfig {
                 enabled: self.vpn_guard.enabled,
                 mode: self.vpn_guard.mode.clone(),
                 allowed_public_ip_cidrs: self.vpn_guard.allowed_public_ip_cidrs.clone(),
             },
-            vpn_interface_bound: self.vpn_binding_confirmed(bind_ip, &detected_interfaces),
+            vpn_interface_bound,
+            vpn_interface_bound_runtime: Some(Arc::new(AtomicBool::new(vpn_interface_bound))),
             ip_filter,
             ip_filter_path: self
                 .ip_filter
@@ -286,42 +288,6 @@ impl DaemonConfig {
 
     pub fn kad_snoop_queue_config(&self) -> SnoopQueueConfig {
         self.kad.snoop_queue_config()
-    }
-
-    fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
-        let interfaces = detect_interfaces().context("failed to enumerate local interfaces")?;
-        self.resolve_p2p_bind_ip_from_interfaces(&interfaces)
-    }
-
-    fn resolve_p2p_bind_ip_from_interfaces(
-        &self,
-        interfaces: &[NetworkInterface],
-    ) -> Result<Ipv4Addr> {
-        if let Some(candidate) = self.p2p_bind_ip {
-            if let Some(bind_interface) = self
-                .p2p_bind_interface
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)?;
-            }
-            return Ok(candidate);
-        }
-
-        let Some(bind_interface) = self
-            .p2p_bind_interface
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
-        };
-        resolve_p2p_bind_interface_ip(interfaces, bind_interface)
-    }
-
-    fn vpn_binding_confirmed(&self, bind_ip: Ipv4Addr, interfaces: &[NetworkInterface]) -> bool {
-        vpn_guard::binding_confirmed(bind_ip, self.p2p_bind_interface.as_deref(), interfaces)
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {
@@ -383,7 +349,7 @@ impl KadListenerConfig {
 /// hang daemon shutdown indefinitely. `disconnect_ed2k` already times the NAT
 /// `stop()` out at ~2s; this is a belt-and-braces cap over the whole teardown
 /// (lease reset + task aborts + NAT release) in case a future step blocks.
-const SHUTDOWN_TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SHUTDOWN_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wait for any shutdown trigger: a REST `POST /app/shutdown` (`shutdown_rx`),
 /// Ctrl-C (SIGINT on unix, console close on Windows), or — on unix — SIGTERM
@@ -466,6 +432,9 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let index = FileIndex::open(config.metadata_path())?;
     let metadata_store = index.metadata_store();
     let ed2k_network = config.ed2k_network_config(&metadata_store)?;
+    let vpn_guard_monitor = ed2k_network
+        .as_ref()
+        .and_then(vpn_guard_monitor::monitor_config);
     let core = Arc::new(EmulebbCore::new_with_network(
         env!("CARGO_PKG_VERSION"),
         index,
@@ -481,6 +450,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
     core.start_shared_directory_monitor().await;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    if let Some(monitor) = vpn_guard_monitor {
+        tokio::spawn(vpn_guard_monitor::run(
+            Arc::clone(&core),
+            shutdown_tx.clone(),
+            monitor,
+        ));
+    }
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(
         Arc::clone(&core),

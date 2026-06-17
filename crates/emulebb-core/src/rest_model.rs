@@ -5,10 +5,8 @@
 //! behavior beyond serde. They are re-exported from the crate root so existing
 //! paths (`emulebb_core::Transfer`, etc.) keep working unchanged.
 
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use chrono::{DateTime, Utc};
 use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter};
@@ -652,11 +650,15 @@ pub struct Ed2kNetworkConfig {
     pub kad_buddy_enabled: bool,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
+    /// Optional configured P2P bind interface name for runtime VPN Guard checks.
+    pub p2p_bind_interface: Option<String>,
     /// Configured VPN-binding guard.
     pub vpn_guard: VpnGuardConfig,
     /// Whether the effective P2P bind IP is confirmed to belong to a named bind
     /// interface or a detected VPN-looking interface.
     pub vpn_interface_bound: bool,
+    /// Runtime-updated VPN binding confirmation, overriding the startup snapshot.
+    pub vpn_interface_bound_runtime: Option<Arc<AtomicBool>>,
     /// IPv4 range filter (ipfilter.dat). Empty when no filter is configured.
     /// Shares its backing across clones so a reload is observed live.
     pub ip_filter: IpFilter,

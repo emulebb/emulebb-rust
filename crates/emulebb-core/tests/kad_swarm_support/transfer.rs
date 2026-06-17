@@ -136,8 +136,10 @@ fn test_network_config(
             ..NatConfig::default()
         },
         config,
+        p2p_bind_interface: None,
         vpn_guard: emulebb_core::VpnGuardConfig::default(),
         vpn_interface_bound: false,
+        vpn_interface_bound_runtime: None,
         ip_filter: Default::default(),
         ip_filter_path: None,
         ip_filter_level: 127,

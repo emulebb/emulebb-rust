@@ -1,5 +1,6 @@
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, sync::atomic::Ordering};
 
+use emulebb_ed2k::NetworkInterface;
 use ipnet::Ipv4Net;
 
 use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardStatus};
@@ -7,7 +8,12 @@ use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardStatus};
 pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -> VpnGuardStatus {
     let guard = &network.vpn_guard;
     let blocking = is_blocking_mode(guard);
-    let interface_block_reason = if blocking && !network.vpn_interface_bound {
+    let vpn_interface_bound = network
+        .vpn_interface_bound_runtime
+        .as_ref()
+        .map(|runtime| runtime.load(Ordering::SeqCst))
+        .unwrap_or(network.vpn_interface_bound);
+    let interface_block_reason = if blocking && !vpn_interface_bound {
         Some("public P2P bind is not VPN-confirmed".to_string())
     } else {
         None
@@ -31,6 +37,35 @@ fn is_blocking_mode(guard: &VpnGuardConfig) -> bool {
     // Master parity (ParseModePreferenceText / GetVpnGuardModeRestToken): only
     // the "Block" token enables guarding; every other text maps to "off".
     guard.enabled && guard.mode.eq_ignore_ascii_case("block")
+}
+
+pub fn binding_confirmed(
+    bind_ip: Ipv4Addr,
+    bind_interface: Option<&str>,
+    interfaces: &[NetworkInterface],
+) -> bool {
+    let bind_ip_text = bind_ip.to_string();
+    let ip_on_vpn_candidate = interfaces.iter().any(|iface| {
+        iface.is_vpn_candidate
+            && iface
+                .addresses
+                .iter()
+                .any(|address| address.address == bind_ip_text)
+    });
+    let named_interface_matches = bind_interface
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|name| {
+            interfaces.iter().any(|iface| {
+                iface.name.trim().eq_ignore_ascii_case(name)
+                    && iface
+                        .addresses
+                        .iter()
+                        .any(|address| address.address == bind_ip_text)
+            })
+        });
+
+    ip_on_vpn_candidate || named_interface_matches
 }
 
 pub(crate) fn public_ip_block_reason(

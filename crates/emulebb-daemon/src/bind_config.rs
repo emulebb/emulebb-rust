@@ -1,7 +1,52 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
-use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface};
+use emulebb_core::vpn_guard::binding_confirmed;
+use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, detect_interfaces};
+
+use crate::DaemonConfig;
+
+impl DaemonConfig {
+    pub(crate) fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
+        let interfaces = detect_interfaces().context("failed to enumerate local interfaces")?;
+        self.resolve_p2p_bind_ip_from_interfaces(&interfaces)
+    }
+
+    pub(crate) fn resolve_p2p_bind_ip_from_interfaces(
+        &self,
+        interfaces: &[NetworkInterface],
+    ) -> Result<Ipv4Addr> {
+        if let Some(candidate) = self.p2p_bind_ip {
+            if let Some(bind_interface) = self
+                .p2p_bind_interface
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)?;
+            }
+            return Ok(candidate);
+        }
+
+        let Some(bind_interface) = self
+            .p2p_bind_interface
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
+        };
+        resolve_p2p_bind_interface_ip(interfaces, bind_interface)
+    }
+
+    pub(crate) fn vpn_binding_confirmed(
+        &self,
+        bind_ip: Ipv4Addr,
+        interfaces: &[NetworkInterface],
+    ) -> bool {
+        binding_confirmed(bind_ip, self.p2p_bind_interface.as_deref(), interfaces)
+    }
+}
 
 pub(crate) fn ensure_p2p_bind_ip_on_interface(
     interfaces: &[NetworkInterface],

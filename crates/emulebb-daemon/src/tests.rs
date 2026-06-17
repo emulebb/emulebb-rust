@@ -1,5 +1,5 @@
 use super::*;
-use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterfaceAddress};
+use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, NetworkInterfaceAddress};
 
 fn metadata_store(config: &DaemonConfig) -> MetadataStore {
     MetadataStore::open(config.metadata_path()).unwrap()

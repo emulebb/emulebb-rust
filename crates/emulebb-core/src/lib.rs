@@ -102,7 +102,7 @@ mod shared_directories;
 mod source_publish;
 mod upload_view;
 mod views;
-mod vpn_guard;
+pub mod vpn_guard;
 use categories::{PR_NORMAL, apply_category_create, apply_category_update, default_categories};
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
@@ -5822,8 +5822,10 @@ mod tests {
             kad_buddy_enabled: true,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
+            p2p_bind_interface: None,
             vpn_guard: VpnGuardConfig::default(),
             vpn_interface_bound: false,
+            vpn_interface_bound_runtime: None,
             ip_filter: IpFilter::default(),
             ip_filter_path: None,
             ip_filter_level: emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
