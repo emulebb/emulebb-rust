@@ -9,13 +9,8 @@ use serde_json::{Value, json};
 use crate::handlers::prelude::*;
 use crate::log_buffer;
 
-pub(crate) async fn logs(RawQuery(raw_query): RawQuery) -> impl IntoResponse {
-    let query = match parse_optional_query::<LogsQuery>(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(response) => return *response,
-    };
-    let limit = query.limit.unwrap_or(200).max(1);
-    let entries: Vec<Value> = log_buffer::recent_logs()
+pub(crate) fn recent_log_values(limit: usize) -> Vec<Value> {
+    log_buffer::recent_logs()
         .into_iter()
         .take(limit)
         .map(|record| {
@@ -26,8 +21,16 @@ pub(crate) async fn logs(RawQuery(raw_query): RawQuery) -> impl IntoResponse {
                 "debug": record.debug,
             })
         })
-        .collect();
-    api_collection(entries).into_response()
+        .collect()
+}
+
+pub(crate) async fn logs(RawQuery(raw_query): RawQuery) -> impl IntoResponse {
+    let query = match parse_optional_query::<LogsQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let limit = query.limit.unwrap_or(200).max(1);
+    api_collection(recent_log_values(limit)).into_response()
 }
 
 pub(crate) async fn clear_logs(body: Bytes) -> impl IntoResponse {

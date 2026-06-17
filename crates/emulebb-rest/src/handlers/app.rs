@@ -11,11 +11,11 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 use emulebb_core::PreferencesUpdate;
 
-use crate::handlers::prelude::*;
+use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
 
 pub(crate) async fn app(State(state): State<RestState>) -> impl IntoResponse {
@@ -163,7 +163,7 @@ pub(crate) async fn snapshot(
         "servers": bounded(server_responses(state.core.servers().await), limit),
         "kad": kad,
         "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
-        "logs": Vec::<Value>::new()
+        "logs": recent_log_values(limit)
     }))
     .into_response()
 }

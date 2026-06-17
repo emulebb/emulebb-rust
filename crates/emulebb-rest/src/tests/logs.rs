@@ -23,6 +23,7 @@ fn test_router() -> axum::Router {
 
 #[tokio::test]
 async fn logs_limit_matches_master_query_semantics() {
+    let _guard = log_buffer::test_log_guard().await;
     log_buffer::clear_logs();
     record_log("info", "oldest log", false);
     record_log("warning", "middle log", false);
@@ -86,7 +87,36 @@ async fn logs_limit_matches_master_query_semantics() {
 }
 
 #[tokio::test]
+async fn snapshot_includes_bounded_recent_logs() {
+    let _guard = log_buffer::test_log_guard().await;
+    log_buffer::clear_logs();
+    record_log("info", "older snapshot log", false);
+    record_log("warning", "newer snapshot log", true);
+    let app = test_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/snapshot?limit=1")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["logs"].as_array().unwrap().len(), 1);
+    assert_eq!(value["data"]["logs"][0]["message"], "newer snapshot log");
+    assert_eq!(value["data"]["logs"][0]["level"], "warning");
+    assert_eq!(value["data"]["logs"][0]["debug"], true);
+    log_buffer::clear_logs();
+}
+
+#[tokio::test]
 async fn logs_clear_requires_canonical_confirmation() {
+    let _guard = log_buffer::test_log_guard().await;
     let app = test_router();
 
     let denied = app
