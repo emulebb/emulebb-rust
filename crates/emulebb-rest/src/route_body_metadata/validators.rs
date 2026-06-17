@@ -231,6 +231,18 @@ pub(super) fn validate_server_patch_body_fields(object: &JsonObject) -> Result<(
     validate_optional_server_body_fields(object, false)
 }
 
+pub(super) fn validate_url_import_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let Some(url) = object.get("url").and_then(serde_json::Value::as_str) else {
+        return Err(invalid_body_error("url must be a non-empty string"));
+    };
+    validate_url_import_text(url, "url")
+}
+
+pub(super) fn validate_kad_bootstrap_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_non_empty_text_body_field(object.get("address"), "address")?;
+    validate_port_body_field(object.get("port"), "port")
+}
+
 fn validate_optional_server_body_fields(
     object: &JsonObject,
     allow_connect: bool,
@@ -353,6 +365,41 @@ fn validate_ed2k_link_text(value: &str, field: &'static str) -> Result<(), Strin
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ed2k://"))
     {
         return Err(format!("{field} must start with ed2k://"));
+    }
+    Ok(())
+}
+
+fn validate_url_import_text(value: &str, field: &'static str) -> Result<(), Box<Response>> {
+    let normalized = value.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if normalized.is_empty() {
+        return Err(invalid_body_error(format!("{field} must not be empty")));
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(invalid_body_error(format!(
+            "{field} must be valid UTF-8 without control characters"
+        )));
+    }
+    if normalized.encode_utf16().count() > 2048 {
+        return Err(invalid_body_error(format!(
+            "{field} must be at most 2048 characters"
+        )));
+    }
+    if normalized.chars().any(|ch| ch.is_ascii_whitespace()) {
+        return Err(invalid_body_error(format!(
+            "{field} must not contain whitespace"
+        )));
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(invalid_body_error(format!(
+            "{field} must start with http:// or https://"
+        )));
+    }
+    let host_begin = lower.find("://").expect("validated URL scheme") + 3;
+    if host_begin >= normalized.len()
+        || matches!(normalized.as_bytes()[host_begin], b'/' | b'?' | b'#')
+    {
+        return Err(invalid_body_error(format!("{field} must include a host")));
     }
     Ok(())
 }

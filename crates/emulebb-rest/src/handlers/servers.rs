@@ -61,7 +61,8 @@ pub(crate) async fn servers_import_met_url(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    match state.core.import_server_met_url(&request.url).await {
+    let url = request.url.trim();
+    match state.core.import_server_met_url(url).await {
         Ok(true) => api_ok(json!({ "ok": true, "imported": true })).into_response(),
         Ok(false) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,

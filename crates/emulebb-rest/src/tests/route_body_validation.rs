@@ -461,3 +461,83 @@ async fn server_patch_body_uses_mfc_validation() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn url_import_body_uses_mfc_validation() {
+    let app = test_router();
+    let routes = [
+        "POST /api/v1/servers/operations/import-met-url",
+        "POST /api/v1/kad/operations/import-nodes-url",
+    ];
+    let cases = [
+        (r#"{}"#, "url must be a non-empty string"),
+        (r#"{"url":1}"#, "url must be a non-empty string"),
+        (r#"{"url":"   "}"#, "url must not be empty"),
+        (
+            r#"{"url":"http://example.invalid/\u0001"}"#,
+            "url must be valid UTF-8 without control characters",
+        ),
+        (
+            r#"{"url":"http://example.invalid/file name"}"#,
+            "url must not contain whitespace",
+        ),
+        (
+            r#"{"url":"ftp://example.invalid/nodes.dat"}"#,
+            "url must start with http:// or https://",
+        ),
+        (r#"{"url":"http:///nodes.dat"}"#, "url must include a host"),
+        (r#"{"url":"https://#fragment"}"#, "url must include a host"),
+    ];
+
+    for route in routes {
+        let (method, uri) = route.split_once(' ').unwrap();
+        for (body, expected_message) in cases {
+            assert_invalid_json_response(
+                app.clone(),
+                method,
+                uri,
+                body.to_string(),
+                expected_message,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn kad_bootstrap_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/kad/operations/bootstrap";
+    let cases = [
+        (r#"{}"#, "address must be a non-empty string"),
+        (
+            r#"{"address":1,"port":4672}"#,
+            "address must be a non-empty string",
+        ),
+        (
+            r#"{"address":"   ","port":4672}"#,
+            "address must not be empty",
+        ),
+        (
+            r#"{"address":"203.0.113.10"}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"203.0.113.10","port":"4672"}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"203.0.113.10","port":0}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"203.0.113.10","port":65536}"#,
+            "port must be in the range 1..65535",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(app.clone(), "POST", uri, body.to_string(), expected_message)
+            .await;
+    }
+}

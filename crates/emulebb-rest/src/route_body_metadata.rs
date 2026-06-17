@@ -13,10 +13,11 @@ use axum::{
 
 use crate::envelope::{api_error, json_error_message};
 use validators::{
-    validate_paused_body_field, validate_server_create_body_fields,
-    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
-    validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_kad_bootstrap_body_fields, validate_paused_body_field,
+    validate_server_create_body_fields, validate_server_patch_body_fields,
+    validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
+    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
+    validate_transfer_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -106,6 +107,12 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_server(path) {
         return validate_server_patch_body_fields(object);
     }
+    if uses_url_import_body(method, path) {
+        return validate_url_import_body_fields(object);
+    }
+    if method == "POST" && path == "/api/v1/kad/operations/bootstrap" {
+        return validate_kad_bootstrap_body_fields(object);
+    }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
@@ -121,6 +128,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
+    const URL_IMPORT: &[&str] = &["url"];
+    const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);
@@ -133,6 +142,12 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "POST" && path == "/api/v1/servers" {
         return Some(SERVER_CREATE);
+    }
+    if uses_url_import_body(method, path) {
+        return Some(URL_IMPORT);
+    }
+    if method == "POST" && path == "/api/v1/kad/operations/bootstrap" {
+        return Some(KAD_BOOTSTRAP);
     }
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {
@@ -184,6 +199,14 @@ fn uses_paused_body(method: &str, path: &str) -> bool {
                     ["searches", _, "results", _, "operations", "download"]
                 )
             }))
+}
+
+fn uses_url_import_body(method: &str, path: &str) -> bool {
+    method == "POST"
+        && matches!(
+            path,
+            "/api/v1/servers/operations/import-met-url" | "/api/v1/kad/operations/import-nodes-url"
+        )
 }
 
 fn api_segments(path: &str) -> Option<Vec<&str>> {

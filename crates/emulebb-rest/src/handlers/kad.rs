@@ -47,7 +47,8 @@ pub(crate) async fn kad_import_nodes_url(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    match state.core.import_kad_nodes_url(&request.url).await {
+    let url = request.url.trim();
+    match state.core.import_kad_nodes_url(url).await {
         Ok(true) => api_ok(json!({ "ok": true, "imported": true })).into_response(),
         Ok(false) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -69,7 +70,8 @@ pub(crate) async fn kad_bootstrap(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    if request.address.trim().is_empty() {
+    let address = request.address.trim().to_string();
+    if address.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
@@ -85,11 +87,7 @@ pub(crate) async fn kad_bootstrap(
         )
         .into_response();
     }
-    match state
-        .core
-        .bootstrap_kad(&request.address, request.port)
-        .await
-    {
+    match state.core.bootstrap_kad(&address, request.port).await {
         Ok(_) => api_ok(kad_response(
             &state.core.status().await.kad,
             state.core.network_binding_status().as_ref(),
