@@ -21,6 +21,9 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
     let Some(allowed_query_fields) = route_query_fields(method, path) else {
         return next.run(request).await;
     };
+    if let Err(response) = validate_path_parameters(method, path) {
+        return *response;
+    }
     if let Some(query) = request.uri().query() {
         for (name, value) in match parse_query_fields(query) {
             Ok(fields) => fields,
@@ -227,6 +230,171 @@ fn query_scalar_error_response(error: QueryScalarError) -> Response {
         )
         .into_response(),
     }
+}
+
+fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response>> {
+    let segments = path
+        .strip_prefix("/api/v1/")
+        .map(|path| path.split('/').collect::<Vec<_>>())
+        .unwrap_or_default();
+    match (method, segments.as_slice()) {
+        ("GET" | "PATCH" | "DELETE", ["categories", category_id]) => {
+            validate_bounded_path_uint(category_id, u32::MAX as u64, "categoryId")?
+        }
+        ("DELETE", ["friends", user_hash]) => validate_lowercase_md4_hex(user_hash, "userHash")?,
+        ("GET" | "PATCH" | "DELETE", ["servers", server_id])
+        | ("POST", ["servers", server_id, "operations", "connect"]) => {
+            validate_endpoint_path_token(server_id, "serverId")?
+        }
+        ("GET" | "PATCH" | "DELETE", ["shared-files", hash])
+        | ("DELETE", ["shared-files", hash, "file"])
+        | ("GET", ["shared-files", hash, "ed2k-link"])
+        | ("GET", ["shared-files", hash, "comments"])
+        | ("GET" | "PATCH" | "DELETE", ["transfers", hash])
+        | ("DELETE", ["transfers", hash, "files"])
+        | ("GET", ["transfers", hash, "details"])
+        | ("GET", ["transfers", hash, "sources"])
+        | ("POST", ["transfers", hash, "operations", _]) => {
+            validate_lowercase_md4_hex(hash, "hash")?
+        }
+        ("GET", ["transfers", hash, "sources", client_id])
+        | ("POST", ["transfers", hash, "sources", client_id, "operations", _]) => {
+            validate_lowercase_md4_hex(hash, "hash")?;
+            validate_client_id_path_token(client_id)?;
+        }
+        ("GET", ["uploads", client_id])
+        | ("POST", ["uploads", client_id, "operations", _])
+        | ("GET", ["upload-queue", client_id])
+        | ("POST", ["upload-queue", client_id, "operations", _]) => {
+            validate_client_id_path_token(client_id)?
+        }
+        (
+            "POST",
+            [
+                "searches",
+                _search_id,
+                "results",
+                hash,
+                "operations",
+                "download",
+            ],
+        ) => validate_lowercase_md4_hex(hash, "hash")?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_bounded_path_uint(
+    value: &str,
+    max: u64,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("{field} must be an unsigned decimal string"),
+            )
+            .into_response(),
+        ));
+    }
+    let value = value.parse::<u64>().map_err(|_| {
+        Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("{field} must be an unsigned decimal string"),
+            )
+            .into_response(),
+        )
+    })?;
+    if value > max {
+        return Err(Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("{field} is out of range"),
+            )
+            .into_response(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lowercase_md4_hex(value: &str, field: &'static str) -> Result<(), Box<Response>> {
+    if is_lowercase_md4_hex(value) {
+        return Ok(());
+    }
+    Err(Box::new(
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            format!("{field} must be a 32-character lowercase hex string"),
+        )
+        .into_response(),
+    ))
+}
+
+fn is_lowercase_md4_hex(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn validate_endpoint_path_token(value: &str, field: &'static str) -> Result<(), Box<Response>> {
+    let Some((address, port)) = value.rsplit_once(':') else {
+        return Err(endpoint_path_token_error(field));
+    };
+    if address.is_empty() || port.is_empty() {
+        return Err(endpoint_path_token_error(field));
+    }
+    let Ok(port) = port.parse::<u64>() else {
+        return Err(endpoint_path_token_error(field));
+    };
+    if !(1..=u16::MAX as u64).contains(&port) {
+        return Err(endpoint_path_token_error(field));
+    }
+    Ok(())
+}
+
+fn endpoint_path_token_error(field: &'static str) -> Box<Response> {
+    Box::new(
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            format!("{field} must use address:port with a port in the range 1..65535"),
+        )
+        .into_response(),
+    )
+}
+
+fn validate_client_id_path_token(value: &str) -> Result<(), Box<Response>> {
+    if is_lowercase_md4_hex(value) || is_endpoint_path_token(value) {
+        return Ok(());
+    }
+    Err(Box::new(
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "clientId must be a 32-character lowercase hex string or address:port",
+        )
+        .into_response(),
+    ))
+}
+
+fn is_endpoint_path_token(value: &str) -> bool {
+    let Some((address, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    if address.is_empty() || port.is_empty() {
+        return false;
+    }
+    let Ok(port) = port.parse::<u64>() else {
+        return false;
+    };
+    (1..=u16::MAX as u64).contains(&port)
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

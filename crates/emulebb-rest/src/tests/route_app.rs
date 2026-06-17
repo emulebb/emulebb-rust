@@ -330,7 +330,7 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/upload-queue/unknown")
+                .uri("/api/v1/upload-queue/192.0.2.44:4662")
                 .header("X-API-Key", "secret")
                 .body(Body::empty())
                 .unwrap(),
@@ -340,18 +340,18 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     for path in [
-        "/api/v1/uploads/unknown/operations/remove",
-        "/api/v1/uploads/unknown/operations/release-slot",
-        "/api/v1/uploads/unknown/operations/add-friend",
-        "/api/v1/uploads/unknown/operations/remove-friend",
-        "/api/v1/uploads/unknown/operations/ban",
-        "/api/v1/uploads/unknown/operations/unban",
-        "/api/v1/upload-queue/unknown/operations/remove",
-        "/api/v1/upload-queue/unknown/operations/release-slot",
-        "/api/v1/upload-queue/unknown/operations/add-friend",
-        "/api/v1/upload-queue/unknown/operations/remove-friend",
-        "/api/v1/upload-queue/unknown/operations/ban",
-        "/api/v1/upload-queue/unknown/operations/unban",
+        "/api/v1/uploads/192.0.2.44:4662/operations/remove",
+        "/api/v1/uploads/192.0.2.44:4662/operations/release-slot",
+        "/api/v1/uploads/192.0.2.44:4662/operations/add-friend",
+        "/api/v1/uploads/192.0.2.44:4662/operations/remove-friend",
+        "/api/v1/uploads/192.0.2.44:4662/operations/ban",
+        "/api/v1/uploads/192.0.2.44:4662/operations/unban",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/remove",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/release-slot",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/add-friend",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/remove-friend",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/ban",
+        "/api/v1/upload-queue/192.0.2.44:4662/operations/unban",
     ] {
         let response = app
             .clone()
