@@ -76,8 +76,8 @@ rationale = "Inbound shared-file request handlers (multipacket / OP_REQUESTFILEN
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_transfer/tests.rs"
-hard_limit_lines = 922
-rationale = "Aggregated #[tokio::test] integration suite for the ED2K transfer runtime (source-exchange reask, partfile serving, hashset/verified-part tracking, session counters, etc.). Test-only file; allowlisted just over the 900 test budget for round-8 FIX 2's new recheck_transfer corruption-detection integration test (a complete 2-part file with a deliberately corrupted part is detected on recheck, the part demoted to Missing for re-download, the verified range shrunk). Bumped again (+1, 921 -> 922) for the `mod inbound_admission;` declaration: the connection-management safe-subset FIX 2 inbound-accept admission-cap tests live in the new tests/inbound_admission.rs submodule (the test bodies themselves are within budget there)."
+hard_limit_lines = 960
+rationale = "Aggregated #[tokio::test] integration suite for the ED2K transfer runtime (source-exchange reask, partfile serving, hashset/verified-part tracking, session counters, etc.). Test-only file; allowlisted just over the 900 test budget for round-8 FIX 2's new recheck_transfer corruption-detection integration test (a complete 2-part file with a deliberately corrupted part is detected on recheck, the part demoted to Missing for re-download, the verified range shrunk). Bumped again (+1, 921 -> 922) for the `mod inbound_admission;` declaration: the connection-management safe-subset FIX 2 inbound-accept admission-cap tests live in the new tests/inbound_admission.rs submodule (the test bodies themselves are within budget there). Bumped again (+38, 922 -> 960) for the round-10 download-source eviction test (stale_download_sources_are_evicted_on_next_write): a stale per-source entry is dropped on the next note_* write, asserting the new opportunistic eviction in download_activity.rs keeps the inner per-peer map bounded for a long-running transfer."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-metadata/src/store.rs"
