@@ -271,7 +271,10 @@ pub struct TransferCreate {
     pub category_id: Option<u32>,
     #[serde(default)]
     pub category_name: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
+    )]
     pub paused: Option<bool>,
 }
 
@@ -301,7 +304,10 @@ pub struct SearchResultDownloadCreate {
     pub category_id: Option<u32>,
     #[serde(default)]
     pub category_name: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_paused_field"
+    )]
     pub paused: Option<bool>,
 }
 

@@ -56,3 +56,15 @@ where
         )),
     }
 }
+
+pub(crate) fn deserialize_optional_paused_field<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(value) => Ok(Some(value)),
+        _ => Err(serde::de::Error::custom("paused must be a boolean")),
+    }
+}

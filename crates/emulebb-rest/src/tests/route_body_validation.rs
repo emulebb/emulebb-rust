@@ -30,3 +30,59 @@ async fn category_id_body_uses_mfc_unsigned_validation() {
         }
     }
 }
+
+#[tokio::test]
+async fn paused_body_uses_mfc_boolean_validation() {
+    let app = test_router();
+    let link = "ed2k://|file|PausedBody.bin|1|00112233445566778899aabbccddeeff|/";
+    let cases = [r#""true""#, "1", "null"];
+
+    for value in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/transfers",
+            format!(r#"{{"link":"{link}","paused":{value}}}"#),
+            "paused must be a boolean",
+        )
+        .await;
+    }
+
+    for value in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/searches/search-1/results/00112233445566778899aabbccddeeff/operations/download",
+            format!(r#"{{"paused":{value}}}"#),
+            "paused must be a boolean",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
+    let app = test_router();
+    let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";
+    let cases = [
+        (
+            r#"{"paused":"true"}"#.to_string(),
+            "link or links is required",
+        ),
+        (
+            format!(r#"{{"link":"{link}","links":[],"paused":"true"}}"#),
+            "link and links are mutually exclusive",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/transfers",
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}

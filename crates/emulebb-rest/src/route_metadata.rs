@@ -13,7 +13,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::envelope::{api_error, json_error_message, out_of_range_response};
+use crate::{
+    envelope::{api_error, out_of_range_response},
+    route_body_metadata::validate_json_body_fields,
+};
 
 pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response {
     let method = request.method().as_str().to_owned();
@@ -398,61 +401,6 @@ fn is_endpoint_path_token(value: &str) -> bool {
         return false;
     };
     (1..=u16::MAX as u64).contains(&port)
-}
-
-fn validate_json_body_fields(method: &str, path: &str, body: &[u8]) -> Result<(), Box<Response>> {
-    if !uses_category_selector_body(method, path) {
-        return Ok(());
-    }
-    let value = serde_json::from_slice::<serde_json::Value>(body).map_err(|error| {
-        Box::new(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                json_error_message(&error),
-            )
-            .into_response(),
-        )
-    })?;
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-    let Some(category_id) = object.get("categoryId") else {
-        return Ok(());
-    };
-    let Some(category_id) = category_id.as_u64() else {
-        return Err(category_id_body_error(
-            "categoryId must be an unsigned number",
-        ));
-    };
-    if category_id > u32::MAX as u64 {
-        return Err(category_id_body_error("categoryId is out of range"));
-    }
-    Ok(())
-}
-
-fn uses_category_selector_body(method: &str, path: &str) -> bool {
-    if method == "POST" && path == "/api/v1/transfers" {
-        return true;
-    }
-    let Some(segments) = path
-        .strip_prefix("/api/v1/")
-        .map(|path| path.split('/').collect::<Vec<_>>())
-    else {
-        return false;
-    };
-    matches!(
-        (method, segments.as_slice()),
-        ("PATCH", ["transfers", _])
-            | (
-                "POST",
-                ["searches", _, "results", _, "operations", "download"]
-            )
-    )
-}
-
-fn category_id_body_error(message: &'static str) -> Box<Response> {
-    Box::new(api_error(StatusCode::BAD_REQUEST, "INVALID_ARGUMENT", message).into_response())
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

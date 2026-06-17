@@ -10,6 +10,7 @@ mod dto;
 mod envelope;
 mod handlers;
 mod responses;
+mod route_body_metadata;
 mod route_metadata;
 mod routes;
 pub use routes::{router, router_with_shutdown};
