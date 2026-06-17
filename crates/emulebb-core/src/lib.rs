@@ -2612,7 +2612,10 @@ impl EmulebbCore {
                 .expect("default category must exist");
             return Ok((category.id, category.name.clone()));
         };
-        ensure!(!category_name.is_empty(), "categoryName must not be empty");
+        ensure!(
+            !category_name.is_empty(),
+            "categoryName does not match a configured category"
+        );
         if category_name.eq_ignore_ascii_case("Default")
             || category_name.eq_ignore_ascii_case("All")
         {
@@ -7162,6 +7165,17 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown field `ed2kLink`"));
+    }
+
+    #[test]
+    fn category_id_selector_ignores_malformed_category_name_like_master() {
+        let request = serde_json::from_str::<TransferCreate>(
+            r#"{"link":"ed2k://|file|Selector.bin|1|00112233445566778899aabbccddeeff|/","categoryId":0,"categoryName":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(request.category_id, Some(0));
+        assert_eq!(request.category_name, None);
     }
 
     #[tokio::test]

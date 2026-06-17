@@ -1,8 +1,6 @@
 //! REST-facing data-transfer structs and their serde helpers.
-//! These are the request/response shapes the REST layer (`emulebb-rest`) and the
-//! daemon serialize over `/api/v1`; they are pure data definitions with no
-//! behavior beyond serde. They are re-exported from the crate root so existing
-//! paths (`emulebb_core::Transfer`, etc.) keep working unchanged.
+//! Re-exported from the crate root so existing `emulebb_core::...` paths keep
+//! working unchanged.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::AtomicBool};
@@ -267,7 +265,10 @@ pub struct TransferCreate {
         deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
     )]
     pub category_id: Option<u32>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
+    )]
     pub category_name: Option<String>,
     #[serde(
         default,
@@ -288,7 +289,10 @@ pub struct TransferUpdate {
         deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
     )]
     pub category_id: Option<u32>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
+    )]
     pub category_name: Option<String>,
 }
 
@@ -300,7 +304,10 @@ pub struct SearchResultDownloadCreate {
         deserialize_with = "crate::rest_model_serde::deserialize_optional_category_id"
     )]
     pub category_id: Option<u32>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::rest_model_serde::deserialize_optional_category_name"
+    )]
     pub category_name: Option<String>,
     #[serde(
         default,

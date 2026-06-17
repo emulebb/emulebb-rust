@@ -73,14 +73,27 @@ fn validate_category_selector_body(
     if !uses_category_selector_body(method, path) {
         return Ok(());
     }
-    let Some(category_id) = object.get("categoryId") else {
+    if let Some(category_id) = object.get("categoryId") {
+        let Some(category_id) = category_id.as_u64() else {
+            return Err(invalid_body_error("categoryId must be an unsigned number"));
+        };
+        if category_id > u32::MAX as u64 {
+            return Err(invalid_body_error("categoryId is out of range"));
+        }
         return Ok(());
-    };
-    let Some(category_id) = category_id.as_u64() else {
-        return Err(invalid_body_error("categoryId must be an unsigned number"));
-    };
-    if category_id > u32::MAX as u64 {
-        return Err(invalid_body_error("categoryId is out of range"));
+    }
+    if let Some(category_name) = object.get("categoryName") {
+        let Some(category_name) = category_name.as_str() else {
+            return Err(invalid_body_error("categoryName must be a string"));
+        };
+        if category_name
+            .trim_matches(|ch: char| ch.is_ascii_whitespace())
+            .is_empty()
+        {
+            return Err(invalid_body_error(
+                "categoryName does not match a configured category",
+            ));
+        }
     }
     Ok(())
 }

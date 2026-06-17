@@ -57,6 +57,18 @@ where
     }
 }
 
+pub(crate) fn deserialize_optional_category_name<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(value) => Ok(Some(value)),
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn deserialize_optional_paused_field<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<bool>, D::Error>
