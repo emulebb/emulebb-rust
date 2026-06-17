@@ -6,10 +6,7 @@ use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardStatus};
 
 pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -> VpnGuardStatus {
     let guard = &network.vpn_guard;
-    // Master parity (GetVpnGuardModeRestToken): the REST mode token is "block"
-    // when guarding is enabled in a blocking mode, otherwise "off".
-    let blocking = guard.enabled
-        && (guard.mode.eq_ignore_ascii_case("block") || guard.mode.eq_ignore_ascii_case("enforce"));
+    let blocking = is_blocking_mode(guard);
     let interface_block_reason = if blocking && !network.vpn_interface_bound {
         Some("public P2P bind is not VPN-confirmed".to_string())
     } else {
@@ -28,6 +25,12 @@ pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -
         startup_blocked: !startup_block_reason.is_empty(),
         startup_block_reason,
     }
+}
+
+fn is_blocking_mode(guard: &VpnGuardConfig) -> bool {
+    // Master parity (ParseModePreferenceText / GetVpnGuardModeRestToken): only
+    // the "Block" token enables guarding; every other text maps to "off".
+    guard.enabled && guard.mode.eq_ignore_ascii_case("block")
 }
 
 pub(crate) fn public_ip_block_reason(
@@ -142,6 +145,19 @@ mod tests {
                 .unwrap()
                 .contains("outside VPN Guard allowed public IP CIDRs")
         );
+    }
+
+    #[test]
+    fn mode_only_blocks_for_block_token() {
+        let mut guard = guard("");
+        guard.mode = "enforce".to_string();
+        assert!(!is_blocking_mode(&guard));
+
+        guard.mode = "Block".to_string();
+        assert!(is_blocking_mode(&guard));
+
+        guard.enabled = false;
+        assert!(!is_blocking_mode(&guard));
     }
 
     #[test]

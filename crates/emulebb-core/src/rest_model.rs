@@ -668,7 +668,7 @@ pub struct Ed2kNetworkConfig {
     pub ip_filter_level: u32,
 }
 
-/// Configured VPN-binding guard. When enabled in `enforce` mode the client
+/// Configured VPN-binding guard. When enabled in `block` mode the client
 /// refuses to start public P2P unless the bind is VPN-confirmed.
 #[derive(Debug, Clone, Default)]
 pub struct VpnGuardConfig {
