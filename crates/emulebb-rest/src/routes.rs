@@ -323,6 +323,14 @@ async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response
                 )
                 .into_response();
             }
+            if is_boolean_query_field(&name) && !is_boolean_query_value(&value) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    format!("{name} must be true or false"),
+                )
+                .into_response();
+            }
         }
     }
     if request.body().size_hint().upper() == Some(0) {
@@ -423,6 +431,17 @@ fn is_transfer_state_name(value: &str) -> bool {
             | "error"
             | "missingfiles"
     )
+}
+
+fn is_boolean_query_field(name: &str) -> bool {
+    matches!(
+        name,
+        "confirm" | "includeScoreBreakdown" | "includeEvidence" | "exactTotal"
+    )
+}
+
+fn is_boolean_query_value(value: &str) -> bool {
+    matches!(value, "true" | "false")
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

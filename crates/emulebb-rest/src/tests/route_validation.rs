@@ -475,3 +475,59 @@ async fn transfers_reject_unknown_state_query_values() {
         .unwrap();
     assert_eq!(accepted.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn boolean_query_values_use_mfc_validation_messages() {
+    let cases = [
+        (
+            "DELETE",
+            "/api/v1/searches?confirm=yes",
+            "confirm must be true or false",
+        ),
+        (
+            "GET",
+            "/api/v1/upload-queue?includeScoreBreakdown=yes",
+            "includeScoreBreakdown must be true or false",
+        ),
+        (
+            "GET",
+            "/api/v1/searches/search-1?includeEvidence=yes",
+            "includeEvidence must be true or false",
+        ),
+        (
+            "GET",
+            "/api/v1/searches/search-1?exactTotal=yes",
+            "exactTotal must be true or false",
+        ),
+    ];
+    for (method, uri, expected_message) in cases {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], expected_message);
+    }
+
+    let accepted = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/upload-queue?includeScoreBreakdown=false")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
