@@ -24,7 +24,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rand::RngCore;
 use tokio::net::UdpSocket;
 
-use crate::networking::resolve_bind_if_index;
+use crate::networking::require_bind_if_index;
 
 const STUN_BINDING_REQUEST: u16 = 0x0001;
 const STUN_BINDING_SUCCESS: u16 = 0x0101;
@@ -132,13 +132,20 @@ pub async fn stun_probe_mapping_behavior(
         return NatMappingBehavior::Inconclusive;
     };
 
+    let bind_if_index = match require_bind_if_index(bind_ip, "STUN NAT mapping probe") {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::debug!("STUN NAT mapping probe blocked by bind policy: {error:#}");
+            return NatMappingBehavior::Inconclusive;
+        }
+    };
     let socket = match UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0)).await {
         Ok(socket) => socket,
         Err(_) => return NatMappingBehavior::Inconclusive,
     };
     if emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        resolve_bind_if_index(bind_ip),
+        Some(bind_if_index),
     )
     .is_err()
     {
@@ -200,6 +207,7 @@ async fn probe_port_unconnected(
 /// One server probe: resolve, bind + egress-pin, `connect()`, single send, parse.
 /// The caller bounds the whole probe with a timeout (see `stun_probe_servers`).
 async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<SocketAddrV4> {
+    let bind_if_index = require_bind_if_index(bind_ip, "STUN public IP probe")?;
     let server = tokio::net::lookup_host((host, port))
         .await
         .with_context(|| format!("STUN DNS lookup failed for {host}:{port}"))?
@@ -218,10 +226,10 @@ async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<S
         .with_context(|| format!("failed to bind STUN probe socket on {bind_ip}"))?;
     // Egress-pin to the tunnel interface (IP_UNICAST_IF) so the reflexive address
     // reflects the real UDP egress — solid VPN binding, identical to the eD2k/Kad
-    // data-plane sockets. No-op for an unspecified/default-route bind.
+    // data-plane sockets.
     emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        resolve_bind_if_index(bind_ip),
+        Some(bind_if_index),
     )
     .with_context(|| format!("failed to pin STUN probe egress for {bind_ip}"))?;
 
@@ -407,6 +415,18 @@ mod tests {
         assert_eq!(
             classify_mapping_ports(Some(50000), None),
             NatMappingBehavior::Inconclusive
+        );
+    }
+
+    #[tokio::test]
+    async fn public_ip_probe_requires_resolved_bind_interface_index_before_dns() {
+        let err = probe_one("invalid.invalid", 3478, Ipv4Addr::new(203, 0, 113, 234))
+            .await
+            .expect_err("unassigned bind IP must fail closed before STUN DNS lookup");
+
+        assert!(
+            err.to_string()
+                .contains("not assigned to a local interface")
         );
     }
 

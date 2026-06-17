@@ -20,6 +20,7 @@ P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/mod.rs",
     "crates/emulebb-ed2k/src/ed2k_server/session.rs",
     "crates/emulebb-ed2k/src/ed2k_server/udp_runtime.rs",
+    "crates/emulebb-ed2k/src/stun.rs",
 )
 
 

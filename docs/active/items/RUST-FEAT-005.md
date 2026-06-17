@@ -54,3 +54,7 @@ keeps it true over time.
   bind-ifIndex resolution or explicit no-index egress pinning on those paths.
   This is CI coverage against known leak regressions, but it does not satisfy
   the dynamic tunnel-down packet-observation acceptance criteria above.
+- 2026-06-17: Extended the static guard to the STUN public-IP/NAT mapping probe
+  path. STUN now requires a resolved bind interface index before DNS/socket
+  activity and passes an explicit ifIndex to egress pinning, so a stale or
+  unassigned P2P bind IP fails closed instead of degrading to optional pinning.
