@@ -51,6 +51,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
+    assert_eq!(value["data"]["alreadyShared"], false);
     assert_eq!(value["data"]["queued"], false);
     assert_eq!(value["data"]["file"]["name"], "Canonical.Shared.bin");
     assert_eq!(value["data"]["file"]["complete"], true);
@@ -60,6 +61,32 @@ async fn shared_files_use_canonical_route_and_envelope() {
         .as_str()
         .unwrap()
         .to_string();
+
+    let repeat_create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-files")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"path":"{}"}}"#,
+                    payload_path.display().to_string().replace('\\', "\\\\")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeat_create_response.status(), StatusCode::OK);
+    let body = to_bytes(repeat_create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["ok"], true);
+    assert_eq!(value["data"]["alreadyShared"], true);
+    assert_eq!(value["data"]["queued"], false);
+    assert_eq!(value["data"]["file"]["hash"], hash);
 
     let list_response = app
         .clone()

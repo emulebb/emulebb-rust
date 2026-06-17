@@ -47,6 +47,13 @@ pub(crate) async fn create_shared_file(
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
             .into_response();
     }
+    let existing_hashes = state
+        .core
+        .shares()
+        .await
+        .into_iter()
+        .map(|share| share.hash)
+        .collect::<std::collections::HashSet<_>>();
     match state
         .core
         .share_local_file(LocalShareCreate {
@@ -58,7 +65,7 @@ pub(crate) async fn create_shared_file(
         Ok(share) => api_ok(SharedFileCreateResult {
             ok: true,
             path,
-            already_shared: false,
+            already_shared: existing_hashes.contains(&share.hash),
             queued: false,
             file: shared_file_response(&share),
         })
