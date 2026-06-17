@@ -177,6 +177,12 @@ pub(crate) struct LogsClearRequest {
     pub(crate) confirm_clear_logs: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct LogsQuery {
+    pub(crate) limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ShutdownRequest {

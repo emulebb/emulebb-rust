@@ -3,15 +3,21 @@
 //! Extracted verbatim from `lib.rs` during the maintainability restructuring;
 //! behavior is unchanged.
 
-use axum::{body::Bytes, http::StatusCode, response::IntoResponse};
+use axum::{body::Bytes, extract::RawQuery, http::StatusCode, response::IntoResponse};
 use serde_json::{Value, json};
 
 use crate::handlers::prelude::*;
 use crate::log_buffer;
 
-pub(crate) async fn logs() -> impl IntoResponse {
+pub(crate) async fn logs(RawQuery(raw_query): RawQuery) -> impl IntoResponse {
+    let query = match parse_optional_query::<LogsQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let limit = query.limit.unwrap_or(200).max(1);
     let entries: Vec<Value> = log_buffer::recent_logs()
         .into_iter()
+        .take(limit)
         .map(|record| {
             json!({
                 "timestamp": record.timestamp,
@@ -21,7 +27,7 @@ pub(crate) async fn logs() -> impl IntoResponse {
             })
         })
         .collect();
-    api_collection(entries)
+    api_collection(entries).into_response()
 }
 
 pub(crate) async fn clear_logs(body: Bytes) -> impl IntoResponse {

@@ -17,6 +17,9 @@ pub use routes::{router, router_with_shutdown};
 #[path = "tests/app.rs"]
 mod app_tests;
 #[cfg(test)]
+#[path = "tests/logs.rs"]
+mod logs_tests;
+#[cfg(test)]
 #[path = "tests/servers.rs"]
 mod server_tests;
 
@@ -202,6 +205,7 @@ mod tests {
             ),
             ("GET", "/api/v1/transfers?unsupportedQuery=true"),
             ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
+            ("GET", "/api/v1/logs?unsupportedQuery=true"),
             (
                 "DELETE",
                 "/api/v1/transfers/00112233445566778899aabbccddeeff/files?unsupportedQuery=true",
@@ -592,43 +596,6 @@ mod tests {
         assert!(data["network"]["binding"].is_object());
         assert!(data["network"]["vpnGuard"].is_object());
         assert_eq!(data["logs"].as_array().unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn logs_clear_requires_canonical_confirmation() {
-        let app = test_router();
-
-        let denied = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/logs/operations/clear")
-                    .header("X-API-Key", "secret")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"confirmClearLogs":false}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-
-        let cleared = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/logs/operations/clear")
-                    .header("X-API-Key", "secret")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"confirmClearLogs":true}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(cleared.status(), StatusCode::OK);
-        let body = to_bytes(cleared.into_body(), usize::MAX).await.unwrap();
-        let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["data"]["ok"], true);
     }
 
     #[tokio::test]
