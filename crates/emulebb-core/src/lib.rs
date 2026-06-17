@@ -733,21 +733,21 @@ impl EmulebbCore {
         let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
         let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
         let kad_buddy = Arc::new(Mutex::new(KadBuddyState::new()));
-        // Persistent Kad buddy-socket registry: holds the held inbound buddy
-        // session writer (so callbacks can be relayed) and tracks the outbound
-        // buddy link, shared by the inbound dispatch, the listener, and the
-        // buddy-management loop.
+        // Persistent Kad buddy-socket registry shared by inbound dispatch,
+        // listener, outbound buddy link, and buddy-management loop.
         let buddy_registry = BuddySocketRegistry::new();
         let shutdown = Arc::new(AtomicBool::new(false));
         let configured_bootstrap_nodes_text =
             configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
+        let kad_bind_if_index =
+            emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
         let dht = DhtNode::new(DhtConfig {
             bind_addr: Some(network.kad_bind_addr),
             obfuscation_enabled: network.config.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             nodes_text: configured_bootstrap_nodes_text.clone(),
             // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
-            bind_if_index: emulebb_ed2k::networking::resolve_bind_if_index(network.bind_ip),
+            bind_if_index: Some(kad_bind_if_index),
             ..DhtConfig::default()
         })
         .await

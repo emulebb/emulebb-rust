@@ -65,13 +65,27 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
     // a per-connection interface lookup.
-    let bind_if_index = listener.local_addr().ok().and_then(|addr| {
-        if let std::net::IpAddr::V4(v4) = addr.ip() {
-            crate::networking::resolve_bind_if_index(v4)
-        } else {
-            None
+    let bind_if_index = match listener.local_addr() {
+        Ok(addr) => match addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                match crate::networking::require_bind_if_index(v4, "eD2K listener") {
+                    Ok(index) => index,
+                    Err(error) => {
+                        warn!("eD2K listener disabled: {error:#}");
+                        return;
+                    }
+                }
+            }
+            _ => {
+                warn!("eD2K listener disabled: non-IPv4 listener addresses are not supported");
+                return;
+            }
+        },
+        Err(error) => {
+            warn!("eD2K listener disabled: failed to read listener bind address: {error}");
+            return;
         }
-    });
+    };
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -105,14 +119,18 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                     drop(stream);
                     continue;
                 };
-                // Pin the accepted socket's egress to the VPN tunnel (IP_UNICAST_IF),
-                // best-effort: the socket already sources from the VPN bind IP, so a
-                // pin failure does not justify dropping an inbound connection.
+                // WHY: accepted eD2K sockets still transmit P2P payloads. If the
+                // per-socket egress pin cannot be applied, continuing would turn an
+                // inbound connection into an unpinned data-plane leak.
                 if let Err(error) = emulebb_kad_dht::socket_opts::pin_egress_to_interface(
                     socket2::SockRef::from(&stream),
-                    bind_if_index,
+                    Some(bind_if_index),
                 ) {
-                    debug!("failed to pin inbound eD2k egress for {peer_addr}: {error}");
+                    debug!(
+                        "dropping inbound eD2k connection from {peer_addr}: failed to pin egress: {error}"
+                    );
+                    drop(stream);
+                    continue;
                 }
                 let dht = dht.clone();
                 let server_state = Arc::clone(&server_state);

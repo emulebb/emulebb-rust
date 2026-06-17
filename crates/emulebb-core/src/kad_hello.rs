@@ -259,6 +259,8 @@ async fn probe_kad_firewalled_tcp(
     peer_addr: SocketAddr,
     timeout: Duration,
 ) -> Result<()> {
+    let bind_if_index =
+        emulebb_ed2k::networking::require_bind_if_index(bind_ip, "Kad TCP firewall probe")?;
     let socket = match peer_addr {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => {
@@ -274,7 +276,7 @@ async fn probe_kad_firewalled_tcp(
     // interface used by the eD2K TCP paths before connect.
     emulebb_kad_dht::socket_opts::pin_egress_to_interface(
         socket2::SockRef::from(&socket),
-        emulebb_ed2k::networking::resolve_bind_if_index(bind_ip),
+        Some(bind_if_index),
     )
     .with_context(|| format!("failed to pin Kad TCP firewall probe egress for {bind_ip}"))?;
     tokio::time::timeout(timeout, socket.connect(peer_addr))
@@ -394,4 +396,25 @@ pub(crate) fn spawn_modern_kad_firewalled_response(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kad_tcp_firewall_probe_requires_resolved_bind_interface_index() {
+        let err = probe_kad_firewalled_tcp(
+            Ipv4Addr::new(203, 0, 113, 234),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44)), 4662),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("unassigned bind IP must fail closed before probing");
+
+        assert!(
+            err.to_string()
+                .contains("not assigned to a local interface")
+        );
+    }
 }

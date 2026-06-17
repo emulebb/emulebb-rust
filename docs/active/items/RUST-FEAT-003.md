@@ -41,6 +41,9 @@ for calling rust "perfectly functional".
   configured bind IP to resolve to a local interface index before any public P2P
   egress can be pinned; unresolved bind IPs fail closed instead of degrading to
   unpinned egress.
+- Kad UDP startup, legacy Kad TCP firewall probes, and accepted eD2K TCP sockets
+  now use the same fail-closed bind-index rule before public P2P payloads can
+  leave the process.
 - Remaining work is live validation that fail-closed behavior holds when the
   tunnel is absent, plus UPnP/port-forwarding validation over the VPN interface.
 
@@ -66,6 +69,8 @@ for calling rust "perfectly functional".
 - [x] A static/bind-policy test asserts eD2K TCP egress is tunnel-pinned.
 - [x] Static bind-index coverage proves unassigned bind IPs fail closed before
       public eD2K TCP/UDP egress pinning.
+- [x] Kad UDP/probe paths require the resolved tunnel ifIndex instead of
+      accepting optional/no-op egress pinning.
 
 ## Validation
 
