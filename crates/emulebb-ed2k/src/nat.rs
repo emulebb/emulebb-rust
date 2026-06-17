@@ -15,7 +15,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::JoinHandle,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[path = "nat/igd.rs"]
 mod igd;
@@ -424,10 +424,19 @@ async fn run_manager_loop(
     let refresh_period = Duration::from_secs(
         config
             .lease_duration_secs
-            .saturating_sub(config.renew_margin_secs as u32)
+            .saturating_sub(u32::try_from(config.renew_margin_secs).unwrap_or(u32::MAX))
             .max(30)
             .into(),
     );
+
+    // Failure backoff: on a point-to-point VPN with no IGD every reconcile fails;
+    // a flat 30s retry would warn-spam for the whole session. Start at 30s, double
+    // up to a 5-minute cap, and reset on the first success. Only the first failure
+    // logs at warn (so it is visible once); subsequent failures drop to debug.
+    const BACKOFF_INITIAL: Duration = Duration::from_secs(30);
+    const BACKOFF_MAX: Duration = Duration::from_secs(300);
+    let mut failure_backoff = BACKOFF_INITIAL;
+    let mut consecutive_failures: u32 = 0;
 
     while !shutdown.load(Ordering::Relaxed) {
         info!(
@@ -447,10 +456,21 @@ async fn run_manager_loop(
                     mapped_endpoints_display(&snapshot.mappings)
                 );
                 reachability.on_nat_status_changed(snapshot).await;
+                failure_backoff = BACKOFF_INITIAL;
+                consecutive_failures = 0;
                 tokio::time::sleep(refresh_period).await;
             }
             Err(error) => {
-                warn!("nat mapping reconcile failed: {error}");
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                if consecutive_failures == 1 {
+                    warn!("nat mapping reconcile failed: {error}");
+                } else {
+                    debug!(
+                        "nat mapping reconcile failed ({consecutive_failures} consecutive), \
+                         next retry in {}s: {error}",
+                        failure_backoff.as_secs()
+                    );
+                }
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -465,7 +485,8 @@ async fn run_manager_loop(
                 guard.last_error = Some(error.to_string());
                 guard.last_refresh_unix_secs = Some(now);
                 drop(guard);
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(failure_backoff).await;
+                failure_backoff = failure_backoff.saturating_mul(2).min(BACKOFF_MAX);
             }
         }
     }
