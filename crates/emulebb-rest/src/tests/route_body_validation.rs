@@ -61,6 +61,94 @@ async fn paused_body_uses_mfc_boolean_validation() {
 }
 
 #[tokio::test]
+async fn category_create_body_uses_mfc_validation() {
+    let app = test_router();
+    let cases = [
+        (r#"{}"#, "name must be a non-empty string"),
+        (r#"{"name":1}"#, "name must be a non-empty string"),
+        (r#"{"name":"   "}"#, "name must not be empty"),
+        (
+            r#"{"name":"Media","path":1}"#,
+            "path must be a non-empty string path",
+        ),
+        (r#"{"name":"Media","path":"   "}"#, "path must not be empty"),
+        (
+            r#"{"name":"Media","comment":1}"#,
+            "comment must be a string",
+        ),
+        (
+            r#"{"name":"Media","color":"green"}"#,
+            "color must be null or an RGB integer",
+        ),
+        (
+            r#"{"name":"Media","color":16777216}"#,
+            "color must be null or an RGB integer",
+        ),
+        (
+            r#"{"name":"Media","priority":true}"#,
+            "priority must be a string or number",
+        ),
+        (
+            r#"{"name":"Media","priority":4294967296}"#,
+            "priority must be a supported priority value",
+        ),
+        (
+            r#"{"name":"Media","priority":"auto"}"#,
+            "priority must be one of verylow, low, normal, high, veryhigh",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/categories",
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn category_patch_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/categories/1";
+    let cases = [
+        (r#"{}"#, "category PATCH requires at least one field"),
+        (r#"{"name":1}"#, "name must be a non-empty string"),
+        (r#"{"name":"   "}"#, "name must not be empty"),
+        (r#"{"path":1}"#, "path must be a non-empty string path"),
+        (r#"{"path":"   "}"#, "path must not be empty"),
+        (r#"{"comment":1}"#, "comment must be a string"),
+        (r#"{"color":-1}"#, "color must be null or an RGB integer"),
+        (
+            r#"{"priority":false}"#,
+            "priority must be a string or number",
+        ),
+        (
+            r#"{"priority":4294967296}"#,
+            "priority must be a supported priority value",
+        ),
+        (
+            r#"{"priority":"auto"}"#,
+            "priority must be one of verylow, low, normal, high, veryhigh",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";

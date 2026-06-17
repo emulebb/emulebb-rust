@@ -243,6 +243,77 @@ pub(super) fn validate_kad_bootstrap_body_fields(object: &JsonObject) -> Result<
     validate_port_body_field(object.get("port"), "port")
 }
 
+pub(super) fn validate_category_create_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    validate_category_core_body_fields(object, true)
+}
+
+pub(super) fn validate_category_patch_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if object.is_empty() {
+        return Err(invalid_body_error(
+            "category PATCH requires at least one field",
+        ));
+    }
+    validate_category_core_body_fields(object, false)
+}
+
+fn validate_category_core_body_fields(
+    object: &JsonObject,
+    require_name: bool,
+) -> Result<(), Box<Response>> {
+    if require_name || object.contains_key("name") {
+        validate_non_empty_text_body_field(object.get("name"), "name")?;
+    }
+    if let Some(path) = object.get("path")
+        && !path.is_null()
+    {
+        validate_path_text_body_field(Some(path), "path")?;
+    }
+    if object
+        .get("comment")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Err(invalid_body_error("comment must be a string"));
+    }
+    if let Some(color) = object.get("color")
+        && !color.is_null()
+    {
+        let Some(color) = color.as_u64() else {
+            return Err(invalid_body_error("color must be null or an RGB integer"));
+        };
+        if color > 0x00ff_ffff {
+            return Err(invalid_body_error("color must be null or an RGB integer"));
+        }
+    }
+    if let Some(priority) = object.get("priority") {
+        validate_category_priority_body_field(priority)?;
+    }
+    Ok(())
+}
+
+fn validate_category_priority_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    if let Some(priority) = value.as_u64() {
+        if priority <= u32::MAX as u64 {
+            return Ok(());
+        }
+        return Err(invalid_body_error(
+            "priority must be a supported priority value",
+        ));
+    }
+    let Some(priority) = value.as_str() else {
+        return Err(invalid_body_error("priority must be a string or number"));
+    };
+    if !matches!(priority, "verylow" | "low" | "normal" | "high" | "veryhigh") {
+        return Err(invalid_body_error(
+            "priority must be one of verylow, low, normal, high, veryhigh",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_optional_server_body_fields(
     object: &JsonObject,
     allow_connect: bool,

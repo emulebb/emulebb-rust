@@ -13,6 +13,7 @@ use axum::{
 
 use crate::envelope::{api_error, json_error_message};
 use validators::{
+    validate_category_create_body_fields, validate_category_patch_body_fields,
     validate_kad_bootstrap_body_fields, validate_paused_body_field,
     validate_server_create_body_fields, validate_server_patch_body_fields,
     validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
@@ -107,6 +108,12 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_server(path) {
         return validate_server_patch_body_fields(object);
     }
+    if method == "POST" && path == "/api/v1/categories" {
+        return validate_category_create_body_fields(object);
+    }
+    if method == "PATCH" && path_matches_category(path) {
+        return validate_category_patch_body_fields(object);
+    }
     if uses_url_import_body(method, path) {
         return validate_url_import_body_fields(object);
     }
@@ -128,6 +135,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
+    const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
 
@@ -143,6 +151,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/servers" {
         return Some(SERVER_CREATE);
     }
+    if method == "POST" && path == "/api/v1/categories" {
+        return Some(CATEGORY);
+    }
     if uses_url_import_body(method, path) {
         return Some(URL_IMPORT);
     }
@@ -154,6 +165,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
         ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
+        ("PATCH", ["categories", _]) => Some(CATEGORY),
         ("POST", ["searches", _, "results", _, "operations", "download"]) => {
             Some(SEARCH_RESULT_DOWNLOAD)
         }
@@ -171,6 +183,10 @@ fn path_matches_shared_file(path: &str) -> bool {
 
 fn path_matches_server(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["servers", _]))
+}
+
+fn path_matches_category(path: &str) -> bool {
+    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["categories", _]))
 }
 
 fn uses_category_selector_body(method: &str, path: &str) -> bool {
