@@ -23,6 +23,14 @@ reason = "Deliberate divergence (operator decision option B): the spike modifier
 compatibility = "Does not affect eD2K or Kad wire compatibility; it only keeps the outbound connection rate at or below the flat per-5s budget (never spiking above it), i.e. equal-or-gentler than the master."
 
 [[omissions]]
+id = "upload-throttle-focus-slot-distribution"
+area = "ed2k"
+stock_behavior = "eMule's CUploadBandwidthThrottler distributes the per-cycle upload byte budget by walking an ORDERED slot list and letting the front (focus) slots consume the bulk at full speed, giving later slots only the leftover / a minimum trickle. This concentrates bandwidth on a few slots for TCP efficiency and faster per-download completion."
+rust_behavior = "The Rust client distributes upload bandwidth with a shared FIFO token-bucket (reserve_upload_payload): each independent per-transfer upload task reserves its turn in arrival order, so the budget is shared roughly equally across all active slots rather than front-loaded onto a focus slot. The slot COUNT model (base + elastic broadband slots) and the upload scoring/ordering of the queue are at parity; only the in-flight bandwidth DISTRIBUTION among already-open slots differs."
+reason = "Deliberate architectural choice (operator decision 2026-06-17): the FIFO token-bucket fits the task-per-transfer async model (no central ordered send authority), is simpler and robust, and the efficiency difference is marginal except with many simultaneously-saturated upload slots. Per the guiding principle 'prefer rust's efficiency when the result is the same or better', the equal-share result is acceptable; focus-slot would only help under heavy multi-slot saturation."
+compatibility = "Does not affect eD2K or Kad wire compatibility; a downloading peer sees the same protocol, only a more even bandwidth share under heavy concurrent upload load."
+
+[[omissions]]
 id = "ipv6-ed2k-kad"
 area = "ed2k-kad"
 stock_behavior = "Some modern clients may have protocol-adjacent IPv6 connectivity support."
