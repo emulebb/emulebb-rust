@@ -647,6 +647,9 @@ pub struct Ed2kNetworkConfig {
     pub kad_buddy_enabled: bool,
     pub nat_config: NatConfig,
     pub config: Ed2kConfig,
+    /// Optional configured P2P bind IP. `None` is valid when the bind came from
+    /// `p2pBindInterface` only; `bind_ip` carries the resolved runtime address.
+    pub p2p_bind_ip: Option<Ipv4Addr>,
     /// Optional configured P2P bind interface name for runtime VPN Guard checks.
     pub p2p_bind_interface: Option<String>,
     /// Configured VPN-binding guard.

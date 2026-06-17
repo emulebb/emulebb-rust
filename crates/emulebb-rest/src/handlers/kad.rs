@@ -11,6 +11,7 @@ use crate::handlers::prelude::*;
 pub(crate) async fn kad(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(kad_response(
         &state.core.status().await.kad,
+        state.core.network_binding_status().as_ref(),
         &state.core.vpn_guard_status(),
     ))
 }
@@ -19,6 +20,7 @@ pub(crate) async fn kad_start(State(state): State<RestState>) -> impl IntoRespon
     match state.core.start_kad().await {
         Ok(_) => api_ok(kad_response(
             &state.core.status().await.kad,
+            state.core.network_binding_status().as_ref(),
             &state.core.vpn_guard_status(),
         ))
         .into_response(),
@@ -32,6 +34,7 @@ pub(crate) async fn kad_stop(State(state): State<RestState>) -> impl IntoRespons
     state.core.set_kad_running(false).await;
     api_ok(kad_response(
         &state.core.status().await.kad,
+        state.core.network_binding_status().as_ref(),
         &state.core.vpn_guard_status(),
     ))
 }
@@ -89,6 +92,7 @@ pub(crate) async fn kad_bootstrap(
     {
         Ok(_) => api_ok(kad_response(
             &state.core.status().await.kad,
+            state.core.network_binding_status().as_ref(),
             &state.core.vpn_guard_status(),
         ))
         .into_response(),
@@ -101,6 +105,7 @@ pub(crate) async fn kad_bootstrap(
 pub(crate) async fn kad_recheck_firewall(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(kad_response(
         &state.core.recheck_kad_firewall().await,
+        state.core.network_binding_status().as_ref(),
         &state.core.vpn_guard_status(),
     ))
 }

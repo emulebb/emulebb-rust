@@ -7,8 +7,8 @@
 use std::path::Path as FsPath;
 
 use emulebb_core::{
-    AppInfo, AppLifecycle, LocalShare, NetworkStatus, Search, SearchResult, ServerInfo, Status,
-    Transfer, TransferThroughputStats, UploadPolicyMetrics, VpnGuardStatus,
+    AppInfo, AppLifecycle, LocalShare, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
+    ServerInfo, Status, Transfer, TransferThroughputStats, UploadPolicyMetrics, VpnGuardStatus,
 };
 use serde_json::{Value, json};
 
@@ -87,6 +87,7 @@ pub(crate) fn stats_response(
 pub(crate) async fn status_response(state: &RestState) -> Value {
     let status = state.core.status().await;
     let guard = state.core.vpn_guard_status();
+    let network = state.core.network_binding_status();
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
     let shared_file_count = state.core.shares().await.len();
@@ -95,8 +96,8 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &upload_policy, &throughput),
         "servers": server_status_response(state).await,
-        "kad": kad_response(&status.kad, &guard),
-        "network": network_response(&guard),
+        "kad": kad_response(&status.kad, network.as_ref(), &guard),
+        "network": network_response(network.as_ref(), &guard),
         "sharedStartupCache": {
             "available": false,
             "ready": true,
@@ -124,22 +125,29 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     })
 }
 
-pub(crate) fn network_response(guard: &VpnGuardStatus) -> Value {
+pub(crate) fn network_response(
+    network: Option<&NetworkBindingStatus>,
+    guard: &VpnGuardStatus,
+) -> Value {
+    let network = network.cloned().unwrap_or_else(|| NetworkBindingStatus {
+        resolve_result: "default".to_string(),
+        ..NetworkBindingStatus::default()
+    });
     json!({
         "ports": {
-            "tcp": 0,
-            "udp": 0,
-            "serverUdp": 0
+            "tcp": network.tcp_port,
+            "udp": network.udp_port,
+            "serverUdp": network.server_udp_port
         },
         "binding": {
-            "configuredAddress": "",
-            "configuredInterfaceId": "",
-            "configuredInterfaceName": "",
-            "activeConfiguredAddress": "",
-            "activeInterfaceId": "",
-            "activeInterfaceName": "",
-            "activeInterfaceIndex": 0,
-            "resolveResult": "default"
+            "configuredAddress": network.configured_address,
+            "configuredInterfaceId": network.configured_interface_id,
+            "configuredInterfaceName": network.configured_interface_name,
+            "activeConfiguredAddress": network.active_configured_address,
+            "activeInterfaceId": network.active_interface_id,
+            "activeInterfaceName": network.active_interface_name,
+            "activeInterfaceIndex": network.active_interface_index,
+            "resolveResult": network.resolve_result
         },
         "vpnGuard": {
             "enabled": guard.enabled,
@@ -151,7 +159,11 @@ pub(crate) fn network_response(guard: &VpnGuardStatus) -> Value {
     })
 }
 
-pub(crate) fn kad_response(kad: &NetworkStatus, guard: &VpnGuardStatus) -> Value {
+pub(crate) fn kad_response(
+    kad: &NetworkStatus,
+    network: Option<&NetworkBindingStatus>,
+    guard: &VpnGuardStatus,
+) -> Value {
     let contact_count = kad.contact_count.unwrap_or(kad.peer_count);
     json!({
         "running": kad.running,
@@ -169,7 +181,7 @@ pub(crate) fn kad_response(kad: &NetworkStatus, guard: &VpnGuardStatus) -> Value
         "operationQueued": kad.operation_queued.unwrap_or(false),
         "alreadyRunning": kad.already_running.unwrap_or(false),
         "blockedByVpnGuard": guard.startup_blocked,
-        "network": network_response(guard)
+        "network": network_response(network, guard)
     })
 }
 
@@ -415,10 +427,12 @@ pub(crate) fn bulk_result_from_hash(hash: &str) -> BulkOperationResult {
 mod tests {
     use std::sync::Arc;
 
-    use emulebb_core::{EmulebbCore, NetworkStatus, TransferThroughputStats, VpnGuardStatus};
+    use emulebb_core::{
+        EmulebbCore, NetworkBindingStatus, NetworkStatus, TransferThroughputStats, VpnGuardStatus,
+    };
     use emulebb_index::FileIndex;
 
-    use super::{kad_response, server_status_value, stats_response};
+    use super::{kad_response, network_response, server_status_value, stats_response};
 
     #[test]
     fn kad_response_surfaces_indexed_counts() {
@@ -439,16 +453,51 @@ mod tests {
             operation_queued: None,
             already_running: None,
         };
-        let value = kad_response(&kad, &guard);
+        let value = kad_response(&kad, None, &guard);
         assert_eq!(value["indexedSources"], 42);
         assert_eq!(value["indexedKeywords"], 13);
 
         // When Kad is not running the counts are unknown -> reported as 0.
         kad.indexed_sources = None;
         kad.indexed_keywords = None;
-        let value = kad_response(&kad, &guard);
+        let value = kad_response(&kad, None, &guard);
         assert_eq!(value["indexedSources"], 0);
         assert_eq!(value["indexedKeywords"], 0);
+    }
+
+    #[test]
+    fn network_response_defaults_without_configured_ed2k_network() {
+        let value = network_response(None, &VpnGuardStatus::off());
+
+        assert_eq!(value["ports"]["tcp"], 0);
+        assert_eq!(value["ports"]["udp"], 0);
+        assert_eq!(value["binding"]["resolveResult"], "default");
+    }
+
+    #[test]
+    fn network_response_reports_configured_ports_and_binding() {
+        let network = NetworkBindingStatus {
+            tcp_port: 4662,
+            udp_port: 4672,
+            server_udp_port: 0,
+            configured_address: "192.0.2.10".to_string(),
+            configured_interface_id: "hide.me".to_string(),
+            configured_interface_name: "hide.me".to_string(),
+            active_configured_address: "192.0.2.10".to_string(),
+            active_interface_id: "hide.me".to_string(),
+            active_interface_name: "hide.me".to_string(),
+            active_interface_index: 17,
+            resolve_result: "resolved".to_string(),
+        };
+
+        let value = network_response(Some(&network), &VpnGuardStatus::off());
+
+        assert_eq!(value["ports"]["tcp"], 4662);
+        assert_eq!(value["ports"]["udp"], 4672);
+        assert_eq!(value["ports"]["serverUdp"], 0);
+        assert_eq!(value["binding"]["configuredAddress"], "192.0.2.10");
+        assert_eq!(value["binding"]["activeInterfaceIndex"], 17);
+        assert_eq!(value["binding"]["resolveResult"], "resolved");
     }
 
     #[tokio::test]

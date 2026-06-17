@@ -136,6 +136,7 @@ fn test_network_config(
             ..NatConfig::default()
         },
         config,
+        p2p_bind_ip: Some(bind_ip),
         p2p_bind_interface: None,
         vpn_guard: emulebb_core::VpnGuardConfig::default(),
         vpn_interface_bound: false,

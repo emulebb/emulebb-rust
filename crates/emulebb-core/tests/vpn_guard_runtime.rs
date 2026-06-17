@@ -67,6 +67,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         kad_buddy_enabled: true,
         nat_config: NatConfig::default(),
         config: Ed2kConfig::default(),
+        p2p_bind_ip: Some(Ipv4Addr::new(198, 51, 100, 10)),
         p2p_bind_interface: None,
         vpn_guard: VpnGuardConfig::default(),
         vpn_interface_bound: false,

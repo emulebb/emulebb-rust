@@ -93,6 +93,7 @@ mod kad_snoop_entry;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
 mod local_search_response;
+mod network_binding;
 mod preferences;
 mod profile_state;
 mod search_query;
@@ -150,6 +151,7 @@ use kad_snoop_entry::{
 use local_search_response::send_local_search_response;
 #[cfg(test)]
 use local_search_response::split_stock_search_responses;
+pub use network_binding::NetworkBindingStatus;
 use preferences::{
     apply_preferences_update, default_preferences,
     ed2k_download_coordinator_config_from_preferences,
@@ -672,14 +674,6 @@ impl EmulebbCore {
         status.operation_queued = Some(status.running);
         status.already_running = Some(false);
         status
-    }
-
-    /// Resolved VPN-guard state for the REST status surfaces.
-    pub fn vpn_guard_status(&self) -> VpnGuardStatus {
-        let Some(network) = self.ed2k_network.as_ref() else {
-            return VpnGuardStatus::off();
-        };
-        vpn_guard::status(network, self.ed2k_reachability.get())
     }
 
     pub async fn connect_ed2k(&self) -> Result<NetworkStatus> {
@@ -5822,6 +5816,7 @@ mod tests {
             kad_buddy_enabled: true,
             nat_config: NatConfig::default(),
             config: Ed2kConfig::default(),
+            p2p_bind_ip: Some(Ipv4Addr::new(198, 51, 100, 10)),
             p2p_bind_interface: None,
             vpn_guard: VpnGuardConfig::default(),
             vpn_interface_bound: false,

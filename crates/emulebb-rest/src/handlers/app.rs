@@ -137,8 +137,10 @@ pub(crate) async fn snapshot(
         Err(response) => return *response,
     };
     let status = status_response(&state).await;
+    let network = state.core.network_binding_status();
     let kad = kad_response(
         &state.core.status().await.kad,
+        network.as_ref(),
         &state.core.vpn_guard_status(),
     );
     let shared_files = bounded(
@@ -160,7 +162,7 @@ pub(crate) async fn snapshot(
         "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),
         "servers": bounded(server_responses(state.core.servers().await), limit),
         "kad": kad,
-        "network": network_response(&state.core.vpn_guard_status()),
+        "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
         "logs": Vec::<Value>::new()
     }))
     .into_response()

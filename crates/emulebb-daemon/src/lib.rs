@@ -248,6 +248,7 @@ impl DaemonConfig {
             kad_routing_maintenance_enabled: self.kad.routing_maintenance_enabled,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
+            p2p_bind_ip: self.p2p_bind_ip,
             p2p_bind_interface: self.p2p_bind_interface.clone(),
             vpn_guard: VpnGuardConfig {
                 enabled: self.vpn_guard.enabled,
