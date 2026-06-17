@@ -42,11 +42,11 @@ pub(crate) async fn create_shared_file(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    if request.path.trim().is_empty() {
+    let path = request.path.trim().to_string();
+    if path.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
             .into_response();
     }
-    let path = request.path;
     match state
         .core
         .share_local_file(LocalShareCreate {

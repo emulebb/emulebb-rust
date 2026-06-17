@@ -87,6 +87,12 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_shared_file(path) {
         return validate_shared_file_patch_body_fields(object);
     }
+    if method == "POST" && path == "/api/v1/shared-files" {
+        return validate_shared_file_add_body_fields(object);
+    }
+    if method == "PATCH" && path == "/api/v1/shared-directories" {
+        return validate_shared_directories_patch_body_fields(object);
+    }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
@@ -239,6 +245,59 @@ fn validate_shared_file_comment_rating_body_fields(
     Ok(())
 }
 
+fn validate_shared_file_add_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_path_text_body_field(object.get("path"), "path")
+}
+
+fn validate_shared_directories_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let Some(roots) = object.get("roots").and_then(serde_json::Value::as_array) else {
+        return Err(invalid_body_error("roots must be an array"));
+    };
+    for root in roots {
+        validate_shared_directory_root_body(root)?;
+    }
+    Ok(())
+}
+
+fn validate_shared_directory_root_body(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    if let Some(object) = value.as_object() {
+        for name in object.keys() {
+            if !matches!(name.as_str(), "path" | "recursive") {
+                return Err(invalid_body_error(format!(
+                    "unknown shared-directory root field: {name}"
+                )));
+            }
+        }
+        validate_path_text_body_field(object.get("path"), "path")?;
+        if object
+            .get("recursive")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(invalid_body_error("recursive must be a boolean"));
+        }
+        return Ok(());
+    }
+    validate_path_text_body_field(Some(value), "path")
+}
+
+fn validate_path_text_body_field(
+    value: Option<&serde_json::Value>,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(path) = value.and_then(serde_json::Value::as_str) else {
+        return Err(invalid_body_error(format!(
+            "{field} must be a non-empty string path"
+        )));
+    };
+    if path
+        .trim_matches(|ch: char| ch.is_ascii_whitespace())
+        .is_empty()
+    {
+        return Err(invalid_body_error(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
 fn validate_transfer_add_link(value: &serde_json::Value) -> Result<(), Box<Response>> {
     let Some(link) = value.as_str() else {
         return Err(invalid_body_error("link must be a string"));
@@ -297,9 +356,17 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const TRANSFER_PATCH: &[&str] = &["name", "priority", "categoryId", "categoryName"];
     const SEARCH_RESULT_DOWNLOAD: &[&str] = &["categoryId", "categoryName", "paused"];
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
+    const SHARED_FILE_ADD: &[&str] = &["path"];
+    const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);
+    }
+    if method == "POST" && path == "/api/v1/shared-files" {
+        return Some(SHARED_FILE_ADD);
+    }
+    if method == "PATCH" && path == "/api/v1/shared-directories" {
+        return Some(SHARED_DIRECTORIES_PATCH);
     }
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {

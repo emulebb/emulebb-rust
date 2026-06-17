@@ -38,7 +38,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"path":"{}"}}"#,
+                    r#"{{"path":"  {}  "}}"#,
                     payload_path.display().to_string().replace('\\', "\\\\")
                 )))
                 .unwrap(),

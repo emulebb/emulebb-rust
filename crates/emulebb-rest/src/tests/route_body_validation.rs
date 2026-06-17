@@ -305,3 +305,69 @@ async fn shared_file_patch_body_uses_mfc_comment_rating_validation() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn shared_file_add_body_uses_mfc_path_validation() {
+    let app = test_router();
+    let cases = [
+        (r#"{}"#, "path must be a non-empty string path"),
+        (r#"{"path":1}"#, "path must be a non-empty string path"),
+        (r#"{"path":"   "}"#, "path must not be empty"),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/shared-files",
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn shared_directories_patch_body_uses_mfc_root_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-directories";
+    let cases = [
+        (r#"{}"#, "roots must be an array"),
+        (r#"{"roots":"C:/Shared"}"#, "roots must be an array"),
+        (
+            r#"{"roots":[1],"confirmReplaceRoots":true}"#,
+            "path must be a non-empty string path",
+        ),
+        (
+            r#"{"roots":["   "],"confirmReplaceRoots":true}"#,
+            "path must not be empty",
+        ),
+        (
+            r#"{"roots":[{}],"confirmReplaceRoots":true}"#,
+            "path must be a non-empty string path",
+        ),
+        (
+            r#"{"roots":[{"path":1}],"confirmReplaceRoots":true}"#,
+            "path must be a non-empty string path",
+        ),
+        (
+            r#"{"roots":[{"path":"C:/Shared","recursive":"true"}],"confirmReplaceRoots":true}"#,
+            "recursive must be a boolean",
+        ),
+        (
+            r#"{"roots":[{"path":"C:/Shared","depth":1}],"confirmReplaceRoots":true}"#,
+            "unknown shared-directory root field: depth",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
