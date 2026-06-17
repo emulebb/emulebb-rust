@@ -73,7 +73,7 @@ impl AichHashTree {
     /// `nLeft = (nBlocks + isLeftBranch) / 2 * GetBaseSize()`.
     fn child_sizes(&self) -> (u64, u64) {
         let base = self.base_size();
-        let blocks = self.data_size / base + u64::from(self.data_size % base != 0);
+        let blocks = self.data_size / base + u64::from(!self.data_size.is_multiple_of(base));
         let left = (blocks + u64::from(self.is_left_branch)) / 2 * base;
         let right = self.data_size - left;
         (left, right)
@@ -236,15 +236,15 @@ impl AichHashTree {
             }
             return false;
         }
-        if let Some(left) = self.left.as_mut() {
-            if !left.hash_valid {
-                left.recalculate_hash(true);
-            }
+        if let Some(left) = self.left.as_mut()
+            && !left.hash_valid
+        {
+            left.recalculate_hash(true);
         }
-        if let Some(right) = self.right.as_mut() {
-            if !right.hash_valid {
-                right.recalculate_hash(true);
-            }
+        if let Some(right) = self.right.as_mut()
+            && !right.hash_valid
+        {
+            right.recalculate_hash(true);
         }
         let left_valid = self.left.as_ref().is_some_and(|n| n.hash_valid);
         let right_valid = self.right.as_ref().is_some_and(|n| n.hash_valid);
@@ -350,7 +350,7 @@ impl AichHashTree {
         hash_ident <<= 1;
         hash_ident |= u32::from(self.is_left_branch);
         let base = self.base_size();
-        let blocks = self.data_size / base + u64::from(self.data_size % base != 0);
+        let blocks = self.data_size / base + u64::from(!self.data_size.is_multiple_of(base));
         let left_size = (if self.is_left_branch {
             blocks + 1
         } else {

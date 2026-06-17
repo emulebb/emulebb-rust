@@ -298,9 +298,8 @@ impl RoutingZone {
     ) {
         match &self.content {
             ZoneContent::Leaf(bin) => {
-                let fill_gate = (self.zone_index as usize) < KK
-                    || (self.depth as usize) < KBASE
-                    || bin.len() * 5 <= K; // GetRemaining() >= 0.8*K <=> size <= 0.2*K
+                let fill_gate =
+                    self.zone_index < KK || (self.depth as usize) < KBASE || bin.len() * 5 <= K; // GetRemaining() >= 0.8*K <=> size <= 0.2*K
                 if fill_gate {
                     targets.push(crate::maintenance::random_target_in_zone(
                         own_id,

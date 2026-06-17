@@ -88,24 +88,6 @@ pub(super) fn verify_piece_against_manifest(
     Ok(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn piece_count_with_zero_piece_size_does_not_panic() {
-        // A piece_size of 0 with a non-zero file size must return 0 rather than
-        // panicking with a divide-by-zero in div_ceil.
-        assert_eq!(piece_count(1024, 0), 0);
-    }
-
-    #[test]
-    fn piece_count_normal_case() {
-        // 3 full pieces + a partial -> 4 pieces.
-        assert_eq!(piece_count(10, 3), 4);
-    }
-}
-
 pub(super) fn rebuild_verified_ranges(manifest: &mut Ed2kResumeManifest) {
     let mut ranges = Vec::new();
     let mut active_start: Option<u64> = None;
@@ -131,4 +113,22 @@ pub(super) fn rebuild_verified_ranges(manifest: &mut Ed2kResumeManifest) {
         }
     }
     manifest.verified_ranges = ranges;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piece_count_with_zero_piece_size_does_not_panic() {
+        // A piece_size of 0 with a non-zero file size must return 0 rather than
+        // panicking with a divide-by-zero in div_ceil.
+        assert_eq!(piece_count(1024, 0), 0);
+    }
+
+    #[test]
+    fn piece_count_normal_case() {
+        // 3 full pieces + a partial -> 4 pieces.
+        assert_eq!(piece_count(10, 3), 4);
+    }
 }

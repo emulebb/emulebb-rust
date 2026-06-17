@@ -12,9 +12,7 @@ pub(crate) fn public_ip_block_reason(
     if cidrs.is_empty() {
         return None;
     }
-    let Some(public_ip) = public_ip else {
-        return None;
-    };
+    let public_ip = public_ip?;
 
     let public_addr = IpAddr::V4(public_ip);
     let mut found_cidr = false;

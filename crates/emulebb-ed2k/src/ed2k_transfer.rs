@@ -182,12 +182,12 @@ pub struct Ed2kTransferRuntime {
     /// Shared cross-transfer download coordinator enforcing the global controls
     /// the per-transfer task model lacks: the connection budget (concurrent cap
     /// + new-connection per-window rate, eMule `CListenSocket::TooManySockets`),
-    /// the per-file soft/UDP source caps (eMule
-    /// `GetMaxSourcePerFileSoft`/`GetMaxSourcePerFileUDP`), and global UDP reask
-    /// round-robin pacing (eMule `CDownloadQueue::Process` `m_udcounter`). One
-    /// per runtime, consulted by the per-transfer driver and the reask loop. A
-    /// `std::sync::Mutex` because every decision is instant (no await held), so
-    /// the download closure / reask path can consult it without `.await`.
+    ///   the per-file soft/UDP source caps (eMule
+    ///   `GetMaxSourcePerFileSoft`/`GetMaxSourcePerFileUDP`), and global UDP reask
+    ///   round-robin pacing (eMule `CDownloadQueue::Process` `m_udcounter`). One
+    ///   per runtime, consulted by the per-transfer driver and the reask loop. A
+    ///   `std::sync::Mutex` because every decision is instant (no await held), so
+    ///   the download closure / reask path can consult it without `.await`.
     download_coordinator: Arc<StdMutex<Ed2kDownloadCoordinator>>,
     /// Live count of inbound (accepted) eD2k peer connections currently being
     /// handled. The listener admits a new inbound connection only while this is

@@ -239,19 +239,19 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     // the oracle (ListenSocket.cpp OP_REQUESTFILENAME -> SendCommentInfo). Only
     // for a file we actually serve, when the peer accepts comments and we have a
     // non-empty rating/comment to send.
-    if let Ok(manifest) = transfer_runtime.manifest(&requested.to_string()).await {
-        if should_send_file_desc(
+    if let Ok(manifest) = transfer_runtime.manifest(&requested.to_string()).await
+        && should_send_file_desc(
             peer_accept_comment_version,
             manifest.rating,
             &manifest.comment,
-        ) {
-            let desc = encode_file_desc(manifest.rating, &manifest.comment);
-            dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "file_desc", &desc);
-            transport
-                .write_all(&desc)
-                .await
-                .with_context(|| format!("failed to send OP_FILEDESC to {peer_addr}"))?;
-        }
+        )
+    {
+        let desc = encode_file_desc(manifest.rating, &manifest.comment);
+        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "file_desc", &desc);
+        transport
+            .write_all(&desc)
+            .await
+            .with_context(|| format!("failed to send OP_FILEDESC to {peer_addr}"))?;
     }
     Ok(Some(requested))
 }

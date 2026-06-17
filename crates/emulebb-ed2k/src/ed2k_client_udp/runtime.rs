@@ -312,11 +312,11 @@ async fn handle_inbound_datagram(
     // Drop datagrams from a banned IP (master ClientUDPSocket.cpp:129
     // IsBannedClient(sin_addr)). The user-hash half of a ban is not knowable from
     // a bare UDP datagram, so only the IP key is checked here.
-    if let SocketAddr::V4(v4) = from {
-        if transfer_runtime.is_client_banned(Some(*v4.ip()), None) {
-            trace!("ed2k udp reask: dropping inbound datagram from banned IP {from}");
-            return;
-        }
+    if let SocketAddr::V4(v4) = from
+        && transfer_runtime.is_client_banned(Some(*v4.ip()), None)
+    {
+        trace!("ed2k udp reask: dropping inbound datagram from banned IP {from}");
+        return;
     }
     trace!(
         "ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}",

@@ -104,6 +104,7 @@ pub(super) async fn handle_public_key(
 /// record the verdict, and sync it onto the upload identity so credit only
 /// benefits a verified peer (IS_IDENTIFIED) and a FAILED verify marks the peer
 /// IS_IDBADGUY (its upload score is zeroed, not merely denied the credit).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_signature(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,

@@ -25,6 +25,8 @@ use crate::ed2k_sources::source_key;
 /// for a firewalled-buddy Kad source).
 const ED2K_DEFAULT_UDP_VERSION: u8 = 4;
 
+type RequestedCallbackSources = HashSet<(Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>)>;
+
 /// Detach every firewalled LowID Kad source with a known buddy onto the UDP reask
 /// loop so it originates an `OP_REASKCALLBACKUDP` to its buddy on the normal
 /// cadence (oracle `CDownloadQueue::KademliaSearchFile` source types 3/5, reasked
@@ -36,7 +38,7 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
     reask_handle: Option<&ReaskSourceHandle>,
     file_hash: Ed2kHash,
     sources: &[Ed2kFoundSource],
-    requested_callback_sources: &mut HashSet<(Ipv4Addr, u16, Option<[u8; 16]>, Option<u8>)>,
+    requested_callback_sources: &mut RequestedCallbackSources,
 ) {
     let Some(reask_handle) = reask_handle else {
         return; // UDP reask disabled

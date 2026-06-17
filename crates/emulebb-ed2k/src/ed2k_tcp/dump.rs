@@ -285,12 +285,11 @@ pub(super) fn canonical_ed2k_recv_phase<'a>(
 }
 
 fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
-    if let Ok(line) = serde_json::to_string(record) {
-        if let Ok(mut guard) = ed2k_tcp_dump_file().lock() {
-            if let Some(file) = guard.as_mut() {
-                let _ = writeln!(file, "{line}");
-            }
-        }
+    if let Ok(line) = serde_json::to_string(record)
+        && let Ok(mut guard) = ed2k_tcp_dump_file().lock()
+        && let Some(file) = guard.as_mut()
+    {
+        let _ = writeln!(file, "{line}");
     }
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`

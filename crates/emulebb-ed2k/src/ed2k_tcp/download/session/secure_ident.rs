@@ -118,17 +118,15 @@ pub(super) fn handle_signature(
             // Bind the just-verified uploader pubkey to its credit row (wiping
             // credits if a different key verified for this user hash before --
             // eMule CClientCredits::Verified anti-takeover).
-            if verified {
-                if let (Some(user_hash), Some(public_key)) = (
+            if verified
+                && let (Some(user_hash), Some(public_key)) = (
                     session_state.peer_user_hash,
                     session_state.peer_secure_ident.peer_public_key.as_deref(),
-                ) {
-                    if let Err(error) =
-                        transfer_runtime.record_verified_secure_ident(user_hash, public_key)
-                    {
-                        debug!("failed to bind verified secure-ident pubkey: {error:#}");
-                    }
-                }
+                )
+                && let Err(error) =
+                    transfer_runtime.record_verified_secure_ident(user_hash, public_key)
+            {
+                debug!("failed to bind verified secure-ident pubkey: {error:#}");
             }
             dump_ed2k_tcp_download_meta(
                 peer_addr,

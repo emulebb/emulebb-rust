@@ -287,24 +287,22 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 // a buddy for, hold the session open and register a relay writer so
                 // handle_kad_callback_req can push OP_CALLBACK down it (oracle
                 // KS_INCOMING_BUDDY connecting -> KS_CONNECTED_BUDDY).
-                if buddy_hold.is_none() {
-                    if let IpAddr::V4(peer_ip) = peer_addr.ip() {
-                        if let Some(buddy_id) = buddy_registry
-                            .match_connecting_peer(peer_ip, hello_profile.identity.user_hash)
-                        {
-                            let (relay_tx, relay_rx) = mpsc::unbounded_channel();
-                            if buddy_registry.attach_inbound(buddy_id, relay_tx) {
-                                info!(
-                                    "holding inbound Kad buddy session for {peer_addr} \
+                if buddy_hold.is_none()
+                    && let IpAddr::V4(peer_ip) = peer_addr.ip()
+                    && let Some(buddy_id) =
+                        buddy_registry.match_connecting_peer(peer_ip, hello_profile.identity.user_hash)
+                {
+                    let (relay_tx, relay_rx) = mpsc::unbounded_channel();
+                    if buddy_registry.attach_inbound(buddy_id, relay_tx) {
+                        info!(
+                            "holding inbound Kad buddy session for {peer_addr} \
                                      (buddy_id={buddy_id})"
-                                );
-                                buddy_hold = Some(InboundBuddyHold {
-                                    buddy_id,
-                                    relay_rx,
-                                    last_buddy_pingpong_at: None,
-                                });
-                            }
-                        }
+                        );
+                        buddy_hold = Some(InboundBuddyHold {
+                            buddy_id,
+                            relay_rx,
+                            last_buddy_pingpong_at: None,
+                        });
                     }
                 }
                 for reply in build_hello_responses(&packet.payload, response_identity)? {

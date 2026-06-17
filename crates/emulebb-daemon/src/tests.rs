@@ -584,14 +584,13 @@ fn load_or_create_secure_ident_reuses_sql_private_secret() {
         second.to_pkcs8_der().unwrap()
     );
     assert!(
-        store
+        !store
             .load_local_identity(ED2K_SECURE_IDENT_IDENTITY_KIND)
             .unwrap()
             .unwrap()
             .private_secret
             .unwrap()
-            .len()
-            > 0
+            .is_empty()
     );
 }
 

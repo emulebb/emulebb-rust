@@ -73,7 +73,7 @@ pub(crate) async fn delete_search(
         Err(error) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
-            &error.to_string(),
+            error.to_string(),
         )
         .into_response(),
     }
@@ -100,7 +100,7 @@ pub(crate) async fn delete_searches(
         Err(error) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
-            &error.to_string(),
+            error.to_string(),
         )
         .into_response(),
     }

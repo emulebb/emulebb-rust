@@ -78,6 +78,8 @@ pub(crate) struct ReaskTickOutput {
     pub timed_out: Vec<(SocketAddr, ReaskAction)>,
 }
 
+type ReaskAdmitFn<'a> = dyn Fn(&Ed2kHash, usize) -> bool + 'a;
+
 /// Global pacing/round-robin control for a reask tick, supplied by the caller
 /// (which wraps the shared download coordinator). Keeps the service I/O-free and
 /// the coordinator the single decision-maker: the service only rotates the file
@@ -90,7 +92,7 @@ pub(crate) struct ReaskTickPacing<'a> {
     /// emit reask pings this tick: the per-file UDP source cap
     /// (`GetMaxSourcePerFileUDP > GetSourceCount`) AND the global reask pacing
     /// floor. `None` = admit every file (the unbounded default tick).
-    pub admit: Option<&'a dyn Fn(&Ed2kHash, usize) -> bool>,
+    pub admit: Option<&'a ReaskAdmitFn<'a>>,
 }
 
 impl ReaskTickPacing<'_> {

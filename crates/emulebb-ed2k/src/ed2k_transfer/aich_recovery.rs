@@ -109,7 +109,8 @@ impl AichRecoveryHashSet {
         let p_size = part_size(self.file_size, part);
         let mut level = 0u8;
         self.root.find_hash_mut(p_start, p_size, &mut level);
-        let blocks = p_size / ED2K_EMBLOCK_SIZE + u64::from(p_size % ED2K_EMBLOCK_SIZE != 0);
+        let blocks =
+            p_size / ED2K_EMBLOCK_SIZE + u64::from(!p_size.is_multiple_of(ED2K_EMBLOCK_SIZE));
         let count = u64::from(level - 1) + blocks;
         u16::try_from(count).map_err(|_| anyhow::anyhow!("AICH recovery hash count overflow"))
     }
@@ -202,7 +203,8 @@ impl AichRecoveryHashSet {
         let p_size = part_size(self.file_size, part);
         let mut level = 0u8;
         self.root.find_hash_mut(p_start, p_size, &mut level);
-        let blocks = p_size / ED2K_EMBLOCK_SIZE + u64::from(p_size % ED2K_EMBLOCK_SIZE != 0);
+        let blocks =
+            p_size / ED2K_EMBLOCK_SIZE + u64::from(!p_size.is_multiple_of(ED2K_EMBLOCK_SIZE));
         let hashes_to_read = (u64::from(level - 1) + blocks) as usize;
 
         let mut cur = Reader::new(body);

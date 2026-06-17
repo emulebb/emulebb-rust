@@ -275,10 +275,10 @@ impl Ed2kDownloadCoordinator {
         if file_count == 0 {
             return None;
         }
-        if let Some(last) = self.last_reask_at {
-            if now.saturating_duration_since(last) < self.config.reask_pacing_interval {
-                return None;
-            }
+        if let Some(last) = self.last_reask_at
+            && now.saturating_duration_since(last) < self.config.reask_pacing_interval
+        {
+            return None;
         }
         let index = self.reask_cursor % file_count;
         self.reask_cursor = self.reask_cursor.wrapping_add(1);

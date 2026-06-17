@@ -412,27 +412,15 @@ impl EmulebbCore {
         );
         let download_limit_bytes_per_sec =
             ed2k_download_limit_bytes_per_sec_from_preferences(&core_state.preferences);
-        let ed2k_transfers = if ed2k_network.is_some() {
-            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
-                &transfer_root,
-                metadata_store.clone(),
-                &Ed2kConfig {
-                    upload_queue: upload_queue_policy,
-                    download_limit_bytes_per_sec,
-                    ..Ed2kConfig::default()
-                },
-            )?
-        } else {
-            Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
-                &transfer_root,
-                metadata_store.clone(),
-                &Ed2kConfig {
-                    upload_queue: upload_queue_policy,
-                    download_limit_bytes_per_sec,
-                    ..Ed2kConfig::default()
-                },
-            )?
-        };
+        let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
+            &transfer_root,
+            metadata_store.clone(),
+            &Ed2kConfig {
+                upload_queue: upload_queue_policy,
+                download_limit_bytes_per_sec,
+                ..Ed2kConfig::default()
+            },
+        )?;
         // Drive the shared download coordinator from the live REST preferences
         // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
         // like the download throttle, so REST preference changes apply to the
@@ -3356,13 +3344,13 @@ impl EmulebbCore {
                     continue;
                 }
                 // The swap target must still be a wanted (active) transfer.
-                if let Some(target) = state.transfers.get(&candidate.file_hash) {
-                    if !matches!(
+                if let Some(target) = state.transfers.get(&candidate.file_hash)
+                    && !matches!(
                         target.state.as_str(),
                         "completed" | "completing" | "paused" | "stopped"
-                    ) {
-                        swap_targets.push(target.clone());
-                    }
+                    )
+                {
+                    swap_targets.push(target.clone());
                 }
             }
         }
@@ -4610,11 +4598,11 @@ async fn handle_kad_local_store_packet(
         receiver_verify_key_valid,
         ..
     } = received;
-    if let IpAddr::V4(ip) = from.ip() {
-        if network.ip_filter.is_filtered(ip) {
-            tracing::trace!("dropping Kad packet from IP-filtered peer {from}");
-            return Ok(());
-        }
+    if let IpAddr::V4(ip) = from.ip()
+        && network.ip_filter.is_filtered(ip)
+    {
+        tracing::trace!("dropping Kad packet from IP-filtered peer {from}");
+        return Ok(());
     }
     match packet {
         KadPacket::HelloReq(req) => {
@@ -4654,13 +4642,11 @@ async fn handle_kad_local_store_packet(
             if added_or_updated
                 && !receiver_verify_key_valid
                 && req.version < LEGACY_VERIFY_VERSION_THRESHOLD
-            {
-                if let Err(error) = dht
+                && let Err(error) = dht
                     .send_legacy_challenge(req.node_id, req.version, from)
                     .await
-                {
-                    tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
-                }
+            {
+                tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
             }
         }
         KadPacket::HelloRes(res) => {
@@ -4693,13 +4679,14 @@ async fn handle_kad_local_store_packet(
             // response could still be spoofed, so verify it with a legacy REQ
             // challenge. (Version 7 relies on receiver keys here and is not
             // challenged on the HELLO_RES leg.)
-            if added_or_updated && !receiver_verify_key_valid && res.version < KAD_VERSION_7 {
-                if let Err(error) = dht
+            if added_or_updated
+                && !receiver_verify_key_valid
+                && res.version < KAD_VERSION_7
+                && let Err(error) = dht
                     .send_legacy_challenge(res.node_id, res.version, from)
                     .await
-                {
-                    tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
-                }
+            {
+                tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
             }
         }
         KadPacket::HelloResAck(ack) => {
@@ -5105,6 +5092,7 @@ async fn handle_kad_local_store_packet(
 /// (not TCP- or UDP-firewalled) and do not already serve a buddy. On acceptance
 /// we register the requester and reply `FINDBUDDY_RES` echoing its `buddy_id`,
 /// our eD2k client hash, and our TCP port (plus our connect options).
+#[allow(clippy::too_many_arguments)]
 async fn handle_kad_find_buddy_req(
     dht: &DhtNode,
     ed2k_listener: &TcpListener,

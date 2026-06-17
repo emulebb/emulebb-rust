@@ -20,23 +20,66 @@ pub(crate) fn apply_search_filters(results: &mut Vec<SearchResult>, request: &Se
                 return false;
             }
         }
-        if let Some(min) = request.min_size_bytes {
-            if result.size_bytes < min {
-                return false;
-            }
+        if let Some(min) = request.min_size_bytes
+            && result.size_bytes < min
+        {
+            return false;
         }
-        if let Some(max) = request.max_size_bytes {
-            if result.size_bytes > max {
-                return false;
-            }
+        if let Some(max) = request.max_size_bytes
+            && result.size_bytes > max
+        {
+            return false;
         }
-        if let Some(min_availability) = request.min_availability {
-            if result.sources < min_availability {
-                return false;
-            }
+        if let Some(min_availability) = request.min_availability
+            && result.sources < min_availability
+        {
+            return false;
         }
         true
     });
+}
+
+pub(crate) fn search_result_from_indexed(
+    search_id: &str,
+    request: &SearchCreate,
+    file: IndexedFile,
+) -> SearchResult {
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash: file.ed2k_hash,
+        name: file.name,
+        size_bytes: file.size_bytes,
+        sources: file.availability_score.max(0) as u32,
+        complete_sources: 0,
+        file_type: file.content_type.clone(),
+        complete: false,
+        known_type: file.content_type,
+        directory: String::new(),
+    }
+}
+
+pub(crate) fn search_result_from_ed2k(
+    search_id: &str,
+    request: &SearchCreate,
+    file: Ed2kSearchFile,
+) -> SearchResult {
+    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash: file.file_hash.to_string(),
+        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
+        size_bytes: file.file_size.unwrap_or_default(),
+        sources: file.source_count.unwrap_or_default(),
+        complete_sources: 0,
+        file_type: file_type.clone(),
+        complete: false,
+        known_type: file_type,
+        directory: String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -95,48 +138,5 @@ mod tests {
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.One.mkv");
-    }
-}
-
-pub(crate) fn search_result_from_indexed(
-    search_id: &str,
-    request: &SearchCreate,
-    file: IndexedFile,
-) -> SearchResult {
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.ed2k_hash,
-        name: file.name,
-        size_bytes: file.size_bytes,
-        sources: file.availability_score.max(0) as u32,
-        complete_sources: 0,
-        file_type: file.content_type.clone(),
-        complete: false,
-        known_type: file.content_type,
-        directory: String::new(),
-    }
-}
-
-pub(crate) fn search_result_from_ed2k(
-    search_id: &str,
-    request: &SearchCreate,
-    file: Ed2kSearchFile,
-) -> SearchResult {
-    let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
-    SearchResult {
-        search_id: search_id.to_string(),
-        method: request.method.clone(),
-        r#type: request.r#type.clone(),
-        hash: file.file_hash.to_string(),
-        name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
-        size_bytes: file.file_size.unwrap_or_default(),
-        sources: file.source_count.unwrap_or_default(),
-        complete_sources: 0,
-        file_type: file_type.clone(),
-        complete: false,
-        known_type: file_type,
-        directory: String::new(),
     }
 }

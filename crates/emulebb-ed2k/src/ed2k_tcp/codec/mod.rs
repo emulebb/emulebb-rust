@@ -385,7 +385,7 @@ pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) ->
             current_byte = 0;
         }
     }
-    if ed2k_part_count % 8 != 0 {
+    if !ed2k_part_count.is_multiple_of(8) {
         payload.push(current_byte);
     }
     payload.extend_from_slice(&0u16.to_le_bytes());

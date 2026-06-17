@@ -9,8 +9,8 @@
 //!   4. `+= lowRatioBonus`          (low all-time-upload-ratio additive bonus)
 //!   5. `/= lowIdDivisor`           (LowID deprioritisation)
 //!   6. `*= 0.5`                    (old-client penalty)
-//! and zeroes the score entirely for a friend slot's fast path (handled by the
-//! caller), an `IS_IDBADGUY` peer, a banned peer, or a `GPLEvildoer`.
+//!      and zeroes the score entirely for a friend slot's fast path (handled by
+//!      the caller), an `IS_IDBADGUY` peer, a banned peer, or a `GPLEvildoer`.
 //!
 //! We keep the queue's integer score contract: the additive low-ratio bonus is
 //! scaled into the same `seconds * filePrio * permille / 1000` integer units the

@@ -284,10 +284,8 @@ impl Ed2kTransferRuntime {
                 continue;
             };
             for (index, present) in bitmap.iter().enumerate() {
-                if *present {
-                    if let Some(slot) = counts.get_mut(index) {
-                        *slot = slot.saturating_add(1);
-                    }
+                if *present && let Some(slot) = counts.get_mut(index) {
+                    *slot = slot.saturating_add(1);
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! (`emulebb_ed2k::diag_event::emit`). They live in `emulebb-core` because the
 //! cross-transfer source/connection decisions they observe (the download driver
 //! + source registry) live here. Emit is a cheap no-op when `EMULEBB_RUST_LOG_DIR`
-//! is unset, so the call sites need no extra gating.
+//!   is unset, so the call sites need no extra gating.
 //!
 //! No field is ever faked: optional `keys` (`peerHash`, `fileHash`) are omitted
 //! when the call site does not have them.
