@@ -27,52 +27,57 @@ pub(crate) async fn validate_route_metadata(request: Request<Body>, next: Next) 
     if let Err(response) = validate_path_parameters(&method, &path) {
         return *response;
     }
-    if let Some(query) = request.uri().query() {
-        for (name, value) in match parse_query_fields(query) {
+    let query_fields = if let Some(query) = request.uri().query() {
+        match parse_query_fields(query) {
             Ok(fields) => fields,
             Err(response) => return *response,
-        } {
-            if !allowed_query_fields.contains(&name.as_str()) {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_ARGUMENT",
-                    format!("unknown query parameter: {name}"),
-                )
-                .into_response();
-            }
-            if name == "limit"
-                && let Err(error) = parse_bounded_query_value(&value, 1, 1000, "limit")
-            {
-                return query_scalar_error_response(error).into_response();
-            }
-            if name == "offset"
-                && let Err(error) = parse_bounded_query_value(&value, 0, i32::MAX as u64, "offset")
-            {
-                return query_scalar_error_response(error).into_response();
-            }
-            if name == "categoryId"
-                && let Err(error) =
-                    parse_bounded_query_value(&value, 0, u32::MAX as u64, "categoryId")
-            {
-                return query_scalar_error_response(error).into_response();
-            }
-            if name == "state" && !is_transfer_state_name(&value) {
-                return api_error(
+        }
+    } else {
+        Vec::new()
+    };
+    for (name, value) in &query_fields {
+        if !allowed_query_fields.contains(&name.as_str()) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("unknown query parameter: {name}"),
+            )
+            .into_response();
+        }
+        if name == "limit"
+            && let Err(error) = parse_bounded_query_value(value, 1, 1000, "limit")
+        {
+            return query_scalar_error_response(error).into_response();
+        }
+        if name == "offset"
+            && let Err(error) = parse_bounded_query_value(value, 0, i32::MAX as u64, "offset")
+        {
+            return query_scalar_error_response(error).into_response();
+        }
+        if name == "categoryId"
+            && let Err(error) = parse_bounded_query_value(value, 0, u32::MAX as u64, "categoryId")
+        {
+            return query_scalar_error_response(error).into_response();
+        }
+        if name == "state" && !is_transfer_state_name(value) {
+            return api_error(
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",
                     "state must be one of downloading, paused, queued, checking, completing, completed, error, missingfiles",
                 )
                 .into_response();
-            }
-            if is_boolean_query_field(&name) && !is_boolean_query_value(&value) {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_ARGUMENT",
-                    format!("{name} must be true or false"),
-                )
-                .into_response();
-            }
         }
+        if is_boolean_query_field(name) && !is_boolean_query_value(value) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("{name} must be true or false"),
+            )
+            .into_response();
+        }
+    }
+    if let Err(response) = validate_destructive_query_confirmation(&method, &path, &query_fields) {
+        return *response;
     }
     if request.body().size_hint().upper() == Some(0) {
         return next.run(request).await;
@@ -186,6 +191,48 @@ fn is_boolean_query_field(name: &str) -> bool {
 
 fn is_boolean_query_value(value: &str) -> bool {
     matches!(value, "true" | "false")
+}
+
+fn validate_destructive_query_confirmation(
+    method: &str,
+    path: &str,
+    fields: &[(String, String)],
+) -> Result<(), Box<Response>> {
+    if !uses_destructive_query_confirmation(method, path) {
+        return Ok(());
+    }
+    if fields
+        .iter()
+        .find(|(name, _)| name == "confirm")
+        .map(|(_, value)| value.as_str())
+        != Some("true")
+    {
+        return Err(Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "confirm must be true",
+            )
+            .into_response(),
+        ));
+    }
+    Ok(())
+}
+
+fn uses_destructive_query_confirmation(method: &str, path: &str) -> bool {
+    if method == "DELETE" && path == "/api/v1/searches" {
+        return true;
+    }
+    let Some(segments) = path
+        .strip_prefix("/api/v1/")
+        .map(|path| path.split('/').collect::<Vec<_>>())
+    else {
+        return false;
+    };
+    matches!(
+        (method, segments.as_slice()),
+        ("DELETE", ["shared-files", _, "file"]) | ("DELETE", ["transfers", _, "files"])
+    )
 }
 
 #[derive(Clone, Copy)]

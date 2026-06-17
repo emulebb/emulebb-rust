@@ -123,3 +123,38 @@ async fn transfers_category_id_query_uses_mfc_unsigned_validation() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn destructive_query_confirmations_use_mfc_validation() {
+    let cases = [
+        ("DELETE", "/api/v1/searches"),
+        ("DELETE", "/api/v1/searches?confirm=false"),
+        (
+            "DELETE",
+            "/api/v1/shared-files/00112233445566778899aabbccddeeff/file",
+        ),
+        (
+            "DELETE",
+            "/api/v1/transfers/00112233445566778899aabbccddeeff/files",
+        ),
+    ];
+
+    for (method, uri) in cases {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["error"]["message"], "confirm must be true");
+    }
+}
