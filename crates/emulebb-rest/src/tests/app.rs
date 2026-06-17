@@ -118,3 +118,74 @@ async fn snapshot_limit_clamps_like_master() {
     assert!(value["data"]["uploadQueue"].as_array().unwrap().len() <= 1000);
     assert!(value["data"]["logs"].as_array().unwrap().len() <= 1000);
 }
+
+#[tokio::test]
+async fn stats_distinguish_active_downloads_from_total_queue() {
+    let router = test_router();
+
+    let create = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"links":["ed2k://|file|Active.bin|1|00112233445566778899aabbccddeeff|/"],"paused":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+
+    let create_paused = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"links":["ed2k://|file|Paused.bin|2|ffeeddccbbaa99887766554433221100|/"],"paused":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_paused.status(), StatusCode::OK);
+
+    let stats = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stats")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.status(), StatusCode::OK);
+    let body = to_bytes(stats.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["activeDownloads"], 1);
+    assert_eq!(value["data"]["downloadCount"], 2);
+
+    let status = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["runtimeDiagnostics"]["downloadFileCount"], 2);
+}

@@ -72,7 +72,7 @@ pub(crate) fn stats_response(
         "activeDownloads": status.transfers.active,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
-        "downloadCount": status.transfers.active + status.transfers.completed,
+        "downloadCount": status.transfers.total,
         "sharedHashingActive": false,
         "sharedHashingCount": 0,
         "sharedFilesReady": status.lifecycle.state == "running",
@@ -91,7 +91,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
     let shared_file_count = state.core.shares().await.len();
-    let download_file_count = status.transfers.active + status.transfers.completed;
+    let download_file_count = status.transfers.total;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &upload_policy, &throughput),

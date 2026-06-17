@@ -586,12 +586,16 @@ impl EmulebbCore {
             tracing::warn!("failed to refresh ED2K transfers from manifests: {error}");
         }
         let state = self.state.lock().await;
-        let completed = state
-            .transfers
-            .values()
-            .filter(|transfer| transfer.state == "completed")
-            .count();
-        let active = state.transfers.len().saturating_sub(completed);
+        let total = state.transfers.len();
+        let mut active = 0;
+        let mut completed = 0;
+        for transfer in state.transfers.values() {
+            match transfer.state.as_str() {
+                "downloading" | "queued" => active += 1,
+                "completed" => completed += 1,
+                _ => {}
+            }
+        }
         let kad_running = state.kad_running;
         drop(state);
 
@@ -606,7 +610,11 @@ impl EmulebbCore {
                 enabled: true,
                 backend: "sqlite-fts5".to_string(),
             },
-            transfers: TransferStats { active, completed },
+            transfers: TransferStats {
+                active,
+                completed,
+                total,
+            },
         }
     }
 

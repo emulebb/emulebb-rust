@@ -1,5 +1,4 @@
 //! REST-facing data-transfer structs and their serde helpers.
-//!
 //! These are the request/response shapes the REST layer (`emulebb-rest`) and the
 //! daemon serialize over `/api/v1`; they are pure data definitions with no
 //! behavior beyond serde. They are re-exported from the crate root so existing
@@ -208,6 +207,7 @@ pub struct IndexingStatus {
 pub struct TransferStats {
     pub active: usize,
     pub completed: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
