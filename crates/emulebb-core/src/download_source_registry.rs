@@ -154,6 +154,40 @@ impl DownloadSourceRegistry {
             .retain(|peer| (peer.ip, peer.tcp_port) != endpoint);
     }
 
+    /// Forget everything the registry holds for `file_hash`: drop every source
+    /// candidate registered for that file (removing peers left with no remaining
+    /// candidate), and release every lease held by a peer whose remaining set no
+    /// longer includes the file. Returns the endpoints whose lease was cleared so
+    /// the caller can drop the matching `active_download_peer_endpoints` entries.
+    ///
+    /// Used when a transfer is deleted (or otherwise cancelled): the running
+    /// attempt's own release path is per-endpoint and idempotent, so this can run
+    /// concurrently with it without double-freeing — clearing a lease that the
+    /// attempt also clears is a no-op, and the candidate map is rebuilt on the next
+    /// requery. A peer that still serves ANOTHER file keeps its lease (its other
+    /// engagement is untouched); only a peer left serving no file is released, so
+    /// an A4AF peer shared with a live transfer is not yanked out from under it.
+    pub(crate) fn release_file(&mut self, file_hash: &str) -> Vec<(Ipv4Addr, u16)> {
+        // Drop this file's candidates and forget peers left with nothing.
+        self.peers.retain(|_, candidates| {
+            candidates.retain(|candidate| candidate.file_hash != file_hash);
+            !candidates.is_empty()
+        });
+        // Release the lease of every peer that no longer has any candidate (it was
+        // engaged only for the file just cleared). A peer still present in `peers`
+        // serves another file and keeps its lease.
+        let mut cleared = Vec::new();
+        self.leased_peers.retain(|peer| {
+            if self.peers.contains_key(peer) {
+                true
+            } else {
+                cleared.push((peer.ip, peer.tcp_port));
+                false
+            }
+        });
+        cleared
+    }
+
     /// Drop every outstanding source lease (FIX: detached-reask lease leak on
     /// disconnect/shutdown). Detached sources live on the UDP reask loop and free
     /// their lease only via a `SourceReleased` event; when the loop breaks on
@@ -394,6 +428,53 @@ mod tests {
         let refreshed = later + Duration::from_secs(1);
         registry.add_candidate(refreshed, candidate(file, 5, 1, source_with_endpoint(0x02, 41101)));
         assert_eq!(registry.candidate_count_for_file(refreshed, file), 1);
+    }
+
+    #[test]
+    fn release_file_clears_candidates_and_only_that_files_leases() {
+        // A peer leased for the file being released loses its lease (returned for
+        // the caller to drop the matching active endpoint); the file's candidates
+        // are gone. A different peer leased for ANOTHER file keeps its lease and
+        // candidate (an A4AF peer shared with a live transfer is not yanked out).
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        // Peer 1 serves only the target file and is leased on it.
+        let peer_target = source_with_endpoint(0x01, 41200);
+        registry.add_candidate(now, candidate(target, 5, 1, peer_target.clone()));
+        assert!(
+            registry
+                .lease_best_for_file(&peer_target, target)
+                .is_some()
+        );
+
+        // Peer 2 serves a different file and is leased on it.
+        let peer_other = source_with_endpoint(0x02, 41201);
+        registry.add_candidate(now, candidate(other, 5, 1, peer_other.clone()));
+        assert!(registry.lease_best_for_file(&peer_other, other).is_some());
+
+        // Peer 3 serves the target file but is NOT leased.
+        let peer_unleased = source_with_endpoint(0x03, 41202);
+        registry.add_candidate(now, candidate(target, 5, 1, peer_unleased.clone()));
+
+        assert_eq!(registry.candidate_count_for_file(now, target), 2);
+        assert_eq!(registry.leased_peer_count(), 2);
+
+        let cleared = registry.release_file(target);
+
+        // Only peer 1's endpoint is returned (it was leased for the target file).
+        assert_eq!(cleared, vec![(peer_target.ip, peer_target.tcp_port)]);
+        // The target file's candidates are gone; the other file's remain.
+        assert_eq!(registry.candidate_count_for_file(now, target), 0);
+        assert_eq!(registry.candidate_count_for_file(now, other), 1);
+        // Peer 2's lease (for the other file) is untouched; peer 1's is gone.
+        assert_eq!(registry.leased_peer_count(), 1);
+        assert!(
+            registry.lease_best_for_file(&peer_other, other).is_none(),
+            "the other file's lease must still be held"
+        );
     }
 
     fn source_with_endpoint(last_octet: u8, tcp_port: u16) -> Ed2kFoundSource {
