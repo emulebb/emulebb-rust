@@ -92,24 +92,46 @@ impl ServerSession {
         trace_role: &'static str,
         timeout: Duration,
     ) -> Result<Self> {
-        let socket = TcpSocket::new_v4().context("failed to create ED2K server TCP socket")?;
-        socket
-            .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
-            .with_context(|| format!("failed to bind ED2K server socket to {bind_ip}"))?;
-        let bind_if_index = crate::networking::require_bind_if_index(bind_ip, "ED2K server TCP")?;
-        // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) before connect so
-        // the server session leaves via the tunnel — solid VPN binding.
-        emulebb_kad_dht::socket_opts::pin_egress_to_interface(
-            socket2::SockRef::from(&socket),
-            Some(bind_if_index),
-        )
-        .with_context(|| format!("failed to pin ED2K server egress for {bind_ip}"))?;
-        let stream = tokio::time::timeout(timeout, socket.connect(endpoint))
-            .await
-            .with_context(|| format!("timed out connecting to ED2K server {endpoint}"))??;
-        stream
-            .set_nodelay(true)
-            .with_context(|| format!("failed to enable TCP_NODELAY for ED2K server {endpoint}"))?;
+        {
+            let mut guard = state.write().await;
+            guard.connecting = true;
+            guard.connected = false;
+            guard.endpoint = Some(endpoint);
+        }
+        let stream = match async {
+            let socket = TcpSocket::new_v4().context("failed to create ED2K server TCP socket")?;
+            socket
+                .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+                .with_context(|| format!("failed to bind ED2K server socket to {bind_ip}"))?;
+            let bind_if_index =
+                crate::networking::require_bind_if_index(bind_ip, "ED2K server TCP")?;
+            // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) before connect
+            // so the server session leaves via the tunnel — solid VPN binding.
+            emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+                socket2::SockRef::from(&socket),
+                Some(bind_if_index),
+            )
+            .with_context(|| format!("failed to pin ED2K server egress for {bind_ip}"))?;
+            let stream = tokio::time::timeout(timeout, socket.connect(endpoint))
+                .await
+                .with_context(|| format!("timed out connecting to ED2K server {endpoint}"))??;
+            stream.set_nodelay(true).with_context(|| {
+                format!("failed to enable TCP_NODELAY for ED2K server {endpoint}")
+            })?;
+            Ok::<TcpStream, anyhow::Error>(stream)
+        }
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                let mut guard = state.write().await;
+                if guard.connecting && guard.endpoint == Some(endpoint) {
+                    guard.connecting = false;
+                    guard.endpoint = None;
+                }
+                return Err(error);
+            }
+        };
         let trace_id = NEXT_SERVER_SESSION_TRACE_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             stream,
@@ -423,5 +445,29 @@ mod tests {
                 .contains("oversized ED2K server packet length"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn server_connect_rolls_back_connecting_state_on_setup_failure() {
+        let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+        let endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4661);
+
+        let err = ServerSession::connect(
+            Ipv4Addr::new(203, 0, 113, 200),
+            endpoint,
+            Arc::clone(&state),
+            "test",
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("non-local bind IP should fail before a session is established");
+
+        let guard = state.read().await;
+        assert!(
+            !guard.connecting,
+            "failed setup left server state connecting after {err}"
+        );
+        assert!(!guard.connected);
+        assert!(guard.endpoint.is_none());
     }
 }

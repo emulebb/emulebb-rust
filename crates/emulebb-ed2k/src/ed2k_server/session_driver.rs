@@ -453,6 +453,7 @@ pub(super) async fn run_one_server_session(
 
 pub(super) async fn clear_server_connection_state(state: &Arc<RwLock<Ed2kServerState>>) {
     let mut guard = state.write().await;
+    guard.connecting = false;
     guard.connected = false;
     guard.endpoint = None;
     guard.client_id = None;

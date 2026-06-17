@@ -223,9 +223,10 @@ pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Va
         .iter()
         .find(|server| server.current)
         .map(server_response);
+    let connecting = servers.iter().any(|server| server.connecting);
     json!({
         "connected": status.ed2k.connected,
-        "connecting": false,
+        "connecting": connecting,
         "currentServer": current_server,
         "lowId": status
             .ed2k
@@ -428,7 +429,8 @@ mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, NetworkBindingStatus, NetworkStatus, TransferThroughputStats, VpnGuardStatus,
+        EmulebbCore, NetworkBindingStatus, NetworkStatus, ServerInfo, TransferThroughputStats,
+        VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
@@ -554,5 +556,41 @@ mod tests {
         status.ed2k.firewalled = Some(false);
         let high_id = server_status_value(&status, &[]);
         assert_eq!(high_id["lowId"], false);
+    }
+
+    #[tokio::test]
+    async fn server_status_reports_connecting_current_server() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let status = core.status().await;
+        let servers = vec![ServerInfo {
+            address: "203.0.113.9".to_string(),
+            port: 4661,
+            endpoint: "203.0.113.9:4661".to_string(),
+            name: "test server".to_string(),
+            priority: "normal".to_string(),
+            static_server: true,
+            connected: false,
+            connecting: true,
+            current: true,
+            description: String::new(),
+            dyn_ip: String::new(),
+            failed_count: 0,
+            hard_files: 0,
+            ip: String::new(),
+            ping: 0,
+            soft_files: 0,
+            version: String::new(),
+            users: 0,
+            files: 0,
+        }];
+
+        let value = server_status_value(&status, &servers);
+
+        assert_eq!(value["connected"], false);
+        assert_eq!(value["connecting"], true);
+        assert_eq!(value["currentServer"]["connecting"], true);
+        assert_eq!(value["currentServer"]["connected"], false);
+        assert!(value["lowId"].is_null());
     }
 }

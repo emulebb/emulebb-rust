@@ -29,6 +29,7 @@ pub(super) async fn handle_server_packet(
             if id_change.client_id == 0 {
                 {
                     let mut guard = session.state.write().await;
+                    guard.connecting = false;
                     guard.connected = false;
                     guard.client_id = None;
                     guard.server_flags = id_change.server_flags;
@@ -46,6 +47,7 @@ pub(super) async fn handle_server_packet(
             }
             {
                 let mut guard = session.state.write().await;
+                guard.connecting = false;
                 guard.connected = true;
                 guard.client_id = Some(id_change.client_id);
                 guard.server_flags = id_change.server_flags;

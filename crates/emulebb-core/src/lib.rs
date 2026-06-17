@@ -185,13 +185,13 @@ pub use rest_model::{
     VpnGuardConfig, VpnGuardStatus,
 };
 use views::{
-    apply_server_update, download_priority_score, enrich_sources_with_live,
-    ensure_category_selector_is_unambiguous, kad_status_from_running, manifest_default_state_name,
-    normalize_transfer_name, preserve_transfer_public_metadata, server_endpoint_from_create,
-    server_info_from_parts, source_by_client_id, source_friend_name, transfer_create_links,
-    transfer_create_state_name, transfer_from_manifest, transfer_parts_from_manifest,
-    transfer_sources_from_manifest, validate_server_priority, validate_server_update,
-    validate_shared_file_comment_rating, validate_shared_upload_priority,
+    apply_server_connection_flags, apply_server_update, download_priority_score,
+    enrich_sources_with_live, ensure_category_selector_is_unambiguous, kad_status_from_running,
+    manifest_default_state_name, normalize_transfer_name, preserve_transfer_public_metadata,
+    server_endpoint_from_create, server_info_from_parts, source_by_client_id, source_friend_name,
+    transfer_create_links, transfer_create_state_name, transfer_from_manifest,
+    transfer_parts_from_manifest, transfer_sources_from_manifest, validate_server_priority,
+    validate_server_update, validate_shared_file_comment_rating, validate_shared_upload_priority,
     validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
     validate_url_import,
 };
@@ -1081,7 +1081,7 @@ impl EmulebbCore {
     }
 
     pub async fn servers(&self) -> Vec<ServerInfo> {
-        let connected_endpoint = self.ed2k_connected_endpoint().await;
+        let endpoints = self.ed2k_server_connection_endpoints().await;
         let state = self.state.lock().await;
         let mut server_map = BTreeMap::<String, ServerInfo>::new();
         if let Some(network) = self.ed2k_network.as_ref() {
@@ -1096,7 +1096,8 @@ impl EmulebbCore {
                     entry.name.as_deref(),
                     entry.description.as_deref(),
                     true,
-                    connected_endpoint.as_deref(),
+                    endpoints.0.as_deref(),
+                    endpoints.1.as_deref(),
                 );
                 apply_server_update(&mut server, state.server_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
@@ -1112,7 +1113,8 @@ impl EmulebbCore {
                         None,
                         None,
                         true,
-                        connected_endpoint.as_deref(),
+                        endpoints.0.as_deref(),
+                        endpoints.1.as_deref(),
                     );
                     apply_server_update(&mut server, state.server_overrides.get(endpoint));
                     server_map.insert(endpoint.clone(), server);
@@ -1122,11 +1124,12 @@ impl EmulebbCore {
         for (endpoint, server) in &state.servers {
             if !state.disabled_servers.contains(endpoint) {
                 let mut server = server.clone();
-                server.current = connected_endpoint
-                    .as_deref()
-                    .is_some_and(|connected| connected == endpoint);
-                server.connected = server.current;
                 apply_server_update(&mut server, state.server_overrides.get(endpoint));
+                apply_server_connection_flags(
+                    &mut server,
+                    endpoints.0.as_deref(),
+                    endpoints.1.as_deref(),
+                );
                 server_map.insert(endpoint.clone(), server);
             }
         }
@@ -1143,14 +1146,15 @@ impl EmulebbCore {
 
     pub async fn add_server(&self, request: ServerCreate) -> Result<ServerInfo> {
         let endpoint = server_endpoint_from_create(&request)?;
-        let connected_endpoint = self.ed2k_connected_endpoint().await;
+        let endpoints = self.ed2k_server_connection_endpoints().await;
         let mut server = server_info_from_parts(
             &request.address,
             request.port,
             request.name.as_deref(),
             None,
             request.static_server.unwrap_or(false),
-            connected_endpoint.as_deref(),
+            endpoints.0.as_deref(),
+            endpoints.1.as_deref(),
         );
         if let Some(priority) = request.priority.as_deref() {
             server.priority = validate_server_priority(priority)?.to_string();
@@ -1198,9 +1202,7 @@ impl EmulebbCore {
             state.server_overrides.remove(&server.endpoint);
             state.disabled_servers.insert(server.endpoint.clone());
         }
-        // Tear the session down if it points at the just-removed server (no live
-        // connection to a server that no longer exists in the store).
-        if self.ed2k_connected_endpoint().await.as_deref() == Some(server.endpoint.as_str()) {
+        if server.current {
             self.disconnect_ed2k().await;
         }
         Ok(Some(server))
@@ -1226,7 +1228,7 @@ impl EmulebbCore {
             let state = self.state.lock().await;
             state.disabled_servers.clone()
         };
-        let connected_endpoint = self.ed2k_connected_endpoint().await;
+        let endpoints = self.ed2k_server_connection_endpoints().await;
         let mut added = 0usize;
         for (ip, port) in servers {
             if port == 0 {
@@ -1236,16 +1238,14 @@ impl EmulebbCore {
             if existing.contains(&endpoint) || disabled.contains(&endpoint) {
                 continue;
             }
-            // Add directly to the store (never auto-connect a discovered server),
-            // mirroring `add_server` minus the connect branch — eMule adds
-            // OP_SERVERLIST servers at low priority without connecting.
             let mut server = server_info_from_parts(
                 &ip.to_string(),
                 port,
                 None,
                 None,
                 false,
-                connected_endpoint.as_deref(),
+                endpoints.0.as_deref(),
+                endpoints.1.as_deref(),
             );
             server.priority = "low".to_string();
             if profile_state::persist_server(&self.metadata_store, &server, true).is_err() {
@@ -3827,15 +3827,19 @@ impl EmulebbCore {
             .await
     }
 
-    async fn ed2k_connected_endpoint(&self) -> Option<String> {
+    async fn ed2k_server_connection_endpoints(&self) -> (Option<String>, Option<String>) {
         let server_state = {
             let runtime_guard = self.ed2k_runtime.lock().await;
-            Arc::clone(&runtime_guard.as_ref()?.server_state)
+            let Some(runtime) = runtime_guard.as_ref() else {
+                return (None, None);
+            };
+            Arc::clone(&runtime.server_state)
         };
         let state = server_state.read().await;
-        state
-            .connected
-            .then(|| state.endpoint.map(|endpoint| endpoint.to_string()))?
+        let endpoint = state.endpoint.map(|endpoint| endpoint.to_string());
+        let connected = state.connected.then(|| endpoint.clone()).flatten();
+        let connecting = state.connecting.then_some(endpoint).flatten();
+        (connected, connecting)
     }
 
     async fn ed2k_status(&self) -> NetworkStatus {

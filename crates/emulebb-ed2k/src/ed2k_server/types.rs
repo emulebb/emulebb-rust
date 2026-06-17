@@ -38,6 +38,8 @@ pub struct Ed2kServerState {
     pub server_name: Option<String>,
     /// Last advertised server description, when known.
     pub server_description: Option<String>,
+    /// Whether a server TCP connection attempt is in progress.
+    pub connecting: bool,
     /// Whether the current session is established.
     pub connected: bool,
 }

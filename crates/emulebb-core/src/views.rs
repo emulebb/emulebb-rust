@@ -446,9 +446,12 @@ pub(crate) fn server_info_from_parts(
     description: Option<&str>,
     static_server: bool,
     connected_endpoint: Option<&str>,
+    connecting_endpoint: Option<&str>,
 ) -> ServerInfo {
     let endpoint = format!("{address}:{port}");
-    let current = connected_endpoint.is_some_and(|connected| connected == endpoint);
+    let connected = connected_endpoint.is_some_and(|connected| connected == endpoint);
+    let connecting = connecting_endpoint.is_some_and(|connecting| connecting == endpoint);
+    let current = connected || connecting;
     ServerInfo {
         address: address.to_string(),
         port,
@@ -456,8 +459,8 @@ pub(crate) fn server_info_from_parts(
         name: name.unwrap_or_default().to_string(),
         priority: "normal".to_string(),
         static_server,
-        connected: current,
-        connecting: false,
+        connected,
+        connecting,
         current,
         description: description.unwrap_or_default().to_string(),
         dyn_ip: String::new(),
@@ -487,6 +490,16 @@ pub(crate) fn apply_server_update(server: &mut ServerInfo, update: Option<&Serve
     }
 }
 
+pub(crate) fn apply_server_connection_flags(
+    server: &mut ServerInfo,
+    connected_endpoint: Option<&str>,
+    connecting_endpoint: Option<&str>,
+) {
+    server.connected = connected_endpoint.is_some_and(|connected| connected == server.endpoint);
+    server.connecting = connecting_endpoint.is_some_and(|connecting| connecting == server.endpoint);
+    server.current = server.connected || server.connecting;
+}
+
 pub(crate) fn validate_server_update(update: &ServerUpdate) -> Result<()> {
     if let Some(priority) = update.priority.as_deref() {
         let _ = validate_server_priority(priority)?;
@@ -508,4 +521,40 @@ pub(crate) fn server_endpoint_from_create(request: &ServerCreate) -> Result<Stri
         let _ = validate_server_priority(priority)?;
     }
     Ok(format!("{}:{}", request.address, request.port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_server_connection_flags, server_info_from_parts};
+
+    #[test]
+    fn server_connection_flags_mark_connecting_server_current() {
+        let mut server = server_info_from_parts("203.0.113.9", 4661, None, None, true, None, None);
+
+        apply_server_connection_flags(&mut server, None, Some("203.0.113.9:4661"));
+
+        assert!(server.current);
+        assert!(server.connecting);
+        assert!(!server.connected);
+    }
+
+    #[test]
+    fn server_connection_flags_prefer_connected_and_clear_stale_flags() {
+        let mut server = server_info_from_parts(
+            "203.0.113.9",
+            4661,
+            None,
+            None,
+            true,
+            Some("203.0.113.9:4661"),
+            None,
+        );
+        server.connecting = true;
+
+        apply_server_connection_flags(&mut server, Some("198.51.100.4:4661"), None);
+
+        assert!(!server.current);
+        assert!(!server.connecting);
+        assert!(!server.connected);
+    }
 }
