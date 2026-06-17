@@ -93,6 +93,12 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return validate_shared_directories_patch_body_fields(object);
     }
+    if method == "POST" && path == "/api/v1/servers" {
+        return validate_server_create_body_fields(object);
+    }
+    if method == "PATCH" && path_matches_server(path) {
+        return validate_server_patch_body_fields(object);
+    }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
@@ -298,6 +304,97 @@ fn validate_path_text_body_field(
     Ok(())
 }
 
+fn validate_server_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_non_empty_text_body_field(object.get("address"), "address")?;
+    validate_port_body_field(object.get("port"), "port")?;
+    validate_optional_server_body_fields(object, true)
+}
+
+fn validate_server_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    if !object.contains_key("name")
+        && !object.contains_key("priority")
+        && !object.contains_key("static")
+    {
+        return Err(invalid_body_error(
+            "server PATCH requires name, priority, or static",
+        ));
+    }
+    validate_optional_server_body_fields(object, false)
+}
+
+fn validate_optional_server_body_fields(
+    object: &JsonObject,
+    allow_connect: bool,
+) -> Result<(), Box<Response>> {
+    if object.get("name").is_some_and(|value| !value.is_string()) {
+        return Err(invalid_body_error("name must be a string when provided"));
+    }
+    if let Some(priority) = object.get("priority") {
+        validate_server_priority_body_field(priority)?;
+    }
+    if object
+        .get("static")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid_body_error("static must be a boolean"));
+    }
+    if allow_connect
+        && object
+            .get("connect")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid_body_error("connect must be a boolean"));
+    }
+    Ok(())
+}
+
+fn validate_non_empty_text_body_field(
+    value: Option<&serde_json::Value>,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(text) = value.and_then(serde_json::Value::as_str) else {
+        return Err(invalid_body_error(format!(
+            "{field} must be a non-empty string"
+        )));
+    };
+    if text
+        .trim_matches(|ch: char| ch.is_ascii_whitespace())
+        .is_empty()
+    {
+        return Err(invalid_body_error(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_port_body_field(
+    value: Option<&serde_json::Value>,
+    field: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(port) = value.and_then(serde_json::Value::as_u64) else {
+        return Err(invalid_body_error(format!(
+            "{field} must be in the range 1..65535"
+        )));
+    };
+    if !(1..=u16::MAX as u64).contains(&port) {
+        return Err(invalid_body_error(format!(
+            "{field} must be in the range 1..65535"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_server_priority_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(priority) = value.as_str() else {
+        return Err(invalid_body_error("priority must be a string"));
+    };
+    if !matches!(priority, "low" | "normal" | "high") {
+        return Err(invalid_body_error(
+            "priority must be one of low, normal, high",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_transfer_add_link(value: &serde_json::Value) -> Result<(), Box<Response>> {
     let Some(link) = value.as_str() else {
         return Err(invalid_body_error("link must be a string"));
@@ -358,6 +455,8 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_FILE_ADD: &[&str] = &["path"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
+    const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
+    const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);
@@ -368,10 +467,14 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return Some(SHARED_DIRECTORIES_PATCH);
     }
+    if method == "POST" && path == "/api/v1/servers" {
+        return Some(SERVER_CREATE);
+    }
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {
         ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
         ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
+        ("PATCH", ["servers", _]) => Some(SERVER_PATCH),
         ("POST", ["searches", _, "results", _, "operations", "download"]) => {
             Some(SEARCH_RESULT_DOWNLOAD)
         }
@@ -385,6 +488,10 @@ fn path_matches_transfer(path: &str) -> bool {
 
 fn path_matches_shared_file(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["shared-files", _]))
+}
+
+fn path_matches_server(path: &str) -> bool {
+    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["servers", _]))
 }
 
 fn uses_category_selector_body(method: &str, path: &str) -> bool {

@@ -12,7 +12,7 @@ async fn servers_use_canonical_crud_routes() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"address":"192.0.2.20","port":4661,"name":"local","priority":"low","static":true}"#,
+                    r#"{"address":"  192.0.2.20  ","port":4661,"name":"local","priority":"low","static":true}"#,
                 ))
                 .unwrap(),
         )

@@ -371,3 +371,93 @@ async fn shared_directories_patch_body_uses_mfc_root_validation() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn server_create_body_uses_mfc_validation() {
+    let app = test_router();
+    let cases = [
+        (r#"{}"#, "address must be a non-empty string"),
+        (
+            r#"{"address":1,"port":4661}"#,
+            "address must be a non-empty string",
+        ),
+        (
+            r#"{"address":"   ","port":4661}"#,
+            "address must not be empty",
+        ),
+        (
+            r#"{"address":"127.0.0.1"}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":"4661"}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":0}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":65536}"#,
+            "port must be in the range 1..65535",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":4661,"name":1}"#,
+            "name must be a string when provided",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":4661,"priority":1}"#,
+            "priority must be a string",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":4661,"priority":"veryhigh"}"#,
+            "priority must be one of low, normal, high",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":4661,"static":"true"}"#,
+            "static must be a boolean",
+        ),
+        (
+            r#"{"address":"127.0.0.1","port":4661,"connect":"true"}"#,
+            "connect must be a boolean",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/servers",
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn server_patch_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/servers/127.0.0.1:4661";
+    let cases = [
+        (r#"{}"#, "server PATCH requires name, priority, or static"),
+        (r#"{"name":1}"#, "name must be a string when provided"),
+        (r#"{"priority":1}"#, "priority must be a string"),
+        (
+            r#"{"priority":"release"}"#,
+            "priority must be one of low, normal, high",
+        ),
+        (r#"{"static":"true"}"#, "static must be a boolean"),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}

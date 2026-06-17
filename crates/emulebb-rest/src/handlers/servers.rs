@@ -27,6 +27,10 @@ pub(crate) async fn create_server(
         Ok(request) => request,
         Err(response) => return *response,
     };
+    let request = ServerCreate {
+        address: request.address.trim().to_string(),
+        ..request
+    };
     match state.core.add_server(request).await {
         Ok(server) => api_ok(server_response(&server)).into_response(),
         Err(error) => {
