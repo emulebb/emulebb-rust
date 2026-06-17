@@ -16,16 +16,24 @@ use emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig;
 use crate::{Preferences, PreferencesUpdate};
 
 pub(crate) fn default_preferences() -> Preferences {
+    // Defaults aligned to the master (srchybrid/Preferences.cpp +
+    // PreferenceValidationSeams.h): upload 6200 KiB/s
+    // (kDefaultConfiguredUploadLimitKiB), download 12207 KiB/s
+    // (kDefaultConfiguredDownloadLimitKiB), maxConnections 500
+    // (GetRecommendedMaxConnections), maxConnectionsPerFiveSeconds 50
+    // (GetDefaultMaxConperFive), maxSourcesPerFile 600
+    // (GetDefaultMaxSourcesPerFile), maxUploadSlots 12 (kDefaultMaxUploadSlots),
+    // queueSize 10000 (kDefaultQueueSize), elasticPercent 80.
     Preferences {
-        upload_limit_ki_bps: 1024,
-        download_limit_ki_bps: 4096,
+        upload_limit_ki_bps: 6200,
+        download_limit_ki_bps: 12207,
         max_connections: 500,
-        max_connections_per_five_seconds: 20,
-        max_sources_per_file: 400,
+        max_connections_per_five_seconds: 50,
+        max_sources_per_file: 600,
         upload_client_data_rate: 32,
-        max_upload_slots: 8,
+        max_upload_slots: 12,
         upload_slot_elastic_percent: 80,
-        queue_size: 5000,
+        queue_size: 10000,
         auto_connect: false,
         new_auto_up: true,
         new_auto_down: true,

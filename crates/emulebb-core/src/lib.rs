@@ -5866,6 +5866,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_preferences_match_the_master() {
+        // FIX 6: defaults aligned to srchybrid/Preferences.cpp +
+        // PreferenceValidationSeams.h.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let prefs = core.preferences().await;
+        assert_eq!(prefs.upload_limit_ki_bps, 6200);
+        assert_eq!(prefs.download_limit_ki_bps, 12207);
+        assert_eq!(prefs.max_connections, 500);
+        assert_eq!(prefs.max_connections_per_five_seconds, 50);
+        assert_eq!(prefs.max_sources_per_file, 600);
+        assert_eq!(prefs.max_upload_slots, 12);
+        assert_eq!(prefs.upload_slot_elastic_percent, 80);
+        assert_eq!(prefs.queue_size, 10000);
+    }
+
+    #[tokio::test]
     async fn network_kademlia_disabled_refuses_kad_bootstrap() {
         let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
         // Disable the Kademlia network (eMule thePrefs.GetNetworkKademlia() == false).
