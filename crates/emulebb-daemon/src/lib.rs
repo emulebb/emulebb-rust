@@ -465,6 +465,14 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         config.transfer_root(),
         ed2k_network,
     )?);
+    // Initial scan-on-demand pickup of the already-present shared files, then
+    // start the live auto-pickup monitor so files added/removed while the daemon
+    // runs are caught (eMule directory auto-monitor parity). The monitor is torn
+    // down by the graceful teardown's disconnect_ed2k.
+    if let Err(error) = core.reload_shared_directories().await {
+        tracing::warn!(%error, "initial shared-directory scan failed; continuing");
+    }
+    core.start_shared_directory_monitor().await;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(
