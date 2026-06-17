@@ -38,10 +38,9 @@ pub(crate) fn public_ip_block_reason(
     if cidrs.is_empty() {
         return None;
     }
-    let public_ip = public_ip?;
 
-    let public_addr = IpAddr::V4(public_ip);
     let mut found_cidr = false;
+    let public_addr = public_ip.map(IpAddr::V4);
     for token in cidrs
         .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
         .map(str::trim)
@@ -51,13 +50,17 @@ pub(crate) fn public_ip_block_reason(
         let Ok(network) = token.parse::<IpNet>() else {
             return Some(format!("invalid VPN Guard allowed public IP CIDR: {token}"));
         };
-        if network.contains(&public_addr) {
+        if public_addr.is_some_and(|addr| network.contains(&addr)) {
             return None;
         }
     }
 
-    found_cidr
-        .then(|| format!("public IP {public_ip} is outside VPN Guard allowed public IP CIDRs"))
+    if public_addr.is_none() {
+        return Some("public IP is unknown for VPN Guard allowed public IP CIDRs".to_string());
+    }
+    public_ip.and_then(|ip| {
+        found_cidr.then(|| format!("public IP {ip} is outside VPN Guard allowed public IP CIDRs"))
+    })
 }
 
 #[cfg(test)]
@@ -85,8 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn public_ip_cidr_defers_until_public_ip_is_known_and_reports_invalid_cidr() {
-        assert!(public_ip_block_reason(&guard("203.0.113.0/24"), None).is_none());
+    fn public_ip_cidr_blocks_until_public_ip_is_known_and_reports_invalid_cidr() {
+        assert!(
+            public_ip_block_reason(&guard("203.0.113.0/24"), None)
+                .unwrap()
+                .contains("public IP is unknown")
+        );
         assert!(
             public_ip_block_reason(&guard("not-a-cidr"), Some(Ipv4Addr::new(203, 0, 113, 5)))
                 .unwrap()

@@ -84,6 +84,7 @@ mod ed2k_buddy_reask;
 mod ed2k_net_drivers;
 mod ed2k_sources;
 mod kad_buddy;
+mod kad_control;
 mod kad_hello;
 mod kad_passive_replay;
 mod kad_publish_schedule;
@@ -597,23 +598,6 @@ impl EmulebbCore {
             },
             transfers: TransferStats { active, completed },
         }
-    }
-
-    pub async fn set_kad_running(&self, running: bool) {
-        self.state.lock().await.kad_running = running;
-    }
-
-    pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {
-        ensure!(!address.trim().is_empty(), "address must not be empty");
-        ensure!(port != 0, "port must be between 1 and 65535");
-        // The Kademlia network must be enabled (eMule thePrefs.GetNetworkKademlia());
-        // when off, Kad is refused / not started.
-        ensure!(
-            self.state.lock().await.preferences.network_kademlia,
-            "Kademlia network is disabled in preferences (networkKademlia=false)"
-        );
-        self.set_kad_running(true).await;
-        Ok(kad_status_from_running(self.state.lock().await.kad_running))
     }
 
     pub async fn import_kad_nodes_url(&self, url: &str) -> Result<bool> {
@@ -6064,6 +6048,39 @@ mod tests {
         .await
         .unwrap();
         assert!(core.bootstrap_kad("203.0.113.9", 4672).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn vpn_guard_blocks_kad_start_until_public_ip_is_known() {
+        let transfer_root = unique_runtime_dir("emulebb-core-vpn-guard-kad-start");
+        let mut network = test_network_config_with_store(
+            &transfer_root,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        );
+        network.vpn_guard = VpnGuardConfig {
+            enabled: true,
+            mode: "block".to_string(),
+            allowed_public_ip_cidrs: "203.0.113.0/24".to_string(),
+        };
+        network.vpn_interface_bound = true;
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+            transfer_root.join("transfers"),
+            Some(network),
+        )
+        .unwrap();
+
+        let err = core
+            .start_kad()
+            .await
+            .expect_err("Kad start must be refused until VPN Guard proves public IP");
+        assert!(err.to_string().contains("blocked by VPN guard"));
+        assert!(err.to_string().contains("public IP is unknown"));
+
+        core.ed2k_reachability.set(Ipv4Addr::new(203, 0, 113, 25));
+        assert!(core.start_kad().await.is_ok());
     }
 
     #[tokio::test]
