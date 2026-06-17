@@ -146,10 +146,13 @@ pub fn resolve_bind_ip(
     bind_interface: Option<&str>,
     bind_ip_override: Option<&str>,
 ) -> Option<String> {
-    if let Some(bind_ip) = bind_ip_override.filter(|ip| !ip.trim().is_empty()) {
+    if let Some(bind_ip) = bind_ip_override.map(str::trim).filter(|ip| !ip.is_empty()) {
         return Some(bind_ip.to_string());
     }
-    let selected_name = bind_interface?;
+    let selected_name = bind_interface?.trim();
+    if selected_name.is_empty() {
+        return None;
+    }
     interfaces
         .iter()
         .find(|iface| iface.name.trim().eq_ignore_ascii_case(selected_name))
@@ -296,7 +299,7 @@ mod tests {
         let interfaces = vec![iface("hide.me", true, false, "10.10.10.2")];
 
         assert_eq!(
-            resolve_bind_ip(&interfaces, Some("hide.me"), Some("10.99.99.2")).as_deref(),
+            resolve_bind_ip(&interfaces, Some("hide.me"), Some(" 10.99.99.2 ")).as_deref(),
             Some("10.99.99.2")
         );
     }
@@ -306,7 +309,7 @@ mod tests {
         let interfaces = vec![iface("hide.me", true, false, "10.10.10.2")];
 
         assert_eq!(
-            resolve_bind_ip(&interfaces, Some("HIDE.ME"), None).as_deref(),
+            resolve_bind_ip(&interfaces, Some(" HIDE.ME "), None).as_deref(),
             Some("10.10.10.2")
         );
     }
