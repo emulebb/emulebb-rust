@@ -19,6 +19,8 @@ emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 hex = "0.4"
 md4 = "0.10"
+notify.workspace = true
+notify-debouncer-full.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
