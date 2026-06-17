@@ -16,6 +16,9 @@ pub use routes::{router, router_with_shutdown};
 #[cfg(test)]
 #[path = "tests/app.rs"]
 mod app_tests;
+#[cfg(test)]
+#[path = "tests/servers.rs"]
+mod server_tests;
 
 // Re-exported at the crate root so the sibling modules can reach the shared
 // dto types and the upload list helper via `crate::...` paths.
