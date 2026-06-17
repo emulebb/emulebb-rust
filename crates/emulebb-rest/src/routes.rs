@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    body::{Body, HttpBody},
+    body::{Body, HttpBody, to_bytes},
     extract::State,
     http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
@@ -260,8 +260,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/logs/operations/clear", post(clear_logs))
         .fallback(fallback)
         .layer(middleware::map_response(rewrite_method_not_allowed))
-        .layer(middleware::from_fn(validate_query_whitelist))
-        .layer(middleware::from_fn(validate_json_content_type))
+        .layer(middleware::from_fn(validate_route_metadata))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -297,24 +296,73 @@ async fn fallback() -> impl IntoResponse {
     api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "API route not found")
 }
 
-async fn validate_json_content_type(request: Request<Body>, next: Next) -> Response {
+async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().as_str();
+    let path = request.uri().path();
+    let Some(allowed_query_fields) = route_query_fields(method, path) else {
+        return next.run(request).await;
+    };
+    if let Some(query) = request.uri().query() {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+            if !allowed_query_fields.contains(&name) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    format!("unknown JSON field: {name}"),
+                )
+                .into_response();
+            }
+        }
+    }
     if request.body().size_hint().upper() == Some(0) {
         return next.run(request).await;
     }
-    let content_type = request
+
+    let is_delete = method == "DELETE";
+    let is_json_content = request
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if is_json_content_type(content_type) {
-        return next.run(request).await;
+        .is_some_and(is_json_content_type);
+
+    let (parts, body) = request.into_parts();
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                format!("invalid request body: {error}"),
+            )
+            .into_response();
+        }
+    };
+
+    if !is_ascii_whitespace_only(&body) {
+        if is_delete {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "DELETE request bodies are not supported",
+            )
+            .into_response();
+        }
+        if !is_json_content {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "Content-Type must be application/json for JSON request bodies",
+            )
+            .into_response();
+        }
     }
-    api_error(
-        StatusCode::BAD_REQUEST,
-        "INVALID_ARGUMENT",
-        "Content-Type must be application/json for JSON request bodies",
-    )
-    .into_response()
+
+    let request = Request::from_parts(parts, Body::from(body));
+    next.run(request).await
 }
 
 fn is_json_content_type(content_type: &str) -> bool {
@@ -325,30 +373,8 @@ fn is_json_content_type(content_type: &str) -> bool {
         .eq_ignore_ascii_case("application/json")
 }
 
-async fn validate_query_whitelist(request: Request<Body>, next: Next) -> Response {
-    let method = request.method().as_str();
-    let path = request.uri().path();
-    let Some(allowed) = route_query_fields(method, path) else {
-        return next.run(request).await;
-    };
-    let Some(query) = request.uri().query() else {
-        return next.run(request).await;
-    };
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
-        if !allowed.contains(&name) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_ARGUMENT",
-                format!("unknown JSON field: {name}"),
-            )
-            .into_response();
-        }
-    }
-    next.run(request).await
+fn is_ascii_whitespace_only(body: &[u8]) -> bool {
+    body.iter().all(|byte| byte.is_ascii_whitespace())
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

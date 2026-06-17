@@ -137,6 +137,99 @@ async fn json_body_requires_json_content_type() {
 }
 
 #[tokio::test]
+async fn delete_routes_reject_request_bodies_after_route_query_validation() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/searches?confirm=true")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        value["error"]["message"],
+        "DELETE request bodies are not supported"
+    );
+
+    let without_content_type = test_router()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/searches?confirm=true")
+                .header("X-API-Key", "secret")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(without_content_type.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(without_content_type.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["error"]["message"],
+        "DELETE request bodies are not supported"
+    );
+
+    let query_error = test_router()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/searches?unsupportedQuery=true")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(query_error.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(query_error.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["error"]["message"],
+        "unknown JSON field: unsupportedQuery"
+    );
+
+    let unknown_route = test_router()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/unknown")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_route.status(), StatusCode::NOT_FOUND);
+
+    let method_not_allowed = test_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/app")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "text/plain")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(method_not_allowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn query_routes_use_canonical_error_envelope() {
     let cases = [
         ("GET", "/api/v1/snapshot?unsupportedQuery=true"),
