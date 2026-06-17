@@ -32,6 +32,19 @@ impl MetadataStore {
     pub fn from_connection(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Crash-consistency: WAL's default `synchronous = NORMAL` does NOT fsync
+        // the WAL on every commit, so a committed transfer-manifest transaction
+        // (e.g. a piece marked Verified) can reach SQLite's cache while the
+        // matching payload bytes are still in the OS cache. On an OS crash /
+        // power loss this lets the manifest outrace the on-disk bytes and would
+        // resurrect a "Verified" range whose bytes are stale/zero. FULL fsyncs
+        // the WAL on commit so a committed manifest state is durable. Paired
+        // with `sync_all()` on the payload before the piece-complete checkpoint
+        // commit, neither side can outrace the other.
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        // Defensive: bound contention waits instead of failing immediately with
+        // SQLITE_BUSY (the persistence audit flagged the absent busy_timeout).
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let mut store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -456,6 +469,24 @@ mod tests {
         let store = MetadataStore::in_memory().unwrap();
         assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
         assert_eq!(store.table_count("profile").unwrap(), 1);
+    }
+
+    #[test]
+    fn connection_enables_durable_synchronous_and_busy_timeout() {
+        // Crash-consistency guard: WAL alone defaults to synchronous = NORMAL,
+        // which does not fsync the WAL on commit and would let a committed
+        // transfer-manifest state outrace the on-disk payload bytes. The store
+        // must raise it to FULL (2) and set a defensive busy_timeout.
+        let store = MetadataStore::in_memory().unwrap();
+        let conn = store.connection().unwrap();
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2, "synchronous must be FULL (2)");
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000, "busy_timeout must be 5000ms");
     }
 
     #[test]

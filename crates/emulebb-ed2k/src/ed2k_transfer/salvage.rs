@@ -207,7 +207,23 @@ impl Ed2kTransferRuntime {
         use tokio::io::{AsyncSeekExt, AsyncWriteExt};
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
-        file.flush().await?;
+
+        // Mid-salvage blocks stay flush()-only (userspace -> OS) for speed; the
+        // block that completes the part is fsync'd so the payload bytes are
+        // durable on disk BEFORE the manifest checkpoint commit can mark the
+        // part Verified. This keeps a durable "Verified" manifest state from
+        // outracing the on-disk bytes on an OS crash / power loss, mirroring the
+        // contiguous append_piece_block piece-complete fsync.
+        let completes_part = {
+            let mut probe = bitmap.clone();
+            probe.set_present(block_idx);
+            probe.all_present()
+        };
+        if completes_part {
+            file.sync_all().await?;
+        } else {
+            file.flush().await?;
+        }
         drop(file);
 
         bitmap.set_present(block_idx);

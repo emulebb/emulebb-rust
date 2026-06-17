@@ -314,7 +314,13 @@ impl Ed2kTransferRuntime {
         let mut outcome = PieceWriteOutcome::Incomplete;
         let mut checkpoint_reason = None;
         if next_piece_bytes_written == expected_piece_len {
-            file.flush().await?;
+            // Piece-complete boundary: fsync the payload to disk (not just a
+            // userspace flush) BEFORE the manifest checkpoint commit below marks
+            // it Verified, so a durable "Verified" manifest state can never
+            // outrace the on-disk bytes on an OS crash / power loss (matches
+            // eMule, which fsyncs the .part file on flush). This is the only
+            // per-piece fsync; mid-piece blocks stay flush()-only for speed.
+            file.sync_all().await?;
             let mut piece_bytes = vec![0u8; usize::try_from(expected_piece_len).unwrap_or(0)];
             drop(file);
             let mut read_file = tokio::fs::OpenOptions::new()
