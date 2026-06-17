@@ -74,6 +74,30 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /capabilities:
+    get:
+      tags: [App]
+      summary: Return contract version and advertised capability tokens.
+      operationId: getCapabilities
+      responses:
+        "200":
+          $ref: "#/components/responses/CapabilityDiscoveryResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowedResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /app/preferences:
     get:
       tags: [App]
@@ -2585,6 +2609,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/BulkOperationEnvelope"
+    CapabilityDiscoveryResponse:
+      description: Capability discovery envelope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CapabilityDiscoveryEnvelope"
     CategoryListResponse:
       description: Category collection envelope.
       content:
@@ -2954,6 +2984,14 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/App"
+    CapabilityDiscoveryEnvelope:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/CapabilityDiscovery"
     EnvelopeBase:
       type: object
       additionalProperties: false
@@ -3013,6 +3051,22 @@ components:
           type: object
           additionalProperties:
             type: boolean
+    CapabilityDiscovery:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, apiVersion, capabilities]
+      properties:
+        contractVersion:
+          type: string
+          description: Independent `/api/v1` contract version from `info.x-contract-version`.
+          example: "1.0.0"
+        apiVersion:
+          type: string
+          example: "1"
+        capabilities:
+          type: array
+          items:
+            type: string
     AppLifecycle:
       type: object
       additionalProperties: false

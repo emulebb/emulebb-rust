@@ -22,6 +22,10 @@ pub(crate) async fn app(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(app_info_response(state.core.app_info()))
 }
 
+pub(crate) async fn capabilities(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(capabilities_response(state.core.app_info()))
+}
+
 pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
     let request = match parse_required_json_body::<ShutdownRequest>(&body) {
         Ok(request) => request,

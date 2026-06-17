@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 
 use crate::{BulkOperationResult, RestState, SearchResultsPage, SharedFileResponse};
 
+const CONTRACT_VERSION: &str = "1.0.0";
+
 pub(crate) fn lifecycle_response(lifecycle: &AppLifecycle) -> Value {
     let shutdown = lifecycle.state == "shuttingdown" || lifecycle.state == "done";
     json!({
@@ -42,6 +44,14 @@ pub(crate) fn app_info_response(app: AppInfo) -> Value {
         "platform": if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" },
         "lifecycle": lifecycle_response(&app.lifecycle),
         "capabilities": capabilities
+    })
+}
+
+pub(crate) fn capabilities_response(app: AppInfo) -> Value {
+    json!({
+        "contractVersion": CONTRACT_VERSION,
+        "apiVersion": app.api_version,
+        "capabilities": app.capabilities
     })
 }
 

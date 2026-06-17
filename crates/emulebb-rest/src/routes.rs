@@ -40,6 +40,7 @@ pub fn router_with_shutdown(
     };
     Router::new()
         .route("/api/v1/app", get(app))
+        .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/app/shutdown", post(shutdown_app))
         .route("/api/v1/diagnostics/dumps", post(capture_diagnostic_dump))
         .route(
@@ -317,4 +318,3 @@ async fn rewrite_method_not_allowed(response: Response) -> Response {
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(body))
 }
-
