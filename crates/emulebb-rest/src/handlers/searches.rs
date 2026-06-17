@@ -75,7 +75,7 @@ pub(crate) async fn delete_search(
     Path(search_id): Path<String>,
 ) -> impl IntoResponse {
     match state.core.delete_search(&search_id).await {
-        Ok(true) => api_ok(json!({ "deleted": true })).into_response(),
+        Ok(true) => api_ok(json!({ "ok": true })).into_response(),
         Ok(false) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "search not found").into_response()
         }
