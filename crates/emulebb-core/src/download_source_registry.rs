@@ -1,9 +1,22 @@
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,
+    time::{Duration, Instant},
 };
 
 use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
+
+/// Liveness TTL for a per-file source candidate. A candidate is "live" while it
+/// was last refreshed (re-seen on a requery / source-exchange round) within this
+/// window; older candidates are stale and excluded from the per-file source
+/// count and pruned opportunistically. Chosen on the order of the source
+/// requery/reask window (eMule re-asks/requeries a source's availability on the
+/// order of tens of minutes) so an actively-tracked live source stays counted
+/// across rounds while a source not seen for an hour ages out. Without this the
+/// per-file count grew monotonically with every distinct peer ever seen, so a
+/// long-lived transfer eventually hit the soft per-file cap on dead candidates
+/// and stopped engaging new live sources (and the `peers` map grew unbounded).
+const CANDIDATE_LIVENESS_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// File-scoped source candidate retained by the peer-centric download registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +26,10 @@ pub(crate) struct DownloadSourceCandidate {
     pub needed_parts: u32,
     pub rare_parts: u32,
     pub source: Ed2kFoundSource,
+    /// When this candidate was last added/refreshed. Stamped by
+    /// [`DownloadSourceRegistry::add_candidate`]; the value supplied at
+    /// construction is overwritten, so callers may use any placeholder.
+    pub last_seen: Instant,
 }
 
 /// In-memory source registry that derives A4AF state from peer ownership.
@@ -23,7 +40,8 @@ pub(crate) struct DownloadSourceRegistry {
 }
 
 impl DownloadSourceRegistry {
-    pub(crate) fn add_candidate(&mut self, candidate: DownloadSourceCandidate) {
+    pub(crate) fn add_candidate(&mut self, now: Instant, mut candidate: DownloadSourceCandidate) {
+        candidate.last_seen = now;
         let candidates = self
             .peers
             .entry(DownloadPeerKey::from_source(&candidate.source))
@@ -38,6 +56,18 @@ impl DownloadSourceRegistry {
         }
     }
 
+    /// Drop every candidate not seen within [`CANDIDATE_LIVENESS_TTL`] of `now`
+    /// and forget peers left with no candidates, so the `peers` map stays bounded
+    /// over many requery rounds (it otherwise grew with every distinct peer ever
+    /// seen). Leases are untouched: a leased (engaged/detached) source is being
+    /// actively worked and its lease is released through its own lifecycle.
+    pub(crate) fn prune_stale_candidates(&mut self, now: Instant) {
+        self.peers.retain(|_, candidates| {
+            candidates.retain(|candidate| !is_stale(candidate, now));
+            !candidates.is_empty()
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn candidate_count_for_peer(&self, source: &Ed2kFoundSource) -> usize {
         self.peers
@@ -49,16 +79,19 @@ impl DownloadSourceRegistry {
         self.peers.values().map(Vec::len).sum()
     }
 
-    /// Number of distinct source candidates registered for `file_hash` across
-    /// all peers. This is the per-file source count the download coordinator
-    /// checks against the soft/UDP per-file caps (eMule
-    /// `CPartFile::GetSourceCount`). The same per-file source state A4AF-lite
-    /// will later read to bias selection across files.
-    pub(crate) fn candidate_count_for_file(&self, file_hash: &str) -> usize {
+    /// Number of CURRENTLY-LIVE source candidates registered for `file_hash`
+    /// across all peers, i.e. those refreshed within [`CANDIDATE_LIVENESS_TTL`]
+    /// of `now`. This is the per-file source count the download coordinator checks
+    /// against the soft/UDP per-file caps (eMule `CPartFile::GetSourceCount`):
+    /// counting only live candidates keeps the cap a measure of how many live
+    /// sources we are tracking for this file rather than how many distinct peers
+    /// were ever seen, so a long-lived transfer keeps accepting fresh sources.
+    /// The same per-file source state A4AF-lite reads to bias selection.
+    pub(crate) fn candidate_count_for_file(&self, now: Instant, file_hash: &str) -> usize {
         self.peers
             .values()
             .flat_map(|candidates| candidates.iter())
-            .filter(|candidate| candidate.file_hash == file_hash)
+            .filter(|candidate| candidate.file_hash == file_hash && !is_stale(candidate, now))
             .count()
     }
 
@@ -161,6 +194,12 @@ impl DownloadPeerKey {
     }
 }
 
+/// Whether `candidate` has not been refreshed within [`CANDIDATE_LIVENESS_TTL`]
+/// of `now` (a saturating elapsed so a future `last_seen` never reads as stale).
+fn is_stale(candidate: &DownloadSourceCandidate, now: Instant) -> bool {
+    now.saturating_duration_since(candidate.last_seen) > CANDIDATE_LIVENESS_TTL
+}
+
 fn candidate_score(candidate: &&DownloadSourceCandidate) -> (u32, u32, u32) {
     (
         candidate.file_priority,
@@ -172,24 +211,26 @@ fn candidate_score(candidate: &&DownloadSourceCandidate) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::time::{Duration, Instant};
 
     use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
     use emulebb_kad_proto::Ed2kHash;
 
-    use super::{DownloadSourceCandidate, DownloadSourceRegistry};
+    use super::{CANDIDATE_LIVENESS_TTL, DownloadSourceCandidate, DownloadSourceRegistry};
 
     #[test]
     fn registry_derives_a4af_candidates_from_peer_fanout() {
         let source = source_with_hash([0x11; 16]);
         let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
 
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             1,
             1,
             source.clone(),
         ));
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             2,
             1,
@@ -204,13 +245,14 @@ mod tests {
     fn registry_leases_one_file_per_peer_and_prefers_best_candidate() {
         let source = source_with_hash([0x22; 16]);
         let mut registry = DownloadSourceRegistry::default();
-        registry.add_candidate(candidate(
+        let now = Instant::now();
+        registry.add_candidate(now, candidate(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             1,
             10,
             source.clone(),
         ));
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             5,
             1,
@@ -239,13 +281,14 @@ mod tests {
     fn registry_defers_when_peer_is_better_for_another_file() {
         let source = source_with_hash([0x33; 16]);
         let mut registry = DownloadSourceRegistry::default();
-        registry.add_candidate(candidate(
+        let now = Instant::now();
+        registry.add_candidate(now, candidate(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             1,
             10,
             source.clone(),
         ));
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             5,
             1,
@@ -268,21 +311,22 @@ mod tests {
     fn registry_swap_target_picks_best_other_wanted_file_and_skips_current() {
         let source = source_with_hash([0x55; 16]);
         let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
         // Peer serves three files: current (a), a low-priority other (b), and a
         // high-priority other (c). The NNP swap must pick c over b and never a.
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9,
             9,
             source.clone(),
         ));
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             1,
             1,
             source.clone(),
         ));
-        registry.add_candidate(candidate(
+        registry.add_candidate(now, candidate(
             "cccccccccccccccccccccccccccccccc",
             5,
             1,
@@ -299,7 +343,8 @@ mod tests {
     fn registry_swap_target_is_none_when_peer_serves_only_the_current_file() {
         let source = source_with_hash([0x66; 16]);
         let mut registry = DownloadSourceRegistry::default();
-        registry.add_candidate(candidate(
+        let now = Instant::now();
+        registry.add_candidate(now, candidate(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9,
             9,
@@ -311,6 +356,52 @@ mod tests {
                 .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stale_candidates_age_out_of_the_per_file_count_and_are_pruned() {
+        // A long-lived file sees many distinct peers over time. Without a liveness
+        // TTL the per-file count grew monotonically with every peer ever seen and
+        // the file eventually stopped accepting new live sources. The TTL-filtered
+        // count must reflect only currently-live candidates, and prune must keep
+        // the map bounded.
+        let mut registry = DownloadSourceRegistry::default();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let t0 = Instant::now();
+
+        // A dead source registered long ago.
+        registry.add_candidate(t0, candidate(file, 5, 1, source_with_endpoint(0x01, 41100)));
+
+        // A fresh source registered well past the TTL: only it is still live.
+        let later = t0 + CANDIDATE_LIVENESS_TTL + Duration::from_secs(1);
+        registry.add_candidate(later, candidate(file, 5, 1, source_with_endpoint(0x02, 41101)));
+
+        // The stale candidate is excluded from the live per-file count.
+        assert_eq!(
+            registry.candidate_count_for_file(later, file),
+            1,
+            "stale candidate must not count toward the per-file soft cap"
+        );
+        // Both rows still exist until a prune runs.
+        assert_eq!(registry.candidate_count(), 2);
+
+        // Pruning drops the stale candidate so the map stays bounded.
+        registry.prune_stale_candidates(later);
+        assert_eq!(registry.candidate_count(), 1);
+        assert_eq!(registry.candidate_count_for_file(later, file), 1);
+
+        // A still-fresh candidate keeps counting (a re-seen live source survives).
+        let refreshed = later + Duration::from_secs(1);
+        registry.add_candidate(refreshed, candidate(file, 5, 1, source_with_endpoint(0x02, 41101)));
+        assert_eq!(registry.candidate_count_for_file(refreshed, file), 1);
+    }
+
+    fn source_with_endpoint(last_octet: u8, tcp_port: u16) -> Ed2kFoundSource {
+        let mut source = source_with_hash([last_octet; 16]);
+        source.ip = Ipv4Addr::new(198, 51, 100, last_octet);
+        source.tcp_port = tcp_port;
+        source.client_id = u32::from_be_bytes(source.ip.octets());
+        source
     }
 
     fn candidate(
@@ -325,6 +416,8 @@ mod tests {
             needed_parts: 4,
             rare_parts,
             source,
+            // Overwritten by add_candidate; placeholder only.
+            last_seen: Instant::now(),
         }
     }
 

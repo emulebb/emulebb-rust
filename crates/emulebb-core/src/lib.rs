@@ -3096,15 +3096,20 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         let mut acquired = Vec::new();
         let mut deferred = 0usize;
+        // Opportunistic prune so the per-file count (and the candidate map) reflect
+        // only live sources: stale candidates age out of the soft-cap check and the
+        // map stays bounded over many requery rounds.
+        let now = Instant::now();
+        state.download_source_registry.prune_stale_candidates(now);
         // Per-file source cap (eMule GetMaxSourcePerFileSoft > GetSourceCount):
         // a file stops engaging new sources past its soft cap. The coordinator
         // (on the transfer runtime) owns the cap; the per-file source count
-        // comes from the registry.
+        // comes from the registry (live candidates only).
         for source in sources {
             let endpoint = source_endpoint_key(source);
             let file_source_count = state
                 .download_source_registry
-                .candidate_count_for_file(file_hash);
+                .candidate_count_for_file(now, file_hash);
             if !self.ed2k_transfers.can_engage_file_source(file_source_count) {
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
@@ -3142,15 +3147,17 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         let file_priority = download_priority_score(&transfer.priority);
         let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
+        let now = Instant::now();
         for source in sources {
             state
                 .download_source_registry
-                .add_candidate(DownloadSourceCandidate {
+                .add_candidate(now, DownloadSourceCandidate {
                     file_hash: transfer.hash.clone(),
                     file_priority,
                     needed_parts,
                     rare_parts: 0,
                     source: source.clone(),
+                    last_seen: now,
                 });
         }
     }
@@ -7711,21 +7718,23 @@ mod tests {
             let mut state = core.state.lock().await;
             state
                 .download_source_registry
-                .add_candidate(DownloadSourceCandidate {
+                .add_candidate(Instant::now(), DownloadSourceCandidate {
                     file_hash: lower_hash.clone(),
                     file_priority: 1,
                     needed_parts: 8,
                     rare_parts: 0,
                     source: source.clone(),
+                    last_seen: Instant::now(),
                 });
             state
                 .download_source_registry
-                .add_candidate(DownloadSourceCandidate {
+                .add_candidate(Instant::now(), DownloadSourceCandidate {
                     file_hash: higher_hash.clone(),
                     file_priority: 9,
                     needed_parts: 1,
                     rare_parts: 0,
                     source: source.clone(),
+                    last_seen: Instant::now(),
                 });
         }
 
@@ -7762,12 +7771,13 @@ mod tests {
             let mut state = core.state.lock().await;
             state
                 .download_source_registry
-                .add_candidate(DownloadSourceCandidate {
+                .add_candidate(Instant::now(), DownloadSourceCandidate {
                     file_hash: file_hash.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 0,
                     source: source.clone(),
+                    last_seen: Instant::now(),
                 });
         }
 
@@ -7861,12 +7871,13 @@ mod tests {
             for (hash, priority) in [(&file_a, 9u32), (&file_b, 3u32)] {
                 state
                     .download_source_registry
-                    .add_candidate(DownloadSourceCandidate {
+                    .add_candidate(Instant::now(), DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: priority,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
+                        last_seen: Instant::now(),
                     });
             }
         }
@@ -7924,12 +7935,13 @@ mod tests {
             for hash in [&current, &other] {
                 state
                     .download_source_registry
-                    .add_candidate(DownloadSourceCandidate {
+                    .add_candidate(Instant::now(), DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: 5,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
+                        last_seen: Instant::now(),
                     });
             }
         }
@@ -7955,12 +7967,13 @@ mod tests {
             let mut state = core.state.lock().await;
             state
                 .download_source_registry
-                .add_candidate(DownloadSourceCandidate {
+                .add_candidate(Instant::now(), DownloadSourceCandidate {
                     file_hash: current.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 1,
                     source: source.clone(),
+                    last_seen: Instant::now(),
                 });
         }
 
@@ -7990,12 +8003,13 @@ mod tests {
             for hash in [&current, &other] {
                 state
                     .download_source_registry
-                    .add_candidate(DownloadSourceCandidate {
+                    .add_candidate(Instant::now(), DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: 5,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
+                        last_seen: Instant::now(),
                     });
             }
         }
