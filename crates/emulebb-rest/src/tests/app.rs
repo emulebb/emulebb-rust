@@ -82,3 +82,39 @@ async fn capabilities_returns_contract_version_and_capability_list() {
             .any(|capability| capability == "rest.emulebb.v1")
     );
 }
+
+#[tokio::test]
+async fn snapshot_limit_clamps_like_master() {
+    let zero_response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/snapshot?limit=0")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(zero_response.status(), StatusCode::OK);
+
+    let large_response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/snapshot?limit=5000")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(large_response.status(), StatusCode::OK);
+    let body = to_bytes(large_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert!(value["data"]["transfers"].as_array().unwrap().len() <= 1000);
+    assert!(value["data"]["sharedFiles"].as_array().unwrap().len() <= 1000);
+    assert!(value["data"]["uploads"].as_array().unwrap().len() <= 1000);
+    assert!(value["data"]["uploadQueue"].as_array().unwrap().len() <= 1000);
+    assert!(value["data"]["logs"].as_array().unwrap().len() <= 1000);
+}

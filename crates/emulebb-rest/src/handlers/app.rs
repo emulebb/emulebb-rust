@@ -132,10 +132,7 @@ pub(crate) async fn snapshot(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let limit = match snapshot_limit(query.limit) {
-        Ok(limit) => limit,
-        Err(response) => return *response,
-    };
+    let limit = snapshot_limit(query.limit);
     let status = status_response(&state).await;
     let network = state.core.network_binding_status();
     let kad = kad_response(
