@@ -45,12 +45,22 @@ impl MetadataStore {
             .map_err(|_| anyhow::anyhow!("metadata database mutex poisoned"))
     }
 
+    /// Bring the on-disk schema to the current version WITHOUT destroying user
+    /// data on an upgrade.
+    ///
+    /// - A marked database (the `metadata_schema` table exists) is migrated in
+    ///   place via the ordered, idempotent ladder in [`crate::migrations`]:
+    ///   equal version opens as-is, an older version is stepped up to current,
+    ///   and a NEWER-than-this-build version makes [`migrate_to_current`] refuse
+    ///   to open rather than wipe a database it does not understand.
+    /// - An unmarked database that already has user tables is a genuinely
+    ///   foreign/legacy file; resetting it is the only place a destructive
+    ///   recreate is still acceptable.
+    /// - An empty database is created fresh at the current version.
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
-            if self.schema_marker_matches()? {
-                return Ok(());
-            }
-            self.reset_schema()?;
+            let mut conn = self.connection()?;
+            crate::migrations::migrate_to_current(&mut conn)?;
             return Ok(());
         }
         if self.has_user_tables()? {
@@ -84,18 +94,6 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         Ok(count != 0)
-    }
-
-    fn schema_marker_matches(&self) -> Result<bool> {
-        let marker = self
-            .connection()?
-            .query_row(
-                "SELECT schema_version FROM metadata_schema WHERE schema_id = ?1",
-                params![SCHEMA_ID],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        Ok(marker == Some(SCHEMA_VERSION))
     }
 
     fn reset_schema(&mut self) -> Result<()> {

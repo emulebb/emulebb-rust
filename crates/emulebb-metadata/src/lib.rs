@@ -4,6 +4,7 @@ mod identity_model;
 mod identity_store;
 mod kad_publish_model;
 mod kad_publish_store;
+mod migrations;
 mod model;
 mod peer_model;
 mod peer_store;
