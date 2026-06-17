@@ -270,6 +270,73 @@ async fn search_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
+async fn preferences_patch_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/app/preferences";
+    let cases = [
+        (
+            r#"{}"#,
+            "preferences PATCH requires at least one preference",
+        ),
+        (
+            r#"{"uploadLimitKiBps":0}"#,
+            "uploadLimitKiBps must be an unsigned number in the range 1..4294967294",
+        ),
+        (
+            r#"{"downloadLimitKiBps":4294967295}"#,
+            "downloadLimitKiBps must be an unsigned number in the range 1..4294967294",
+        ),
+        (
+            r#"{"maxConnections":"1"}"#,
+            "maxConnections must be an unsigned number in the range 1..2147483647",
+        ),
+        (
+            r#"{"maxConnectionsPerFiveSeconds":0}"#,
+            "maxConnectionsPerFiveSeconds must be an unsigned number in the range 1..2147483647",
+        ),
+        (
+            r#"{"maxSourcesPerFile":2147483648}"#,
+            "maxSourcesPerFile must be an unsigned number in the range 1..2147483647",
+        ),
+        (
+            r#"{"uploadClientDataRate":0}"#,
+            "uploadClientDataRate must be an unsigned number in the range 1..4294967295",
+        ),
+        (
+            r#"{"maxUploadSlots":65}"#,
+            "maxUploadSlots must be an unsigned number in the range 1..64",
+        ),
+        (
+            r#"{"uploadSlotElasticPercent":101}"#,
+            "uploadSlotElasticPercent must be an unsigned number in the range 0..100",
+        ),
+        (
+            r#"{"queueSize":1999}"#,
+            "queueSize must be an unsigned number in the range 2000..10000",
+        ),
+        (
+            r#"{"networkEd2k":"false"}"#,
+            "networkEd2k must be a boolean",
+        ),
+        (
+            r#"{"downloadAutoBroadbandIo":1}"#,
+            "downloadAutoBroadbandIo must be a boolean",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";

@@ -1,5 +1,6 @@
 //! Route-specific REST JSON body validators.
 
+mod preferences;
 mod search;
 
 use axum::response::Response;
@@ -10,6 +11,12 @@ const MAX_TRANSFER_ADD_LINKS: usize = 100;
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     search::validate_search_create_body_fields(object)
+}
+
+pub(super) fn validate_preferences_patch_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    preferences::validate_preferences_patch_body_fields(object)
 }
 
 pub(super) fn validate_transfer_add_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {

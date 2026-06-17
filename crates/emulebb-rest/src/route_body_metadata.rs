@@ -15,11 +15,12 @@ use crate::envelope::{api_error, json_error_message};
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
     validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
-    validate_paused_body_field, validate_search_create_body_fields,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
-    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
-    validate_transfer_patch_body_fields, validate_url_import_body_fields,
+    validate_paused_body_field, validate_preferences_patch_body_fields,
+    validate_search_create_body_fields, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
+    validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
+    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -103,6 +104,9 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return validate_shared_directories_patch_body_fields(object);
     }
+    if method == "PATCH" && path == "/api/v1/app/preferences" {
+        return validate_preferences_patch_body_fields(object);
+    }
     if method == "POST" && path == "/api/v1/servers" {
         return validate_server_create_body_fields(object);
     }
@@ -140,6 +144,25 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
     const SHARED_FILE_ADD: &[&str] = &["path"];
     const SHARED_DIRECTORIES_PATCH: &[&str] = &["roots", "confirmReplaceRoots"];
+    const PREFERENCES_PATCH: &[&str] = &[
+        "uploadLimitKiBps",
+        "downloadLimitKiBps",
+        "maxConnections",
+        "maxConnectionsPerFiveSeconds",
+        "maxSourcesPerFile",
+        "uploadClientDataRate",
+        "maxUploadSlots",
+        "uploadSlotElasticPercent",
+        "queueSize",
+        "autoConnect",
+        "newAutoUp",
+        "newAutoDown",
+        "creditSystem",
+        "safeServerConnect",
+        "networkKademlia",
+        "networkEd2k",
+        "downloadAutoBroadbandIo",
+    ];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
     const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
@@ -164,6 +187,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "PATCH" && path == "/api/v1/shared-directories" {
         return Some(SHARED_DIRECTORIES_PATCH);
+    }
+    if method == "PATCH" && path == "/api/v1/app/preferences" {
+        return Some(PREFERENCES_PATCH);
     }
     if method == "POST" && path == "/api/v1/servers" {
         return Some(SERVER_CREATE);
