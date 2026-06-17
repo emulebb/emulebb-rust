@@ -9,8 +9,8 @@ use crate::{
         PeerSourceExchangeRequest, begin_secure_ident_probe, dump_ed2k_tcp_download_meta,
         dump_ed2k_tcp_download_send, encode_aich_file_hash_request, encode_hashset_request,
         encode_hashset_request2, encode_multipacket_ext2_request, encode_multipacket_request,
-        encode_request_filename, encode_request_sources, encode_request_sources2,
-        encode_set_req_file_id, encode_start_upload_req,
+        encode_request_filename, encode_request_sources2, encode_set_req_file_id,
+        encode_start_upload_req,
     },
     ed2k_transfer::{ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime},
 };
@@ -144,19 +144,19 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         session_state.startup_file_requests_sent = true;
     }
 
+    // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
+    // omission): only request sources from an SX2-capable peer via
+    // OP_REQUESTSOURCES2. We never send the legacy SX1 OP_REQUESTSOURCES, so a
+    // peer that advertised only SX1 is not asked for sources.
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.source_request_sent
         && !waiting_for_peer_secure_ident
         && !session_state.remote_supports_file_identifiers
         && session_state.source_exchange_allowed
-        && session_state.remote_supports_source_exchange
+        && session_state.remote_supports_source_exchange2
     {
-        let source_request = if session_state.remote_supports_source_exchange2 {
-            encode_request_sources2(file_hash)
-        } else {
-            encode_request_sources(file_hash)
-        };
+        let source_request = encode_request_sources2(file_hash);
         dump_ed2k_tcp_download_send(
             peer_addr,
             transport.mode,
@@ -282,13 +282,48 @@ pub(super) fn hashset_request_stalled(session_state: &DownloadSessionState) -> b
 fn source_exchange_request_for_peer(
     session_state: &DownloadSessionState,
 ) -> PeerSourceExchangeRequest {
-    if !session_state.source_exchange_allowed {
-        PeerSourceExchangeRequest::None
-    } else if session_state.remote_supports_source_exchange2 {
+    // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
+    // omission): request sources only from an SX2-capable peer. A peer that
+    // advertised only the legacy SX1 is never asked (no V1 fallback).
+    if session_state.source_exchange_allowed && session_state.remote_supports_source_exchange2 {
         PeerSourceExchangeRequest::V2
-    } else if session_state.remote_supports_source_exchange {
-        PeerSourceExchangeRequest::V1
     } else {
         PeerSourceExchangeRequest::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(sx1: bool, sx2: bool, allowed: bool) -> DownloadSessionState {
+        let mut s = DownloadSessionState::new(true, false, allowed, None);
+        s.remote_supports_source_exchange = sx1;
+        s.remote_supports_source_exchange2 = sx2;
+        s
+    }
+
+    #[test]
+    fn source_exchange_request_is_sx2_only() {
+        // SX2-capable peer -> request V2 (REF-002: SX2-only).
+        assert_eq!(
+            source_exchange_request_for_peer(&state(true, true, true)),
+            PeerSourceExchangeRequest::V2
+        );
+        // SX1-only peer -> never asked (no V1 fallback).
+        assert_eq!(
+            source_exchange_request_for_peer(&state(true, false, true)),
+            PeerSourceExchangeRequest::None
+        );
+        // No source exchange at all -> None.
+        assert_eq!(
+            source_exchange_request_for_peer(&state(false, false, true)),
+            PeerSourceExchangeRequest::None
+        );
+        // Source exchange not allowed (already requested) -> None even for SX2.
+        assert_eq!(
+            source_exchange_request_for_peer(&state(true, true, false)),
+            PeerSourceExchangeRequest::None
+        );
     }
 }

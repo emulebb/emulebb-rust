@@ -15,7 +15,7 @@ use crate::{
 use super::super::super::codec::{
     SourceExchangePeer, decode_exact_file_hash_payload, decode_file_hash_payload,
     decode_hashset_request2, decode_request_sources_payload, encode_aich_file_hash_answer,
-    encode_answer_sources, encode_answer_sources2, encode_file_req_ans_nofil, encode_file_status,
+    encode_answer_sources2, encode_file_req_ans_nofil, encode_file_status,
     encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
     encode_file_desc, encode_multipacket_ext2_answer, encode_request_filename_answer,
     skip_request_filename_ext_info, source_exchange_entry_count,
@@ -63,13 +63,9 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                 include_status = true;
             }
             OP_REQUESTSOURCES => {
-                let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
-                let reply = encode_answer_sources(&requested, &sources);
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
-                transport
-                    .write_all(&reply)
-                    .await
-                    .with_context(|| format!("failed to send OP_ANSWERSOURCES to {peer_addr}"))?;
+                // SX2-only (REF-002 / sx1-live-source-exchange omission): a legacy
+                // SX1 OP_REQUESTSOURCES sub-op carries no extra payload, so it is
+                // consumed but never answered with OP_ANSWERSOURCES.
             }
             OP_REQUESTSOURCES2 => {
                 if remaining.len() < 3 {
@@ -355,24 +351,23 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
     payload: &[u8],
 ) -> Result<Option<Ed2kHash>> {
     let (requested, requested_version) = decode_request_sources_payload(opcode, payload)?;
-    if opcode == OP_REQUESTSOURCES2 && requested_version == 0 {
+    // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
+    // omission): we serve OP_REQUESTSOURCES2 -> OP_ANSWERSOURCES2 only. A legacy
+    // SX1 OP_REQUESTSOURCES is decoded (for the diagnostic dump) but never
+    // answered with OP_ANSWERSOURCES.
+    if opcode != OP_REQUESTSOURCES2 {
+        return Ok(Some(requested));
+    }
+    if requested_version == 0 {
         return Ok(Some(requested));
     }
     if transfer_runtime.local_entry(&requested).await?.is_some() {
-        let used_version = if opcode == OP_REQUESTSOURCES2 {
-            requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION)
-        } else {
-            1
-        };
+        let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
         let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
         if source_exchange_entry_count(used_version, &sources) == 0 {
             return Ok(Some(requested));
         }
-        let reply = if opcode == OP_REQUESTSOURCES2 {
-            encode_answer_sources2(&requested, used_version, &sources)
-        } else {
-            encode_answer_sources(&requested, &sources)
-        };
+        let reply = encode_answer_sources2(&requested, used_version, &sources);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
         transport
             .write_all(&reply)
@@ -390,36 +385,27 @@ async fn answer_source_request_subpacket<'a>(
     opcode: u8,
     remaining: &'a [u8],
 ) -> Result<&'a [u8]> {
-    let requested_version = if opcode == OP_REQUESTSOURCES2 {
-        if remaining.len() < 3 {
-            anyhow::bail!("short OP_REQUESTSOURCES2 sub-payload in OP_MULTIPACKET");
-        }
-        remaining[0]
-    } else {
-        1
-    };
-    let remaining = if opcode == OP_REQUESTSOURCES2 {
-        &remaining[3..]
-    } else {
-        remaining
-    };
+    // Source exchange is SX2-only (REF-002 / the sx1-live-source-exchange
+    // omission): inside a multipacket we answer the OP_REQUESTSOURCES2 sub-op only.
+    // A legacy SX1 OP_REQUESTSOURCES sub-op (which carries no extra payload) is
+    // consumed but never answered with OP_ANSWERSOURCES.
+    if opcode != OP_REQUESTSOURCES2 {
+        return Ok(remaining);
+    }
+    if remaining.len() < 3 {
+        anyhow::bail!("short OP_REQUESTSOURCES2 sub-payload in OP_MULTIPACKET");
+    }
+    let requested_version = remaining[0];
+    let remaining = &remaining[3..];
     if requested_version == 0 {
         return Ok(remaining);
     }
-    let used_version = if opcode == OP_REQUESTSOURCES2 {
-        requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION)
-    } else {
-        1
-    };
+    let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
     let sources = source_exchange_peers(transfer_runtime, requested, peer_addr.ip()).await?;
     if source_exchange_entry_count(used_version, &sources) == 0 {
         return Ok(remaining);
     }
-    let reply = if opcode == OP_REQUESTSOURCES2 {
-        encode_answer_sources2(requested, used_version, &sources)
-    } else {
-        encode_answer_sources(requested, &sources)
-    };
+    let reply = encode_answer_sources2(requested, used_version, &sources);
     dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
     transport
         .write_all(&reply)

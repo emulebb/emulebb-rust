@@ -1,10 +1,10 @@
 [[omissions]]
 id = "sx1-live-source-exchange"
 area = "ed2k"
-stock_behavior = "Legacy clients may advertise and use Source Exchange v1 live request and answer opcodes."
-rust_behavior = "The Rust client does not advertise or implement live SX1 paths; source exchange support is SX2-only."
-reason = "Workspace policy records SX1 live source exchange as intentionally removed deprecated behavior."
-compatibility = "Stock-compatible for the supported surface because unsupported SX1 is not advertised."
+stock_behavior = "Legacy clients may advertise and use Source Exchange v1 live request (OP_REQUESTSOURCES) and answer (OP_ANSWERSOURCES) opcodes."
+rust_behavior = "The Rust client is SX2-only on every live source-exchange leg: it never sends OP_REQUESTSOURCES (download startup + multipacket request request only SX2 OP_REQUESTSOURCES2, with no SX1 fallback even for an SX1-only peer), never answers an inbound OP_REQUESTSOURCES with OP_ANSWERSOURCES (the standalone + both multipacket serve paths decode-and-ignore SX1), and does not ingest an inbound OP_ANSWERSOURCES (it is decoded for the diagnostic dump only and its sources are dropped). SX2 (OP_REQUESTSOURCES2 / OP_ANSWERSOURCES2) request, serve, and ingest stay fully active. The SX1 wire encoders/decoders remain only for codec round-trip tests."
+reason = "Workspace policy records SX1 live source exchange as intentionally removed deprecated behavior; eMuleBB is SX2-only (operator decision REF-002)."
+compatibility = "Stock-compatible for the supported surface because unsupported SX1 is not advertised or acted on; an SX1-only peer simply yields no exchanged sources, and an unsolicited SX1 answer is ignored."
 
 [[omissions]]
 id = "ipv6-ed2k-kad"

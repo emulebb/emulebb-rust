@@ -804,18 +804,22 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     .await?;
                 }
                 (OP_EMULEPROT, OP_ANSWERSOURCES) => {
-                    let (answer_hash, sources) = decode_answer_sources_payload(
+                    // SX2-only (REF-002 / sx1-live-source-exchange omission): we
+                    // never solicit OP_REQUESTSOURCES, so an unsolicited legacy SX1
+                    // OP_ANSWERSOURCES is decoded for the diagnostic dump only and
+                    // its sources are NOT ingested. SX2 (OP_ANSWERSOURCES2 above)
+                    // stays fully active.
+                    let decoded = decode_answer_sources_payload(
                         &packet.payload,
                         session_state.remote_source_exchange_version,
-                    )?;
-                    remember_source_exchange_sources(
-                        transfer_runtime,
-                        file_hash,
-                        file_hash_hex,
-                        answer_hash,
-                        sources,
-                    )
-                    .await?;
+                    );
+                    let source_count = decoded.map(|(_, sources)| sources.len()).unwrap_or(0);
+                    dump_ed2k_tcp_download_meta(
+                        peer_addr,
+                        Some(transport.mode),
+                        "answer_sources_sx1_ignored",
+                        format!("file_hash={file_hash_hex} sources={source_count} (SX1 ignored)"),
+                    );
                 }
                 (OP_EDONKEYPROT, OP_QUEUERANK) => {
                     let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;

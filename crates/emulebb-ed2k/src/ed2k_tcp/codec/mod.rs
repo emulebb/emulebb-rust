@@ -31,10 +31,13 @@ pub(super) use file_status::{
 pub(super) use file_status::decode_file_status_payload;
 pub(super) use source_exchange::{
     SourceExchangePeer, decode_answer_sources2_payload, decode_answer_sources_payload,
-    decode_request_sources_payload, encode_answer_sources, encode_answer_sources2,
-    encode_request_sources, encode_request_sources2, encode_request_sources2_subpayload,
-    source_exchange_entry_count,
+    decode_request_sources_payload, encode_answer_sources2, encode_request_sources2,
+    encode_request_sources2_subpayload, source_exchange_entry_count,
 };
+// SX1 live encoders are no longer used in production (source exchange is SX2-only,
+// REF-002 / sx1-live-source-exchange omission); kept for codec round-trip tests.
+#[cfg(test)]
+pub(super) use source_exchange::{encode_answer_sources, encode_request_sources};
 
 const MAX_CLIENT_MSG_LEN: usize = 450;
 

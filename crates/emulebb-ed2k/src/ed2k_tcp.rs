@@ -67,7 +67,7 @@ pub(in crate::ed2k_tcp) use codec::{
     encode_aich_recovery_request, encode_empty_shared_files_answer, encode_hashset_request,
     encode_hashset_request2, encode_multipacket_ext2_request, encode_multipacket_request,
     encode_packet, encode_port_test_answer, encode_public_ip_answer, encode_request_filename,
-    encode_request_parts_batch, encode_request_sources, encode_request_sources2,
+    encode_request_parts_batch, encode_request_sources2,
     encode_set_req_file_id, encode_shared_browse_denied_answer, encode_start_upload_req,
     inflate_compressed_part_fragment, validate_file_status_part_count,
 };
@@ -85,8 +85,8 @@ use codec::{
     encode_compressed_part_fragment, encode_file_req_ans_nofil, encode_file_status,
     encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
     encode_multipacket_ext2_answer, encode_packed_packet, encode_queue_ranking,
-    encode_request_filename_answer, encode_request_sources2_subpayload, encode_sending_part,
-    skip_request_filename_ext_info,
+    encode_request_filename_answer, encode_request_sources, encode_request_sources2_subpayload,
+    encode_sending_part, skip_request_filename_ext_info,
 };
 pub(in crate::ed2k_tcp) use aich_salvage::handle_aich_recovery_answer;
 pub use buddy_link::{OutboundBuddyLinkOptions, run_outbound_buddy_link};
