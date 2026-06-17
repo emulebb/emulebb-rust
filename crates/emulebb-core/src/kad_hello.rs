@@ -269,6 +269,14 @@ async fn probe_kad_firewalled_tcp(
     socket
         .bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
         .with_context(|| format!("failed to bind Kad TCP firewall probe socket to {bind_ip}"))?;
+    // WHY: this probe is a P2P TCP data-plane connection; binding the source IP
+    // is not enough under split-tunnel routing, so pin the SYN to the same
+    // interface used by the eD2K TCP paths before connect.
+    emulebb_kad_dht::socket_opts::pin_egress_to_interface(
+        socket2::SockRef::from(&socket),
+        emulebb_ed2k::networking::resolve_bind_if_index(bind_ip),
+    )
+    .with_context(|| format!("failed to pin Kad TCP firewall probe egress for {bind_ip}"))?;
     tokio::time::timeout(timeout, socket.connect(peer_addr))
         .await
         .with_context(|| format!("timed out probing Kad TCP firewall peer {peer_addr}"))?
