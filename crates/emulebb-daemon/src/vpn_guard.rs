@@ -20,7 +20,7 @@ pub(crate) fn binding_confirmed(
         .filter(|value| !value.is_empty())
         .is_some_and(|name| {
             interfaces.iter().any(|iface| {
-                iface.name == name
+                iface.name.trim().eq_ignore_ascii_case(name)
                     && iface
                         .addresses
                         .iter()

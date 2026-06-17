@@ -696,7 +696,7 @@ fn p2p_bind_interface_requires_matching_ipv4_interface() {
 fn vpn_binding_is_confirmed_by_named_interface_or_vpn_ip() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    config.p2p_bind_interface = Some("HIDE.ME".to_string());
 
     assert!(config.vpn_binding_confirmed(
         "10.44.55.66".parse().unwrap(),
