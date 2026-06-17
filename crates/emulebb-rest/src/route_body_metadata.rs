@@ -14,11 +14,12 @@ use axum::{
 use crate::envelope::{api_error, json_error_message};
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
-    validate_kad_bootstrap_body_fields, validate_paused_body_field,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_directories_patch_body_fields, validate_shared_file_add_body_fields,
-    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
-    validate_transfer_patch_body_fields, validate_url_import_body_fields,
+    validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
+    validate_paused_body_field, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
+    validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
+    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
+    validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -114,6 +115,9 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_category(path) {
         return validate_category_patch_body_fields(object);
     }
+    if method == "POST" && path == "/api/v1/friends" {
+        return validate_friend_create_body_fields(object);
+    }
     if uses_url_import_body(method, path) {
         return validate_url_import_body_fields(object);
     }
@@ -136,6 +140,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
     const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
+    const FRIEND_CREATE: &[&str] = &["userHash", "name"];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
 
@@ -153,6 +158,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "POST" && path == "/api/v1/categories" {
         return Some(CATEGORY);
+    }
+    if method == "POST" && path == "/api/v1/friends" {
+        return Some(FRIEND_CREATE);
     }
     if uses_url_import_body(method, path) {
         return Some(URL_IMPORT);

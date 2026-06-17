@@ -314,6 +314,42 @@ fn validate_category_priority_body_field(value: &serde_json::Value) -> Result<()
     Ok(())
 }
 
+pub(super) fn validate_friend_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let Some(user_hash) = object.get("userHash").and_then(serde_json::Value::as_str) else {
+        return Err(invalid_body_error(
+            "userHash must be a 32-character lowercase hex string",
+        ));
+    };
+    if user_hash.len() != 32
+        || !user_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_body_error(
+            "userHash must be a 32-character lowercase hex string",
+        ));
+    }
+    if let Some(name) = object.get("name") {
+        validate_friend_name_body_field(name)?;
+    }
+    Ok(())
+}
+
+fn validate_friend_name_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(name) = value.as_str() else {
+        return Err(invalid_body_error("name must be a string"));
+    };
+    if name.chars().any(char::is_control) {
+        return Err(invalid_body_error(
+            "name must be valid UTF-8 without control characters",
+        ));
+    }
+    if name.encode_utf16().count() > 128 {
+        return Err(invalid_body_error("name must be at most 128 characters"));
+    }
+    Ok(())
+}
+
 fn validate_optional_server_body_fields(
     object: &JsonObject,
     allow_connect: bool,

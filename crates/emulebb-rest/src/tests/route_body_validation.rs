@@ -149,6 +149,54 @@ async fn category_patch_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
+async fn friend_create_body_uses_mfc_validation() {
+    let app = test_router();
+    let user_hash = "00112233445566778899aabbccddeeff";
+    let long_name = "a".repeat(129);
+    let cases = [
+        (
+            r#"{}"#.to_string(),
+            "userHash must be a 32-character lowercase hex string",
+        ),
+        (
+            r#"{"userHash":1}"#.to_string(),
+            "userHash must be a 32-character lowercase hex string",
+        ),
+        (
+            r#"{"userHash":"00112233445566778899AABBCCDDEEFF"}"#.to_string(),
+            "userHash must be a 32-character lowercase hex string",
+        ),
+        (
+            r#"{"userHash":"00112233445566778899aabbccddee"}"#.to_string(),
+            "userHash must be a 32-character lowercase hex string",
+        ),
+        (
+            format!(r#"{{"userHash":"{user_hash}","name":1}}"#),
+            "name must be a string",
+        ),
+        (
+            format!(r#"{{"userHash":"{user_hash}","name":"bad\u0001name"}}"#),
+            "name must be valid UTF-8 without control characters",
+        ),
+        (
+            format!(r#"{{"userHash":"{user_hash}","name":"{long_name}"}}"#),
+            "name must be at most 128 characters",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/friends",
+            body,
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";
