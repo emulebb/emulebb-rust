@@ -142,6 +142,14 @@ async fn old_client_penalty_drops_score_below_modern_peer() {
             .await,
         Ed2kUploadSessionStatus::Waiting { rank: 2 }
     );
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let old_entry = snapshot
+        .iter()
+        .find(|entry| entry.client_id == Some(0x0A00_0062))
+        .expect("old client waiter must be visible in snapshot");
+    assert!(old_entry.old_client_penalty_applied);
+    assert!(!old_entry.low_ratio_applied);
+    assert!(!old_entry.low_id_penalty_applied);
 }
 
 #[tokio::test]
@@ -204,4 +212,12 @@ async fn low_ratio_bonus_promotes_an_underserved_file() {
             .await,
         Ed2kUploadSessionStatus::Waiting { rank: 2 }
     );
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let underserved_entry = snapshot
+        .iter()
+        .find(|entry| entry.file_hash == underserved.to_string())
+        .expect("underserved waiter must be visible in snapshot");
+    assert!(underserved_entry.low_ratio_applied);
+    assert_eq!(underserved_entry.low_ratio_bonus, 50);
+    assert!(!underserved_entry.old_client_penalty_applied);
 }

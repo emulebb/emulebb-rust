@@ -17,14 +17,20 @@
 //! rest of the queue uses, preserving the master's *relative* weighting (the
 //! bonus is added after the priority multiply, before the divisor and penalty).
 
-use super::{
-    DEFAULT_CREDIT_SCORE_PERMILLE, Ed2kUploadPeerIdentity, FRIEND_SLOT_SCORE_BONUS,
-    LOW_ID_SCORE_DIVISOR, OLD_CLIENT_PENALTY_DENOMINATOR, OLD_CLIENT_PENALTY_NUMERATOR,
-};
+use super::{DEFAULT_CREDIT_SCORE_PERMILLE, Ed2kUploadPeerIdentity, FRIEND_SLOT_SCORE_BONUS};
 
 /// Master old-client threshold: a peer whose eMule version byte is at or below
 /// this value gets the old-client penalty (`m_byEmuleVersion <= 0x19`).
 pub(super) const OLD_CLIENT_EMULE_VERSION_THRESHOLD: u8 = 0x19;
+/// eMule default LowID score divisor (`PreferenceValidationSeams::kDefaultLowIDDivisor`):
+/// a LowID waiter's score is divided by this to deprioritise unreachable peers
+/// (master `inputs.uLowIdDivisor`, applied when `HasLowID() && divisor > 1`).
+pub(super) const LOW_ID_SCORE_DIVISOR: i128 = 2;
+/// eMule old-client score penalty: the effective working score is multiplied by
+/// 0.5 (`UploadScoreSeams::BuildUploadScoreBreakdown` `fWorkingScore *= 0.5f`)
+/// for an old eMule client (`m_byEmuleVersion <= 0x19`).
+const OLD_CLIENT_PENALTY_NUMERATOR: i128 = 1;
+const OLD_CLIENT_PENALTY_DENOMINATOR: i128 = 2;
 
 /// eMule default low-ratio additive bonus (`PreferenceValidationSeams::
 /// kDefaultLowRatioBonus`, `thePrefs.GetLowRatioBonus()`). Added to the working
@@ -136,6 +142,22 @@ pub(super) fn waiting_score(inputs: UploadScoreInputs) -> i128 {
     }
 
     score + friend_slot_bonus(inputs.friend_slot)
+}
+
+pub(super) const fn low_ratio_bonus_value(applies: bool) -> u32 {
+    if applies {
+        DEFAULT_LOW_RATIO_BONUS as u32
+    } else {
+        0
+    }
+}
+
+pub(super) const fn low_id_divisor_value(applies: bool) -> u32 {
+    if applies {
+        LOW_ID_SCORE_DIVISOR as u32
+    } else {
+        1
+    }
 }
 
 const fn friend_slot_bonus(friend_slot: bool) -> i128 {

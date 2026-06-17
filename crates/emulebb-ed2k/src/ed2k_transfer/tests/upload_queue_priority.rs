@@ -168,4 +168,12 @@ async fn upload_queue_low_id_waiter_scores_below_high_id_peer() {
             .await,
         Ed2kUploadSessionStatus::Waiting { rank: 2 }
     );
+    let snapshot = runtime.upload_queue_snapshot().await;
+    let low_id_entry = snapshot
+        .iter()
+        .find(|entry| entry.client_id == Some(0x0000_2222))
+        .expect("LowID waiter must be visible in snapshot");
+    assert!(low_id_entry.low_id_penalty_applied);
+    assert_eq!(low_id_entry.low_id_divisor, 2);
+    assert!(!low_id_entry.old_client_penalty_applied);
 }

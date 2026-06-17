@@ -561,10 +561,7 @@ pub struct Upload {
     pub queue_rank: Option<u16>,
 }
 
-/// Upload-score modifier breakdown (eMuleBB `UploadScoreBreakdown` shape). The
-/// Rust upload scorer is base waiting-time x file-priority x credit-ratio; it
-/// does not apply the master's low-ratio bonus, low-ID divisor, old-client
-/// penalty, or slow-upload cooldown, so those report as not-applied.
+/// Upload-score modifier breakdown (eMuleBB `UploadScoreBreakdown` shape).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadScoreBreakdown {

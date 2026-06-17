@@ -12,15 +12,6 @@ const HIGH_FILE_PRIORITY_SCORE: i128 = 9;
 const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
 pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
-/// eMule default LowID score divisor (`PreferenceValidationSeams::kDefaultLowIDDivisor`):
-/// a LowID waiter's score is divided by this to deprioritise unreachable peers
-/// (master `inputs.uLowIdDivisor`, applied when `HasLowID() && divisor > 1`).
-const LOW_ID_SCORE_DIVISOR: i128 = 2;
-/// eMule old-client score penalty: the effective working score is multiplied by
-/// 0.5 (`UploadScoreSeams::BuildUploadScoreBreakdown` `fWorkingScore *= 0.5f`)
-/// for an old eMule client (`m_byEmuleVersion <= 0x19`).
-const OLD_CLIENT_PENALTY_NUMERATOR: i128 = 1;
-const OLD_CLIENT_PENALTY_DENOMINATOR: i128 = 2;
 
 /// Sentinel all-time upload ratio (permille) used for an unknown requested file:
 /// at/above the low-ratio threshold so the low-ratio score bonus is NOT applied,
@@ -236,6 +227,11 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub file_priority_score: i128,
     /// Credit-ratio component, in permille (1000 == neutral 1.0x).
     pub credit_score_permille: i128,
+    pub low_ratio_applied: bool,
+    pub low_ratio_bonus: u32,
+    pub low_id_penalty_applied: bool,
+    pub low_id_divisor: u32,
+    pub old_client_penalty_applied: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +540,13 @@ impl Ed2kUploadQueueState {
                 score: self.waiting_score(key, session, now),
                 file_priority_score: session.file_priority_score,
                 credit_score_permille: session.credit_score_permille,
+                low_ratio_applied: session.score_modifiers.low_ratio_bonus,
+                low_ratio_bonus: score::low_ratio_bonus_value(
+                    session.score_modifiers.low_ratio_bonus,
+                ),
+                low_id_penalty_applied: session.score_modifiers.low_id,
+                low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
+                old_client_penalty_applied: session.score_modifiers.old_client,
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {

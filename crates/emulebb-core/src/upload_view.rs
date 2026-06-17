@@ -54,12 +54,11 @@ pub(crate) fn upload_from_snapshot(
         effective_score_float: entry.score as f64,
         credit_ratio: entry.credit_score_permille as f64 / 1000.0,
         file_priority: entry.file_priority_score as i64,
-        // The Rust scorer applies none of the master's modifiers.
-        low_ratio_applied: false,
-        low_ratio_bonus: 0,
-        low_id_penalty_applied: false,
-        low_id_divisor: 1,
-        old_client_penalty_applied: false,
+        low_ratio_applied: entry.low_ratio_applied,
+        low_ratio_bonus: entry.low_ratio_bonus,
+        low_id_penalty_applied: entry.low_id_penalty_applied,
+        low_id_divisor: entry.low_id_divisor,
+        old_client_penalty_applied: entry.old_client_penalty_applied,
         cooldown_remaining_ms: 0,
     };
     Upload {
