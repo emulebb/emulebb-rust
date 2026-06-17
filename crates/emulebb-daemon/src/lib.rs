@@ -18,9 +18,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::info;
 
+mod bind_config;
 pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard;
+
+use bind_config::ensure_p2p_bind_ip_on_interface;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -286,10 +289,6 @@ impl DaemonConfig {
     }
 
     fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
-        if let Some(candidate) = self.p2p_bind_ip {
-            return Ok(candidate);
-        }
-
         let interfaces = detect_interfaces().context("failed to enumerate local interfaces")?;
         self.resolve_p2p_bind_ip_from_interfaces(&interfaces)
     }
@@ -299,6 +298,14 @@ impl DaemonConfig {
         interfaces: &[NetworkInterface],
     ) -> Result<Ipv4Addr> {
         if let Some(candidate) = self.p2p_bind_ip {
+            if let Some(bind_interface) = self
+                .p2p_bind_interface
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)?;
+            }
             return Ok(candidate);
         }
 

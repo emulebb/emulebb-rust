@@ -611,11 +611,11 @@ fn p2p_bind_interface_resolves_configured_interface_ipv4() {
 }
 
 #[test]
-fn p2p_bind_ip_overrides_configured_interface() {
+fn p2p_bind_ip_and_interface_accept_matching_pair() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(
         temp.path().to_path_buf(),
-        Some("192.0.2.10".parse().unwrap()),
+        Some("10.44.55.66".parse().unwrap()),
     );
     config.p2p_bind_interface = Some("hide.me".to_string());
 
@@ -623,7 +623,28 @@ fn p2p_bind_ip_overrides_configured_interface() {
         .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
         .unwrap();
 
-    assert_eq!(bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+    assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
+}
+
+#[test]
+fn p2p_bind_ip_and_interface_reject_mismatched_pair() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(
+        temp.path().to_path_buf(),
+        Some("192.0.2.10".parse().unwrap()),
+    );
+    config.p2p_bind_interface = Some("hide.me".to_string());
+
+    let error = config
+        .resolve_p2p_bind_ip_from_interfaces(&[
+            iface("Ethernet", "192.0.2.10"),
+            iface("hide.me", "10.44.55.66"),
+        ])
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("p2pBindIp"));
+    assert!(error.contains("not assigned to p2pBindInterface"));
 }
 
 #[test]
