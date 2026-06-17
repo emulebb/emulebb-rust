@@ -326,18 +326,32 @@ async fn uploads_and_upload_queue_use_canonical_envelopes() {
     assert_eq!(value["data"]["offset"], 1);
     assert_eq!(value["data"]["limit"], 1);
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/upload-queue/192.0.2.44:4662")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for (path, expected_message) in [
+        (
+            "/api/v1/uploads/192.0.2.44:4662",
+            "active upload client not found",
+        ),
+        (
+            "/api/v1/upload-queue/192.0.2.44:4662",
+            "upload queue client not found",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["message"], expected_message);
+    }
 
     for path in [
         "/api/v1/uploads/192.0.2.44:4662/operations/remove",

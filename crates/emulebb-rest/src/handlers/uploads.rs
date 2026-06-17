@@ -69,10 +69,16 @@ pub(crate) async fn upload_by_client_id(
 ) -> Response {
     match state.core.upload(&client_id, waiting_queue).await {
         Some(upload) => api_ok(upload).into_response(),
-        None => api_error(
+        None if waiting_queue => api_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
             "upload queue client not found",
+        )
+        .into_response(),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "active upload client not found",
         )
         .into_response(),
     }
