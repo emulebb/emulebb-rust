@@ -734,7 +734,7 @@ impl Ed2kUploadQueueState {
                     Ed2kUploadSessionPhase::Granted => self.config.granted_timeout,
                     Ed2kUploadSessionPhase::Uploading => self.config.upload_timeout,
                 };
-                (now.duration_since(session.last_activity) > timeout)
+                (now.saturating_duration_since(session.last_activity) > timeout)
                     .then(|| (key.clone(), session.phase))
             })
             .collect::<Vec<_>>();
