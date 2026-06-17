@@ -5,7 +5,7 @@ use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
     ed2k_tcp::{Ed2kTransport, OP_REQUESTPARTS_I64},
-    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity},
+    ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, Ed2kUploadPeerIdentity},
 };
 
 use super::{
@@ -97,52 +97,75 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     }
 
     for (start, end) in ranges {
-        let Some(bytes) = transfer_runtime
-            .read_verified_range(&requested, start, end)
-            .await?
-        else {
-            continue;
-        };
-        for reply in build_upload_part_packets(
-            &requested,
-            &shared.canonical_name,
-            start,
-            end,
-            &bytes,
-            is_i64,
-        )? {
-            dump_ed2k_tcp_listener_send(peer_addr, transport.mode, reply.phase, &reply.packet);
-            let reservation = transfer_runtime
-                .reserve_upload_payload_budget(
-                    u64::try_from(reply.packet.len()).unwrap_or(u64::MAX),
-                )
-                .await;
-            if !reservation.delay.is_zero() {
-                tokio::time::sleep(reservation.delay).await;
+        // FIX (memory-amplification DoS): never read or buffer a whole
+        // peer-requested range at once. The range size is peer-controlled and
+        // uncapped (a complete file is one verified `[0, file_size]` span, so a
+        // peer can request the entire file in a single range), and the old path
+        // allocated `vec![0u8; end - start]` per range — a multi-GB resident
+        // spike per packet, repeatable across connections. eMule serves through
+        // the disk-IO thread in EMBLOCKSIZE (184_320) chunks and a conforming
+        // downloader never requests more than one EMBLOCKSIZE per range, so we
+        // walk the range in EMBLOCKSIZE fragments: the per-read allocation is
+        // bounded to one block regardless of the requested span, and a
+        // legitimate <=EMBLOCKSIZE request is served in a single fragment
+        // (exactly the bytes asked for).
+        let mut fragment_start = start;
+        while fragment_start < end {
+            let fragment_end = fragment_start
+                .saturating_add(ED2K_EMBLOCK_SIZE)
+                .min(end);
+            let Some(bytes) = transfer_runtime
+                .read_verified_range(&requested, fragment_start, fragment_end)
+                .await?
+            else {
+                // A fragment that is not (fully) verified ends serving of this
+                // range; the master likewise serves only complete parts.
+                break;
+            };
+            for reply in build_upload_part_packets(
+                &requested,
+                &shared.canonical_name,
+                fragment_start,
+                fragment_end,
+                &bytes,
+                is_i64,
+            )? {
+                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, reply.phase, &reply.packet);
+                let reservation = transfer_runtime
+                    .reserve_upload_payload_budget(
+                        u64::try_from(reply.packet.len()).unwrap_or(u64::MAX),
+                    )
+                    .await;
+                if !reservation.delay.is_zero() {
+                    tokio::time::sleep(reservation.delay).await;
+                }
+                transport
+                    .write_all(&reply.packet)
+                    .await
+                    .with_context(|| {
+                        format!("failed to send ED2K upload payload to {peer_addr}")
+                    })?;
             }
-            transport
-                .write_all(&reply.packet)
-                .await
-                .with_context(|| format!("failed to send ED2K upload payload to {peer_addr}"))?;
+            let fragment_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if let Some(user_hash) = peer_user_hash {
+                transfer_runtime.add_peer_credit_delta(user_hash, fragment_bytes, 0)?;
+            }
+            // Credit the served file's lifetime-uploaded counter so its all-time
+            // upload ratio (eMule CKnownFile::GetAllTimeUploadRatio) reflects
+            // served bytes, feeding the upload-queue low-ratio score bonus.
+            transfer_runtime.add_file_all_time_uploaded(&requested, fragment_bytes)?;
+            // FIX (slot-recycle window): refresh activity per fragment, not only
+            // per completed range. A large range fragmented over a slow link can
+            // otherwise exceed `upload_timeout` between activity touches and let
+            // another task's `reap_expired_sessions` recycle the active slot
+            // mid-serve. `note_payload_sent` refreshes `last_activity` and adds
+            // exactly the bytes just sent, so accounting stays correct (each
+            // fragment is counted once).
+            upload_queue
+                .note_payload_sent(transfer_runtime, fragment_bytes)
+                .await;
+            fragment_start = fragment_end;
         }
-        if let Some(user_hash) = peer_user_hash {
-            transfer_runtime.add_peer_credit_delta(
-                user_hash,
-                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                0,
-            )?;
-        }
-        // Credit the served file's lifetime-uploaded counter so its all-time
-        // upload ratio (eMule CKnownFile::GetAllTimeUploadRatio) reflects served
-        // bytes, feeding the upload-queue low-ratio score bonus.
-        transfer_runtime
-            .add_file_all_time_uploaded(&requested, u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
-        upload_queue
-            .note_payload_sent(
-                transfer_runtime,
-                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            )
-            .await;
     }
 
     Ok(UploadPayloadOutcome::Continue { requested })

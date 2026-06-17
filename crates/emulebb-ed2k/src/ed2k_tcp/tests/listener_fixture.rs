@@ -531,11 +531,21 @@ pub(super) async fn read_upload_bytes(
                 let (decoded_hash, start, advertised_len, fragment) =
                     decode_compressed_part_fragment(&packet[6..], false).unwrap();
                 assert_eq!(decoded_hash, *file_hash);
-                assert_eq!(start, expected_start);
+                // The serve walks the requested range in EMBLOCKSIZE blocks, each
+                // its own zlib stream possibly spanning several wire fragments
+                // (all sharing the same `start`); a new block opens (pending ==
+                // None) at the next contiguous offset.
+                if pending.is_none() {
+                    assert_eq!(
+                        start,
+                        expected_start + u64::try_from(reconstructed.len()).unwrap()
+                    );
+                }
+                let block_end = (start + ED2K_EMBLOCK_SIZE).min(expected_end);
                 let pending_stream = pending.get_or_insert_with(|| PendingCompressedPart {
                     piece_index: 0,
-                    start: expected_start,
-                    end: expected_end,
+                    start,
+                    end: block_end,
                     advertised_compressed_len: advertised_len,
                     compressed_received: 0,
                     uncompressed_written: 0,
@@ -586,11 +596,22 @@ pub(super) async fn read_transport_upload_bytes(
                 let (decoded_hash, start, advertised_len, fragment) =
                     decode_compressed_part_fragment(&packet.payload, false).unwrap();
                 assert_eq!(decoded_hash, *file_hash);
-                assert_eq!(start, expected_start);
+                // The serve walks the requested range in EMBLOCKSIZE blocks, each
+                // its own complete zlib stream. A block's compressed stream may
+                // span several wire fragments, all carrying the same `start`; a
+                // new block begins (pending == None) at the next contiguous
+                // offset. Only validate `start` when a new block opens.
+                if pending.is_none() {
+                    assert_eq!(
+                        start,
+                        expected_start + u64::try_from(reconstructed.len()).unwrap()
+                    );
+                }
+                let block_end = (start + ED2K_EMBLOCK_SIZE).min(expected_end);
                 let pending_stream = pending.get_or_insert_with(|| PendingCompressedPart {
                     piece_index: 0,
-                    start: expected_start,
-                    end: expected_end,
+                    start,
+                    end: block_end,
                     advertised_compressed_len: advertised_len,
                     compressed_received: 0,
                     uncompressed_written: 0,
