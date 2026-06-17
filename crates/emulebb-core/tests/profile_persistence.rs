@@ -7,6 +7,7 @@ use std::{
 use emulebb_core::{
     CategoryCreate, CategoryPriorityValue, EmulebbCore, FriendCreate, LocalShareCreate,
     NullableStringField, NullableU32Field, PreferencesUpdate, ServerCreate, ServerUpdate,
+    TransferUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -121,6 +122,61 @@ async fn unshared_file_marker_survives_core_restart() {
 
     let reloaded = open_core(&metadata_path, &transfer_root);
     assert!(reloaded.share(&file_hash).await.is_none());
+}
+
+#[tokio::test]
+async fn delete_category_resets_referencing_transfers_to_uncategorized() {
+    let runtime_dir = unique_test_dir("delete-category-reset");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let payload_path = runtime_dir.join("Shared.Payload.bin");
+    fs::write(&payload_path, b"category reset payload").unwrap();
+    let core = open_core(&metadata_path, &transfer_root);
+
+    let share = core
+        .share_local_file(LocalShareCreate {
+            path: payload_path.display().to_string(),
+            name: Some("Shared.Payload.bin".to_string()),
+        })
+        .await
+        .unwrap();
+    let category = core
+        .create_category(CategoryCreate {
+            name: "Movies".to_string(),
+            path: NullableStringField::Missing,
+            comment: None,
+            color: NullableU32Field::Missing,
+            priority: None,
+        })
+        .await
+        .unwrap();
+    assert_ne!(category.id, 0);
+
+    let updated = core
+        .update_transfer(
+            &share.hash,
+            TransferUpdate {
+                category_id: Some(category.id),
+                ..TransferUpdate::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.category_id, category.id);
+    assert_eq!(updated.category_name, "Movies");
+
+    assert!(core.delete_category(category.id).await.unwrap().is_some());
+
+    let transfer = core.transfer(&share.hash).await.unwrap();
+    assert_eq!(
+        transfer.category_id, 0,
+        "transfer category_id must reset to uncategorized after its category is deleted"
+    );
+    assert_eq!(transfer.category_name, "");
+
+    // Idempotent: deleting an already-removed category returns None.
+    assert!(core.delete_category(category.id).await.unwrap().is_none());
 }
 
 fn open_core(metadata_path: &Path, transfer_root: &Path) -> EmulebbCore {

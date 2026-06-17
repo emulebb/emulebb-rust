@@ -1236,10 +1236,17 @@ impl EmulebbCore {
             return Ok(None);
         };
         profile_state::persist_server(&self.metadata_store, &server, false)?;
-        let mut state = self.state.lock().await;
-        state.servers.remove(&server.endpoint);
-        state.server_overrides.remove(&server.endpoint);
-        state.disabled_servers.insert(server.endpoint.clone());
+        {
+            let mut state = self.state.lock().await;
+            state.servers.remove(&server.endpoint);
+            state.server_overrides.remove(&server.endpoint);
+            state.disabled_servers.insert(server.endpoint.clone());
+        }
+        // Tear the session down if it points at the just-removed server (no live
+        // connection to a server that no longer exists in the store).
+        if self.ed2k_connected_endpoint().await.as_deref() == Some(server.endpoint.as_str()) {
+            self.disconnect_ed2k().await;
+        }
         Ok(Some(server))
     }
 
@@ -1544,6 +1551,14 @@ impl EmulebbCore {
         };
         self.metadata_store.delete_category(category_id)?;
         state.categories.remove(&category_id);
+        // Reset transfers that referenced this category back to uncategorized so
+        // their category_id does not dangle at a removed id.
+        for transfer in state.transfers.values_mut() {
+            if transfer.category_id == category_id {
+                transfer.category_id = 0;
+                transfer.category_name = String::new();
+            }
+        }
         Ok(Some(category))
     }
 
