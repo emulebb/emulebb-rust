@@ -62,6 +62,7 @@ pub(crate) fn stats_response(
 ) -> Value {
     let ed2k_connected = status.ed2k.connected;
     let kad_connected = status.kad.connected;
+    let ed2k_high_id = ed2k_connected && !status.ed2k.firewalled.unwrap_or(false);
     json!({
         "connected": ed2k_connected || kad_connected,
         "downloadSpeedKiBps": throughput.download_rate_bytes_per_sec as f64 / 1024.0,
@@ -76,7 +77,7 @@ pub(crate) fn stats_response(
         "sharedHashingCount": 0,
         "sharedFilesReady": status.lifecycle.state == "running",
         "ed2kConnected": ed2k_connected,
-        "ed2kHighId": ed2k_connected,
+        "ed2kHighId": ed2k_high_id,
         "kadRunning": status.kad.running,
         "kadConnected": kad_connected,
         "kadFirewalled": status.kad.firewalled
@@ -202,6 +203,10 @@ pub(crate) fn server_responses(servers: Vec<ServerInfo>) -> Vec<Value> {
 pub(crate) async fn server_status_response(state: &RestState) -> Value {
     let status = state.core.status().await;
     let servers = state.core.servers().await;
+    server_status_value(&status, &servers)
+}
+
+pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Value {
     let current_server = servers
         .iter()
         .find(|server| server.current)
@@ -210,7 +215,10 @@ pub(crate) async fn server_status_response(state: &RestState) -> Value {
         "connected": status.ed2k.connected,
         "connecting": false,
         "currentServer": current_server,
-        "lowId": if status.ed2k.connected { Some(false) } else { None },
+        "lowId": status
+            .ed2k
+            .connected
+            .then(|| status.ed2k.firewalled.unwrap_or(false)),
         "serverCount": servers.len()
     })
 }
@@ -410,7 +418,7 @@ mod tests {
     use emulebb_core::{EmulebbCore, NetworkStatus, TransferThroughputStats, VpnGuardStatus};
     use emulebb_index::FileIndex;
 
-    use super::{kad_response, stats_response};
+    use super::{kad_response, server_status_value, stats_response};
 
     #[test]
     fn kad_response_surfaces_indexed_counts() {
@@ -462,5 +470,40 @@ mod tests {
         // omit rather than emit a misleading 0 (no lifetime persistence).
         assert!(value.get("totalDownloadedBytes").is_none());
         assert!(value.get("totalUploadedBytes").is_none());
+    }
+
+    #[tokio::test]
+    async fn stats_response_reports_ed2k_low_id_as_not_high_id() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let mut status = core.status().await;
+        status.ed2k.connected = true;
+        status.ed2k.firewalled = Some(true);
+        let upload_policy = core.upload_policy_metrics().await;
+        let throughput = TransferThroughputStats::default();
+
+        let value = stats_response(&status, &upload_policy, &throughput);
+
+        assert_eq!(value["ed2kConnected"], true);
+        assert_eq!(value["ed2kHighId"], false);
+    }
+
+    #[tokio::test]
+    async fn server_status_reports_connected_low_id_verdict() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let mut status = core.status().await;
+
+        let disconnected = server_status_value(&status, &[]);
+        assert!(disconnected["lowId"].is_null());
+
+        status.ed2k.connected = true;
+        status.ed2k.firewalled = Some(true);
+        let low_id = server_status_value(&status, &[]);
+        assert_eq!(low_id["lowId"], true);
+
+        status.ed2k.firewalled = Some(false);
+        let high_id = server_status_value(&status, &[]);
+        assert_eq!(high_id["lowId"], false);
     }
 }

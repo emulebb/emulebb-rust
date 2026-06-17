@@ -3872,7 +3872,7 @@ impl EmulebbCore {
             running: true,
             connected: state.connected,
             peer_count: u32::from(state.connected),
-            firewalled: None,
+            firewalled: state.connected.then(|| state.tcp_firewalled()).flatten(),
             bootstrapping: None,
             bootstrap_progress: None,
             contact_count: None,
