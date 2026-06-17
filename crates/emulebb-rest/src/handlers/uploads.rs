@@ -62,7 +62,11 @@ pub(crate) async fn upload_queue_client(
     upload_by_client_id(state, client_id, true).await
 }
 
-pub(crate) async fn upload_by_client_id(state: RestState, client_id: String, waiting_queue: bool) -> Response {
+pub(crate) async fn upload_by_client_id(
+    state: RestState,
+    client_id: String,
+    waiting_queue: bool,
+) -> Response {
     match state.core.upload(&client_id, waiting_queue).await {
         Some(upload) => api_ok(upload).into_response(),
         None => api_error(

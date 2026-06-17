@@ -74,8 +74,7 @@ impl Ed2kTransferRuntime {
         let part_index = u32::from(part);
         let piece_size = manifest.piece_size;
         let part_start = u64::from(part_index) * piece_size;
-        let part_len =
-            expected_piece_length(manifest.file_size, piece_size, u64::from(part_index));
+        let part_len = expected_piece_length(manifest.file_size, piece_size, u64::from(part_index));
         if part_len == 0 {
             return Ok(None);
         }
@@ -105,8 +104,12 @@ impl Ed2kTransferRuntime {
             u64::from(part_index),
             recovery_body,
         )?;
-        let recovery =
-            compute_part_recovery(manifest.file_size, u64::from(part_index), &part_bytes, &trusted_block_hashes)?;
+        let recovery = compute_part_recovery(
+            manifest.file_size,
+            u64::from(part_index),
+            &part_bytes,
+            &trusted_block_hashes,
+        )?;
 
         // Build the per-part bitmap from the good/bad verdict: good blocks become
         // present, corrupt blocks become missing/needed.
@@ -157,8 +160,7 @@ impl Ed2kTransferRuntime {
         let part_index = u32::from(part);
         let piece_size = manifest.piece_size;
         let part_start = u64::from(part_index) * piece_size;
-        let part_len =
-            expected_piece_length(manifest.file_size, piece_size, u64::from(part_index));
+        let part_len = expected_piece_length(manifest.file_size, piece_size, u64::from(part_index));
         let part_end = part_start + part_len;
 
         let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);

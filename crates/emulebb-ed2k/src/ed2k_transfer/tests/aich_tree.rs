@@ -186,7 +186,8 @@ fn master_hash_matches_independent_reconstruction() {
         let mut f = std::fs::File::create(&payload_path).unwrap();
         f.write_all(&data).unwrap();
         f.sync_all().unwrap();
-        let independent = super::super::build_aich_hashset_from_payload(&payload_path, size).unwrap();
+        let independent =
+            super::super::build_aich_hashset_from_payload(&payload_path, size).unwrap();
         assert_eq!(
             set.master_hash(),
             independent.master_hash,
@@ -243,10 +244,7 @@ fn recovery_data_round_trip_and_single_block_salvage() {
     assert_eq!(out.recovered_ranges.len(), block_count - 1);
     let abs_bad_start = part * ED2K_PART_SIZE + corrupt_block as u64 * ED2K_EMBLOCK_SIZE;
     assert_eq!(out.corrupt_ranges[0].0, abs_bad_start);
-    assert_eq!(
-        out.corrupt_ranges[0].1,
-        abs_bad_start + ED2K_EMBLOCK_SIZE
-    );
+    assert_eq!(out.corrupt_ranges[0].1, abs_bad_start + ED2K_EMBLOCK_SIZE);
     // recovered bytes = whole part minus the one bad block.
     assert_eq!(out.recovered_bytes(), p_size as u64 - ED2K_EMBLOCK_SIZE);
 }

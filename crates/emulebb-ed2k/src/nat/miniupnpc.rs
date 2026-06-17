@@ -168,9 +168,7 @@ fn reconcile_blocking(
         // port so a gateway-driven port change does not leak the old mapping.
         if let Some(previous_port) = previous_mappings
             .iter()
-            .find(|previous| {
-                previous.name == spec.name && previous.protocol == spec.protocol
-            })
+            .find(|previous| previous.name == spec.name && previous.protocol == spec.protocol)
             .map(|previous| previous.external_addr.port())
             .filter(|previous_port| *previous_port != external_port)
         {
@@ -179,10 +177,7 @@ fn reconcile_blocking(
             {
                 warn!(
                     "UPnP backend {} failed to delete stale {} mapping external_port={}: {}",
-                    backend_name,
-                    spec.name,
-                    previous_port,
-                    error
+                    backend_name, spec.name, previous_port, error
                 );
             } else {
                 info!(

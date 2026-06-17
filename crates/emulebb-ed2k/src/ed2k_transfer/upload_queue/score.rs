@@ -18,8 +18,8 @@
 //! bonus is added after the priority multiply, before the divisor and penalty).
 
 use super::{
-    DEFAULT_CREDIT_SCORE_PERMILLE, FRIEND_SLOT_SCORE_BONUS, LOW_ID_SCORE_DIVISOR,
-    OLD_CLIENT_PENALTY_NUMERATOR, OLD_CLIENT_PENALTY_DENOMINATOR, Ed2kUploadPeerIdentity,
+    DEFAULT_CREDIT_SCORE_PERMILLE, Ed2kUploadPeerIdentity, FRIEND_SLOT_SCORE_BONUS,
+    LOW_ID_SCORE_DIVISOR, OLD_CLIENT_PENALTY_DENOMINATOR, OLD_CLIENT_PENALTY_NUMERATOR,
 };
 
 /// Master old-client threshold: a peer whose eMule version byte is at or below
@@ -78,8 +78,7 @@ impl UploadScoreModifiers {
             gpl_evildoer: peer.gpl_evildoer,
             banned: peer.banned,
             old_client,
-            low_ratio_bonus: all_time_upload_ratio_permille
-                < DEFAULT_LOW_RATIO_THRESHOLD_PERMILLE,
+            low_ratio_bonus: all_time_upload_ratio_permille < DEFAULT_LOW_RATIO_THRESHOLD_PERMILLE,
         }
     }
 
@@ -111,9 +110,9 @@ pub(super) fn waiting_score(inputs: UploadScoreInputs) -> i128 {
     // integer units (seconds * filePrio * permille / 1000); the /10 priority scale
     // is a constant factor that drops out of the relative ordering, so the
     // additive low-ratio bonus below is scaled into these same units.
-    let mut score = inputs.waiting_seconds * inputs.file_priority_score
-        * inputs.credit_score_permille
-        / DEFAULT_CREDIT_SCORE_PERMILLE;
+    let mut score =
+        inputs.waiting_seconds * inputs.file_priority_score * inputs.credit_score_permille
+            / DEFAULT_CREDIT_SCORE_PERMILLE;
 
     // Master step 4: additive low-ratio bonus. The master adds `uLowRatioBonus`
     // (default 50) to a working score expressed in seconds-equivalent units, so
@@ -121,9 +120,9 @@ pub(super) fn waiting_score(inputs: UploadScoreInputs) -> i128 {
     // above to keep its weight equivalent to ~50s of waiting at this peer's
     // priority/credit.
     if inputs.modifiers.low_ratio_bonus {
-        score += DEFAULT_LOW_RATIO_BONUS * inputs.file_priority_score
-            * inputs.credit_score_permille
-            / DEFAULT_CREDIT_SCORE_PERMILLE;
+        score +=
+            DEFAULT_LOW_RATIO_BONUS * inputs.file_priority_score * inputs.credit_score_permille
+                / DEFAULT_CREDIT_SCORE_PERMILLE;
     }
 
     // Master step 5: LowID divisor (below the friend-slot fast path).

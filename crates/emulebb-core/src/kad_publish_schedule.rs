@@ -116,12 +116,18 @@ impl KadPublishSchedule {
 
     /// Record that the file's keyword was (re)published at `now`.
     pub(crate) fn mark_keyword_published(&mut self, file_hash: &str, now: Instant) {
-        self.files.entry(file_hash.to_string()).or_default().last_keyword = Some(now);
+        self.files
+            .entry(file_hash.to_string())
+            .or_default()
+            .last_keyword = Some(now);
     }
 
     /// Record that the file's source was (re)published at `now`.
     pub(crate) fn mark_source_published(&mut self, file_hash: &str, now: Instant) {
-        self.files.entry(file_hash.to_string()).or_default().last_source = Some(now);
+        self.files
+            .entry(file_hash.to_string())
+            .or_default()
+            .last_source = Some(now);
     }
 
     /// Whether the file's notes (comment/rating) publish is due (never published,
@@ -137,7 +143,10 @@ impl KadPublishSchedule {
 
     /// Record that the file's notes were (re)published at `now`.
     pub(crate) fn mark_notes_published(&mut self, file_hash: &str, now: Instant) {
-        self.files.entry(file_hash.to_string()).or_default().last_notes = Some(now);
+        self.files
+            .entry(file_hash.to_string())
+            .or_default()
+            .last_notes = Some(now);
     }
 
     /// Drop bookkeeping for files no longer shared, so the map cannot grow

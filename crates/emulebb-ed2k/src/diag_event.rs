@@ -65,7 +65,10 @@ fn writer() -> &'static StdMutex<Option<fs::File>> {
             .map(std::path::PathBuf::from)
             .and_then(|dir| {
                 fs::create_dir_all(&dir).ok()?;
-                let path = dir.join(format!("{DIAG_EVENT_FILE_PREFIX}{}.jsonl", std::process::id()));
+                let path = dir.join(format!(
+                    "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
+                    std::process::id()
+                ));
                 fs::OpenOptions::new()
                     .create(true)
                     .append(true)

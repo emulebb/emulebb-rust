@@ -151,11 +151,7 @@ async fn run_small_timer_sweep(
             probe.kad_version
         );
         if let Err(error) = dht
-            .send_packet_with_class(
-                addr,
-                &KadPacket::HelloReq(hello),
-                RpcWorkClass::Maintenance,
-            )
+            .send_packet_with_class(addr, &KadPacket::HelloReq(hello), RpcWorkClass::Maintenance)
             .await
         {
             tracing::debug!("failed to send Kad re-probe HELLO to {addr}: {error}");

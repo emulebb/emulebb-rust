@@ -15,8 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod aich_trust_corroboration;
 mod aich_tree;
+mod aich_trust_corroboration;
 mod ban_store_runtime;
 mod download_throttle;
 mod file_status_parts;
@@ -163,10 +163,14 @@ async fn download_speed_tracks_sliding_window_not_whole_transfer() {
 
     // Whole-transfer average over 23s would be ~91 KiB/s; the window only sees
     // the two recent samples (the early one fell out of the 10s window).
-    let windowed = runtime.download_speed_bytes_per_sec_at(file_hash, now + Duration::from_secs(23));
+    let windowed =
+        runtime.download_speed_bytes_per_sec_at(file_hash, now + Duration::from_secs(23));
     // span from oldest retained sample (+21s) to now (+23s) = 2s, 2 MiB total.
     assert_eq!(windowed, 2 * 1_048_576 * 1_000 / 2_000);
-    assert!(windowed > 500_000, "windowed rate reflects the recent burst");
+    assert!(
+        windowed > 500_000,
+        "windowed rate reflects the recent burst"
+    );
 }
 
 #[tokio::test]

@@ -106,10 +106,9 @@ impl super::MetadataStore {
     pub fn prune_aged_peers(&self) -> Result<usize> {
         const CREDIT_AGE_LIMIT_MS: i64 = 150 * 24 * 60 * 60 * 1000;
         let cutoff = unix_ms().saturating_sub(CREDIT_AGE_LIMIT_MS);
-        let pruned = self.connection()?.execute(
-            "DELETE FROM peers WHERE last_seen_ms < ?1",
-            params![cutoff],
-        )?;
+        let pruned = self
+            .connection()?
+            .execute("DELETE FROM peers WHERE last_seen_ms < ?1", params![cutoff])?;
         Ok(pruned)
     }
 
@@ -125,11 +124,7 @@ impl super::MetadataStore {
     ///   persists) and store the new key.
     ///
     /// Returns `true` when the key changed and credits were wiped.
-    pub fn record_verified_secure_ident(
-        &self,
-        user_hash: &str,
-        public_key: &[u8],
-    ) -> Result<bool> {
+    pub fn record_verified_secure_ident(&self, user_hash: &str, public_key: &[u8]) -> Result<bool> {
         let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
         let now = unix_ms();
         let mut conn = self.connection()?;

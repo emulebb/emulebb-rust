@@ -123,7 +123,10 @@ mod tests {
         let value = 0b110u32 << 29;
         let decoded = decode_misc_options1(value);
         assert_eq!(decoded.aich_version, 6);
-        assert!(decoded.supports_aich(), "non-zero AICH version means supported");
+        assert!(
+            decoded.supports_aich(),
+            "non-zero AICH version means supported"
+        );
     }
 
     #[test]

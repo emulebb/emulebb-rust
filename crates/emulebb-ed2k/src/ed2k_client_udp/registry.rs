@@ -72,7 +72,11 @@ impl ReaskPendingRegistry {
             .collect();
         expired
             .into_iter()
-            .filter_map(|endpoint| self.pending.remove(&endpoint).map(|reask| (endpoint, reask)))
+            .filter_map(|endpoint| {
+                self.pending
+                    .remove(&endpoint)
+                    .map(|reask| (endpoint, reask))
+            })
             .collect()
     }
 

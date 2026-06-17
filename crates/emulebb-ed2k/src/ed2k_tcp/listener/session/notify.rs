@@ -8,16 +8,16 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 
+use super::super::super::Ed2kTransport;
 use super::super::super::codec::{
+    decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
     decode_client_id_change_payload, decode_client_message_payload,
     decode_edonkey_queue_rank_payload, decode_emule_queue_ranking_payload,
     decode_file_description_payload, decode_optional_file_hash_payload,
     decode_preview_answer_payload, decode_preview_request_payload, decode_public_ip_answer_payload,
-    decode_reask_callback_tcp_payload, decode_chat_captcha_request_payload,
-    decode_chat_captcha_result_payload,
+    decode_reask_callback_tcp_payload,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_meta;
-use super::super::super::Ed2kTransport;
 
 /// OP_OUTOFPARTREQS: the peer ran out of part requests for us; log only.
 pub(super) fn handle_out_of_part_requests(transport: &Ed2kTransport, peer_addr: SocketAddr) {
@@ -49,11 +49,7 @@ pub(super) fn handle_change_client_id(
 }
 
 /// OP_CHANGE_SLOT: the peer changed the active transfer slot.
-pub(super) fn handle_change_slot(
-    transport: &Ed2kTransport,
-    peer_addr: SocketAddr,
-    payload: &[u8],
-) {
+pub(super) fn handle_change_slot(transport: &Ed2kTransport, peer_addr: SocketAddr, payload: &[u8]) {
     let changed_file = decode_optional_file_hash_payload(payload);
     dump_ed2k_tcp_listener_meta(
         peer_addr,

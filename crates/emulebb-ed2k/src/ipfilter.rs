@@ -66,7 +66,11 @@ impl IpFilter {
     /// Number of loaded ranges.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.read().expect("ip filter lock poisoned").ranges.len()
+        self.inner
+            .read()
+            .expect("ip filter lock poisoned")
+            .ranges
+            .len()
     }
 
     #[must_use]
@@ -163,7 +167,9 @@ fn parse_ipv4(text: &str) -> Option<u32> {
     if count != 4 {
         return None;
     }
-    Some(u32::from(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3])))
+    Some(u32::from(Ipv4Addr::new(
+        octets[0], octets[1], octets[2], octets[3],
+    )))
 }
 
 #[cfg(test)]
@@ -184,7 +190,10 @@ mod tests {
     #[test]
     fn high_level_ranges_are_allow_listed() {
         // A range with level >= the filter level is not filtered (allow entry).
-        let filter = IpFilter::parse("10.0.0.0 - 10.0.0.255 , 200 , Allowed", DEFAULT_FILTER_LEVEL);
+        let filter = IpFilter::parse(
+            "10.0.0.0 - 10.0.0.255 , 200 , Allowed",
+            DEFAULT_FILTER_LEVEL,
+        );
         assert!(!filter.is_filtered(Ipv4Addr::new(10, 0, 0, 1)));
     }
 

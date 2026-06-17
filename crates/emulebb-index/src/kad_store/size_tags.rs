@@ -2,9 +2,7 @@
 //! stores. These operate purely on `&[Tag]` slices and never touch the stored
 //! publish records, so they sit below the per-domain submodules.
 
-use emulebb_kad_proto::{
-    NodeId, SearchRes, SearchResultEntry, Tag, TagName, TagValue, tag_name,
-};
+use emulebb_kad_proto::{NodeId, SearchRes, SearchResultEntry, Tag, TagName, TagValue, tag_name};
 
 pub(super) fn is_integer_tag_value(value: &TagValue) -> bool {
     matches!(

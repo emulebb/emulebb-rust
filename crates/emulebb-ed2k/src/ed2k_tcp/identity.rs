@@ -428,12 +428,19 @@ pub(super) async fn try_send_secure_ident_signature(
         SocketAddr::V4(v4) => Some(*v4.ip()),
         SocketAddr::V6(_) => None, // IPv4-only client
     };
-    let challenge_ip =
-        select_outbound_challenge_ip(peer_state.peer_sec_ident, peer_state.our_external_ip, peer_ip);
+    let challenge_ip = select_outbound_challenge_ip(
+        peer_state.peer_sec_ident,
+        peer_state.our_external_ip,
+        peer_ip,
+    );
     let signature = encode_packet(
         OP_EMULEPROT,
         OP_SIGNATURE,
-        &secure_ident.signature_payload_with_challenge_ip(peer_public_key, challenge, challenge_ip)?,
+        &secure_ident.signature_payload_with_challenge_ip(
+            peer_public_key,
+            challenge,
+            challenge_ip,
+        )?,
     );
     transport
         .write_all(&signature)

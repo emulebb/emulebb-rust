@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::{KadPacket, NodeId, Req, constants::KADEMLIA_FIND_VALUE, opcode};
 
-use crate::error::DhtError;
 use super::DhtNode;
+use crate::error::DhtError;
 
 /// Oracle challenge lifetime (`SEC2MS(180)`).
 const LEGACY_CHALLENGE_TTL: Duration = Duration::from_secs(180);
@@ -132,11 +132,13 @@ impl DhtNode {
 
         if version == KAD_VERSION_7 {
             // Version 7 supports keys but not HELLO_RES_ACK: PING challenge.
-            self.inner
-                .legacy_challenges
-                .lock()
-                .await
-                .add(contact_id, NodeId::ZERO, ip, opcode::PONG, now);
+            self.inner.legacy_challenges.lock().await.add(
+                contact_id,
+                NodeId::ZERO,
+                ip,
+                opcode::PONG,
+                now,
+            );
             self.send_packet(addr, &KadPacket::Ping).await?;
         } else {
             // Older versions: REQ (FIND_VALUE) with a random challenge target.

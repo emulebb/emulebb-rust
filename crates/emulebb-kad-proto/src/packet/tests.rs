@@ -436,7 +436,14 @@ fn test_firewalled_res_roundtrip() {
     // header byte + opcode + 4-byte IP body, little-endian.
     assert_eq!(
         bytes,
-        vec![OP_KADEMLIAHEADER, opcode::FIREWALLED_RES, 0x04, 0x03, 0x02, 0x01]
+        vec![
+            OP_KADEMLIAHEADER,
+            opcode::FIREWALLED_RES,
+            0x04,
+            0x03,
+            0x02,
+            0x01
+        ]
     );
     match roundtrip(&pkt) {
         KadPacket::FirewalledRes(f) => assert_eq!(f.ip, 0x0102_0304),

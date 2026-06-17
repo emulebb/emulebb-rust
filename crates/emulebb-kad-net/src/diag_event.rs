@@ -84,7 +84,10 @@ pub fn emit(
         return;
     };
     if serde_json::to_writer(&mut *guard, &record).is_err() || guard.write_all(b"\n").is_err() {
-        warn!("failed to write diag_event line to {}", writer.path.display());
+        warn!(
+            "failed to write diag_event line to {}",
+            writer.path.display()
+        );
         return;
     }
     let _ = guard.flush();
@@ -137,20 +140,33 @@ pub fn bad_peer_kad_drop(
 }
 
 fn diag_event_writer() -> Option<&'static DiagEventWriter> {
-    DIAG_EVENT_WRITER.get_or_init(init_diag_event_writer).as_ref()
+    DIAG_EVENT_WRITER
+        .get_or_init(init_diag_event_writer)
+        .as_ref()
 }
 
 fn init_diag_event_writer() -> Option<DiagEventWriter> {
     let dir = read_env_path(EMULEBB_RUST_LOG_DIR_ENV)?;
     if let Err(error) = fs::create_dir_all(&dir) {
-        warn!("failed to create diag_event directory {}: {}", dir.display(), error);
+        warn!(
+            "failed to create diag_event directory {}: {}",
+            dir.display(),
+            error
+        );
         return None;
     }
-    let path = dir.join(format!("{DIAG_EVENT_FILE_PREFIX}{}.jsonl", std::process::id()));
+    let path = dir.join(format!(
+        "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
+        std::process::id()
+    ));
     let file = match fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(file) => file,
         Err(error) => {
-            warn!("failed to open diag_event file {}: {}", path.display(), error);
+            warn!(
+                "failed to open diag_event file {}: {}",
+                path.display(),
+                error
+            );
             return None;
         }
     };

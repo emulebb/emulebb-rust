@@ -19,7 +19,10 @@ pub(crate) async fn servers(State(state): State<RestState>) -> impl IntoResponse
     api_collection(server_responses(state.core.servers().await))
 }
 
-pub(crate) async fn create_server(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn create_server(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<ServerCreate>(&body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -44,7 +47,10 @@ pub(crate) async fn servers_disconnect(State(state): State<RestState>) -> impl I
     api_ok(server_status_response(&state).await)
 }
 
-pub(crate) async fn servers_import_met_url(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn servers_import_met_url(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<UrlImportRequest>(&body) {
         Ok(request) => request,
         Err(response) => return *response,

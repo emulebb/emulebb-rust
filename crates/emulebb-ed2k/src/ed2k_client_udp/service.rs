@@ -151,10 +151,7 @@ impl ReaskService {
     /// §4.1 transition; caller has already checked UDP-eligibility).
     pub(crate) fn register_source(&mut self, file_hash: Ed2kHash, source: ReaskSource) {
         self.endpoint_index.insert(source.endpoint, file_hash);
-        self.per_file
-            .entry(file_hash)
-            .or_default()
-            .insert(source);
+        self.per_file.entry(file_hash).or_default().insert(source);
     }
 
     /// Drop a source (e.g. the transfer completed or no longer needs it).
@@ -343,8 +340,8 @@ mod tests {
     }
 
     fn register(svc: &mut ReaskService, now: Instant) {
-        let src = ReaskSource::new(peer_v4(), file_hash(), 4, now)
-            .with_obfuscation(PEER_HASH, true);
+        let src =
+            ReaskSource::new(peer_v4(), file_hash(), 4, now).with_obfuscation(PEER_HASH, true);
         svc.register_source(file_hash(), src);
     }
 
@@ -361,8 +358,11 @@ mod tests {
         let source_endpoint = (Ipv4Addr::new(198, 51, 100, 50), 4672);
         let buddy_endpoint = (Ipv4Addr::new(203, 0, 113, 80), 5000);
         let buddy_id = [0x99u8; 16];
-        let src = ReaskSource::new(source_endpoint, file_hash(), 4, now)
-            .with_buddy(true, Some(buddy_endpoint), Some(buddy_id));
+        let src = ReaskSource::new(source_endpoint, file_hash(), 4, now).with_buddy(
+            true,
+            Some(buddy_endpoint),
+            Some(buddy_id),
+        );
         svc.register_source(file_hash(), src);
 
         let out = svc.tick(now, Duration::from_secs(20), |_| TransferReaskInfo {
@@ -371,7 +371,10 @@ mod tests {
         });
         assert_eq!(out.send.len(), 1);
         let (dest, datagram) = &out.send[0];
-        assert_eq!(*dest, SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1));
+        assert_eq!(
+            *dest,
+            SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1)
+        );
         assert_eq!(datagram[0], 0xC5); // OP_EMULEPROT, plaintext
         assert_eq!(datagram[1], OP_REASKCALLBACKUDP);
         let decoded = decode_reask_callback_udp(&datagram[2..], 4).unwrap();

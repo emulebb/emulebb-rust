@@ -84,7 +84,9 @@ pub(super) async fn handle_server_packet(
                     None => context.public_ip.clear(),
                 }
             } else {
-                context.public_ip.set(ipv4_from_client_id(id_change.client_id));
+                context
+                    .public_ip
+                    .set(ipv4_from_client_id(id_change.client_id));
             }
             send_connected_server_startup(
                 session,

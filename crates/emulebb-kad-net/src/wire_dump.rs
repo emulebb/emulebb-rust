@@ -318,10 +318,16 @@ fn emit_kad_udp_diag_event(
         serde_json::json!(summary.raw_obfuscated),
     );
     if let Some(requested) = summary.requested_obfuscation {
-        body.insert("requestedObfuscation".to_string(), serde_json::json!(requested));
+        body.insert(
+            "requestedObfuscation".to_string(),
+            serde_json::json!(requested),
+        );
     }
     if let Some(transport_mode) = summary.transport_mode {
-        body.insert("transportMode".to_string(), serde_json::json!(transport_mode));
+        body.insert(
+            "transportMode".to_string(),
+            serde_json::json!(transport_mode),
+        );
     }
     if let Some(receiver_verify_key) = summary.receiver_verify_key {
         body.insert(
@@ -336,10 +342,16 @@ fn emit_kad_udp_diag_event(
         );
     }
     if let Some(valid) = summary.receiver_verify_key_valid {
-        body.insert("receiverVerifyKeyValid".to_string(), serde_json::json!(valid));
+        body.insert(
+            "receiverVerifyKeyValid".to_string(),
+            serde_json::json!(valid),
+        );
     }
     if let Some(tracked) = summary.tracked_request_opcode {
-        body.insert("trackedRequestOpcode".to_string(), serde_json::json!(tracked));
+        body.insert(
+            "trackedRequestOpcode".to_string(),
+            serde_json::json!(tracked),
+        );
     }
     if let Some(drop_reason) = summary.drop_reason {
         body.insert("dropReason".to_string(), serde_json::json!(drop_reason));

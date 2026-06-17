@@ -34,7 +34,10 @@ pub(crate) async fn shared_files(
     api_collection_page(items, query).into_response()
 }
 
-pub(crate) async fn create_shared_file(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn create_shared_file(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<SharedFileCreateRequest>(&body) {
         Ok(request) => request,
         Err(response) => return *response,

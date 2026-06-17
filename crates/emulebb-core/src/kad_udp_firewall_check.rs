@@ -25,6 +25,7 @@ use tokio::{
     sync::{Mutex, Notify, RwLock},
 };
 
+use emulebb_ed2k::ed2k_server::Ed2kServerState;
 use emulebb_ed2k::{
     ed2k_tcp::{
         Ed2kHelloIdentity, FirewallCheckUdpRequest, emule_connect_options, enrich_hello_identity,
@@ -33,7 +34,6 @@ use emulebb_ed2k::{
     kad_firewall::{KadFirewallState, UdpFirewallCheckSummary},
     reachability::ExternalReachability,
 };
-use emulebb_ed2k::ed2k_server::Ed2kServerState;
 use emulebb_kad_dht::DhtNode;
 
 use crate::Ed2kNetworkConfig;
@@ -211,7 +211,9 @@ async fn run_kad_udp_firewall_check_round(
                 helper.kad_version
             ),
             Err(error) => {
-                tracing::debug!("Kad UDP firewall-check request to {helper_addr} failed: {error:#}");
+                tracing::debug!(
+                    "Kad UDP firewall-check request to {helper_addr} failed: {error:#}"
+                );
                 kad_firewall
                     .lock()
                     .await
@@ -222,8 +224,8 @@ async fn run_kad_udp_firewall_check_round(
 
     // Wait for the inbound KADEMLIA2_FIREWALLUDP replies to converge. The inbound
     // handler records them against the active round; poll the shared state.
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS);
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS);
     while tokio::time::Instant::now() < deadline {
         if kad_firewall.lock().await.udp_verified {
             break;
@@ -330,8 +332,12 @@ mod tests {
         // A prior UPnP guess that must be overridden by the peer-confirmed result.
         reachability.set_external_udp_port(45000);
 
-        apply_kad_udp_firewall_check_result(&firewall, &reachability, Some(summary(true, Some(53000))))
-            .await;
+        apply_kad_udp_firewall_check_result(
+            &firewall,
+            &reachability,
+            Some(summary(true, Some(53000))),
+        )
+        .await;
 
         assert!(reachability.udp_port_is_peer_confirmed());
         assert_eq!(reachability.advertised_udp_port(4672), 53000);

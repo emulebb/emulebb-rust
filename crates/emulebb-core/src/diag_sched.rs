@@ -21,7 +21,11 @@ fn peer_string(source: &Ed2kFoundSource) -> String {
     format!("{}:{}", source.ip, source.tcp_port)
 }
 
-fn insert_source_keys(keys: &mut Map<String, Value>, source: &Ed2kFoundSource, file_hash_hex: &str) {
+fn insert_source_keys(
+    keys: &mut Map<String, Value>,
+    source: &Ed2kFoundSource,
+    file_hash_hex: &str,
+) {
     keys.insert("peer".to_string(), json!(peer_string(source)));
     if let Some(user_hash) = source.user_hash {
         keys.insert("peerHash".to_string(), json!(hex::encode(user_hash)));
@@ -53,7 +57,13 @@ pub(crate) fn conn_budget(
         body.insert("denyReason".to_string(), json!(reason.as_str()));
     }
     let severity = if decision.admitted { "info" } else { "low" };
-    emit(FAMILY, "conn_budget", severity, Value::Object(keys), Value::Object(body));
+    emit(
+        FAMILY,
+        "conn_budget",
+        severity,
+        Value::Object(keys),
+        Value::Object(body),
+    );
 }
 
 /// `source_engaged` (schema §3.5): a source begins being served for a file.

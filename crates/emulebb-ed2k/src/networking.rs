@@ -169,10 +169,13 @@ pub fn resolve_bind_ip(
 /// leak traffic onto the LAN.
 #[must_use]
 pub fn resolve_bind_if_index(bind_ip: std::net::Ipv4Addr) -> Option<u32> {
-    get_if_addrs().ok()?.into_iter().find_map(|iface| match iface.addr {
-        IfAddr::V4(ref v4) if v4.ip == bind_ip => iface.index,
-        _ => None,
-    })
+    get_if_addrs()
+        .ok()?
+        .into_iter()
+        .find_map(|iface| match iface.addr {
+            IfAddr::V4(ref v4) if v4.ip == bind_ip => iface.index,
+            _ => None,
+        })
 }
 
 /// Converts a resolved binding to the serializable report shape.

@@ -31,7 +31,10 @@ pub(super) const UDP_SERV_STAT_MIN_REASK_TIME: Duration = Duration::from_secs(20
 /// last ping is at least [`UDP_SERV_STAT_REASK_TIME`] old, never sooner than the
 /// [`UDP_SERV_STAT_MIN_REASK_TIME`] floor. A first ping (no prior ping) is always
 /// due.
-pub(super) fn status_ping_due_at(last_status_ping: Option<TokioInstant>, now: TokioInstant) -> bool {
+pub(super) fn status_ping_due_at(
+    last_status_ping: Option<TokioInstant>,
+    now: TokioInstant,
+) -> bool {
     match last_status_ping {
         None => true,
         Some(last) => {
@@ -119,7 +122,8 @@ mod tests {
     fn decode_reads_users_and_files_at_stock_offsets() {
         let challenge = 0x55AA_1234;
         let payload = body(challenge, 5000, 90000, &[]);
-        let decoded = decode_server_status_response(&payload, challenge).expect("matching challenge");
+        let decoded =
+            decode_server_status_response(&payload, challenge).expect("matching challenge");
         assert_eq!(decoded.users, 5000);
         assert_eq!(decoded.files, 90000);
         assert_eq!(decoded.udp_flags, None);
@@ -138,7 +142,8 @@ mod tests {
             t
         };
         let payload = body(challenge, 100, 200, &trailer);
-        let decoded = decode_server_status_response(&payload, challenge).expect("matching challenge");
+        let decoded =
+            decode_server_status_response(&payload, challenge).expect("matching challenge");
         assert_eq!(decoded.users, 100);
         assert_eq!(decoded.files, 200);
         assert_eq!(decoded.udp_flags, Some(0x0000_0321));

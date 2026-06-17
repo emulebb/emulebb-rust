@@ -337,11 +337,13 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["data"]["contractVersion"], "1.0.0");
         assert_eq!(value["data"]["apiVersion"], "1");
-        assert!(value["data"]["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|capability| capability == "rest.emulebb.v1"));
+        assert!(
+            value["data"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "rest.emulebb.v1")
+        );
     }
 
     #[tokio::test]

@@ -285,7 +285,10 @@ async fn listener_serves_oversized_range_block_by_block_without_whole_range_read
             assert_eq!(decoded_hash, file_hash);
             assert_eq!(start, served_end, "fragments must be contiguous");
             assert_eq!(end - start, bytes.len() as u64);
-            assert!(end <= ED2K_PART_SIZE, "serve overran into the unverified part");
+            assert!(
+                end <= ED2K_PART_SIZE,
+                "serve overran into the unverified part"
+            );
             max_fragment_len = max_fragment_len.max(end - start);
             served_end = end;
         }

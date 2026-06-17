@@ -304,7 +304,9 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Sample.Title.mkv");
         let piece_bytes: i64 = conn
-            .query_row("SELECT bytes_written FROM transfer_pieces", [], |r| r.get(0))
+            .query_row("SELECT bytes_written FROM transfer_pieces", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(piece_bytes, 4096);
         let user_hash: Vec<u8> = conn

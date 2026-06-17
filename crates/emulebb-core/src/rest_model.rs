@@ -11,9 +11,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use emulebb_ed2k::{
-    NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
-};
+use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter};
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig};
 use serde::{Deserialize, Serialize};
 

@@ -752,7 +752,8 @@ async fn graceful_teardown_disconnects_and_is_idempotent() {
     // teardown function directly and asserts it (a) leaves ed2k disconnected,
     // (b) is safe to call twice (idempotent, no double-free / panic), and
     // (c) completes well within the bounded timeout.
-    let core = Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
 
     let teardown = async {
         graceful_teardown(&core).await;

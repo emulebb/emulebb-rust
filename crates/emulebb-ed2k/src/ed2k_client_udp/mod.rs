@@ -45,9 +45,7 @@ pub use runtime::{
     ReaskEventSender, ReaskSourceHandle, reask_command_channel, reask_event_channel,
     run_ed2k_udp_reask_loop,
 };
-pub(crate) use service::{
-    ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo,
-};
+pub(crate) use service::{ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo};
 pub(crate) use source_set::ReaskSourceSet;
 pub(crate) use state::{
     FILE_REASK_TIME, MIN_REQUEST_TIME, ReaskAction, ReaskReply, ReaskSource, UDP_MAX_QUEUE_TIME,

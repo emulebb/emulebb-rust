@@ -351,11 +351,8 @@ impl Ed2kUploadQueueState {
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
         let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
-        let score_modifiers = UploadScoreModifiers::from_peer(
-            &key.peer,
-            low_id,
-            all_time_upload_ratio_permille,
-        );
+        let score_modifiers =
+            UploadScoreModifiers::from_peer(&key.peer, low_id, all_time_upload_ratio_permille);
         if let Some(existing_key) = self.session_key_for_peer(&key.peer) {
             let Some(mut session) = self.sessions.remove(&existing_key) else {
                 unreachable!("existing peer queue key missing from session map");

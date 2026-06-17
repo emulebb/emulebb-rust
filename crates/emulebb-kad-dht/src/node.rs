@@ -30,9 +30,9 @@ use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 
 struct DhtInner {
     own_id: NodeId,
@@ -323,11 +323,7 @@ impl DhtNode {
     /// Send an already-framed datagram on the shared Kad UDP socket without Kad
     /// encoding — for eD2k reask replies + the per-transfer ticker. Pass-through
     /// to `RpcManager::send_raw_datagram`.
-    pub async fn send_raw_datagram(
-        &self,
-        addr: SocketAddr,
-        data: &[u8],
-    ) -> Result<(), DhtError> {
+    pub async fn send_raw_datagram(&self, addr: SocketAddr, data: &[u8]) -> Result<(), DhtError> {
         self.inner.rpc.send_raw_datagram(addr, data).await?;
         Ok(())
     }

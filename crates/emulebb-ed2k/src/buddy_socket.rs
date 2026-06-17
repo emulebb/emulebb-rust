@@ -226,9 +226,16 @@ mod tests {
         let ip = Ipv4Addr::new(198, 51, 100, 9);
         registry.set_expected_inbound(expected(ip, 0x11, 0x22));
 
-        assert_eq!(registry.match_connecting_peer(ip, [0x11; 16]), Some(buddy_id(0x22)));
+        assert_eq!(
+            registry.match_connecting_peer(ip, [0x11; 16]),
+            Some(buddy_id(0x22))
+        );
         // Wrong IP / wrong hash do not match.
-        assert!(registry.match_connecting_peer(Ipv4Addr::new(10, 0, 0, 1), [0x11; 16]).is_none());
+        assert!(
+            registry
+                .match_connecting_peer(Ipv4Addr::new(10, 0, 0, 1), [0x11; 16])
+                .is_none()
+        );
         assert!(registry.match_connecting_peer(ip, [0x99; 16]).is_none());
     }
 

@@ -50,7 +50,13 @@ pub(crate) fn buddy(established: bool, peer: SocketAddr) {
     };
     let action = if established { "acquired" } else { "released" };
     let body = json!({ "milestone": milestone, "action": action });
-    emit(FAMILY, "buddy", "info", json!({ "peer": peer.to_string() }), body);
+    emit(
+        FAMILY,
+        "buddy",
+        "info",
+        json!({ "peer": peer.to_string() }),
+        body,
+    );
 }
 
 /// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
@@ -120,7 +126,11 @@ mod tests {
             false,
             false,
             false,
-            KadRoutingSummaryCounts { total: 10, verified: 4, with_udp_key: 6 },
+            KadRoutingSummaryCounts {
+                total: 10,
+                verified: 4,
+                with_udp_key: 6,
+            },
         );
     }
 }

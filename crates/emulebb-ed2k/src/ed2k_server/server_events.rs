@@ -155,7 +155,10 @@ mod tests {
         let declared = 255usize;
         let mut body = vec![declared as u8];
         for i in 0..declared {
-            body.extend(entry([10, 0, (i >> 8) as u8, (i & 0xff) as u8], 4000 + (i as u16)));
+            body.extend(entry(
+                [10, 0, (i >> 8) as u8, (i & 0xff) as u8],
+                4000 + (i as u16),
+            ));
         }
         let servers = decode_server_list(&body);
         assert!(servers.len() <= MAX_SERVERS_FROM_ONE_LIST);

@@ -19,7 +19,8 @@ use std::borrow::Cow;
 use super::codec::{
     DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK,
     OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskCallbackUdp, ReaskFilePing,
-    decode_direct_callback_req, decode_reask_ack, decode_reask_callback_udp, decode_reask_file_ping,
+    decode_direct_callback_req, decode_reask_ack, decode_reask_callback_udp,
+    decode_reask_file_ping,
 };
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
@@ -140,7 +141,13 @@ mod tests {
         let plain = frame(OP_REASKACK, &body);
         let datagram = obfuscate_client_udp_with(&OUR_HASH, SENDER_IP, &plain, 0x2468, 0x40);
         let msg = parse_inbound_reask_datagram(&datagram, SENDER_IP, &OUR_HASH, 4).unwrap();
-        assert_eq!(msg, InboundReaskMessage::Ack(ReaskAck { part_status: None, queue_position: 9 }));
+        assert_eq!(
+            msg,
+            InboundReaskMessage::Ack(ReaskAck {
+                part_status: None,
+                queue_position: 9
+            })
+        );
     }
 
     #[test]
@@ -193,7 +200,10 @@ mod tests {
     #[test]
     fn non_reask_emuleprot_opcode_is_ignored() {
         // Plaintext OP_EMULEPROT but an opcode we don't handle here.
-        assert!(parse_inbound_reask_datagram(&frame(0x01, &[1, 2, 3]), SENDER_IP, &OUR_HASH, 4).is_none());
+        assert!(
+            parse_inbound_reask_datagram(&frame(0x01, &[1, 2, 3]), SENDER_IP, &OUR_HASH, 4)
+                .is_none()
+        );
     }
 
     #[test]

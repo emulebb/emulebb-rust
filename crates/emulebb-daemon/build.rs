@@ -30,10 +30,8 @@ fn main() {
         use embed_manifest::{embed_manifest, new_manifest};
 
         if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-            embed_manifest(
-                new_manifest("EmulebbRust").long_path_aware(Setting::Enabled),
-            )
-            .expect("failed to embed longPathAware Windows manifest");
+            embed_manifest(new_manifest("EmulebbRust").long_path_aware(Setting::Enabled))
+                .expect("failed to embed longPathAware Windows manifest");
         }
     }
 }

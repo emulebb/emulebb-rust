@@ -668,7 +668,8 @@ pub(super) async fn complete_peer_secure_ident_with_listener_transport(
         .await
         .unwrap();
 
-    let listener_public_key = read_transport_until_opcode(transport, OP_EMULEPROT, OP_PUBLICKEY).await;
+    let listener_public_key =
+        read_transport_until_opcode(transport, OP_EMULEPROT, OP_PUBLICKEY).await;
     let listener_public_key = decode_public_key_payload(&listener_public_key.payload).unwrap();
     transport
         .write_all(

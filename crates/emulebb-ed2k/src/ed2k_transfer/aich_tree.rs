@@ -111,7 +111,11 @@ impl AichHashTree {
                 };
                 self.left = Some(Box::new(AichHashTree::new(left_size, true, base)));
             }
-            return self.left.as_mut().unwrap().find_hash_mut(start, size, level);
+            return self
+                .left
+                .as_mut()
+                .unwrap()
+                .find_hash_mut(start, size, level);
         }
         let start = start - left_size;
         if start + size > right_size {
@@ -125,7 +129,10 @@ impl AichHashTree {
             };
             self.right = Some(Box::new(AichHashTree::new(right_size, false, base)));
         }
-        self.right.as_mut().unwrap().find_hash_mut(start, size, level)
+        self.right
+            .as_mut()
+            .unwrap()
+            .find_hash_mut(start, size, level)
     }
 
     /// Read-only find of an existing valid hash. Mirrors `FindExistingHash`.
@@ -344,7 +351,12 @@ impl AichHashTree {
         hash_ident |= u32::from(self.is_left_branch);
         let base = self.base_size();
         let blocks = self.data_size / base + u64::from(self.data_size % base != 0);
-        let left_size = (if self.is_left_branch { blocks + 1 } else { blocks }) / 2 * base;
+        let left_size = (if self.is_left_branch {
+            blocks + 1
+        } else {
+            blocks
+        }) / 2
+            * base;
         let right_size = self.data_size - left_size;
         let (Some(left), Some(right)) = (self.left.as_ref(), self.right.as_ref()) else {
             bail!("AICH CreatePartRecoveryData: missing child trees");

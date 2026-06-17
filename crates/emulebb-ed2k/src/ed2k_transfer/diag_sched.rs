@@ -89,5 +89,11 @@ pub(crate) fn capacity_snapshot(
         "activeSlots": active_sessions,
         "waitingSessions": waiting_sessions,
     });
-    emit(FAMILY, "capacity_snapshot", "info", Value::Object(Map::new()), body);
+    emit(
+        FAMILY,
+        "capacity_snapshot",
+        "info",
+        Value::Object(Map::new()),
+        body,
+    );
 }

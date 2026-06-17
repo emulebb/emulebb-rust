@@ -20,8 +20,8 @@ use super::super::super::identity::{
     try_send_secure_ident_signature, verify_peer_secure_ident_signature,
 };
 use super::super::super::{
-    ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED, Ed2kSecureIdent,
-    Ed2kTransport, OP_EMULEPROT, OP_PUBLICKEY, encode_packet,
+    ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_SIGNATURE_NEEDED,
+    Ed2kSecureIdent, Ed2kTransport, OP_EMULEPROT, OP_PUBLICKEY, encode_packet,
 };
 
 /// OP_SECIDENTSTATE: the peer told us which credential it needs; send the

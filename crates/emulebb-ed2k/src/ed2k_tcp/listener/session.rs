@@ -24,10 +24,9 @@ use crate::{
 
 use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
-    decode_exact_file_hash_payload, decode_kad_callback_payload,
-    decode_optional_file_hash_payload, encode_aich_recovery_answer,
-    encode_aich_recovery_failure_answer, encode_buddy_pong, encode_file_req_ans_nofil,
-    encode_port_test_answer, encode_public_ip_answer,
+    decode_exact_file_hash_payload, decode_kad_callback_payload, decode_optional_file_hash_payload,
+    encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_buddy_pong,
+    encode_file_req_ans_nofil, encode_port_test_answer, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
@@ -935,10 +934,7 @@ impl InboundBuddyHold {
 
 /// Pure 3-minute buddy ping/pong gate (oracle `AllowIncomingBuddyPingPong`),
 /// split out so the cadence is deterministically unit-testable.
-fn allow_buddy_pingpong_at(
-    last: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> bool {
+fn allow_buddy_pingpong_at(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
     match last {
         None => true,
         Some(last) => now.saturating_duration_since(last) >= BUDDY_PINGPONG_MIN_INTERVAL,
@@ -1122,7 +1118,10 @@ mod tests {
             last + BUDDY_PINGPONG_MIN_INTERVAL - Duration::from_secs(1)
         ));
         // Exactly at the boundary and beyond: allowed again.
-        assert!(allow_buddy_pingpong_at(Some(last), last + BUDDY_PINGPONG_MIN_INTERVAL));
+        assert!(allow_buddy_pingpong_at(
+            Some(last),
+            last + BUDDY_PINGPONG_MIN_INTERVAL
+        ));
         assert!(allow_buddy_pingpong_at(
             Some(last),
             last + BUDDY_PINGPONG_MIN_INTERVAL + Duration::from_secs(1)

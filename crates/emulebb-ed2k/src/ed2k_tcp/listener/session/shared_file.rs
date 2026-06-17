@@ -15,10 +15,10 @@ use crate::{
 use super::super::super::codec::{
     SourceExchangePeer, decode_exact_file_hash_payload, decode_file_hash_payload,
     decode_hashset_request2, decode_request_sources_payload, encode_aich_file_hash_answer,
-    encode_answer_sources2, encode_file_req_ans_nofil, encode_file_status,
+    encode_answer_sources2, encode_file_desc, encode_file_req_ans_nofil, encode_file_status,
     encode_hashset_answer, encode_hashset_answer2, encode_multipacket_answer,
-    encode_file_desc, encode_multipacket_ext2_answer, encode_request_filename_answer,
-    skip_request_filename_ext_info, source_exchange_entry_count,
+    encode_multipacket_ext2_answer, encode_request_filename_answer, skip_request_filename_ext_info,
+    source_exchange_entry_count,
 };
 use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
@@ -77,7 +77,8 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                     continue;
                 }
                 let used_version = requested_version.min(ED2K_SOURCE_EXCHANGE2_VERSION);
-                let sources = source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
+                let sources =
+                    source_exchange_peers(transfer_runtime, &requested, peer_addr.ip()).await?;
                 if source_exchange_entry_count(used_version, &sources) == 0 {
                     continue;
                 }
@@ -239,7 +240,11 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
     // for a file we actually serve, when the peer accepts comments and we have a
     // non-empty rating/comment to send.
     if let Ok(manifest) = transfer_runtime.manifest(&requested.to_string()).await {
-        if should_send_file_desc(peer_accept_comment_version, manifest.rating, &manifest.comment) {
+        if should_send_file_desc(
+            peer_accept_comment_version,
+            manifest.rating,
+            &manifest.comment,
+        ) {
             let desc = encode_file_desc(manifest.rating, &manifest.comment);
             dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "file_desc", &desc);
             transport
@@ -448,11 +453,7 @@ fn source_ip_is_low_id(ip: Ipv4Addr) -> bool {
 
 /// `true` when a source is eligible to be offered in a source-exchange reply:
 /// direct-dialable (non-LowID, non-zero TCP port) and not the requester itself.
-fn source_exchange_eligible(
-    ip: Ipv4Addr,
-    tcp_port: u16,
-    exclude_ipv4: Option<Ipv4Addr>,
-) -> bool {
+fn source_exchange_eligible(ip: Ipv4Addr, tcp_port: u16, exclude_ipv4: Option<Ipv4Addr>) -> bool {
     // Never echo the requester back to itself as a source.
     tcp_port != 0 && exclude_ipv4 != Some(ip) && !source_ip_is_low_id(ip)
 }
@@ -592,13 +593,21 @@ mod tests {
         let public = Ipv4Addr::new(45, 82, 80, 155);
         // Eligible: public IP, real port, not the requester.
         assert!(source_exchange_eligible(public, 4662, None));
-        assert!(source_exchange_eligible(public, 4662, Some(Ipv4Addr::new(1, 2, 3, 4))));
+        assert!(source_exchange_eligible(
+            public,
+            4662,
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        ));
         // Zero port is never dialable.
         assert!(!source_exchange_eligible(public, 0, None));
         // Never echo the requester back to itself.
         assert!(!source_exchange_eligible(public, 4662, Some(public)));
         // LowID source is excluded even with a non-zero port.
-        assert!(!source_exchange_eligible(Ipv4Addr::new(7, 0, 0, 0), 4662, None));
+        assert!(!source_exchange_eligible(
+            Ipv4Addr::new(7, 0, 0, 0),
+            4662,
+            None
+        ));
     }
 
     #[test]

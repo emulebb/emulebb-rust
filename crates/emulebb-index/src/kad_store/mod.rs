@@ -25,17 +25,17 @@ mod source;
 
 use entry_store::{purge_expired, upsert_entry};
 use keyword::{
-    STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish, has_stock_keyword_filename,
-    keyword_dedup_key, keyword_entry_matches_restrictive_payload, keyword_result_tags,
-    stock_keyword_file_size, stock_keyword_publish_decision,
+    STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish, has_stock_keyword_filename, keyword_dedup_key,
+    keyword_entry_matches_restrictive_payload, keyword_result_tags, stock_keyword_file_size,
+    stock_keyword_publish_decision,
 };
 use notes::{
     StoredNotesPublish, has_stock_note_tags, notes_dedup_key, notes_result_tags,
     stock_notes_publish_load, upsert_notes_entry,
 };
 use size_tags::{
-    search_response, stock_notes_file_size_matches_request,
-    stock_source_file_size_matches_request, stock_stored_publish_tags,
+    search_response, stock_notes_file_size_matches_request, stock_source_file_size_matches_request,
+    stock_stored_publish_tags,
 };
 use source::{
     StoredSourcePublish, is_stock_source_publish, source_dedup_key, source_entry_id,
@@ -1566,7 +1566,11 @@ mod tests {
                 ts(index as i64),
             );
         }
-        assert_eq!(store.source_entry_count(), 3, "file A bounded by per-file cap");
+        assert_eq!(
+            store.source_entry_count(),
+            3,
+            "file A bounded by per-file cap"
+        );
 
         // Two sources for file B: file B settles within its own per-file cap and
         // the store total (3 + 2 = 5) is exactly the global cap.
@@ -1606,7 +1610,10 @@ mod tests {
         let cfg = KadLocalStoreConfig::default();
         assert!(cfg.source_capacity > cfg.source_per_file_capacity);
         assert!(cfg.notes_capacity > cfg.notes_per_file_capacity);
-        assert_eq!(cfg.source_per_file_capacity, super::STOCK_MAX_SOURCES_PER_FILE);
+        assert_eq!(
+            cfg.source_per_file_capacity,
+            super::STOCK_MAX_SOURCES_PER_FILE
+        );
         assert_eq!(cfg.notes_per_file_capacity, super::STOCK_MAX_NOTES_PER_FILE);
     }
 

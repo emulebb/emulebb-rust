@@ -37,7 +37,9 @@ async fn foreign_handler_receives_non_kad_datagram() {
     }
 
     let got = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
-    let (data, from) = got.expect("foreign handler not invoked in time").expect("channel closed");
+    let (data, from) = got
+        .expect("foreign handler not invoked in time")
+        .expect("channel closed");
     assert_eq!(data, datagram);
     assert_eq!(from, peer_addr);
 }
@@ -95,7 +97,10 @@ async fn send_raw_datagram_writes_unencoded_bytes() {
     let out = transport.drain_outgoing();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].0, peer_addr);
-    assert_eq!(out[0].1, framed, "bytes must go out verbatim, un-Kad-encoded");
+    assert_eq!(
+        out[0].1, framed,
+        "bytes must go out verbatim, un-Kad-encoded"
+    );
 }
 
 #[tokio::test]
@@ -141,6 +146,12 @@ async fn declining_foreign_handler_falls_through_to_decode_failure() {
 
     // The loop survived the declined datagram and still processes the Kad packet.
     let received = tokio::time::timeout(Duration::from_secs(2), subscriber.recv()).await;
-    assert!(received.is_ok(), "recv loop stalled after a declined foreign datagram");
-    assert!(matches!(received.unwrap().unwrap().packet, KadPacket::HelloReq(_)));
+    assert!(
+        received.is_ok(),
+        "recv loop stalled after a declined foreign datagram"
+    );
+    assert!(matches!(
+        received.unwrap().unwrap().packet,
+        KadPacket::HelloReq(_)
+    ));
 }

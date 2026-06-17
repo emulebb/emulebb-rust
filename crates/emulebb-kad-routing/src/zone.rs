@@ -142,7 +142,13 @@ impl RoutingZone {
     ///
     /// For simplicity: recurse into all leaf bins, add contacts to result.
     /// The caller (RoutingTable) sorts by XOR distance.
-    pub fn get_closest(&self, target: &NodeId, own_id: &NodeId, n: usize, result: &mut Vec<Contact>) {
+    pub fn get_closest(
+        &self,
+        target: &NodeId,
+        own_id: &NodeId,
+        n: usize,
+        result: &mut Vec<Contact>,
+    ) {
         match &self.content {
             ZoneContent::Leaf(bin) => {
                 for c in bin.iter() {
@@ -570,8 +576,13 @@ mod tests {
         };
         for i in 0..size as u8 {
             let id = make_id_with_bit(KBASE as u32, false, i + 1);
-            zone.add(make_contact(id, &format!("30.{}.0.1", i + 1)), &OWN, i as usize, usize::MAX)
-                .unwrap();
+            zone.add(
+                make_contact(id, &format!("30.{}.0.1", i + 1)),
+                &OWN,
+                i as usize,
+                usize::MAX,
+            )
+            .unwrap();
         }
         assert_eq!(zone.count(), size);
         zone

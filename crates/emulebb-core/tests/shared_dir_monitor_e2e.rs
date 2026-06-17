@@ -139,7 +139,10 @@ fn unique_test_dir(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .map(|path| path.join("tmp"))
         .unwrap_or_else(std::env::temp_dir);
-    let path = root.join(format!("emulebb-core-{name}-{}-{stamp}", std::process::id()));
+    let path = root.join(format!(
+        "emulebb-core-{name}-{}-{stamp}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("create test dir");
     path

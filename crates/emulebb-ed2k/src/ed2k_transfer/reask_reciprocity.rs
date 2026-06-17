@@ -37,7 +37,9 @@ impl Ed2kTransferRuntime {
         our_public_ip: [u8; 4],
     ) -> Option<Vec<u8>> {
         // IPv4-only client: a non-V4 sender cannot be one of our queued peers.
-        let SocketAddr::V4(v4) = from else { return None };
+        let SocketAddr::V4(v4) = from else {
+            return None;
+        };
         let sender_ip = IpAddr::V4(*v4.ip());
         let sender_udp_port = v4.port();
         let requested_hex = ping.file_hash.to_string();
@@ -85,8 +87,7 @@ impl Ed2kTransferRuntime {
         let req = InboundReaskRequest {
             file_shared,
             sender_located: located.is_some(),
-            file_matches: located
-                .is_some_and(|e| e.file_hash.eq_ignore_ascii_case(&requested_hex)),
+            file_matches: located.is_some_and(|e| e.file_hash.eq_ignore_ascii_case(&requested_hex)),
             waiting_position: located.and_then(|e| e.queue_rank).unwrap_or(0),
             sender_multiple_ip_unknown: located.is_none() && same_ip.len() > 1,
             waiting_user_count,

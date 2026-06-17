@@ -151,7 +151,10 @@ impl ReaskSourceSet {
             .into_iter()
             .filter_map(|((ip, port), _)| {
                 let source = self.sources.get_mut(&(ip, port))?;
-                Some(((ip, port), apply_reask_reply(source, ReaskReply::Timeout, now)))
+                Some((
+                    (ip, port),
+                    apply_reask_reply(source, ReaskReply::Timeout, now),
+                ))
             })
             .collect()
     }
@@ -214,7 +217,10 @@ mod tests {
         let mut set = ReaskSourceSet::new();
         let (a, pa) = source(&mut set, 2, now);
         // Unsolicited ack (no pending reask) is dropped.
-        assert!(set.apply_reply(a, pa, ReaskReply::Ack { rank: 5 }, now).is_none());
+        assert!(
+            set.apply_reply(a, pa, ReaskReply::Ack { rank: 5 }, now)
+                .is_none()
+        );
         // After a reask is outstanding, the ack is accepted.
         set.mark_reasked(a, pa, now);
         assert_eq!(
@@ -288,14 +294,15 @@ mod tests {
 
         // One obfuscation-capable due source.
         let endpoint = (ip(8), 4672);
-        set.insert(
-            ReaskSource::new(endpoint, hash(), 4, now).with_obfuscation(peer_hash, true),
-        );
+        set.insert(ReaskSource::new(endpoint, hash(), 4, now).with_obfuscation(peer_hash, true));
 
         let datagrams = set.due_datagrams(now, Some(&[true, false, true]), 2, 4, our_ip);
         assert_eq!(datagrams.len(), 1);
         // A HighID source's direct ping is destined to the source's own endpoint.
-        assert_eq!(datagrams[0].0, SocketAddr::new(endpoint.0.into(), endpoint.1));
+        assert_eq!(
+            datagrams[0].0,
+            SocketAddr::new(endpoint.0.into(), endpoint.1)
+        );
 
         // The built datagram is a valid OP_REASKFILEPING the peer (keying on its
         // own hash == peer_hash + our IP as the sender) can parse back.
@@ -338,8 +345,11 @@ mod tests {
         let buddy_endpoint = (Ipv4Addr::new(198, 51, 100, 200), 5000);
         let buddy_id = [0x77u8; 16];
         set.insert(
-            ReaskSource::new(source_endpoint, hash(), 4, now)
-                .with_buddy(true, Some(buddy_endpoint), Some(buddy_id)),
+            ReaskSource::new(source_endpoint, hash(), 4, now).with_buddy(
+                true,
+                Some(buddy_endpoint),
+                Some(buddy_id),
+            ),
         );
 
         let datagrams = set.due_datagrams(now, Some(&[true, false]), 3, 4, our_ip);
@@ -366,10 +376,11 @@ mod tests {
         // A LowID source missing the buddy id (hello-only buddy) falls back to the
         // direct ping destined to its own endpoint (no origination).
         let no_id_endpoint = (ip(21), 4672);
-        set.insert(
-            ReaskSource::new(no_id_endpoint, hash(), 4, now)
-                .with_buddy(true, Some(buddy_endpoint), None),
-        );
+        set.insert(ReaskSource::new(no_id_endpoint, hash(), 4, now).with_buddy(
+            true,
+            Some(buddy_endpoint),
+            None,
+        ));
         let next = set.due_datagrams(now, None, 0, 4, our_ip);
         let entry = next
             .iter()

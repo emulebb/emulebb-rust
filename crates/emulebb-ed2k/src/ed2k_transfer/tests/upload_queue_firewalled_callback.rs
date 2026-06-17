@@ -24,7 +24,11 @@ fn firewalled_context() -> Ed2kUploadFirewallContext {
 
 /// Fill the waiting queue past the master 50-waiter threshold (the active slot is
 /// taken by a separate granted peer), so the firewalled-callback guard engages.
-async fn fill_queue_past_threshold(runtime: &Ed2kTransferRuntime, file_hash: &Ed2kHash, now: Instant) {
+async fn fill_queue_past_threshold(
+    runtime: &Ed2kTransferRuntime,
+    file_hash: &Ed2kHash,
+    now: Instant,
+) {
     let (_active, active_status) = runtime
         .begin_upload_session_at(upload_peer(1, 0x01, 0x0A00_0001), file_hash, now)
         .await;
@@ -35,13 +39,14 @@ async fn fill_queue_past_threshold(runtime: &Ed2kTransferRuntime, file_hash: &Ed
         let user_marker = (index % 200) as u8 + 1;
         let client_id = 0x0A01_0000 + index;
         let (_handle, status) = runtime
-            .begin_upload_session_at(
-                upload_peer(octet, user_marker, client_id),
-                file_hash,
-                now,
-            )
+            .begin_upload_session_at(upload_peer(octet, user_marker, client_id), file_hash, now)
             .await;
-        assert_eq!(status, Ed2kUploadSessionStatus::Waiting { rank: index as u16 + 1 });
+        assert_eq!(
+            status,
+            Ed2kUploadSessionStatus::Waiting {
+                rank: index as u16 + 1
+            }
+        );
     }
 }
 

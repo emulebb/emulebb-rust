@@ -188,9 +188,8 @@ async fn test_firewalled_res_reaches_handler_without_outbound_tracking() {
     let _handle = rpc.start();
 
     let peer_addr = make_peer_addr();
-    let firewalled_res = KadPacket::FirewalledRes(emulebb_kad_proto::FirewalledRes {
-        ip: 0x0102_0304,
-    });
+    let firewalled_res =
+        KadPacket::FirewalledRes(emulebb_kad_proto::FirewalledRes { ip: 0x0102_0304 });
     let encoded = firewalled_res.encode().unwrap();
     let _ = inject_tx.send((encoded, peer_addr)).await;
 

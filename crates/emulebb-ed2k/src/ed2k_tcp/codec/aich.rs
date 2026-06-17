@@ -106,7 +106,9 @@ pub(in crate::ed2k_tcp) fn encode_aich_file_hash_answer(
     encode_packet(OP_EMULEPROT, OP_AICHFILEHASHANS, &payload)
 }
 
-pub(in crate::ed2k_tcp) fn decode_aich_file_hash_answer(payload: &[u8]) -> Result<(Ed2kHash, [u8; 20])> {
+pub(in crate::ed2k_tcp) fn decode_aich_file_hash_answer(
+    payload: &[u8],
+) -> Result<(Ed2kHash, [u8; 20])> {
     if payload.len() < 36 {
         anyhow::bail!("short OP_AICHFILEHASHANS payload {}", payload.len());
     }

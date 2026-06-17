@@ -51,10 +51,7 @@ fn old_client_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUploadPeer
 
 /// Assert that a flagged-zero waiter (bad-guy / GPL / banned) always ranks below
 /// a plain waiter that registered AFTER it, since its score is forced to 0.
-async fn flagged_waiter_ranks_below_plain(
-    label: &str,
-    flagged: Ed2kUploadPeerIdentity,
-) {
+async fn flagged_waiter_ranks_below_plain(label: &str, flagged: Ed2kUploadPeerIdentity) {
     let root = unique_test_dir(&format!("ed2k-upload-queue-{label}"));
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime.configure_upload_queue(one_slot_config()).await;

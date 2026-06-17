@@ -88,7 +88,10 @@ async fn disabled_credit_system_gives_everyone_the_neutral_ratio() {
             now,
         )
         .await;
-    assert_eq!(credited_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+    assert_eq!(
+        credited_status,
+        Ed2kUploadSessionStatus::Waiting { rank: 2 }
+    );
 
     // Scoring keeps the credited peer behind: no credit weighting applied.
     let scored_at = now + Duration::from_secs(1);

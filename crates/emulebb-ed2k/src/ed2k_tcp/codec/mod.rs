@@ -15,22 +15,22 @@ mod source_exchange;
 mod upload;
 
 pub(super) use aich::{
-    AichRecoveryAnswer, decode_aich_file_hash_answer,
-    decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
-    encode_aich_file_hash_answer, encode_aich_file_hash_request, encode_aich_recovery_answer,
+    AichRecoveryAnswer, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
+    decode_aich_recovery_request_payload, encode_aich_file_hash_answer,
+    encode_aich_file_hash_request, encode_aich_recovery_answer,
     encode_aich_recovery_failure_answer, encode_aich_recovery_request,
 };
 pub(in crate::ed2k_tcp) use buddy::{
     encode_buddy_ping, encode_buddy_pong, encode_kad_callback_relay,
 };
+#[cfg(test)]
+pub(super) use file_status::decode_file_status_payload;
 pub(super) use file_status::{
     decode_file_status_availability, decode_file_status_body_availability, encode_file_status,
     validate_file_status_part_count,
 };
-#[cfg(test)]
-pub(super) use file_status::decode_file_status_payload;
 pub(super) use source_exchange::{
-    SourceExchangePeer, decode_answer_sources2_payload, decode_answer_sources_payload,
+    SourceExchangePeer, decode_answer_sources_payload, decode_answer_sources2_payload,
     decode_request_sources_payload, encode_answer_sources2, encode_request_sources2,
     encode_request_sources2_subpayload, source_exchange_entry_count,
 };
@@ -44,9 +44,8 @@ const MAX_CLIENT_MSG_LEN: usize = 450;
 use super::{
     MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_ASKSHAREDDENIEDANS,
     OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEDESC, OP_FILEREQANSNOFIL,
-    OP_PACKEDPROT,
-    OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
-    OP_SETREQFILEID, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
+    OP_PACKEDPROT, OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING, OP_REQFILENAMEANSWER,
+    OP_REQUESTFILENAME, OP_SETREQFILEID, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
 };
 pub(super) use hashset::{
     decode_hashset_answer, decode_hashset_answer2, decode_hashset_request2, encode_hashset_answer,
@@ -376,8 +375,8 @@ pub(super) fn encode_request_filename_ext_info(manifest: &Ed2kResumeManifest) ->
     for index in 0..usize::from(ed2k_part_count) {
         // Data parts follow their verified state; the trailing exact-multiple
         // EOF slice (index >= data_part_count) is always complete.
-        let complete = index >= data_part_count
-            || manifest.pieces[index].state == Ed2kTransferState::Verified;
+        let complete =
+            index >= data_part_count || manifest.pieces[index].state == Ed2kTransferState::Verified;
         if complete {
             current_byte |= 1 << (index % 8);
         }
@@ -551,7 +550,11 @@ fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
     let comment_bytes = comment.as_bytes();
     let mut body = Vec::with_capacity(1 + 4 + comment_bytes.len());
     body.push(rating);
-    body.extend_from_slice(&u32::try_from(comment_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    body.extend_from_slice(
+        &u32::try_from(comment_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     body.extend_from_slice(comment_bytes);
     body
 }
@@ -559,7 +562,11 @@ fn encode_file_description_body(rating: u8, comment: &str) -> Vec<u8> {
 /// Encode a complete `OP_FILEDESC` packet (`OP_EMULEPROT` opcode `0x61`) carrying
 /// the served file's rating + comment, mirroring `UploadClient.cpp:SendCommentInfo`.
 pub(super) fn encode_file_desc(rating: u8, comment: &str) -> Vec<u8> {
-    encode_packet(OP_EMULEPROT, OP_FILEDESC, &encode_file_description_body(rating, comment))
+    encode_packet(
+        OP_EMULEPROT,
+        OP_FILEDESC,
+        &encode_file_description_body(rating, comment),
+    )
 }
 
 pub(super) fn decode_file_description_payload(payload: &[u8]) -> Result<FileDescription> {

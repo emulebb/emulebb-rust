@@ -45,7 +45,10 @@ pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) ->
     api_ok(json!({"ok": true})).into_response()
 }
 
-pub(crate) async fn capture_diagnostic_dump(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn capture_diagnostic_dump(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<DiagnosticDumpRequest>(&body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -94,7 +97,10 @@ pub(crate) async fn preferences(State(state): State<RestState>) -> impl IntoResp
     api_ok(state.core.preferences().await)
 }
 
-pub(crate) async fn update_preferences(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn update_preferences(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<PreferencesUpdate>(&body) {
         Ok(request) => request,
         Err(response) => return *response,

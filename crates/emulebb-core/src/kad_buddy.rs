@@ -297,7 +297,10 @@ mod tests {
 
     #[test]
     fn find_buddy_res_rejects_wrong_echo() {
-        assert!(!find_buddy_res_matches(own(), NodeId::from_bytes([0x01; 16])));
+        assert!(!find_buddy_res_matches(
+            own(),
+            NodeId::from_bytes([0x01; 16])
+        ));
         // Echoing our own id (instead of the complement) must be rejected.
         assert!(!find_buddy_res_matches(own(), own()));
     }
@@ -310,9 +313,27 @@ mod tests {
             kad_connected: true,
         };
         assert!(base.needs_buddy());
-        assert!(!BuddyNeedInput { tcp_firewalled: false, ..base }.needs_buddy());
-        assert!(!BuddyNeedInput { udp_firewalled_verified: false, ..base }.needs_buddy());
-        assert!(!BuddyNeedInput { kad_connected: false, ..base }.needs_buddy());
+        assert!(
+            !BuddyNeedInput {
+                tcp_firewalled: false,
+                ..base
+            }
+            .needs_buddy()
+        );
+        assert!(
+            !BuddyNeedInput {
+                udp_firewalled_verified: false,
+                ..base
+            }
+            .needs_buddy()
+        );
+        assert!(
+            !BuddyNeedInput {
+                kad_connected: false,
+                ..base
+            }
+            .needs_buddy()
+        );
     }
 
     fn incoming(buddy_id: NodeId) -> IncomingBuddy {
@@ -382,7 +403,9 @@ mod tests {
         let buddy_id = NodeId::from_bytes([0x44; 16]);
         let mut state = KadBuddyState::new();
         assert!(state.callback_relay_target(buddy_id).is_none());
-        state.accept_incoming_buddy(false, incoming(buddy_id)).unwrap();
+        state
+            .accept_incoming_buddy(false, incoming(buddy_id))
+            .unwrap();
         assert!(state.callback_relay_target(buddy_id).is_some());
         assert!(
             state
@@ -417,7 +440,11 @@ mod tests {
 
         // Becoming reachable releases our buddy and re-enables searching when we
         // are firewalled again.
-        let not_needed = BuddyNeedInput { tcp_firewalled: false, udp_firewalled_verified: false, ..need };
+        let not_needed = BuddyNeedInput {
+            tcp_firewalled: false,
+            udp_firewalled_verified: false,
+            ..need
+        };
         assert!(state.release_buddies_if_unneeded(not_needed));
         assert!(!state.has_outgoing_buddy());
         assert!(state.should_search(need, now));
@@ -479,7 +506,10 @@ mod tests {
         let mut state = KadBuddyState::new();
         state.mark_search_started(now);
         assert!(!state.should_search(need, now));
-        assert!(!state.should_search(need, now + ChronoDuration::seconds(FIND_BUDDY_RETRY_SECS - 1)));
+        assert!(!state.should_search(
+            need,
+            now + ChronoDuration::seconds(FIND_BUDDY_RETRY_SECS - 1)
+        ));
         assert!(state.should_search(need, now + ChronoDuration::seconds(FIND_BUDDY_RETRY_SECS)));
     }
 }

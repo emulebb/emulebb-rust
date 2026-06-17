@@ -1,31 +1,29 @@
 use super::dump;
 use super::{
     CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
-    CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME,
-    CT_VERSION, DownloadSessionOptions, DownloadWindowLimits, ED2K_EMBLOCK_SIZE,
-    ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SOURCE_EXCHANGE2_VERSION, EDONKEY_VERSION,
-    EMULE_CRYPT_REQUESTS, EMULE_CRYPT_SUPPORTS, EMULE_ENCRYPTION_METHOD_OBFUSCATION,
-    EMULE_INFO_FEATURES, EMULE_PROTOCOL_VERSION, EMULE_TCP_CRYPT_MAGIC_REQUESTER,
-    EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC, EMULE_VERSION_SHORT, ET_COMMENTS,
-    ET_FEATURES, Ed2kAichHashset, Ed2kConnectionContext, Ed2kFileIdentifier,
-    Ed2kHashsetRequestOptions, Ed2kHelloIdentity, Ed2kPeerConnectMode, Ed2kPeerDownloadOptions,
-    Ed2kPeerDownloadOutcome, Ed2kPeerSecureIdentState, Ed2kSecureIdent, Ed2kTransport,
-    Ed2kTransportMode, EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME, OP_ACCEPTUPLOADREQ,
-    OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ, OP_AICHREQUEST, OP_ANSWERSOURCES,
-    OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDFILES,
-    OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK,
-    OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES,
-    OP_COMPRESSEDPART, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT,
-    OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILESTATUS, OP_FWCHECKUDPREQ, OP_HASHSETANSWER2,
-    OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
-    OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER, OP_OUTOFPARTREQS, OP_PACKEDPROT,
-    OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
-    OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER, OP_REQUESTFILENAME,
-    OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
-    OP_SECIDENTSTATE, OP_SENDINGPART, OP_SETREQFILEID, OP_SIGNATURE, OP_STARTUPLOADREQ,
-    HelloBuddySnapshot, PeerSourceExchangeRequest, PendingCompressedPart, SourceExchangePeer,
-    TAGTYPE_UINT32, set_hello_buddy_snapshot,
-    begin_secure_ident_probe, build_hello_responses, build_upload_part_packets,
+    CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_NAME, CT_VERSION, DownloadSessionOptions,
+    DownloadWindowLimits, ED2K_EMBLOCK_SIZE, ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
+    ED2K_SOURCE_EXCHANGE2_VERSION, EDONKEY_VERSION, EMULE_CRYPT_REQUESTS, EMULE_CRYPT_SUPPORTS,
+    EMULE_ENCRYPTION_METHOD_OBFUSCATION, EMULE_INFO_FEATURES, EMULE_PROTOCOL_VERSION,
+    EMULE_TCP_CRYPT_MAGIC_REQUESTER, EMULE_TCP_CRYPT_MAGIC_SERVER, EMULE_TCP_CRYPT_MAGIC_SYNC,
+    EMULE_VERSION_SHORT, ET_COMMENTS, ET_FEATURES, Ed2kAichHashset, Ed2kConnectionContext,
+    Ed2kFileIdentifier, Ed2kHashsetRequestOptions, Ed2kHelloIdentity, Ed2kPeerConnectMode,
+    Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, Ed2kPeerSecureIdentState, Ed2kSecureIdent,
+    Ed2kTransport, Ed2kTransportMode, EmuleTcpPacket, FirewallCheckUdpRequest, HELLO_NICKNAME,
+    HelloBuddySnapshot, OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHFILEHASHREQ,
+    OP_AICHREQUEST, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS,
+    OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_BUDDYPING, OP_BUDDYPONG,
+    OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ,
+    OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER,
+    OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FILESTATUS, OP_FWCHECKUDPREQ,
+    OP_HASHSETANSWER2, OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK,
+    OP_MESSAGE, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_MULTIPACKETANSWER, OP_OUTOFPARTREQS,
+    OP_PACKEDPROT, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ,
+    OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQFILENAMEANSWER,
+    OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES,
+    OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SENDINGPART, OP_SETREQFILEID, OP_SIGNATURE,
+    OP_STARTUPLOADREQ, PeerSourceExchangeRequest, PendingCompressedPart, SourceExchangePeer,
+    TAGTYPE_UINT32, begin_secure_ident_probe, build_hello_responses, build_upload_part_packets,
     connect_callback_peer, decode_aich_file_hash_answer, decode_aich_recovery_answer_payload,
     decode_aich_recovery_request_payload, decode_answer_sources_payload,
     decode_chat_captcha_request_payload, decode_chat_captcha_result_payload,
@@ -46,10 +44,9 @@ use super::{
     emule_misc_options1, emule_misc_options2, emule_version_tag, encode_accept_upload_req,
     encode_aich_file_hash_answer, encode_aich_file_hash_request,
     encode_aich_recovery_failure_answer, encode_aich_recovery_request, encode_answer_sources,
-    encode_answer_sources2,
-    encode_compressed_part_fragment, encode_empty_shared_files_answer, encode_emule_info_answer,
-    encode_emule_info_request, encode_file_req_ans_nofil, encode_hashset_answer2,
-    encode_hashset_request2, encode_hello_answer, encode_hello_request,
+    encode_answer_sources2, encode_compressed_part_fragment, encode_empty_shared_files_answer,
+    encode_emule_info_answer, encode_emule_info_request, encode_file_req_ans_nofil,
+    encode_hashset_answer2, encode_hashset_request2, encode_hello_answer, encode_hello_request,
     encode_incoming_obfuscation_response, encode_multipacket_answer,
     encode_multipacket_ext2_request, encode_multipacket_request, encode_packed_packet,
     encode_packet, encode_port_test_answer, encode_public_ip_answer, encode_queue_ranking,
@@ -58,7 +55,7 @@ use super::{
     encode_sending_part, encode_shared_browse_denied_answer, encode_start_upload_req,
     enrich_hello_identity, handle_connection, inflate_compressed_part_fragment, is_mule_hello,
     next_download_read_timeout, request_udp_firewall_check, select_download_window_limits,
-    skip_request_filename_ext_info, validate_file_status_part_count,
+    set_hello_buddy_snapshot, skip_request_filename_ext_info, validate_file_status_part_count,
 };
 use crate::{
     ed2k_server::{Ed2kFoundSource, Ed2kServerState},
@@ -230,13 +227,8 @@ fn encode_startup_multipacket_ext2_answer_with_identifier(
     // The startup/answer fixtures cover complete-file shares, so a requested
     // status maps to the master "complete" body (`WriteUInt16(0)`).
     let status_body = include_file_status.then(|| 0u16.to_le_bytes().to_vec());
-    super::encode_multipacket_ext2_answer(
-        file_identifier,
-        file_name,
-        true,
-        status_body.as_deref(),
-    )
-    .unwrap()
+    super::encode_multipacket_ext2_answer(file_identifier, file_name, true, status_body.as_deref())
+        .unwrap()
 }
 
 fn encode_startup_multipacket_ext2_answer(

@@ -19,7 +19,10 @@ pub(crate) async fn categories(State(state): State<RestState>) -> impl IntoRespo
     api_collection(state.core.categories().await)
 }
 
-pub(crate) async fn create_category(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn create_category(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<CategoryCreate>(&body) {
         Ok(request) => request,
         Err(response) => return *response,

@@ -129,7 +129,10 @@ mod tests {
                 guard.acquire(target(2)),
             )
             .await;
-            assert!(blocked.is_err(), "second target blocks while the only slot is held");
+            assert!(
+                blocked.is_err(),
+                "second target blocks while the only slot is held"
+            );
         }
         // After drop, the same target can be searched again and the slot frees.
         let again = guard.acquire(target(1)).await;

@@ -348,7 +348,9 @@ impl Ed2kTransferRuntime {
             } else {
                 piece.state = Ed2kTransferState::Missing;
                 piece.bytes_written = 0;
-                outcome = PieceWriteOutcome::VerificationFailed { part_index: piece_index };
+                outcome = PieceWriteOutcome::VerificationFailed {
+                    part_index: piece_index,
+                };
                 checkpoint_reason = Some("piece_verification_failed");
             }
             rebuild_verified_ranges(&mut manifest);

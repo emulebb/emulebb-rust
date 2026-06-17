@@ -33,7 +33,9 @@ fn hello_request_encoding_matches_ed2k_framing() {
 
 #[test]
 fn hello_answer_advertises_emule_style_tags() {
-    let _guard = HELLO_TAG_COUNT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HELLO_TAG_COUNT_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     set_hello_buddy_snapshot(None);
     let packet = encode_hello_answer(Ed2kHelloIdentity {
         user_hash: [0x22; 16],
@@ -478,7 +480,9 @@ async fn enrich_hello_identity_keeps_direct_udp_callback_off_for_high_id() {
 
 #[test]
 fn hello_advertises_buddy_tags_when_firewalled_with_buddy() {
-    let _guard = HELLO_TAG_COUNT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HELLO_TAG_COUNT_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let buddy_ip = std::net::Ipv4Addr::new(203, 0, 113, 50);
     let buddy_udp_port = 4665u16;

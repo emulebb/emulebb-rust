@@ -460,7 +460,11 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
     let file_hash_hex = file_hash.to_string();
     let root = unique_test_dir("ed2k-listener-sx-self-exclude");
     let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
-    let job = new_transfer_job(file_hash, "sx-exclude.txt".to_string(), payload.len() as u64);
+    let job = new_transfer_job(
+        file_hash,
+        "sx-exclude.txt".to_string(),
+        payload.len() as u64,
+    );
     transfer_runtime.ensure_job(&job).await.unwrap();
     transfer_runtime
         .store_md4_hashset(&file_hash_hex, Vec::new())

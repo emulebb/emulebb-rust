@@ -103,8 +103,9 @@ impl Ed2kPieceState {
     /// resume-manifest backward compatibility.
     pub(super) fn resolve_block_bitmap(&self, part_len: u64) -> PartBlockBitmap {
         match self.block_bitmap.as_deref() {
-            Some(hex) => PartBlockBitmap::from_hex(part_len, hex)
-                .unwrap_or_else(|| PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written)),
+            Some(hex) => PartBlockBitmap::from_hex(part_len, hex).unwrap_or_else(|| {
+                PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written)
+            }),
             None => PartBlockBitmap::contiguous_prefix(part_len, self.bytes_written),
         }
     }

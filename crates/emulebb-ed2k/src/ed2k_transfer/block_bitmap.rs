@@ -112,7 +112,9 @@ impl PartBlockBitmap {
 
     /// Number of present blocks.
     pub(super) fn present_count(&self) -> usize {
-        (0..self.block_count).filter(|&idx| self.is_present(idx)).count()
+        (0..self.block_count)
+            .filter(|&idx| self.is_present(idx))
+            .count()
     }
 
     /// The summed byte length of all present blocks. Mirrors the

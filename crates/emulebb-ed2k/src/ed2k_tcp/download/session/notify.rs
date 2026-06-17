@@ -119,11 +119,7 @@ pub(super) fn handle_kad_firewall_tcp_ack(transport: &Ed2kTransport, peer_addr: 
 }
 
 /// OP_BUDDYPING / OP_BUDDYPONG: a Kad buddy keep-alive.
-pub(super) fn handle_buddy_ping_pong(
-    transport: &Ed2kTransport,
-    peer_addr: SocketAddr,
-    opcode: u8,
-) {
+pub(super) fn handle_buddy_ping_pong(transport: &Ed2kTransport, peer_addr: SocketAddr, opcode: u8) {
     dump_ed2k_tcp_download_meta(
         peer_addr,
         Some(transport.mode),

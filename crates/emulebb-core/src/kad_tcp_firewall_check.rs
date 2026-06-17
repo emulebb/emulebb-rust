@@ -189,8 +189,8 @@ async fn run_kad_tcp_firewall_check_round(
 
     // Wait for the inbound open acks / FIREWALLED_RES replies to settle. The
     // listener + Kad handler update the shared state; poll for an open verdict.
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(KAD_TCP_FIREWALL_CHECK_RESULT_WAIT_SECS);
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(KAD_TCP_FIREWALL_CHECK_RESULT_WAIT_SECS);
     while tokio::time::Instant::now() < deadline {
         if kad_firewall.lock().await.tcp_firewalled() == Some(false) {
             break;

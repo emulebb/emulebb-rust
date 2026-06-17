@@ -33,12 +33,7 @@ const PREVIEW_BONUS: u32 = 500;
 const COMPLETION_BONUS: u32 = 100;
 
 /// Compute the selection rank for one missing part. Lower is better.
-fn part_rank(
-    piece: &Ed2kPieceState,
-    frequency: u32,
-    expected_len: u64,
-    is_preview: bool,
-) -> u32 {
+fn part_rank(piece: &Ed2kPieceState, frequency: u32, expected_len: u64, is_preview: bool) -> u32 {
     // Criterion 1: rarity dominates.
     let mut rank = frequency.saturating_mul(RARITY_WEIGHT);
 

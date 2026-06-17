@@ -234,9 +234,7 @@ async fn handle_buddy_packet(
             //   (a) uCheck XOR allones must equal our own Kad id, and
             //   (b) the file must be one we share or download.
             if !buddy_callback_check_matches(callback.buddy_check, own_kad_id) {
-                debug!(
-                    "dropping buddy {buddy_addr} OP_CALLBACK: uCheck does not match our Kad id"
-                );
+                debug!("dropping buddy {buddy_addr} OP_CALLBACK: uCheck does not match our Kad id");
                 return Ok(true);
             }
             if !transfer_runtime.owns_file(&callback.file_hash).await {
@@ -310,16 +308,18 @@ async fn handle_buddy_packet(
         }
         // The buddy answers our ping with a pong; just keep the link alive.
         (OP_EMULEPROT, OP_BUDDYPONG) | (OP_EMULEPROT, OP_BUDDYPING) => {
-            debug!("received buddy keepalive opcode=0x{:02X} from {buddy_addr}", packet.opcode);
+            debug!(
+                "received buddy keepalive opcode=0x{:02X} from {buddy_addr}",
+                packet.opcode
+            );
             Ok(true)
         }
         // Late hello/info chatter from the buddy: answer info, otherwise ignore.
         (OP_EDONKEYPROT, OP_HELLO) => {
             for reply in build_hello_responses(&packet.payload, hello_identity)? {
-                transport
-                    .write_all(&reply)
-                    .await
-                    .with_context(|| format!("failed to reply to OP_HELLO from buddy {buddy_addr}"))?;
+                transport.write_all(&reply).await.with_context(|| {
+                    format!("failed to reply to OP_HELLO from buddy {buddy_addr}")
+                })?;
             }
             Ok(true)
         }

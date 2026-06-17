@@ -32,9 +32,8 @@ pub(crate) fn public_ip_block_reason(
         }
     }
 
-    found_cidr.then(|| {
-        format!("public IP {public_ip} is outside VPN Guard allowed public IP CIDRs")
-    })
+    found_cidr
+        .then(|| format!("public IP {public_ip} is outside VPN Guard allowed public IP CIDRs"))
 }
 
 #[cfg(test)]

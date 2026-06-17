@@ -418,7 +418,8 @@ mod tests {
             .await
             .expect_err("oversized server packet length must be rejected");
         assert!(
-            err.to_string().contains("oversized ED2K server packet length"),
+            err.to_string()
+                .contains("oversized ED2K server packet length"),
             "unexpected error: {err}"
         );
     }

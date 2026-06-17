@@ -180,7 +180,10 @@ async fn probe_port_unconnected(
     rand::thread_rng().fill_bytes(&mut txid);
     let request = build_request(&txid);
     tokio::time::timeout(timeout, async {
-        socket.send_to(&request, SocketAddr::V4(server)).await.ok()?;
+        socket
+            .send_to(&request, SocketAddr::V4(server))
+            .await
+            .ok()?;
         let mut buf = [0u8; 1500];
         loop {
             let (len, from) = socket.recv_from(&mut buf).await.ok()?;
@@ -293,8 +296,12 @@ fn parse_response(buf: &[u8], txid: &[u8; 12]) -> Result<SocketAddrV4> {
             let family = buf[vpos + 1];
             if family == STUN_FAMILY_IPV4 {
                 let mut port = u16::from_be_bytes([buf[vpos + 2], buf[vpos + 3]]);
-                let mut addr =
-                    u32::from_be_bytes([buf[vpos + 4], buf[vpos + 5], buf[vpos + 6], buf[vpos + 7]]);
+                let mut addr = u32::from_be_bytes([
+                    buf[vpos + 4],
+                    buf[vpos + 5],
+                    buf[vpos + 6],
+                    buf[vpos + 7],
+                ]);
                 if attr_type == ATTR_XOR_MAPPED_ADDRESS {
                     addr ^= STUN_MAGIC_COOKIE;
                     port ^= (STUN_MAGIC_COOKIE >> 16) as u16;

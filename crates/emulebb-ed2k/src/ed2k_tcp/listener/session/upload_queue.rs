@@ -56,27 +56,33 @@ impl ListenerUploadQueue {
 
     /// Capture the advertised peer identity for the `sched` diag emits.
     fn record_diag_peer(&mut self, peer_identity: &Ed2kUploadPeerIdentity) {
-        self.diag_peer = Some(diag_sched::peer_label(peer_identity.ip, peer_identity.tcp_port));
+        self.diag_peer = Some(diag_sched::peer_label(
+            peer_identity.ip,
+            peer_identity.tcp_port,
+        ));
         self.diag_peer_hash = peer_identity.user_hash;
     }
 
     /// Emit `upload_slot_opened` once per grant transition (peer + file known).
     fn emit_slot_opened(&self) {
-        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
+        {
             diag_sched::upload_slot_opened(peer, self.diag_peer_hash, &file_hash.to_string());
         }
     }
 
     /// Emit `queue_rank` for a genuine waiting rank sent on the wire.
     fn emit_queue_rank(&self, rank: u16) {
-        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
+        {
             diag_sched::queue_rank(peer, self.diag_peer_hash, &file_hash.to_string(), rank);
         }
     }
 
     /// Emit `upload_slot_closed` when a held session is released.
     fn emit_slot_closed(&self) {
-        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref()) {
+        if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
+        {
             diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string());
         }
     }

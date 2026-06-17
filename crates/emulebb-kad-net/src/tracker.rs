@@ -254,8 +254,8 @@ impl PacketTracker {
 
         if state.last_tick != now || state.tokens != cap - cost {
             // Existing bucket: refill by elapsed ms (cap at `cap`), then spend.
-            let elapsed_ms = i64::try_from(now.duration_since(state.last_tick).as_millis())
-                .unwrap_or(i64::MAX);
+            let elapsed_ms =
+                i64::try_from(now.duration_since(state.last_tick).as_millis()).unwrap_or(i64::MAX);
             state.tokens = (state.tokens.saturating_add(elapsed_ms)).min(cap);
             state.tokens = state.tokens.saturating_sub(cost);
         }
@@ -266,8 +266,7 @@ impl PacketTracker {
         // flood that also bans the IP (handled by the caller via MassiveDrop).
         let action = if tokens < massive_floor {
             // Oracle: a sustained flood far past the limit bans the source IP.
-            self.banned_until
-                .insert(key.ip, now + MASSIVE_FLOOD_BAN);
+            self.banned_until.insert(key.ip, now + MASSIVE_FLOOD_BAN);
             PacketTrackerAction::MassiveDrop
         } else if tokens < 0 {
             PacketTrackerAction::Drop
@@ -558,7 +557,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(70));
         tracker.prune();
         assert!(tracker.buckets.is_empty(), "idle bucket must be pruned");
-        assert!(tracker.banned_until.is_empty(), "expired ban must be pruned");
+        assert!(
+            tracker.banned_until.is_empty(),
+            "expired ban must be pruned"
+        );
     }
 
     #[test]

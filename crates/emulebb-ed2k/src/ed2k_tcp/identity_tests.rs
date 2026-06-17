@@ -85,7 +85,10 @@ fn wrong_challenge_fails() {
         None,
     )
     .expect("verify ran");
-    assert!(!ok, "a signature over a different challenge must not verify");
+    assert!(
+        !ok,
+        "a signature over a different challenge must not verify"
+    );
 }
 
 #[test]
@@ -207,9 +210,17 @@ fn emitted_public_key_is_pkcs1_within_stock_cap() {
     let us = ident();
     let payload = us.public_key_payload().expect("public-key payload");
     let key_len = payload[0] as usize;
-    assert_eq!(key_len, payload.len() - 1, "length prefix must match key bytes");
+    assert_eq!(
+        key_len,
+        payload.len() - 1,
+        "length prefix must match key bytes"
+    );
     let key_bytes = &payload[1..];
-    assert_eq!(key_bytes, us.public_key_der(), "wire bytes == public_key_der");
+    assert_eq!(
+        key_bytes,
+        us.public_key_der(),
+        "wire bytes == public_key_der"
+    );
     assert!(
         key_bytes.len() <= 80,
         "emitted key {} bytes must fit MAXPUBKEYSIZE",
@@ -292,9 +303,15 @@ fn outbound_signature_v2_selected_for_v2_only_peer() {
     );
 
     // secIdent=3 (bit 0 set) -> V1 (no challenge-IP trailer), the common case.
-    assert_eq!(select_outbound_challenge_ip(3, Some(our_ip), Some(peer_ip)), None);
+    assert_eq!(
+        select_outbound_challenge_ip(3, Some(our_ip), Some(peer_ip)),
+        None
+    );
     // Unknown level (0) stays on the safe V1 path.
-    assert_eq!(select_outbound_challenge_ip(0, Some(our_ip), Some(peer_ip)), None);
+    assert_eq!(
+        select_outbound_challenge_ip(0, Some(our_ip), Some(peer_ip)),
+        None
+    );
 }
 
 #[test]
@@ -315,6 +332,10 @@ fn outbound_v2_payload_differs_from_v1() {
     let v1 = us
         .signature_payload_with_challenge_ip(peer.public_key_der(), challenge, v1_sel)
         .expect("v1 payload");
-    assert_eq!(v2.len(), v1.len() + 1, "V2 appends the ip-kind trailer byte");
+    assert_eq!(
+        v2.len(),
+        v1.len() + 1,
+        "V2 appends the ip-kind trailer byte"
+    );
     assert_eq!(*v2.last().unwrap(), CRYPT_CIP_LOCALCLIENT);
 }

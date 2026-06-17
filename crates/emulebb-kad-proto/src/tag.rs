@@ -551,14 +551,7 @@ mod tests {
         // type 0x07 (BLOB), short name marker, name byte, then a u32 length of
         // 0xFFFFFFFF (~4 GB) with no payload following. The capped reader must
         // reject this immediately instead of pre-allocating a 4 GB Vec.
-        let mut buf = Cursor::new(vec![
-            0x80 | 0x07,
-            tag_name::SOURCES,
-            0xFF,
-            0xFF,
-            0xFF,
-            0xFF,
-        ]);
+        let mut buf = Cursor::new(vec![0x80 | 0x07, tag_name::SOURCES, 0xFF, 0xFF, 0xFF, 0xFF]);
         let result = Tag::read_le(&mut buf);
         assert!(
             result.is_err(),

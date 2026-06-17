@@ -15,7 +15,10 @@ use std::{
     fs,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, AtomicU64, AtomicUsize}},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,8 +29,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
 
 mod aich_recovery;
-mod aich_trust;
 mod aich_tree;
+mod aich_trust;
 mod block_bitmap;
 mod callback;
 mod catalog;
@@ -54,16 +57,16 @@ mod upload_queue;
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
+pub use download_coordinator::Ed2kDownloadCoordinatorConfig;
 use download_coordinator::{
     DEFAULT_CONNECTION_WINDOW, DEFAULT_REASK_PACING_INTERVAL, Ed2kDownloadCoordinator,
 };
-pub use download_coordinator::Ed2kDownloadCoordinatorConfig;
 use download_throttle::Ed2kDownloadThrottle;
-pub use inbound_admission::Ed2kInboundConnectionGuard;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
 #[cfg(test)]
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
+pub use inbound_admission::Ed2kInboundConnectionGuard;
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
@@ -72,8 +75,8 @@ pub use model::{
     Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kSourceHint,
     Ed2kTransferJob, Ed2kTransferState,
 };
-use upload_queue::Ed2kUploadQueueState;
 use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;
+use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::{
     Ed2kUploadFirewallContext, Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig,
     Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,

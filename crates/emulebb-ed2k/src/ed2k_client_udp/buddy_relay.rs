@@ -85,7 +85,11 @@ pub(crate) fn encode_reask_callback_tcp_relay(
     // where len counts the opcode byte plus the body.
     let mut frame = Vec::with_capacity(6 + body.len());
     frame.push(OP_EMULEPROT);
-    frame.extend_from_slice(&u32::try_from(body.len() + 1).unwrap_or(u32::MAX).to_le_bytes());
+    frame.extend_from_slice(
+        &u32::try_from(body.len() + 1)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     frame.push(OP_REASKCALLBACKTCP);
     frame.extend_from_slice(&body);
     frame
@@ -282,7 +286,9 @@ mod tests {
             requester,
             4,
         );
-        let frame = relay_rx.try_recv().expect("a relayed OP_REASKCALLBACKTCP frame");
+        let frame = relay_rx
+            .try_recv()
+            .expect("a relayed OP_REASKCALLBACKTCP frame");
         assert_eq!(frame[0], OP_EMULEPROT);
         assert_eq!(frame[5], OP_REASKCALLBACKTCP);
         let body = &frame[6..];
@@ -293,7 +299,10 @@ mod tests {
         let mut mismatch = callback(None, None);
         mismatch.buddy_id = Ed2kHash::from_bytes([0x99; 16]);
         relay_buddy_reask_callback(&registry, &mismatch, requester, 4);
-        assert!(relay_rx.try_recv().is_err(), "mismatched buddy-id must not relay");
+        assert!(
+            relay_rx.try_recv().is_err(),
+            "mismatched buddy-id must not relay"
+        );
     }
 
     #[test]
@@ -304,7 +313,10 @@ mod tests {
         assert!(registry.attach_inbound(NodeId::from_bytes([0x11; 16]), tx));
         let v6: SocketAddr = "[2001:db8::1]:4672".parse().unwrap();
         relay_buddy_reask_callback(&registry, &callback(None, None), v6, 4);
-        assert!(relay_rx.try_recv().is_err(), "non-IPv4 requester must be dropped");
+        assert!(
+            relay_rx.try_recv().is_err(),
+            "non-IPv4 requester must be dropped"
+        );
     }
 
     #[test]
@@ -314,10 +326,12 @@ mod tests {
         // [dest_ip u32][dest_port u16][file_hash 16][tail].
         let ip = Ipv4Addr::new(198, 51, 100, 9);
         let port = 5000u16;
-        let frame = encode_reask_callback_tcp_relay(&callback(Some(vec![true]), Some(3)), ip, port, 4);
+        let frame =
+            encode_reask_callback_tcp_relay(&callback(Some(vec![true]), Some(3)), ip, port, 4);
         let body = &frame[6..];
         // Manually mirror the source-side decode of the leading fixed fields.
-        let dest_ip = Ipv4Addr::from(u32::from_le_bytes(body[..4].try_into().unwrap()).to_be_bytes());
+        let dest_ip =
+            Ipv4Addr::from(u32::from_le_bytes(body[..4].try_into().unwrap()).to_be_bytes());
         let dest_port = u16::from_le_bytes(body[4..6].try_into().unwrap());
         let file_hash = Ed2kHash(body[6..22].try_into().unwrap());
         assert_eq!(dest_ip, ip);

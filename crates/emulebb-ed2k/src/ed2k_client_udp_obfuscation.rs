@@ -343,7 +343,10 @@ mod tests {
     #[test]
     fn sanitize_marker_sets_ed2k_bit_and_avoids_reserved() {
         // Even input gains the ed2k bit.
-        assert_eq!(sanitize_ed2k_marker(0x40) & ED2K_MARKER_BIT, ED2K_MARKER_BIT);
+        assert_eq!(
+            sanitize_ed2k_marker(0x40) & ED2K_MARKER_BIT,
+            ED2K_MARKER_BIT
+        );
         // Reserved-after-bit values fall back to a valid non-reserved marker.
         for reserved in [
             OP_EMULEPROT,
@@ -420,8 +423,7 @@ mod tests {
         // the key part is mixed into the MD5 key on both ends).
         let plaintext = b"another-reask-ack";
         for (rkp, marker) in [(0x0000u16, 0x00u8), (0xFFFF, 0xFE), (0x8001, 0x80)] {
-            let datagram =
-                obfuscate_client_udp_with(&DEST_HASH, SENDER_IP, plaintext, rkp, marker);
+            let datagram = obfuscate_client_udp_with(&DEST_HASH, SENDER_IP, plaintext, rkp, marker);
             let recovered =
                 deobfuscate_client_udp(&DEST_HASH, SENDER_IP, &datagram).expect("round-trip");
             assert_eq!(recovered, plaintext);
@@ -434,7 +436,9 @@ mod tests {
     /// Guards that the independently-built pieces compose losslessly.
     #[test]
     fn full_reask_obfuscation_pipeline_round_trips() {
-        use crate::ed2k_client_udp::{OP_REASKFILEPING, decode_reask_file_ping, encode_reask_file_ping};
+        use crate::ed2k_client_udp::{
+            OP_REASKFILEPING, decode_reask_file_ping, encode_reask_file_ping,
+        };
         use emulebb_kad_proto::Ed2kHash;
 
         let file_hash = Ed2kHash::from_bytes([

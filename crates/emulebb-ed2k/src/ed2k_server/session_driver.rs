@@ -35,8 +35,12 @@ pub(super) async fn run_one_server_session(
     // dynamically), so a UPnP mapping that became ready or was remapped after
     // startup yields the right HighID callback TCP port + UDP port on (re)connect.
     // The startup-snapshot identity carries the internal ports as the fallback.
-    login_identity.tcp_port = context.public_ip.advertised_tcp_port(login_identity.tcp_port);
-    login_identity.udp_port = context.public_ip.advertised_udp_port(login_identity.udp_port);
+    login_identity.tcp_port = context
+        .public_ip
+        .advertised_tcp_port(login_identity.tcp_port);
+    login_identity.udp_port = context
+        .public_ip
+        .advertised_udp_port(login_identity.udp_port);
     let transport_endpoint = server.transport_endpoint(use_server_obfuscation);
     let mut session = ServerSession::connect(
         context.bind_ip,

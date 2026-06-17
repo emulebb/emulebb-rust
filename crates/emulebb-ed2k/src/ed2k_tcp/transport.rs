@@ -87,7 +87,9 @@ impl Ed2kTransport {
             socket2::SockRef::from(&socket),
             crate::networking::resolve_bind_if_index(bind_ip),
         )
-        .with_context(|| format!("failed to pin eD2k egress to the bind interface for {bind_ip}"))?;
+        .with_context(|| {
+            format!("failed to pin eD2k egress to the bind interface for {bind_ip}")
+        })?;
         let mut stream = tokio::time::timeout(timeout, socket.connect(peer_addr))
             .await
             .with_context(|| format!("timed out connecting to eD2k peer {peer_addr}"))??;
@@ -301,7 +303,8 @@ mod tests {
             .await
             .expect_err("oversized declared length must be rejected");
         assert!(
-            err.to_string().contains("oversized eD2k peer packet length"),
+            err.to_string()
+                .contains("oversized eD2k peer packet length"),
             "unexpected error: {err}"
         );
     }
@@ -323,7 +326,8 @@ mod tests {
             .expect_err("payload read should fail on the closed peer");
         // The failure must come from the payload read, NOT the oversized cap.
         assert!(
-            !err.to_string().contains("oversized eD2k peer packet length"),
+            !err.to_string()
+                .contains("oversized eD2k peer packet length"),
             "boundary length must not trip the cap: {err}"
         );
     }
@@ -337,7 +341,8 @@ mod tests {
             .await
             .expect_err("bad protocol header must be rejected");
         assert!(
-            err.to_string().contains("invalid eD2k peer protocol header"),
+            err.to_string()
+                .contains("invalid eD2k peer protocol header"),
             "unexpected error: {err}"
         );
     }

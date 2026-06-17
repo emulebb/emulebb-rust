@@ -111,9 +111,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         // (exactly the bytes asked for).
         let mut fragment_start = start;
         while fragment_start < end {
-            let fragment_end = fragment_start
-                .saturating_add(ED2K_EMBLOCK_SIZE)
-                .min(end);
+            let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
             let Some(bytes) = transfer_runtime
                 .read_verified_range(&requested, fragment_start, fragment_end)
                 .await?
@@ -139,12 +137,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 if !reservation.delay.is_zero() {
                     tokio::time::sleep(reservation.delay).await;
                 }
-                transport
-                    .write_all(&reply.packet)
-                    .await
-                    .with_context(|| {
-                        format!("failed to send ED2K upload payload to {peer_addr}")
-                    })?;
+                transport.write_all(&reply.packet).await.with_context(|| {
+                    format!("failed to send ED2K upload payload to {peer_addr}")
+                })?;
             }
             let fragment_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if let Some(user_hash) = peer_user_hash {

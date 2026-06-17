@@ -273,8 +273,7 @@ impl Ed2kTransferRuntime {
     /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).
     /// When disabled every peer scores the neutral 1.0 credit ratio.
     pub fn set_credit_system_enabled(&self, enabled: bool) {
-        self.credit_system_enabled
-            .store(enabled, Ordering::Relaxed);
+        self.credit_system_enabled.store(enabled, Ordering::Relaxed);
     }
 
     fn peer_credit_score_permille(&self, peer: &Ed2kUploadPeerIdentity) -> i128 {

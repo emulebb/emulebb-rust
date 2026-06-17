@@ -258,18 +258,14 @@ mod tests {
         let mut registry = DownloadSourceRegistry::default();
         let now = Instant::now();
 
-        registry.add_candidate(now, candidate(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            1,
-            1,
-            source.clone(),
-        ));
-        registry.add_candidate(now, candidate(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            2,
-            1,
-            source.clone(),
-        ));
+        registry.add_candidate(
+            now,
+            candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 1, source.clone()),
+        );
+        registry.add_candidate(
+            now,
+            candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2, 1, source.clone()),
+        );
 
         assert_eq!(registry.candidate_count_for_peer(&source), 2);
         assert_eq!(registry.a4af_candidate_count(), 1);
@@ -280,18 +276,14 @@ mod tests {
         let source = source_with_hash([0x22; 16]);
         let mut registry = DownloadSourceRegistry::default();
         let now = Instant::now();
-        registry.add_candidate(now, candidate(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            1,
-            10,
-            source.clone(),
-        ));
-        registry.add_candidate(now, candidate(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            5,
-            1,
-            source.clone(),
-        ));
+        registry.add_candidate(
+            now,
+            candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 10, source.clone()),
+        );
+        registry.add_candidate(
+            now,
+            candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 1, source.clone()),
+        );
 
         let leased = registry
             .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -316,18 +308,14 @@ mod tests {
         let source = source_with_hash([0x33; 16]);
         let mut registry = DownloadSourceRegistry::default();
         let now = Instant::now();
-        registry.add_candidate(now, candidate(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            1,
-            10,
-            source.clone(),
-        ));
-        registry.add_candidate(now, candidate(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            5,
-            1,
-            source.clone(),
-        ));
+        registry.add_candidate(
+            now,
+            candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, 10, source.clone()),
+        );
+        registry.add_candidate(
+            now,
+            candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 5, 1, source.clone()),
+        );
 
         assert!(
             registry
@@ -348,24 +336,18 @@ mod tests {
         let now = Instant::now();
         // Peer serves three files: current (a), a low-priority other (b), and a
         // high-priority other (c). The NNP swap must pick c over b and never a.
-        registry.add_candidate(now, candidate(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            9,
-            9,
-            source.clone(),
-        ));
-        registry.add_candidate(now, candidate(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            1,
-            1,
-            source.clone(),
-        ));
-        registry.add_candidate(now, candidate(
-            "cccccccccccccccccccccccccccccccc",
-            5,
-            1,
-            source.clone(),
-        ));
+        registry.add_candidate(
+            now,
+            candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9, 9, source.clone()),
+        );
+        registry.add_candidate(
+            now,
+            candidate("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1, 1, source.clone()),
+        );
+        registry.add_candidate(
+            now,
+            candidate("cccccccccccccccccccccccccccccccc", 5, 1, source.clone()),
+        );
 
         let target = registry
             .swap_target_for_peer(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -378,12 +360,10 @@ mod tests {
         let source = source_with_hash([0x66; 16]);
         let mut registry = DownloadSourceRegistry::default();
         let now = Instant::now();
-        registry.add_candidate(now, candidate(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            9,
-            9,
-            source.clone(),
-        ));
+        registry.add_candidate(
+            now,
+            candidate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9, 9, source.clone()),
+        );
 
         assert!(
             registry
@@ -408,7 +388,10 @@ mod tests {
 
         // A fresh source registered well past the TTL: only it is still live.
         let later = t0 + CANDIDATE_LIVENESS_TTL + Duration::from_secs(1);
-        registry.add_candidate(later, candidate(file, 5, 1, source_with_endpoint(0x02, 41101)));
+        registry.add_candidate(
+            later,
+            candidate(file, 5, 1, source_with_endpoint(0x02, 41101)),
+        );
 
         // The stale candidate is excluded from the live per-file count.
         assert_eq!(
@@ -426,7 +409,10 @@ mod tests {
 
         // A still-fresh candidate keeps counting (a re-seen live source survives).
         let refreshed = later + Duration::from_secs(1);
-        registry.add_candidate(refreshed, candidate(file, 5, 1, source_with_endpoint(0x02, 41101)));
+        registry.add_candidate(
+            refreshed,
+            candidate(file, 5, 1, source_with_endpoint(0x02, 41101)),
+        );
         assert_eq!(registry.candidate_count_for_file(refreshed, file), 1);
     }
 
@@ -444,11 +430,7 @@ mod tests {
         // Peer 1 serves only the target file and is leased on it.
         let peer_target = source_with_endpoint(0x01, 41200);
         registry.add_candidate(now, candidate(target, 5, 1, peer_target.clone()));
-        assert!(
-            registry
-                .lease_best_for_file(&peer_target, target)
-                .is_some()
-        );
+        assert!(registry.lease_best_for_file(&peer_target, target).is_some());
 
         // Peer 2 serves a different file and is leased on it.
         let peer_other = source_with_endpoint(0x02, 41201);

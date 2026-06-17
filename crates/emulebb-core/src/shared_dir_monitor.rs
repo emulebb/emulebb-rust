@@ -86,10 +86,9 @@ pub(crate) enum MonitorAction {
 /// actually touches the filesystem.
 pub(crate) fn classify_event(event: &DebouncedEvent) -> Vec<MonitorAction> {
     // Map every path of the event to the same action variant.
-    let map_paths =
-        |variant: fn(PathBuf) -> MonitorAction| -> Vec<MonitorAction> {
-            event.paths.iter().cloned().map(variant).collect()
-        };
+    let map_paths = |variant: fn(PathBuf) -> MonitorAction| -> Vec<MonitorAction> {
+        event.paths.iter().cloned().map(variant).collect()
+    };
     match event.kind {
         EventKind::Create(_)
         | EventKind::Modify(
@@ -192,8 +191,10 @@ where
     // handler runs on the watcher thread; it must not block, so it only
     // classifies + forwards over an unbounded tokio channel (a non-blocking send
     // that is safe to call from a non-async thread).
-    let (action_tx, action_rx): (UnboundedSender<MonitorAction>, UnboundedReceiver<MonitorAction>) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (action_tx, action_rx): (
+        UnboundedSender<MonitorAction>,
+        UnboundedReceiver<MonitorAction>,
+    ) = tokio::sync::mpsc::unbounded_channel();
 
     let handler = move |result: DebounceEventResult| match result {
         Ok(events) => {
@@ -316,8 +317,8 @@ where
 // / `unshare_file` ingest/catalog paths so MD4/AICH/catalog stay consistent.
 // ---------------------------------------------------------------------------
 
-use crate::{EmulebbCore, LocalShareCreate};
 use crate::shared_directories::refresh_shared_directory_row;
+use crate::{EmulebbCore, LocalShareCreate};
 
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
 /// roots. Tears down any previous monitor first, then watches each accessible
@@ -442,8 +443,8 @@ async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify_debouncer_full::notify::event::{CreateKind, RemoveKind};
     use notify_debouncer_full::notify::Event;
+    use notify_debouncer_full::notify::event::{CreateKind, RemoveKind};
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Instant;
@@ -454,7 +455,10 @@ mod tests {
             paths: paths.into_iter().map(PathBuf::from).collect(),
             attrs: Default::default(),
         };
-        DebouncedEvent { event, time: Instant::now() }
+        DebouncedEvent {
+            event,
+            time: Instant::now(),
+        }
     }
 
     fn share(path: &str) -> MonitorAction {
@@ -554,8 +558,12 @@ mod tests {
     /// remove only for a path that was shared.
     #[tokio::test]
     async fn consumer_shares_then_removes_and_skips_unknown_removes() {
-        let applied =
-            applied_actions(vec![share("/s/a.dat"), remove("/s/a.dat"), remove("/s/b.dat")]).await;
+        let applied = applied_actions(vec![
+            share("/s/a.dat"),
+            remove("/s/a.dat"),
+            remove("/s/b.dat"),
+        ])
+        .await;
         assert_eq!(applied, vec![share("/s/a.dat"), remove("/s/a.dat")]);
     }
 
@@ -563,8 +571,12 @@ mod tests {
     /// is cleared by the Remove).
     #[tokio::test]
     async fn consumer_reshares_after_remove() {
-        let applied =
-            applied_actions(vec![share("/s/a.dat"), remove("/s/a.dat"), share("/s/a.dat")]).await;
+        let applied = applied_actions(vec![
+            share("/s/a.dat"),
+            remove("/s/a.dat"),
+            share("/s/a.dat"),
+        ])
+        .await;
         assert_eq!(
             applied,
             vec![share("/s/a.dat"), remove("/s/a.dat"), share("/s/a.dat")]

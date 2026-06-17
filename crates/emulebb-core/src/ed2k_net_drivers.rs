@@ -20,16 +20,18 @@ use std::{
 };
 
 use anyhow::Result;
-use emulebb_ed2k::ed2k_server::{Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState};
+use emulebb_ed2k::ed2k_server::{
+    Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState,
+};
+use emulebb_ed2k::ed2k_tcp::{Ed2kHelloIdentity, connect_callback_peer};
+use emulebb_ed2k::kad_firewall::KadFirewallState;
+use emulebb_ed2k::stun::{
+    DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
+};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatManager, TransportProtocol,
     reachability::ExternalReachability,
 };
-use emulebb_ed2k::stun::{
-    DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
-};
-use emulebb_ed2k::ed2k_tcp::{Ed2kHelloIdentity, connect_callback_peer};
-use emulebb_ed2k::kad_firewall::KadFirewallState;
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
@@ -210,11 +212,13 @@ pub(crate) async fn run_ed2k_reask_reengage(
         // in a spawned task we await, so a panic surfaces as a JoinError we log and
         // skip, keeping the loop alive.
         let handler_core = core.clone();
-        let handle = tokio::spawn(handle_reask_event(handler_core, event, direct_callback.clone()));
+        let handle = tokio::spawn(handle_reask_event(
+            handler_core,
+            event,
+            direct_callback.clone(),
+        ));
         if let Err(join_error) = handle.await {
-            tracing::warn!(
-                "ED2K reask re-engage event handler panicked; continuing: {join_error}"
-            );
+            tracing::warn!("ED2K reask re-engage event handler panicked; continuing: {join_error}");
         }
     }
 }
@@ -249,7 +253,8 @@ async fn handle_reask_event(
             // and reconnect this endpoint over TCP. Without this the endpoint
             // stays leased forever and acquire_direct_download_source_leases
             // defers it, leaking the lease and killing re-engage.
-            core.release_direct_download_source_leases(&[endpoint]).await;
+            core.release_direct_download_source_leases(&[endpoint])
+                .await;
         }
         ReaskEvent::SourceReady { file_hash } => {
             let hash = file_hash.to_string();
@@ -295,12 +300,8 @@ async fn handle_direct_callback_req(
     // Only act when we are still the firewalled (LowID) side we advertised: a
     // non-firewalled node never advertised direct UDP callback, so a request to
     // it is stale/spurious (oracle gates on IsFirewalled()).
-    let firewalled = current_tcp_firewalled(
-        &ctx.ed2k_listener,
-        &ctx.server_state,
-        &ctx.kad_firewall,
-    )
-    .await;
+    let firewalled =
+        current_tcp_firewalled(&ctx.ed2k_listener, &ctx.server_state, &ctx.kad_firewall).await;
     if !firewalled {
         tracing::debug!(
             "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: not firewalled (we do \
@@ -330,9 +331,9 @@ async fn handle_direct_callback_req(
                 "direct-UDP-callback connect-out to {peer_addr} completed transport={}",
                 mode.as_str()
             ),
-            Err(error) => tracing::debug!(
-                "direct-UDP-callback connect-out to {peer_addr} failed: {error:#}"
-            ),
+            Err(error) => {
+                tracing::debug!("direct-UDP-callback connect-out to {peer_addr} failed: {error:#}")
+            }
         }
     });
 }
@@ -394,9 +395,18 @@ mod tests {
     fn direct_callback_target_rejects_invalid_endpoints() {
         // Zero TCP port (oracle requires a dialable port) and the unspecified /
         // broadcast IPs are rejected; an ordinary HighID requester is accepted.
-        assert!(!direct_callback_target_is_valid(Ipv4Addr::new(198, 51, 100, 7), 0));
-        assert!(!direct_callback_target_is_valid(Ipv4Addr::UNSPECIFIED, 4662));
+        assert!(!direct_callback_target_is_valid(
+            Ipv4Addr::new(198, 51, 100, 7),
+            0
+        ));
+        assert!(!direct_callback_target_is_valid(
+            Ipv4Addr::UNSPECIFIED,
+            4662
+        ));
         assert!(!direct_callback_target_is_valid(Ipv4Addr::BROADCAST, 4662));
-        assert!(direct_callback_target_is_valid(Ipv4Addr::new(198, 51, 100, 7), 4662));
+        assert!(direct_callback_target_is_valid(
+            Ipv4Addr::new(198, 51, 100, 7),
+            4662
+        ));
     }
 }

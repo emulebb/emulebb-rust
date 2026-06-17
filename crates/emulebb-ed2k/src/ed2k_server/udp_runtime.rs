@@ -48,13 +48,7 @@ pub(super) async fn send_server_udp_status_request(
     server: &ResolvedServerEntry,
 ) -> Result<u32> {
     let challenge = server_status_challenge();
-    send_server_udp_packet(
-        socket,
-        server,
-        OP_GLOBSERVSTATREQ,
-        &challenge.to_le_bytes(),
-    )
-    .await?;
+    send_server_udp_packet(socket, server, OP_GLOBSERVSTATREQ, &challenge.to_le_bytes()).await?;
     Ok(challenge)
 }
 

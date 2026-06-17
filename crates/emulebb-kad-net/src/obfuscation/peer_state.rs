@@ -176,9 +176,8 @@ mod tests {
         let total = PEER_MAP_CAP + 16;
         for i in 0..total {
             let octets = (i as u32).to_be_bytes();
-            let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                10, octets[1], octets[2], octets[3],
-            ));
+            let ip =
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, octets[1], octets[2], octets[3]));
             layer.register_peer_key(SocketAddr::new(ip, 4000), i as u32);
         }
         assert_eq!(

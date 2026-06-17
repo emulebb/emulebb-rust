@@ -3,12 +3,7 @@
 //! Extracted verbatim from `lib.rs` during the maintainability restructuring;
 //! behavior is unchanged.
 
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 
 use crate::handlers::prelude::*;

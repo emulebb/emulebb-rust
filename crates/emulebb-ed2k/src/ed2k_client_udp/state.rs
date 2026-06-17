@@ -366,13 +366,16 @@ mod tests {
         let buddy_id = [0xCD; 16];
 
         // HighID source: never a buddy-reask target even with buddy info present.
-        let high = ReaskSource::new(endpoint, hash(), 4, now)
-            .with_buddy(false, Some(buddy_ep), Some(buddy_id));
+        let high = ReaskSource::new(endpoint, hash(), 4, now).with_buddy(
+            false,
+            Some(buddy_ep),
+            Some(buddy_id),
+        );
         assert!(high.buddy_reask_target().is_none());
 
         // LowID but missing the buddy id (hello-only buddy) -> not eligible.
-        let no_id = ReaskSource::new(endpoint, hash(), 4, now)
-            .with_buddy(true, Some(buddy_ep), None);
+        let no_id =
+            ReaskSource::new(endpoint, hash(), 4, now).with_buddy(true, Some(buddy_ep), None);
         assert!(no_id.buddy_reask_target().is_none());
 
         // LowID but missing the buddy endpoint -> not eligible.
@@ -381,8 +384,11 @@ mod tests {
         assert!(no_ep.buddy_reask_target().is_none());
 
         // LowID with both endpoint + id -> eligible, returns (endpoint, id).
-        let ok = ReaskSource::new(endpoint, hash(), 4, now)
-            .with_buddy(true, Some(buddy_ep), Some(buddy_id));
+        let ok = ReaskSource::new(endpoint, hash(), 4, now).with_buddy(
+            true,
+            Some(buddy_ep),
+            Some(buddy_id),
+        );
         assert_eq!(ok.buddy_reask_target(), Some((buddy_ep, buddy_id)));
     }
 

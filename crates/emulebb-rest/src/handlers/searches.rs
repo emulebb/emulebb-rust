@@ -27,7 +27,10 @@ pub(crate) async fn searches(State(state): State<RestState>) -> impl IntoRespons
     )
 }
 
-pub(crate) async fn create_search(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn create_search(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<SearchCreate>(&body) {
         Ok(request) => request,
         Err(response) => return *response,

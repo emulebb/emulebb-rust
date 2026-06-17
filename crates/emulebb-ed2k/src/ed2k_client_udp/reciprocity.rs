@@ -122,9 +122,7 @@ pub(crate) fn build_reciprocity_reply(
                 &target,
             ))
         }
-        InboundReaskAnswer::QueueFull => {
-            Some(super::outbound::build_queue_full_datagram(&target))
-        }
+        InboundReaskAnswer::QueueFull => Some(super::outbound::build_queue_full_datagram(&target)),
         InboundReaskAnswer::FileNotFound => {
             Some(super::outbound::build_file_not_found_datagram(&target))
         }

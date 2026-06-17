@@ -95,7 +95,10 @@ fn test_insert_response_contact_threads_res_tcp_port() {
     assert_eq!(candidates.len(), 1);
     let contact = &candidates[0].contact;
     assert_eq!(contact.addr.port(), 4672, "UDP endpoint port preserved");
-    assert_eq!(contact.tcp_port, 4662, "real eD2k TCP port threaded through");
+    assert_eq!(
+        contact.tcp_port, 4662,
+        "real eD2k TCP port threaded through"
+    );
     assert_ne!(
         contact.tcp_port,
         contact.addr.port(),
@@ -188,16 +191,19 @@ fn test_sanitize_res_contacts_drops_ip_filtered_contacts() {
     let banned = Ipv4Addr::new(10, 11, 12, 13);
     let filter: crate::traversal::KadIpFilter = std::sync::Arc::new(move |ip| ip == banned);
 
-    let sanitized =
-        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, Some(&filter))
-            .expect("sanitized");
+    let sanitized = sanitize_res_contacts(
+        &contacts,
+        "9.9.9.9:4672".parse().unwrap(),
+        10,
+        Some(&filter),
+    )
+    .expect("sanitized");
     assert_eq!(sanitized.len(), 1, "the banned contact must be dropped");
     assert_eq!(sanitized[0].ip_addr(), Ipv4Addr::new(20, 21, 22, 23));
 
     // Without the hook, both contacts are kept (filter disabled).
-    let unfiltered =
-        sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, None)
-            .expect("sanitized");
+    let unfiltered = sanitize_res_contacts(&contacts, "9.9.9.9:4672".parse().unwrap(), 10, None)
+        .expect("sanitized");
     assert_eq!(unfiltered.len(), 2);
 }
 

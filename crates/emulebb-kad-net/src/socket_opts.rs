@@ -31,7 +31,7 @@ pub const P2P_UDP_RECV_BUFFER_BYTES: usize = 1024 * 1024;
 #[cfg(windows)]
 pub fn pin_egress_to_interface(sock: SockRef<'_>, if_index: Option<u32>) -> io::Result<()> {
     use std::os::windows::io::AsRawSocket;
-    use windows_sys::Win32::Networking::WinSock::{IPPROTO_IP, IP_UNICAST_IF, setsockopt};
+    use windows_sys::Win32::Networking::WinSock::{IP_UNICAST_IF, IPPROTO_IP, setsockopt};
 
     let Some(index) = if_index.and_then(NonZeroU32::new) else {
         return Ok(());

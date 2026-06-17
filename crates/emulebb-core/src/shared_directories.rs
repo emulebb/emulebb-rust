@@ -227,5 +227,4 @@ mod tests {
         assert!(result.is_ok());
         assert!(output.is_empty());
     }
-
 }

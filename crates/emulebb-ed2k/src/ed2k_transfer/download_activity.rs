@@ -49,7 +49,11 @@ impl DatarateWindow {
             return 0;
         };
         let span_ms = now.saturating_duration_since(oldest_ts).as_millis().max(1);
-        let total: u128 = self.samples.iter().map(|&(_, bytes)| u128::from(bytes)).sum();
+        let total: u128 = self
+            .samples
+            .iter()
+            .map(|&(_, bytes)| u128::from(bytes))
+            .sum();
         u64::try_from((total * 1_000) / span_ms).unwrap_or(u64::MAX)
     }
 }

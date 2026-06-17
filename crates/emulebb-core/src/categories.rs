@@ -37,7 +37,10 @@ pub(crate) fn default_categories() -> BTreeMap<u32, Category> {
     )])
 }
 
-pub(crate) fn apply_category_create(category: &mut Category, request: CategoryCreate) -> Result<()> {
+pub(crate) fn apply_category_create(
+    category: &mut Category,
+    request: CategoryCreate,
+) -> Result<()> {
     category.name = normalize_category_name(Some(request.name))?;
     apply_category_path(category, request.path)?;
     if let Some(comment) = request.comment {
@@ -50,7 +53,10 @@ pub(crate) fn apply_category_create(category: &mut Category, request: CategoryCr
     Ok(())
 }
 
-pub(crate) fn apply_category_update(category: &mut Category, request: CategoryUpdate) -> Result<()> {
+pub(crate) fn apply_category_update(
+    category: &mut Category,
+    request: CategoryUpdate,
+) -> Result<()> {
     if request.name.is_some() {
         category.name = normalize_category_name(request.name)?;
     }
@@ -90,8 +96,8 @@ fn apply_category_path(category: &mut Category, path: NullableStringField) -> Re
             // output lands. (Operator-rule scope: category paths -- see
             // long_path.rs.)
             let long = long_path(Path::new(path));
-            let canonical = fs::canonicalize(&long)
-                .with_context(|| format!("failed to resolve {path}"))?;
+            let canonical =
+                fs::canonicalize(&long).with_context(|| format!("failed to resolve {path}"))?;
             ensure!(canonical.is_dir(), "path is not a directory");
             Some(canonical.display().to_string())
         }

@@ -8,7 +8,10 @@
 //! per-file budget; it operates directly on the parent `Ed2kTransferRuntime`
 //! state (a child module sees the parent's private fields).
 
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::Ed2kTransferRuntime;
 

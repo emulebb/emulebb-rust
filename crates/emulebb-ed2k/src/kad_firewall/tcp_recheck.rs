@@ -67,10 +67,12 @@ impl KadFirewallState {
     /// (oracle `IsKadFirewallCheckIP`).
     #[must_use]
     pub fn is_tcp_firewall_check_ip(&self, ip: IpAddr, now: DateTime<Utc>) -> bool {
-        self.tcp_firewall_check_ips.get(&ip).is_some_and(|probed_at| {
-            now.signed_duration_since(*probed_at)
-                < ChronoDuration::seconds(TCP_FIREWALL_CHECK_IP_TTL_SECS)
-        })
+        self.tcp_firewall_check_ips
+            .get(&ip)
+            .is_some_and(|probed_at| {
+                now.signed_duration_since(*probed_at)
+                    < ChronoDuration::seconds(TCP_FIREWALL_CHECK_IP_TTL_SECS)
+            })
     }
 
     fn prune_tcp_firewall_check_ips(&mut self, now: DateTime<Utc>) {

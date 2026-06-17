@@ -21,9 +21,7 @@ use emulebb_ed2k::{
     ed2k_server::{Ed2kFoundSource, Ed2kSearchFile},
     ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint},
 };
-use emulebb_kad_dht::{
-    DhtNode, RpcWorkClass, SearchResult as KadSearchResult, SourceResult,
-};
+use emulebb_kad_dht::{DhtNode, RpcWorkClass, SearchResult as KadSearchResult, SourceResult};
 use emulebb_kad_proto::{Ed2kHash, NodeId};
 use md4::{Digest, Md4};
 use tokio_stream::StreamExt;
@@ -325,7 +323,11 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed
         }
         _ => None,
     };
-    let buddy_id = if firewalled_buddy { result.buddy_id } else { None };
+    let buddy_id = if firewalled_buddy {
+        result.buddy_id
+    } else {
+        None
+    };
     Ed2kFoundSource {
         file_hash: result.file_hash,
         ip: result.ip,

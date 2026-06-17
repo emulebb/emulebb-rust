@@ -63,7 +63,10 @@ async fn ten_unique_ip_majority_root_is_promoted() {
     );
     // Persisted.
     let reloaded = runtime.manifest(&file_hash).await.unwrap();
-    assert_eq!(reloaded.aich_root.as_deref(), Some(hex::encode(root).as_str()));
+    assert_eq!(
+        reloaded.aich_root.as_deref(),
+        Some(hex::encode(root).as_str())
+    );
 }
 
 #[tokio::test]

@@ -407,9 +407,7 @@ pub(crate) fn bulk_result_from_hash(hash: &str) -> BulkOperationResult {
 mod tests {
     use std::sync::Arc;
 
-    use emulebb_core::{
-        EmulebbCore, NetworkStatus, TransferThroughputStats, VpnGuardStatus,
-    };
+    use emulebb_core::{EmulebbCore, NetworkStatus, TransferThroughputStats, VpnGuardStatus};
     use emulebb_index::FileIndex;
 
     use super::{kad_response, stats_response};

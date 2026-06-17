@@ -133,14 +133,12 @@ impl RpcManager {
                         // (oracle banned-client check), before any per-bucket
                         // accounting or handler dispatch.
                         if !flood_exempt && inner.tracker.lock().unwrap().is_banned(from.ip()) {
-                            inner
-                                .observability
-                                .lock()
-                                .unwrap()
-                                .record_tracker_action(
-                                    inbound.tracker_bucket.unwrap_or(PacketTrackerBucket::Default),
-                                    PacketTrackerAction::MassiveDrop,
-                                );
+                            inner.observability.lock().unwrap().record_tracker_action(
+                                inbound
+                                    .tracker_bucket
+                                    .unwrap_or(PacketTrackerBucket::Default),
+                                PacketTrackerAction::MassiveDrop,
+                            );
                             debug!(
                                 "dropping Kad packet from flood-banned IP {} opcode={}",
                                 from.ip(),
@@ -226,12 +224,14 @@ impl RpcManager {
                                 // dropped this packet (uniform-diagnostics-v2 §3.4).
                                 // repeatCount = packets observed in the window;
                                 // windowSeconds = the limiter window.
-                                let (bad_event, bad_behavior, bad_severity) =
-                                    if matches!(decision.action, PacketTrackerAction::MassiveDrop) {
-                                        ("anti_flood_ban", "anti_flood_ban", "high")
-                                    } else {
-                                        ("anti_flood_drop", "anti_flood_drop", "medium")
-                                    };
+                                let (bad_event, bad_behavior, bad_severity) = if matches!(
+                                    decision.action,
+                                    PacketTrackerAction::MassiveDrop
+                                ) {
+                                    ("anti_flood_ban", "anti_flood_ban", "high")
+                                } else {
+                                    ("anti_flood_drop", "anti_flood_drop", "medium")
+                                };
                                 crate::diag_event::bad_peer_kad_drop(
                                     bad_event,
                                     bad_severity,

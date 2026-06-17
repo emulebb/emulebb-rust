@@ -360,7 +360,13 @@ mod tests {
 
     #[test]
     fn test_checking_type_ages_toward_dead() {
-        let mut c = Contact::new(NodeId::from_bytes([3u8; 16]), "8.8.8.8".parse().unwrap(), 1, 2, 9);
+        let mut c = Contact::new(
+            NodeId::from_bytes([3u8; 16]),
+            "8.8.8.8".parse().unwrap(),
+            1,
+            2,
+            9,
+        );
         c.probe_type = 0;
         let base = SystemTime::now();
         // Each advance is at least 10s after the previous to clear the oracle
@@ -379,7 +385,13 @@ mod tests {
     fn test_checking_type_re_age_guard_blocks_within_10s() {
         // Oracle CheckingType (Contact.cpp:207) only advances if >= 10s have
         // passed since the last advance.
-        let mut c = Contact::new(NodeId::from_bytes([8u8; 16]), "8.8.4.4".parse().unwrap(), 1, 2, 9);
+        let mut c = Contact::new(
+            NodeId::from_bytes([8u8; 16]),
+            "8.8.4.4".parse().unwrap(),
+            1,
+            2,
+            9,
+        );
         c.probe_type = 0;
         let base = SystemTime::now();
         // First advance always passes (last_type_set_at == None).
@@ -394,7 +406,13 @@ mod tests {
     fn test_bootstrap_contact_quality_bonus() {
         // Oracle Contact.cpp:293-294: a bootstrap contact gets +10.
         let now = SystemTime::now();
-        let mut base = Contact::new(NodeId::from_bytes([9u8; 16]), "1.2.3.9".parse().unwrap(), 1, 2, 10);
+        let mut base = Contact::new(
+            NodeId::from_bytes([9u8; 16]),
+            "1.2.3.9".parse().unwrap(),
+            1,
+            2,
+            10,
+        );
         base.received_hello_packet = true;
         base.probe_type = 0;
         base.last_seen = now;
@@ -409,7 +427,13 @@ mod tests {
         let now = SystemTime::now();
         // Strong contact: verified(400) + hello(240) + key(160) + type0(120)
         // + fresh<=15min(90) + v10 quality(12) = 1022.
-        let mut strong = Contact::new(NodeId::from_bytes([4u8; 16]), "1.2.3.4".parse().unwrap(), 1, 2, 10);
+        let mut strong = Contact::new(
+            NodeId::from_bytes([4u8; 16]),
+            "1.2.3.4".parse().unwrap(),
+            1,
+            2,
+            10,
+        );
         strong.verified = true;
         strong.received_hello_packet = true;
         strong.udp_key = emulebb_kad_proto::KadUdpKey::new(0x11);
@@ -427,18 +451,36 @@ mod tests {
     fn test_is_weak_for_replacement() {
         let now = SystemTime::now();
         // Unverified, no hello, no key -> weak.
-        let mut bare = Contact::new(NodeId::from_bytes([5u8; 16]), "1.2.3.5".parse().unwrap(), 1, 2, 9);
+        let mut bare = Contact::new(
+            NodeId::from_bytes([5u8; 16]),
+            "1.2.3.5".parse().unwrap(),
+            1,
+            2,
+            9,
+        );
         bare.last_seen = now;
         assert!(bare.is_weak_for_replacement(now));
 
         // Expired window -> weak even if otherwise OK.
-        let mut expired = Contact::new(NodeId::from_bytes([6u8; 16]), "1.2.3.6".parse().unwrap(), 1, 2, 9);
+        let mut expired = Contact::new(
+            NodeId::from_bytes([6u8; 16]),
+            "1.2.3.6".parse().unwrap(),
+            1,
+            2,
+            9,
+        );
         expired.received_hello_packet = true;
         expired.expires_at = Some(now - Duration::from_secs(1));
         assert!(expired.is_weak_for_replacement(now));
 
         // Strong, unexpired, high score -> not weak.
-        let mut strong = Contact::new(NodeId::from_bytes([7u8; 16]), "1.2.3.7".parse().unwrap(), 1, 2, 10);
+        let mut strong = Contact::new(
+            NodeId::from_bytes([7u8; 16]),
+            "1.2.3.7".parse().unwrap(),
+            1,
+            2,
+            10,
+        );
         strong.verified = true;
         strong.received_hello_packet = true;
         strong.udp_key = emulebb_kad_proto::KadUdpKey::new(0x22);

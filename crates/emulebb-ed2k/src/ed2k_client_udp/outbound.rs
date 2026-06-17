@@ -52,7 +52,12 @@ pub(crate) fn build_reask_file_ping_datagram(
     our_udp_version: u8,
     target: &OutboundReaskTarget,
 ) -> Vec<u8> {
-    let body = encode_reask_file_ping(file_hash, part_status, complete_source_count, our_udp_version);
+    let body = encode_reask_file_ping(
+        file_hash,
+        part_status,
+        complete_source_count,
+        our_udp_version,
+    );
     frame(OP_REASKFILEPING, &body, target)
 }
 
@@ -88,8 +93,13 @@ pub(crate) fn build_reask_callback_udp_datagram(
     complete_source_count: u16,
     our_udp_version: u8,
 ) -> Vec<u8> {
-    let body =
-        encode_reask_callback_udp(buddy_id, file_hash, part_status, complete_source_count, our_udp_version);
+    let body = encode_reask_callback_udp(
+        buddy_id,
+        file_hash,
+        part_status,
+        complete_source_count,
+        our_udp_version,
+    );
     let mut datagram = Vec::with_capacity(2 + body.len());
     datagram.push(OP_EMULEPROT);
     datagram.push(OP_REASKCALLBACKUDP);
@@ -179,8 +189,7 @@ mod tests {
     #[test]
     fn callback_udp_is_always_plaintext() {
         let buddy = Ed2kHash::from_bytes([0x55; 16]);
-        let datagram =
-            build_reask_callback_udp_datagram(&buddy, &file_hash(), None, 2, 4);
+        let datagram = build_reask_callback_udp_datagram(&buddy, &file_hash(), None, 2, 4);
         // Always plaintext: starts with the OP_EMULEPROT marker (never obfuscated).
         assert_eq!(datagram[0], OP_EMULEPROT);
         assert_eq!(datagram[1], OP_REASKCALLBACKUDP);

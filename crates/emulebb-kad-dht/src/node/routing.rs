@@ -20,8 +20,7 @@ impl DhtNode {
         let contacts = crate::bootstrap::parse_nodes_dat(data)?;
         let mut added = 0usize;
         for bc in contacts {
-            let mut contact =
-                Contact::new(bc.node_id, bc.ip, bc.udp_port, bc.tcp_port, bc.version);
+            let mut contact = Contact::new(bc.node_id, bc.ip, bc.udp_port, bc.tcp_port, bc.version);
             contact.udp_key = bc.udp_key;
             if self.add_contact(contact).await.is_ok() {
                 added += 1;
@@ -99,11 +98,7 @@ impl DhtNode {
     /// challenge completed). Mirrors `CRoutingZone::VerifyContact`: the contact
     /// must exist with a matching IP. Returns whether a contact was verified.
     pub async fn verify_contact(&self, id: &NodeId, ip: std::net::Ipv4Addr) -> bool {
-        self.inner
-            .routing_table
-            .lock()
-            .await
-            .verify_contact(id, ip)
+        self.inner.routing_table.lock().await.verify_contact(id, ip)
     }
 
     /// Return the closest known contacts to the target.
@@ -144,12 +139,10 @@ impl DhtNode {
         }
         let own_id = self.own_id();
         // The Kad socket is IPv4-only; capture the bound IPv4 to skip ourselves.
-        let local_ip = self.bind_addr().ok().and_then(|addr| {
-            addr.ip()
-                .to_string()
-                .parse::<std::net::Ipv4Addr>()
-                .ok()
-        });
+        let local_ip = self
+            .bind_addr()
+            .ok()
+            .and_then(|addr| addr.ip().to_string().parse::<std::net::Ipv4Addr>().ok());
         let mut contacts = self.inner.routing_table.lock().await.all_contacts();
         // Newest contacts first (oracle prepends fresh candidates).
         contacts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -476,7 +469,10 @@ mod tests {
 
         let helpers = dht.firewall_check_helpers(8).await;
         assert_eq!(helpers.len(), 1);
-        assert_eq!(helpers[0].ip, "198.51.100.10".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(
+            helpers[0].ip,
+            "198.51.100.10".parse::<std::net::Ipv4Addr>().unwrap()
+        );
         assert_eq!(helpers[0].tcp_port, 42011);
 
         assert!(dht.firewall_check_helpers(0).await.is_empty());

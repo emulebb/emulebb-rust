@@ -173,7 +173,11 @@ async fn reask_transfer_info_advertises_partfile_bitmap_for_incomplete_download(
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     // A fresh two-part job is incomplete with no verified pieces yet.
     let file_hash = Ed2kHash::from_bytes([0x42; 16]);
-    let job = new_transfer_job(file_hash, "ubuntu-linux.iso".to_string(), ED2K_PART_SIZE + 7);
+    let job = new_transfer_job(
+        file_hash,
+        "ubuntu-linux.iso".to_string(),
+        ED2K_PART_SIZE + 7,
+    );
     runtime.ensure_job(&job).await.unwrap();
 
     // Two live sources: one advertises both parts (complete), one only one part.

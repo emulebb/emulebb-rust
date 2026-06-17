@@ -70,9 +70,9 @@ pub(in crate::ed2k_tcp) fn encode_buddy_pong() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::decode_kad_callback_payload;
     use super::super::super::TCP_PACKET_HEADER_LEN;
+    use super::super::decode_kad_callback_payload;
+    use super::*;
     use emulebb_kad_proto::Ed2kHash;
 
     /// Split an encoded eD2k TCP frame into (protocol, opcode, payload). The
@@ -83,7 +83,11 @@ mod tests {
         let declared_len = u32::from_le_bytes(frame[1..5].try_into().unwrap()) as usize;
         let opcode = frame[5];
         let payload = &frame[TCP_PACKET_HEADER_LEN..];
-        assert_eq!(declared_len, payload.len() + 1, "framed length includes opcode");
+        assert_eq!(
+            declared_len,
+            payload.len() + 1,
+            "framed length includes opcode"
+        );
         (protocol, opcode, payload)
     }
 

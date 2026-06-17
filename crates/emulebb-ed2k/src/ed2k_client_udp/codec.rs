@@ -315,7 +315,9 @@ mod tests {
     #[test]
     fn part_status_round_trip_lsb_first() {
         // 10 parts: have 0,1,3,9 -> byte0 = 0b0000_1011, byte1 = 0b0000_0010.
-        let parts = [true, true, false, true, false, false, false, false, false, true];
+        let parts = [
+            true, true, false, true, false, false, false, false, false, true,
+        ];
         let encoded = encode_part_status(Some(&parts));
         assert_eq!(encoded[0..2], 10u16.to_le_bytes());
         assert_eq!(encoded[2], 0b0000_1011);

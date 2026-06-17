@@ -64,7 +64,10 @@ fn md4_hashset(data: &[u8]) -> (Ed2kHash, Vec<[u8; 16]>) {
     for ph in &part_hashes {
         file_hasher.update(ph);
     }
-    (Ed2kHash::from_bytes(file_hasher.finalize().into()), part_hashes)
+    (
+        Ed2kHash::from_bytes(file_hasher.finalize().into()),
+        part_hashes,
+    )
 }
 
 /// AICH master + per-part hashes for `data`, derived through the independent
@@ -111,13 +114,19 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     for byte in &mut on_disk[cb_start..cb_end] {
         *byte ^= 0xFF;
     }
-    let payload_path = runtime.transfer_dir_path(&job.file_hash).join(PAYLOAD_FILE_NAME);
+    let payload_path = runtime
+        .transfer_dir_path(&job.file_hash)
+        .join(PAYLOAD_FILE_NAME);
     fs::write(&payload_path, &on_disk).unwrap();
 
     // Sanity: part 0 as stored fails MD4 (this is the corrupt-part trigger).
     let part0_disk = &on_disk[..ED2K_PART_SIZE as usize];
     let canonical_part0 = md4(&data[..ED2K_PART_SIZE as usize]);
-    assert_ne!(md4(part0_disk), canonical_part0, "corrupt part must fail MD4");
+    assert_ne!(
+        md4(part0_disk),
+        canonical_part0,
+        "corrupt part must fail MD4"
+    );
 
     // Begin salvage with a valid recovery answer for part 0.
     let body = recovery_body_for(&data, 0);
@@ -128,7 +137,11 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
         .expect("salvage should start for a corrupt part with a trusted AICH root");
 
     // Exactly the one corrupt block is needed; every other block was salvaged.
-    assert_eq!(outcome.needed_ranges.len(), 1, "only one block needs redownload");
+    assert_eq!(
+        outcome.needed_ranges.len(),
+        1,
+        "only one block needs redownload"
+    );
     assert_eq!(
         outcome.needed_ranges[0],
         (cb_start as u64, cb_end as u64),
@@ -143,7 +156,10 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     assert_eq!(piece0.state, Ed2kTransferState::Missing);
     let bitmap = piece0.resolve_block_bitmap(ED2K_PART_SIZE);
     assert_eq!(bitmap.present_count(), total_blocks - 1);
-    assert!(!bitmap.is_present(corrupt_block), "corrupt block stays missing");
+    assert!(
+        !bitmap.is_present(corrupt_block),
+        "corrupt block stays missing"
+    );
     for idx in 0..total_blocks {
         if idx != corrupt_block {
             assert!(bitmap.is_present(idx), "good block {idx} stays present");
@@ -155,7 +171,13 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
     // Verified.
     let good_block = &data[cb_start..cb_end];
     let verified = runtime
-        .write_salvage_block(&job.file_hash, 0, cb_start as u64, cb_end as u64, good_block)
+        .write_salvage_block(
+            &job.file_hash,
+            0,
+            cb_start as u64,
+            cb_end as u64,
+            good_block,
+        )
         .await
         .unwrap();
     assert!(
@@ -165,7 +187,10 @@ async fn salvage_keeps_good_blocks_and_reverifies_after_one_block() {
 
     let manifest = runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
-    assert!(manifest.pieces[0].block_bitmap.is_none(), "verified part drops the bitmap");
+    assert!(
+        manifest.pieces[0].block_bitmap.is_none(),
+        "verified part drops the bitmap"
+    );
     assert_eq!(manifest.pieces[0].bytes_written, ED2K_PART_SIZE);
     // The on-disk part 0 now matches the canonical bytes.
     let restored = fs::read(&payload_path).unwrap();
@@ -182,8 +207,14 @@ async fn block_bitmap_persists_round_trip() {
     let aich = aich_hashset(&data);
     let job = new_transfer_job(file_hash, "persist.bin".to_string(), data.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
-    runtime.store_md4_hashset(&job.file_hash, md4_parts).await.unwrap();
-    runtime.store_aich_hashset(&job.file_hash, aich.clone()).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, md4_parts)
+        .await
+        .unwrap();
+    runtime
+        .store_aich_hashset(&job.file_hash, aich.clone())
+        .await
+        .unwrap();
 
     // Corrupt two non-adjacent blocks (3 and 40) of part 0.
     let corrupt = [3usize, 40usize];
@@ -194,7 +225,9 @@ async fn block_bitmap_persists_round_trip() {
             *byte ^= 0xAA;
         }
     }
-    let payload_path = runtime.transfer_dir_path(&job.file_hash).join(PAYLOAD_FILE_NAME);
+    let payload_path = runtime
+        .transfer_dir_path(&job.file_hash)
+        .join(PAYLOAD_FILE_NAME);
     fs::write(&payload_path, &on_disk).unwrap();
 
     let body = recovery_body_for(&data, 0);
@@ -211,7 +244,11 @@ async fn block_bitmap_persists_round_trip() {
         .resolve_block_bitmap(ED2K_PART_SIZE);
 
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let after = reloaded_runtime.manifest(&job.file_hash).await.unwrap().pieces[0]
+    let after = reloaded_runtime
+        .manifest(&job.file_hash)
+        .await
+        .unwrap()
+        .pieces[0]
         .resolve_block_bitmap(ED2K_PART_SIZE);
 
     assert_eq!(before, after, "bitmap survives save -> reload unchanged");
@@ -244,7 +281,10 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
         .unwrap();
 
     // Sequentially append part 0 in EMBLOCKSIZE blocks via the contiguous path.
-    runtime.mark_piece_requested(&job.file_hash, 0).await.unwrap();
+    runtime
+        .mark_piece_requested(&job.file_hash, 0)
+        .await
+        .unwrap();
     let mut pos = 0u64;
     let mut completed = false;
     while pos < ED2K_PART_SIZE {

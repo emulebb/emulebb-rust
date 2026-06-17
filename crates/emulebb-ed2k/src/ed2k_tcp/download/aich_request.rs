@@ -18,8 +18,10 @@ use crate::ed2k_transfer::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, decode_aich_hash_hex,
 };
 
-use super::super::{Ed2kTransport, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
-    encode_aich_recovery_request};
+use super::super::{
+    Ed2kTransport, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_send,
+    encode_aich_recovery_request,
+};
 
 /// Mutable per-session AICH-recovery request bookkeeping.
 pub(in crate::ed2k_tcp) struct AichRecoveryRequestState<'a> {

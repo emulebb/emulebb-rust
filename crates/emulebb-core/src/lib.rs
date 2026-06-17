@@ -13,6 +13,12 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
+#[cfg(test)]
+use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
+#[cfg(test)]
+use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+#[cfg(test)]
+use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_ed2k::{
     NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
@@ -22,16 +28,16 @@ use emulebb_ed2k::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions,
         Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
         Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session, request_callback_on_server,
-        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
-        search_keyword_via_background_session, search_source_servers, search_source_udp_servers,
-        search_source_via_background_session,
+        parse_server_met, publish_shared_catalog_via_background_session,
+        request_callback_on_server, request_callback_via_background_session, run_ed2k_server_loop,
+        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
+        search_source_udp_servers, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
-        Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions, download_file_from_peer, emule_connect_options,
-        encode_kad_callback_relay_frame, run_ed2k_listener, run_outbound_buddy_link,
-        set_hello_buddy_snapshot, set_publish_rust_identity,
+        Ed2kSecureIdent, HelloBuddySnapshot, OutboundBuddyLinkOptions, download_file_from_peer,
+        emule_connect_options, encode_kad_callback_relay_frame, run_ed2k_listener,
+        run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
         ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
@@ -41,36 +47,25 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
-#[cfg(test)]
-use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
-#[cfg(test)]
-use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_index::{
-    FileIndex, IndexedFile, KadLocalStore, SnoopEntry, SnoopQueue,
-    metadata_from_publish_snapshot, publish_snapshot_from_metadata,
+    FileIndex, IndexedFile, KadLocalStore, SnoopEntry, SnoopQueue, metadata_from_publish_snapshot,
+    publish_snapshot_from_metadata,
 };
 #[cfg(test)]
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
-use emulebb_kad_dht::{
-    DhtConfig, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass,
-};
+use emulebb_kad_dht::{DhtConfig, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass};
 #[cfg(test)]
-use emulebb_kad_dht::{
-    NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult,
-};
+use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
+#[cfg(test)]
+use emulebb_kad_proto::tag_name;
 use emulebb_kad_proto::{
-    CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes,
-    HelloResAck, KAD_VERSION, KadPacket, PublishRes, Tag, constants::K,
-    packet::ContactEntry,
+    CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, HelloResAck, KAD_VERSION, KadPacket,
+    PublishRes, Tag, constants::K, packet::ContactEntry,
 };
 #[cfg(test)]
 use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
-#[cfg(test)]
-use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
-#[cfg(test)]
-use emulebb_kad_proto::tag_name;
 use emulebb_metadata::MetadataStore;
 use serde_json::json;
 use tokio::{
@@ -94,10 +89,10 @@ mod kad_passive_replay;
 mod kad_publish_schedule;
 mod kad_routing_maintenance;
 mod kad_snoop_entry;
-mod local_search_response;
-mod preferences;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
+mod local_search_response;
+mod preferences;
 mod profile_state;
 mod search_query;
 mod search_state;
@@ -105,28 +100,25 @@ mod shared_dir_monitor;
 mod shared_directories;
 mod source_publish;
 mod upload_view;
-mod vpn_guard;
 mod views;
-use categories::{
-    PR_NORMAL, apply_category_create, apply_category_update, default_categories,
-};
+mod vpn_guard;
+use categories::{PR_NORMAL, apply_category_create, apply_category_update, default_categories};
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
+use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
-use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
     drop_self_sources, ed2k_keyword_server_attempts, ed2k_server_callback_route,
     found_source_from_hint, hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source,
     keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
-    new_direct_ed2k_source_count,
-    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_exclude_background_source_endpoint,
-    should_query_kad_source_supplement, should_skip_no_progress_source_requery,
-    sort_download_sources, source_endpoint_key, source_key,
+    new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
+    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
+    should_exclude_background_source_endpoint, should_query_kad_source_supplement,
+    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -145,12 +137,12 @@ use kad_hello::{
 use kad_hello::{
     build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
 };
-use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
 #[cfg(test)]
 use kad_passive_replay::{
     PassiveReplayFamily, index_passive_keyword_result, preferred_passive_replay_families,
     remember_passive_note_results, remember_passive_source_results,
 };
+use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
@@ -169,6 +161,7 @@ use source_publish::{
 };
 use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
 
+use shared_dir_monitor::SharedDirMonitor;
 pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
 };
@@ -176,7 +169,6 @@ use shared_directories::{
     refresh_shared_directory_row, scan_shared_directory_roots, shared_directory_from_index,
     shared_directory_to_index, shared_directory_update_parts,
 };
-use shared_dir_monitor::SharedDirMonitor;
 
 mod rest_model;
 pub use rest_model::{
@@ -184,19 +176,19 @@ pub use rest_model::{
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
     IndexingStatus, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
     NullableU32Field, Preferences, PreferencesUpdate, Search, SearchCreate, SearchResult,
-    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate,
-    Status, Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource,
-    TransferStats, TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics,
-    UploadScoreBreakdown, VpnGuardConfig, VpnGuardStatus,
+    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
+    Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource, TransferStats,
+    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
+    VpnGuardConfig, VpnGuardStatus,
 };
 use views::{
-    apply_server_update, download_priority_score,
-    ensure_category_selector_is_unambiguous, enrich_sources_with_live, kad_status_from_running,
-    manifest_default_state_name, normalize_transfer_name, preserve_transfer_public_metadata,
-    server_endpoint_from_create, server_info_from_parts, source_by_client_id, source_friend_name,
-    transfer_create_links, transfer_create_state_name, transfer_from_manifest,
-    transfer_parts_from_manifest, transfer_sources_from_manifest, validate_server_priority,
-    validate_server_update, validate_shared_file_comment_rating, validate_shared_upload_priority,
+    apply_server_update, download_priority_score, enrich_sources_with_live,
+    ensure_category_selector_is_unambiguous, kad_status_from_running, manifest_default_state_name,
+    normalize_transfer_name, preserve_transfer_public_metadata, server_endpoint_from_create,
+    server_info_from_parts, source_by_client_id, source_friend_name, transfer_create_links,
+    transfer_create_state_name, transfer_from_manifest, transfer_parts_from_manifest,
+    transfer_sources_from_manifest, validate_server_priority, validate_server_update,
+    validate_shared_file_comment_rating, validate_shared_upload_priority,
     validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
     validate_url_import,
 };
@@ -256,7 +248,6 @@ struct DirectDownloadSpawnContext<'a, DownloadFn> {
     retry_round: u32,
     download_peer: &'a DownloadFn,
 }
-
 
 #[derive(Debug)]
 struct CoreState {
@@ -581,10 +572,9 @@ impl EmulebbCore {
         // Apply the global connection budget + per-file source caps live, like
         // the download limit (eMule GetMaxConnections / GetMaxConperFive /
         // GetConfiguredMaxSourcesPerFile preference changes take effect at once).
-        self.ed2k_transfers
-            .apply_download_coordinator_config(
-                ed2k_download_coordinator_config_from_preferences(&preferences),
-            );
+        self.ed2k_transfers.apply_download_coordinator_config(
+            ed2k_download_coordinator_config_from_preferences(&preferences),
+        );
         // Apply the credit-system toggle live (eMule thePrefs.GetCreditSystem()):
         // when off, upload scoring uses the neutral 1.0 credit ratio for everyone.
         self.ed2k_transfers
@@ -696,7 +686,9 @@ impl EmulebbCore {
         // only reporting status (oracle CUDPFirewallTester::ReCheckFirewallUDP).
         {
             let runtime = self.ed2k_runtime.lock().await;
-            if let Some(signal) = runtime.as_ref().and_then(|rt| rt.kad_firewall_recheck.as_ref())
+            if let Some(signal) = runtime
+                .as_ref()
+                .and_then(|rt| rt.kad_firewall_recheck.as_ref())
             {
                 signal.notify_one();
             }
@@ -2023,8 +2015,10 @@ impl EmulebbCore {
         // CLIENTBANTIME TTL) so it is actually rejected at accept/connect/source
         // add, mirroring eMule's `CUpDownClient::Ban` (UploadClient.cpp:1042 ->
         // CClientList::AddBannedClient).
-        self.ed2k_transfers
-            .ban_client(parse_ban_ip(&upload.address), parse_ban_hash(upload.user_hash.as_deref()));
+        self.ed2k_transfers.ban_client(
+            parse_ban_ip(&upload.address),
+            parse_ban_hash(upload.user_hash.as_deref()),
+        );
         self.state
             .lock()
             .await
@@ -2267,8 +2261,10 @@ impl EmulebbCore {
         // Back the manual source ban with the enforced ban store (IP + user
         // hash, 4h TTL) so the source is rejected on the next connect / source
         // add (eMule CUpDownClient::Ban).
-        self.ed2k_transfers
-            .ban_client(parse_ban_ip(&source.ip), parse_ban_hash(source.user_hash.as_deref()));
+        self.ed2k_transfers.ban_client(
+            parse_ban_ip(&source.ip),
+            parse_ban_hash(source.user_hash.as_deref()),
+        );
         self.state
             .lock()
             .await
@@ -2778,7 +2774,9 @@ impl EmulebbCore {
         let hello_identity = Ed2kHelloIdentity {
             user_hash: network.user_hash,
             client_id: 0,
-            tcp_port: self.ed2k_reachability.advertised_tcp_port(network.listen_port),
+            tcp_port: self
+                .ed2k_reachability
+                .advertised_tcp_port(network.listen_port),
             udp_port: self
                 .ed2k_reachability
                 .advertised_udp_port(network.kad_bind_addr.port()),
@@ -3233,7 +3231,10 @@ impl EmulebbCore {
             let file_source_count = state
                 .download_source_registry
                 .candidate_count_for_file(now, file_hash);
-            if !self.ed2k_transfers.can_engage_file_source(file_source_count) {
+            if !self
+                .ed2k_transfers
+                .can_engage_file_source(file_source_count)
+            {
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
                 crate::diag_sched::source_dropped(file_hash, source);
@@ -3308,16 +3309,17 @@ impl EmulebbCore {
         let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
         let now = Instant::now();
         for source in sources {
-            state
-                .download_source_registry
-                .add_candidate(now, DownloadSourceCandidate {
+            state.download_source_registry.add_candidate(
+                now,
+                DownloadSourceCandidate {
                     file_hash: transfer.hash.clone(),
                     file_priority,
                     needed_parts,
                     rare_parts: 0,
                     source: source.clone(),
                     last_seen: now,
-                });
+                },
+            );
         }
     }
 
@@ -3802,7 +3804,9 @@ impl EmulebbCore {
             // incoming connections + HighID callback on tcp_port, and locate us for
             // UDP source-reask by the (ip, udp_port) we advertise; the gateway can
             // remap either external port (see advertised_ports).
-            tcp_port: self.ed2k_reachability.advertised_tcp_port(network.listen_port),
+            tcp_port: self
+                .ed2k_reachability
+                .advertised_tcp_port(network.listen_port),
             udp_port: self
                 .ed2k_reachability
                 .advertised_udp_port(network.kad_bind_addr.port()),
@@ -4655,9 +4659,7 @@ async fn handle_kad_local_store_packet(
                     .send_legacy_challenge(req.node_id, req.version, from)
                     .await
                 {
-                    tracing::debug!(
-                        "failed to send legacy Kad challenge to {from}: {error:#}"
-                    );
+                    tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
                 }
             }
         }
@@ -4696,9 +4698,7 @@ async fn handle_kad_local_store_packet(
                     .send_legacy_challenge(res.node_id, res.version, from)
                     .await
                 {
-                    tracing::debug!(
-                        "failed to send legacy Kad challenge to {from}: {error:#}"
-                    );
+                    tracing::debug!("failed to send legacy Kad challenge to {from}: {error:#}");
                 }
             }
         }
@@ -4711,16 +4711,12 @@ async fn handle_kad_local_store_packet(
             // source IP is not spoofed. The receive loop already enforced that we
             // had sent a HELLO_RES to this IP (HELLO_RES is out-tracked).
             if !receiver_verify_key_valid {
-                tracing::debug!(
-                    "ignoring Kad HELLO_RES_ACK from {from}: receiver key is invalid"
-                );
+                tracing::debug!("ignoring Kad HELLO_RES_ACK from {from}: receiver key is invalid");
             } else if let IpAddr::V4(ip) = from.ip() {
                 if dht.verify_contact(&ack.node_id, ip).await {
                     tracing::debug!("verified Kad contact {} via HELLO_RES_ACK", ack.node_id);
                 } else {
-                    tracing::debug!(
-                        "Kad HELLO_RES_ACK from {from}: no matching contact to verify"
-                    );
+                    tracing::debug!("Kad HELLO_RES_ACK from {from}: no matching contact to verify");
                 }
             }
         }
@@ -4759,9 +4755,7 @@ async fn handle_kad_local_store_packet(
             let outcome = {
                 let mut firewall = kad_firewall.lock().await;
                 if !firewall.is_tcp_firewall_check_ip(from.ip(), now) {
-                    tracing::debug!(
-                        "ignoring unrequested Kad FIREWALLED_RES from {from}"
-                    );
+                    tracing::debug!("ignoring unrequested Kad FIREWALLED_RES from {from}");
                     FirewalledResponseOutcome::Ignored
                 } else {
                     firewall.record_firewalled_response(from.ip(), reported_ip, now)
@@ -4792,7 +4786,9 @@ async fn handle_kad_local_store_packet(
                     // doing it here too means a fast inbound completion is reflected
                     // immediately.)
                     if let Some(external_udp_port) = summary.external_udp_port {
-                        runtime.reachability.set_peer_confirmed_udp_port(external_udp_port);
+                        runtime
+                            .reachability
+                            .set_peer_confirmed_udp_port(external_udp_port);
                     }
                     tracing::info!(
                         helpers_selected = summary.helpers_selected,
@@ -5173,8 +5169,7 @@ async fn handle_kad_find_buddy_req(
         .await
     {
         kad_buddy.lock().await.release_incoming_buddy(&buddy);
-        return Err(error)
-            .with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"));
+        return Err(error).with_context(|| format!("failed to send Kad FINDBUDDY_RES to {from}"));
     }
 
     // Record the firewalled client we expect to connect to us so the listener
@@ -5235,7 +5230,10 @@ async fn handle_kad_find_buddy_res(
         }
         state.set_outgoing_buddy(buddy);
     }
-    set_hello_buddy_snapshot(Some(HelloBuddySnapshot { ip: buddy_ip, udp_port: from.port() }));
+    set_hello_buddy_snapshot(Some(HelloBuddySnapshot {
+        ip: buddy_ip,
+        udp_port: from.port(),
+    }));
     // kad_event buddy milestone `buddy_established` (uniform-diagnostics-v2 §3.3).
     crate::diag_kad_event::buddy(true, from);
     tracing::info!("acquired Kad buddy {from} (tcp_port={})", res.tcp_port);
@@ -5337,12 +5335,8 @@ async fn handle_kad_callback_req(
         return;
     };
 
-    let frame = encode_kad_callback_relay_frame(
-        req.buddy_id.0,
-        &req.file_hash,
-        requester_ip,
-        req.tcp_port,
-    );
+    let frame =
+        encode_kad_callback_relay_frame(req.buddy_id.0, &req.file_hash, requester_ip, req.tcp_port);
     if buddy_registry.relay_to_inbound(req.buddy_id, frame) {
         tracing::info!(
             "relayed Kad OP_CALLBACK to buddied client {buddy_tcp_addr} for requester \
@@ -5932,7 +5926,9 @@ mod tests {
         handle_kad_callback_req(&kad_buddy, &registry, from, &req).await;
 
         // The exact OP_CALLBACK relay frame must be pushed down the held socket.
-        let relayed = rx.try_recv().expect("relay frame delivered to held buddy socket");
+        let relayed = rx
+            .try_recv()
+            .expect("relay frame delivered to held buddy socket");
         let expected =
             encode_kad_callback_relay_frame(buddy_id.0, &file_hash, requester_ip, requester_tcp);
         assert_eq!(relayed, expected);
@@ -6449,9 +6445,8 @@ mod tests {
         let own = NodeId::ZERO;
 
         // Close target (chunk0 distance well under SEARCHTOLERANCE) -> accepted.
-        let close = NodeId::from_be_bytes([
-            0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        let close =
+            NodeId::from_be_bytes([0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(kad_publish_within_tolerance(
             own,
             close,
@@ -6459,9 +6454,8 @@ mod tests {
         ));
 
         // Far target (chunk0 distance > SEARCHTOLERANCE) from a public IP -> dropped.
-        let far = NodeId::from_be_bytes([
-            0x7F, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        let far =
+            NodeId::from_be_bytes([0x7F, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(!kad_publish_within_tolerance(
             own,
             far,
@@ -7569,19 +7563,22 @@ mod tests {
         // Spawn all sources at once so several slots are in flight when one panics.
         options.max_parallel_download_peers = 3;
 
-        let result = run_ed2k_direct_downloads(options, move |_bind_ip,
-                                                               _source,
-                                                               _hello_identity,
-                                                               _secure_ident,
-                                                               _transfer_runtime,
-                                                               _file_name,
-                                                               _file_size,
-                                                               _connect_timeout| async move {
-            // Yield first so all three workers are spawned (and hold a slot)
-            // before the panic unwinds, exercising the drain path.
-            tokio::task::yield_now().await;
-            panic!("simulated download worker panic");
-        })
+        let result = run_ed2k_direct_downloads(
+            options,
+            move |_bind_ip,
+                  _source,
+                  _hello_identity,
+                  _secure_ident,
+                  _transfer_runtime,
+                  _file_name,
+                  _file_size,
+                  _connect_timeout| async move {
+                // Yield first so all three workers are spawned (and hold a slot)
+                // before the panic unwinds, exercising the drain path.
+                tokio::task::yield_now().await;
+                panic!("simulated download worker panic");
+            },
+        )
         .await;
 
         assert!(result.is_err(), "a worker panic propagates as an error");
@@ -7889,26 +7886,28 @@ mod tests {
         );
         {
             let mut state = core.state.lock().await;
-            state
-                .download_source_registry
-                .add_candidate(Instant::now(), DownloadSourceCandidate {
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
                     file_hash: lower_hash.clone(),
                     file_priority: 1,
                     needed_parts: 8,
                     rare_parts: 0,
                     source: source.clone(),
                     last_seen: Instant::now(),
-                });
-            state
-                .download_source_registry
-                .add_candidate(Instant::now(), DownloadSourceCandidate {
+                },
+            );
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
                     file_hash: higher_hash.clone(),
                     file_priority: 9,
                     needed_parts: 1,
                     rare_parts: 0,
                     source: source.clone(),
                     last_seen: Instant::now(),
-                });
+                },
+            );
         }
 
         let (lower_sources, lower_deferred) = core
@@ -7942,16 +7941,17 @@ mod tests {
         );
         {
             let mut state = core.state.lock().await;
-            state
-                .download_source_registry
-                .add_candidate(Instant::now(), DownloadSourceCandidate {
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
                     file_hash: file_hash.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 0,
                     source: source.clone(),
                     last_seen: Instant::now(),
-                });
+                },
+            );
         }
 
         // Engage (lease) the source, as a download attempt would before detaching
@@ -8001,10 +8001,8 @@ mod tests {
         // makes the attempt a no-op that returns Ok(None) so the queued-attempt
         // wrapper neither rewrites the transfer state nor re-queues a retry.
         let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-        let transfer = a4af_test_transfer(
-            &Ed2kHash::from_bytes([0x80; 16]).to_string(),
-            "downloading",
-        );
+        let transfer =
+            a4af_test_transfer(&Ed2kHash::from_bytes([0x80; 16]).to_string(), "downloading");
         let cancel = CancellationToken::new();
         cancel.cancel();
 
@@ -8045,11 +8043,7 @@ mod tests {
             .await
             .unwrap();
         let hash = transfer.hash.clone();
-        let source = direct_test_source(
-            hash.parse().unwrap(),
-            Ipv4Addr::new(192, 0, 2, 60),
-            41030,
-        );
+        let source = direct_test_source(hash.parse().unwrap(), Ipv4Addr::new(192, 0, 2, 60), 41030);
         let endpoint = source_endpoint_key(&source);
 
         // Simulate a running attempt for this hash: a registered + leased source
@@ -8057,16 +8051,17 @@ mod tests {
         let cancel = CancellationToken::new();
         {
             let mut state = core.state.lock().await;
-            state
-                .download_source_registry
-                .add_candidate(Instant::now(), DownloadSourceCandidate {
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
                     file_hash: hash.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 0,
                     source: source.clone(),
                     last_seen: Instant::now(),
-                });
+                },
+            );
             assert!(
                 state
                     .download_source_registry
@@ -8080,11 +8075,7 @@ mod tests {
                 .insert(hash.clone(), (0, cancel.clone()));
         }
 
-        let deleted = core
-            .delete_transfer_files(&hash)
-            .await
-            .unwrap()
-            .unwrap();
+        let deleted = core.delete_transfer_files(&hash).await.unwrap().unwrap();
         assert_eq!(deleted.hash, hash);
 
         // The in-flight attempt is signalled to stop.
@@ -8099,7 +8090,9 @@ mod tests {
             "delete must release the hash's leases"
         );
         assert_eq!(
-            state.download_source_registry.candidate_count_for_file(Instant::now(), &hash),
+            state
+                .download_source_registry
+                .candidate_count_for_file(Instant::now(), &hash),
             0,
             "delete must forget the hash's source candidates"
         );
@@ -8132,8 +8125,7 @@ mod tests {
         let transfer = core
             .create_transfer(TransferCreate {
                 link: Some(
-                    "ed2k://|file|Pause.Me.bin|4096|00112233445566778899aabbccddeeff|/"
-                        .to_string(),
+                    "ed2k://|file|Pause.Me.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
                 ),
                 links: None,
                 category_id: None,
@@ -8208,16 +8200,17 @@ mod tests {
             // File A is the peer's best (higher priority), so it wins the single
             // per-peer relationship; file B is the lower-priority other file.
             for (hash, priority) in [(&file_a, 9u32), (&file_b, 3u32)] {
-                state
-                    .download_source_registry
-                    .add_candidate(Instant::now(), DownloadSourceCandidate {
+                state.download_source_registry.add_candidate(
+                    Instant::now(),
+                    DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: priority,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
                         last_seen: Instant::now(),
-                    });
+                    },
+                );
             }
         }
 
@@ -8237,7 +8230,10 @@ mod tests {
 
         // The peer holds exactly one active engagement across both files (no
         // double-engage / one relationship per peer).
-        assert_eq!(core.state.lock().await.active_download_peer_endpoints.len(), 1);
+        assert_eq!(
+            core.state.lock().await.active_download_peer_endpoints.len(),
+            1
+        );
 
         // After the peer is released, a fresh acquisition for the best file reuses
         // the same source rather than being permanently consumed.
@@ -8272,23 +8268,27 @@ mod tests {
                 .transfers
                 .insert(other.clone(), a4af_test_transfer(&other, "downloading"));
             for hash in [&current, &other] {
-                state
-                    .download_source_registry
-                    .add_candidate(Instant::now(), DownloadSourceCandidate {
+                state.download_source_registry.add_candidate(
+                    Instant::now(),
+                    DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: 5,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
                         last_seen: Instant::now(),
-                    });
+                    },
+                );
             }
         }
 
         let swapped = core
             .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
             .await;
-        assert_eq!(swapped, 1, "NNP source must be swapped to the other wanted file");
+        assert_eq!(
+            swapped, 1,
+            "NNP source must be swapped to the other wanted file"
+        );
     }
 
     #[tokio::test]
@@ -8304,22 +8304,26 @@ mod tests {
         );
         {
             let mut state = core.state.lock().await;
-            state
-                .download_source_registry
-                .add_candidate(Instant::now(), DownloadSourceCandidate {
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
                     file_hash: current.clone(),
                     file_priority: 5,
                     needed_parts: 4,
                     rare_parts: 1,
                     source: source.clone(),
                     last_seen: Instant::now(),
-                });
+                },
+            );
         }
 
         let swapped = core
             .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
             .await;
-        assert_eq!(swapped, 0, "NNP source with no other wanted file must not be swapped");
+        assert_eq!(
+            swapped, 0,
+            "NNP source with no other wanted file must not be swapped"
+        );
     }
 
     #[tokio::test]
@@ -8340,23 +8344,27 @@ mod tests {
                 .transfers
                 .insert(other.clone(), a4af_test_transfer(&other, "completed"));
             for hash in [&current, &other] {
-                state
-                    .download_source_registry
-                    .add_candidate(Instant::now(), DownloadSourceCandidate {
+                state.download_source_registry.add_candidate(
+                    Instant::now(),
+                    DownloadSourceCandidate {
                         file_hash: hash.clone(),
                         file_priority: 5,
                         needed_parts: 4,
                         rare_parts: 1,
                         source: source.clone(),
                         last_seen: Instant::now(),
-                    });
+                    },
+                );
             }
         }
 
         let swapped = core
             .swap_no_needed_parts_sources(&current, std::slice::from_ref(&source))
             .await;
-        assert_eq!(swapped, 0, "completed other file is not a valid swap target");
+        assert_eq!(
+            swapped, 0,
+            "completed other file is not a valid swap target"
+        );
     }
 
     #[test]
@@ -8473,10 +8481,7 @@ mod tests {
         let own_user_hash = [0xAB; 16];
         let identity = OwnSourceIdentity {
             user_hash: own_user_hash,
-            endpoints: vec![
-                (Ipv4Addr::new(192, 168, 50, 2), 4662),
-                (own_ip, own_port),
-            ],
+            endpoints: vec![(Ipv4Addr::new(192, 168, 50, 2), 4662), (own_ip, own_port)],
         };
 
         // (1) self by advertised public endpoint, (2) self by local bind endpoint,
@@ -8484,12 +8489,16 @@ mod tests {
         let mut self_by_endpoint = direct_test_source(file_hash, own_ip, own_port);
         self_by_endpoint.user_hash = None;
         let self_by_bind = direct_test_source(file_hash, Ipv4Addr::new(192, 168, 50, 2), 4662);
-        let mut self_by_hash =
-            direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 9), 5000);
+        let mut self_by_hash = direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 9), 5000);
         self_by_hash.user_hash = Some(own_user_hash);
         let foreign = direct_test_source(file_hash, Ipv4Addr::new(198, 51, 100, 22), 4662);
 
-        let mut sources = vec![self_by_endpoint, self_by_bind, self_by_hash, foreign.clone()];
+        let mut sources = vec![
+            self_by_endpoint,
+            self_by_bind,
+            self_by_hash,
+            foreign.clone(),
+        ];
         let dropped = drop_self_sources(&mut sources, &identity);
 
         assert_eq!(dropped, 3);

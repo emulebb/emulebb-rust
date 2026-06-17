@@ -127,7 +127,12 @@ async fn background_udp_source_search_preserves_responding_server() {
     assert_eq!(sources[0].source_server, Some(server.base_endpoint()));
 }
 
-fn server_status_payload(challenge: u32, users: u32, files: u32, udp_flags: Option<u32>) -> Vec<u8> {
+fn server_status_payload(
+    challenge: u32,
+    users: u32,
+    files: u32,
+    udp_flags: Option<u32>,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&challenge.to_le_bytes());
     payload.extend_from_slice(&users.to_le_bytes());

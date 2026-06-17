@@ -102,7 +102,8 @@ async fn corrupt_part_triggers_aich_recovery_request() {
             direct_udp_callback: false,
         },
         &Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+                .unwrap(),
         ),
         &transfer_runtime,
         "corrupt.bin".to_string(),

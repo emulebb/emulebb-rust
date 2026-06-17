@@ -46,7 +46,10 @@ pub enum ReaskCommand {
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
     /// *source*): answer the downloader at `dest` like an inbound `OP_REASKFILEPING`
     /// (oracle ListenSocket.cpp). Only the file hash is carried (reciprocity key).
-    AnswerCallbackTcp { dest: SocketAddr, file_hash: Ed2kHash },
+    AnswerCallbackTcp {
+        dest: SocketAddr,
+        file_hash: Ed2kHash,
+    },
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -100,7 +103,9 @@ impl ReaskSourceHandle {
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
     /// Best-effort: a full/closed channel drops the answer (downloader retries/TCP).
     pub(crate) fn answer_callback_tcp(&self, dest: std::net::SocketAddr, file_hash: Ed2kHash) {
-        let _ = self.0.try_send(ReaskCommand::AnswerCallbackTcp { dest, file_hash });
+        let _ = self
+            .0
+            .try_send(ReaskCommand::AnswerCallbackTcp { dest, file_hash });
     }
 }
 
@@ -313,7 +318,11 @@ async fn handle_inbound_datagram(
             return;
         }
     }
-    trace!("ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}", data.len(), hex_preview(data));
+    trace!(
+        "ed2k udp reask: PKT-IN <- {from} ({} bytes) hex={}",
+        data.len(),
+        hex_preview(data)
+    );
     match service.handle_inbound(data, from, Instant::now()) {
         ReaskInboundOutcome::RoutedReply {
             file_hash,
@@ -350,7 +359,10 @@ async fn handle_inbound_datagram(
         }
         ReaskInboundOutcome::BuddyRelay { callback, from } => {
             super::buddy_relay::relay_buddy_reask_callback(
-                buddy_registry, &callback, from, our_udp_version,
+                buddy_registry,
+                &callback,
+                from,
+                our_udp_version,
             );
         }
         ReaskInboundOutcome::DirectCallbackReq { req, from } => {
@@ -372,7 +384,9 @@ async fn handle_inbound_datagram(
                     connect_options: req.connect_options,
                 });
             } else {
-                trace!("ed2k udp reask: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}");
+                trace!(
+                    "ed2k udp reask: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}"
+                );
             }
         }
         ReaskInboundOutcome::Ignored => {}
@@ -388,7 +402,13 @@ fn apply_reask_command(
     match command {
         ReaskCommand::Register(args) => {
             let ReaskDetachArgs {
-                file_hash, endpoint, udp_version, user_hash, should_crypt, low_id, buddy_endpoint,
+                file_hash,
+                endpoint,
+                udp_version,
+                user_hash,
+                should_crypt,
+                low_id,
+                buddy_endpoint,
                 buddy_id,
             } = args;
             let mut source = ReaskSource::new(endpoint, file_hash, udp_version, Instant::now());
@@ -452,8 +472,9 @@ async fn drive_reask_tick(
                 complete_source_count: 0,
             })
     };
-    let admit_udp =
-        |_file_hash: &Ed2kHash, source_count: usize| transfer_runtime.can_reask_file_via_udp(source_count);
+    let admit_udp = |_file_hash: &Ed2kHash, source_count: usize| {
+        transfer_runtime.can_reask_file_via_udp(source_count)
+    };
     let out = service.tick_paced(
         Instant::now(),
         REASK_REPLY_TIMEOUT,
@@ -591,7 +612,10 @@ mod tests {
             Ed2kHash::from_bytes([0x44; 16]),
             (Ipv4Addr::new(198, 51, 100, 10), 4672),
         );
-        assert!(events.is_empty(), "deep rank must keep reasking, lease held");
+        assert!(
+            events.is_empty(),
+            "deep rank must keep reasking, lease held"
+        );
     }
 
     #[test]
@@ -667,7 +691,9 @@ mod tests {
         // The runtime arm turns this exact outcome into a DirectCallbackReq event.
         match outcome {
             ReaskInboundOutcome::DirectCallbackReq { req, from } => {
-                let SocketAddr::V4(v4) = from else { panic!("ipv4") };
+                let SocketAddr::V4(v4) = from else {
+                    panic!("ipv4")
+                };
                 let event = ReaskEvent::DirectCallbackReq {
                     requester_ip: *v4.ip(),
                     tcp_port: req.tcp_port,
@@ -675,7 +701,12 @@ mod tests {
                     connect_options: req.connect_options,
                 };
                 match event {
-                    ReaskEvent::DirectCallbackReq { requester_ip, tcp_port, user_hash, .. } => {
+                    ReaskEvent::DirectCallbackReq {
+                        requester_ip,
+                        tcp_port,
+                        user_hash,
+                        ..
+                    } => {
                         assert_eq!(requester_ip, Ipv4Addr::new(198, 51, 100, 7));
                         assert_eq!(tcp_port, 4662);
                         assert_eq!(user_hash, [0x5A; 16]);
@@ -727,7 +758,10 @@ mod tests {
             ReaskCommand::Register(args) => {
                 assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
                 assert!(args.low_id);
-                assert_eq!(args.buddy_endpoint, Some((Ipv4Addr::new(203, 0, 113, 9), 5000)));
+                assert_eq!(
+                    args.buddy_endpoint,
+                    Some((Ipv4Addr::new(203, 0, 113, 9), 5000))
+                );
                 assert_eq!(args.buddy_id, Some([0x77; 16]));
             }
             other => panic!("expected Register, got {other:?}"),

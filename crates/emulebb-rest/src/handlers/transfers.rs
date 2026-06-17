@@ -43,7 +43,10 @@ pub(crate) async fn transfers(
     api_collection_page(items, query.page()).into_response()
 }
 
-pub(crate) async fn create_transfer(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
+pub(crate) async fn create_transfer(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
     let request = match parse_required_json_body::<TransferCreate>(&body) {
         Ok(request) => request,
         Err(response) => return *response,
@@ -86,7 +89,10 @@ pub(crate) async fn clear_completed_transfers(
     }
 }
 
-pub(crate) async fn transfer(State(state): State<RestState>, Path(hash): Path<String>) -> impl IntoResponse {
+pub(crate) async fn transfer(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
     match state.core.transfer(&hash).await {
         Some(transfer) => api_ok(transfer).into_response(),
         None => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response(),

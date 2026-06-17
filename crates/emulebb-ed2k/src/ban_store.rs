@@ -182,7 +182,9 @@ mod tests {
 
         assert!(store.is_hash_banned_at(&HASH_A, start));
         assert!(!store.is_hash_banned_at(&HASH_B, start));
-        assert!(!store.is_hash_banned_at(&HASH_A, start + CLIENT_BAN_TIME + Duration::from_secs(1)));
+        assert!(
+            !store.is_hash_banned_at(&HASH_A, start + CLIENT_BAN_TIME + Duration::from_secs(1))
+        );
     }
 
     #[test]

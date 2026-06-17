@@ -291,7 +291,11 @@ pub(in crate::ed2k_tcp) async fn reconcile_download_manifest_metadata(
     // corroborated before it can authorize salvage (mirrors the master's
     // untrusted-hash accumulation).
     *manifest = transfer_runtime
-        .record_network_aich_root(file_hash_hex, peer_file_identifier.aich_root, peer_addr.ip())
+        .record_network_aich_root(
+            file_hash_hex,
+            peer_file_identifier.aich_root,
+            peer_addr.ip(),
+        )
         .await?;
     *request_file_identifier = Ed2kFileIdentifier::from_manifest(manifest)?;
     Ok(())

@@ -77,7 +77,9 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             Ok((stream, peer_addr)) => {
                 if let std::net::IpAddr::V4(ip) = peer_addr.ip() {
                     if ip_filter.is_filtered(ip) {
-                        debug!("dropping inbound eD2k connection from IP-filtered peer {peer_addr}");
+                        debug!(
+                            "dropping inbound eD2k connection from IP-filtered peer {peer_addr}"
+                        );
                         drop(stream);
                         continue;
                     }
