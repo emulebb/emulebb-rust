@@ -197,6 +197,79 @@ async fn friend_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
+async fn search_create_body_uses_mfc_validation() {
+    let app = test_router();
+    let long_query = "a".repeat(161);
+    let cases = [
+        (r#"{}"#.to_string(), "query must be a string"),
+        (r#"{"query":1}"#.to_string(), "query must be a string"),
+        (
+            r#"{"query":"   \t   "}"#.to_string(),
+            "query must not be empty",
+        ),
+        (
+            r#"{"query":"bad\u0001query"}"#.to_string(),
+            "query must be valid UTF-8 without control characters",
+        ),
+        (
+            format!(r#"{{"query":"{long_query}"}}"#),
+            "query must be at most 160 characters",
+        ),
+        (
+            r#"{"query":"sample","method":1}"#.to_string(),
+            "method must be a string",
+        ),
+        (
+            r#"{"query":"sample","method":"local"}"#.to_string(),
+            "method must be one of automatic, server, global, kad",
+        ),
+        (
+            r#"{"query":"sample","type":1}"#.to_string(),
+            "type must be a string",
+        ),
+        (
+            r#"{"query":"sample","type":"archive"}"#.to_string(),
+            "type is not supported",
+        ),
+        (
+            r#"{"query":"sample","extension":1}"#.to_string(),
+            "extension must be a string",
+        ),
+        (
+            r#"{"query":"sample","minSizeBytes":"1"}"#.to_string(),
+            "minSizeBytes must be an unsigned number",
+        ),
+        (
+            r#"{"query":"sample","maxSizeBytes":-1}"#.to_string(),
+            "maxSizeBytes must be an unsigned number",
+        ),
+        (
+            r#"{"query":"sample","minSizeBytes":10,"maxSizeBytes":9}"#.to_string(),
+            "maxSizeBytes must be greater than or equal to minSizeBytes",
+        ),
+        (
+            r#"{"query":"sample","minAvailability":"1"}"#.to_string(),
+            "minAvailability must be an unsigned number",
+        ),
+        (
+            r#"{"query":"sample","minAvailability":1000001}"#.to_string(),
+            "minAvailability must be an unsigned number in the range 0..1000000",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "POST",
+            "/api/v1/searches",
+            body,
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";

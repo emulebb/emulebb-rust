@@ -401,7 +401,7 @@ async fn search_results_use_canonical_paging_query() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"query":"paged result","method":"automatic","type":""}"#,
+                    r#"{"query":"  paged\tresult  ","method":"automatic","type":""}"#,
                 ))
                 .unwrap(),
         )
@@ -410,6 +410,7 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["query"], "paged result");
     let search_id = value["data"]["id"].as_str().unwrap();
 
     let response = app
