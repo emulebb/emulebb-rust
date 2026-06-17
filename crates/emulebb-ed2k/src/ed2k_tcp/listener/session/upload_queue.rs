@@ -239,6 +239,19 @@ impl ListenerUploadQueue {
         }
     }
 
+    /// The file this connection currently holds an upload slot/waiting entry
+    /// for, if any. Unlike the session's `requested_file_hash` (overwritten by
+    /// every file-touching handler), this tracks the file the granted slot is
+    /// keyed on, so `OP_END_OF_DOWNLOAD` releases only when the peer signals end
+    /// for the file it actually holds.
+    pub(in crate::ed2k_tcp) const fn slot_file_hash(&self) -> Option<Ed2kHash> {
+        if self.session.is_some() {
+            self.file_hash
+        } else {
+            None
+        }
+    }
+
     pub(in crate::ed2k_tcp) async fn release(&mut self, transfer_runtime: &Ed2kTransferRuntime) {
         if let Some(upload_session_handle) = self.session.as_ref() {
             transfer_runtime
@@ -382,5 +395,38 @@ mod tests {
         // released) calling it a second time must be a harmless no-op.
         queue.release(&runtime).await;
         assert!(runtime.upload_queue_snapshot().await.is_empty());
+    }
+
+    /// FIX (END_OF_DOWNLOAD on the wrong hash): `slot_file_hash` must report the
+    /// file the granted slot is keyed on, so OP_END_OF_DOWNLOAD compares against
+    /// the held file rather than the mutable per-session `requested_file_hash`
+    /// (which any later file-touching handler overwrites). Before a slot exists
+    /// it is `None`; after a grant it is the granted file; after release it is
+    /// `None` again.
+    #[tokio::test]
+    async fn slot_file_hash_tracks_the_granted_slot_not_the_last_request() {
+        let root = unique_test_dir("ed2k-listener-slot-file-hash");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)), 4662);
+        let identity = super::super::upload_peer_identity_from_socket(peer_addr);
+        let file_a = Ed2kHash::from_bytes([0xA1; 16]);
+
+        let mut queue = ListenerUploadQueue::new();
+        // No slot yet: nothing to release on END_OF_DOWNLOAD.
+        assert_eq!(queue.slot_file_hash(), None);
+
+        // Granting a slot for file A keys the slot on A.
+        let _reply = queue.start_upload_reply(&runtime, identity, &file_a).await;
+        assert_eq!(
+            queue.slot_file_hash(),
+            Some(file_a),
+            "the granted slot must report the file it is keyed on"
+        );
+
+        // After release the slot is gone, so a stray END_OF_DOWNLOAD matches
+        // nothing (the post-loop unconditional release still guarantees cleanup).
+        queue.release(&runtime).await;
+        assert_eq!(queue.slot_file_hash(), None);
     }
 }

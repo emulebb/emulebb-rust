@@ -455,8 +455,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         packet.payload.len()
                     ),
                 );
-                if requested_file_hash == ended_hash {
+                // Release the granted slot ONLY when the END is for the file the
+                // slot is keyed on, so END_OF_DOWNLOAD(B) can't release a slot
+                // held for A (requested_file_hash is mutable and overwritten by
+                // every file-touching handler). Still close the connection when
+                // the peer signals end for the file it is currently working on.
+                let ends_slot = upload_queue.slot_file_hash() == ended_hash;
+                if ends_slot {
                     upload_queue.release(transfer_runtime).await;
+                }
+                if ends_slot || requested_file_hash == ended_hash {
                     break Ok(());
                 }
             }
