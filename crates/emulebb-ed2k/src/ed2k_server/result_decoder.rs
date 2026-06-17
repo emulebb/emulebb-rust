@@ -90,10 +90,19 @@ fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &
     }
     let count = u32::from_le_bytes(payload[..4].try_into().unwrap());
     let mut cursor = &payload[4..];
-    let mut files = Vec::with_capacity(count as usize);
+    // `count` is attacker-controlled (it heads an OP_SEARCHRESULT /
+    // OP_GLOBSEARCHRES payload). The smallest possible result entry is
+    // MIN_SEARCH_ENTRY_SIZE bytes (the per-entry short-input guard below), so a
+    // payload can never carry more than `cursor.len() / MIN_SEARCH_ENTRY_SIZE`
+    // entries. Cap the pre-allocation to that bound so a bogus count (e.g.
+    // 0xFFFFFFFF) cannot trigger a multi-hundred-GB `Vec::with_capacity` reserve
+    // that would abort the process. Legitimate packets are unaffected: their real
+    // entries always fit within the bound, so nothing is dropped.
+    const MIN_SEARCH_ENTRY_SIZE: usize = 26;
+    let mut files = Vec::with_capacity((count as usize).min(cursor.len() / MIN_SEARCH_ENTRY_SIZE));
 
     for _ in 0..count {
-        if cursor.len() < 26 {
+        if cursor.len() < MIN_SEARCH_ENTRY_SIZE {
             anyhow::bail!("short ED2K search result entry");
         }
         let file_hash = Ed2kHash(cursor[..16].try_into().unwrap());
@@ -237,4 +246,42 @@ fn decode_found_sources_from(
 
 fn udp_chain_matches(payload: &[u8], opcode: u8) -> bool {
     payload.len() >= 2 && payload[0] == OP_EDONKEYPROT && payload[1] == opcode
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tag_codec::push_short_string_tag;
+    use super::*;
+
+    #[test]
+    fn huge_search_count_does_not_over_allocate() {
+        // A malicious server sends a 4-byte payload claiming 0xFFFFFFFF results.
+        // Without the pre-allocation cap this would request ~378 GB via
+        // `Vec::with_capacity` and abort the process. With the cap it must decode
+        // to a clean error (the very first entry is short) and never abort.
+        let payload = [0xFFu8, 0xFF, 0xFF, 0xFF];
+        let result = decode_search_result_page(&payload);
+        assert!(
+            result.is_err(),
+            "tiny payload with a bogus count must error, not panic/abort"
+        );
+    }
+
+    #[test]
+    fn legitimate_search_count_still_decodes() {
+        // Header count=1 followed by one well-formed entry with a single
+        // filename tag. The cap must not drop the legitimate result.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes()); // count
+        payload.extend_from_slice(&[0u8; 16]); // file hash
+        payload.extend_from_slice(&[0u8; 4]); // client id
+        payload.extend_from_slice(&[0u8; 2]); // port
+        payload.extend_from_slice(&1u32.to_le_bytes()); // tag count = 1
+        push_short_string_tag(&mut payload, FT_FILENAME, "a.txt"); // one filename tag
+        payload.push(0x00); // more-results marker
+
+        let page = decode_search_result_page(&payload).expect("legitimate page decodes");
+        assert_eq!(page.files.len(), 1);
+        assert_eq!(page.files[0].file_name.as_deref(), Some("a.txt"));
+    }
 }
