@@ -29,6 +29,7 @@ binrw = "0.14"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+embed-manifest = "1.5"
 futures-util = "0.3"
 if-addrs = "0.13"
 ipconfig = "0.3"

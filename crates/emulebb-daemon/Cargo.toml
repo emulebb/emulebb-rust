@@ -31,5 +31,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
+[build-dependencies]
+embed-manifest.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
