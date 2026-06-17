@@ -120,6 +120,26 @@ impl DownloadSourceRegistry {
         self.leased_peers
             .retain(|peer| (peer.ip, peer.tcp_port) != endpoint);
     }
+
+    /// Drop every outstanding source lease (FIX: detached-reask lease leak on
+    /// disconnect/shutdown). Detached sources live on the UDP reask loop and free
+    /// their lease only via a `SourceReleased` event; when the loop breaks on
+    /// shutdown / command-channel close the still-detached sources never emit it,
+    /// so those endpoints stay leased forever and `acquire_*_leases` defers them
+    /// indefinitely. `disconnect_ed2k` tears the whole download stack down before
+    /// any reconnect rebuilds it, so a full lease reset here is correct and cannot
+    /// race a fresh connect; the candidate map is left intact (it is rebuilt on
+    /// requery and pruned by TTL). Returns the leased peer endpoints cleared so
+    /// the caller can drop the matching `active_download_peer_endpoints` entries.
+    pub(crate) fn reset_leases(&mut self) -> Vec<(Ipv4Addr, u16)> {
+        let cleared = self
+            .leased_peers
+            .iter()
+            .map(|peer| (peer.ip, peer.tcp_port))
+            .collect();
+        self.leased_peers.clear();
+        cleared
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

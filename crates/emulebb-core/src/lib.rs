@@ -1069,6 +1069,19 @@ impl EmulebbCore {
         // Drop the reask detach handle so post-disconnect downloads stay on TCP
         // and the closed command channel lets the (aborted) loop wind down.
         *self.ed2k_reask_handle.lock().unwrap() = None;
+        // FIX (detached-reask lease leak): release every outstanding download
+        // source lease. Sources detached onto the reask loop free their lease only
+        // via a SourceReleased event, which is never emitted when the loop breaks
+        // on shutdown / command-channel close; without this reset those endpoints
+        // would stay leased across reconnect and acquire_*_leases would defer them
+        // forever. Safe (no race): disconnect fully tears the stack down before any
+        // reconnect rebuilds it.
+        {
+            let mut state = self.state.lock().await;
+            for endpoint in state.download_source_registry.reset_leases() {
+                state.active_download_peer_endpoints.remove(&endpoint);
+            }
+        }
         if let Some(runtime) = self.ed2k_runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
             for task in runtime.tasks {
@@ -7727,6 +7740,73 @@ mod tests {
         assert_eq!(lower_deferred, 1);
         assert_eq!(higher_sources, vec![source.clone()]);
         assert_eq!(higher_deferred, 0);
+        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
+            .await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_detached_reask_source_leases_and_re_engages() {
+        // A detached source held on the UDP reask loop keeps its lease
+        // (active_download_peer_endpoints + the registry leased_peers). When the
+        // reask loop breaks on shutdown without emitting SourceReleased, the lease
+        // would leak; disconnect_ed2k must reset it so the source is re-engageable
+        // after a reconnect.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let file_hash = Ed2kHash::from_bytes([0x4a; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x4a; 16]),
+            Ipv4Addr::new(192, 0, 2, 50),
+            41020,
+        );
+        {
+            let mut state = core.state.lock().await;
+            state
+                .download_source_registry
+                .add_candidate(DownloadSourceCandidate {
+                    file_hash: file_hash.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 0,
+                    source: source.clone(),
+                });
+        }
+
+        // Engage (lease) the source, as a download attempt would before detaching
+        // it onto the reask loop.
+        let (engaged, deferred) = core
+            .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(engaged, vec![source.clone()]);
+        assert_eq!(deferred, 0);
+        {
+            let state = core.state.lock().await;
+            assert_eq!(state.active_download_peer_endpoints.len(), 1);
+            assert_eq!(state.download_source_registry.leased_peer_count(), 1);
+        }
+
+        // The reask loop breaks on shutdown without emitting SourceReleased; the
+        // lease would leak. disconnect_ed2k must release it.
+        core.disconnect_ed2k().await;
+        {
+            let state = core.state.lock().await;
+            assert!(
+                state.active_download_peer_endpoints.is_empty(),
+                "disconnect must clear active download peer endpoints"
+            );
+            assert_eq!(
+                state.download_source_registry.leased_peer_count(),
+                0,
+                "disconnect must release detached source leases"
+            );
+        }
+
+        // The freed source is re-engageable on the next acquire (not deferred
+        // forever by a stale lease).
+        let (re_engaged, re_deferred) = core
+            .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(re_engaged, vec![source.clone()]);
+        assert_eq!(re_deferred, 0);
         core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
             .await;
     }
