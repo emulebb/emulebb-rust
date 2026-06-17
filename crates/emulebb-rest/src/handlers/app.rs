@@ -160,7 +160,7 @@ pub(crate) async fn snapshot(
         "sharedFiles": shared_files,
         "uploads": bounded(without_score_breakdown(state.core.uploads().await), limit),
         "uploadQueue": bounded(without_score_breakdown(state.core.upload_queue().await), limit),
-        "servers": bounded(server_responses(state.core.servers().await), limit),
+        "servers": server_responses(state.core.servers().await),
         "kad": kad,
         "network": network_response(network.as_ref(), &state.core.vpn_guard_status()),
         "logs": recent_log_values(limit)
