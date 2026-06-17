@@ -45,7 +45,7 @@ pub(crate) fn public_ip_block_reason(
         .map(str::trim)
         .filter(|token| !token.is_empty())
     {
-        let Ok(network) = token.parse::<Ipv4Net>() else {
+        let Ok(network) = parse_allowed_public_ipv4_range(token) else {
             return Some(format!("invalid VPN Guard allowed public IP CIDR: {token}"));
         };
         if !is_public_ipv4_range_only(&network) {
@@ -64,6 +64,18 @@ pub(crate) fn public_ip_block_reason(
     }
     (!networks.is_empty())
         .then(|| format!("public IP {public_ip} is outside VPN Guard allowed public IP CIDRs"))
+}
+
+fn parse_allowed_public_ipv4_range(token: &str) -> Result<Ipv4Net, ()> {
+    token
+        .parse::<Ipv4Net>()
+        .or_else(|_| {
+            token
+                .parse::<Ipv4Addr>()
+                .map_err(|_| ())
+                .and_then(|ip| Ipv4Net::new(ip, 32).map_err(|_| ()))
+        })
+        .map_err(|_| ())
 }
 
 fn is_public_ipv4_range_only(network: &Ipv4Net) -> bool {
@@ -127,6 +139,18 @@ mod tests {
         assert!(public_ip_block_reason(&guard, Some(Ipv4Addr::new(8, 8, 8, 8))).is_none());
         assert!(
             public_ip_block_reason(&guard, Some(Ipv4Addr::new(1, 1, 1, 1)))
+                .unwrap()
+                .contains("outside VPN Guard allowed public IP CIDRs")
+        );
+    }
+
+    #[test]
+    fn public_ip_cidr_allows_host_address_without_prefix() {
+        let guard = guard("8.8.8.8");
+
+        assert!(public_ip_block_reason(&guard, Some(Ipv4Addr::new(8, 8, 8, 8))).is_none());
+        assert!(
+            public_ip_block_reason(&guard, Some(Ipv4Addr::new(8, 8, 8, 9)))
                 .unwrap()
                 .contains("outside VPN Guard allowed public IP CIDRs")
         );
