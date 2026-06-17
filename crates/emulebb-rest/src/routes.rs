@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, HttpBody},
     extract::State,
     http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
@@ -261,6 +261,7 @@ pub fn router_with_shutdown(
         .fallback(fallback)
         .layer(middleware::map_response(rewrite_method_not_allowed))
         .layer(middleware::from_fn(validate_query_whitelist))
+        .layer(middleware::from_fn(validate_json_content_type))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -294,6 +295,34 @@ async fn require_api_key(
 
 async fn fallback() -> impl IntoResponse {
     api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "API route not found")
+}
+
+async fn validate_json_content_type(request: Request<Body>, next: Next) -> Response {
+    if request.body().size_hint().upper() == Some(0) {
+        return next.run(request).await;
+    }
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if is_json_content_type(content_type) {
+        return next.run(request).await;
+    }
+    api_error(
+        StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        "Content-Type must be application/json for JSON request bodies",
+    )
+    .into_response()
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type
+        .split_once(';')
+        .map_or(content_type, |(media_type, _)| media_type)
+        .trim()
+        .eq_ignore_ascii_case("application/json")
 }
 
 async fn validate_query_whitelist(request: Request<Body>, next: Next) -> Response {
