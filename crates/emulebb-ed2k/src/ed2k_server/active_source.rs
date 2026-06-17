@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::{net::UdpSocket, sync::RwLock, time::Instant as TokioInstant};
+use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -16,12 +16,12 @@ use super::packet_handler::decode_id_change_payload;
 use super::{
     Ed2kFoundSource, Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_GLOBFOUNDSOURCES,
     OP_IDCHANGE, OP_LOGINREQUEST, OP_REJECT, ResolvedServerEntry, ServerSession,
-    ServerSessionPhase, annotate_found_sources_server, configured_server_entries,
-    decode_found_sources, decode_udp_found_source_sets, encode_login_request, encode_packet,
-    encode_source_request, login_identity_for_server_transport, merge_found_sources,
-    read_server_udp_packet, resolve_server_entry, send_connected_server_startup,
-    send_udp_source_search, should_use_server_obfuscation, source_request_opcode,
-    validate_found_sources,
+    ServerSessionPhase, annotate_found_sources_server, bind_server_udp_socket,
+    configured_server_entries, decode_found_sources, decode_udp_found_source_sets,
+    encode_login_request, encode_packet, encode_source_request,
+    login_identity_for_server_transport, merge_found_sources, read_server_udp_packet,
+    resolve_server_entry, send_connected_server_startup, send_udp_source_search,
+    should_use_server_obfuscation, source_request_opcode, validate_found_sources,
 };
 
 /// Inputs for a one-shot ED2K source search across configured servers.
@@ -227,15 +227,7 @@ pub async fn search_source_udp_servers(
         return Ok(Vec::new());
     }
 
-    let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
-        .await
-        .with_context(|| format!("failed to bind ED2K UDP source-search socket on {bind_ip}"))?;
-    // Egress-pin to the VPN tunnel interface (IP_UNICAST_IF) — solid VPN binding.
-    emulebb_kad_dht::socket_opts::pin_egress_to_interface(
-        socket2::SockRef::from(&socket),
-        crate::networking::resolve_bind_if_index(bind_ip),
-    )
-    .with_context(|| format!("failed to pin ED2K UDP source-search egress for {bind_ip}"))?;
+    let socket = bind_server_udp_socket(bind_ip).await?;
     let mut aggregated_results = Vec::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));

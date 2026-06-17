@@ -108,7 +108,9 @@ pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServ
 #[cfg(test)]
 use udp::derive_server_udp_cipher;
 use udp::{decode_server_udp_datagram, encode_server_udp_datagram, server_udp_endpoint};
-use udp_runtime::{read_server_udp_packet, send_udp_keyword_search, send_udp_source_search};
+use udp_runtime::{
+    bind_server_udp_socket, read_server_udp_packet, send_udp_keyword_search, send_udp_source_search,
+};
 
 const OP_EDONKEYPROT: u8 = 0xE3;
 const OP_EMULEPROT: u8 = 0xC5;

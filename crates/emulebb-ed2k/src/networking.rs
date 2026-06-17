@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[cfg(windows)]
 use std::net::IpAddr;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use if_addrs::{IfAddr, get_if_addrs};
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +181,16 @@ pub fn resolve_bind_if_index(bind_ip: std::net::Ipv4Addr) -> Option<u32> {
         })
 }
 
+/// Fail-closed bind index resolver for public P2P sockets. A missing index
+/// would leave egress unpinned on platforms that support per-socket routing.
+pub fn require_bind_if_index(bind_ip: std::net::Ipv4Addr, purpose: &str) -> Result<u32> {
+    resolve_bind_if_index(bind_ip)
+        .filter(|index| *index != 0)
+        .with_context(|| {
+            format!("{purpose} bind IP {bind_ip} is not assigned to a local interface")
+        })
+}
+
 /// Converts a resolved binding to the serializable report shape.
 #[must_use]
 pub fn build_interface_binding_report(
@@ -266,7 +276,7 @@ mod tests {
     use super::{
         InterfaceAddressFamily, InterfaceSelectionState, NetworkInterface, NetworkInterfaceAddress,
         ResolvedInterfaceBindingReport, build_interface_binding_report, recommend_interface,
-        resolve_bind_if_index, resolve_bind_ip,
+        require_bind_if_index, resolve_bind_if_index, resolve_bind_ip,
     };
     use if_addrs::IfAddr;
 
@@ -329,6 +339,12 @@ mod tests {
             resolve_bind_if_index(std::net::Ipv4Addr::new(203, 0, 113, 234)),
             None
         );
+        let err = require_bind_if_index(std::net::Ipv4Addr::new(203, 0, 113, 234), "test")
+            .expect_err("unassigned bind IP must fail closed");
+        assert!(
+            err.to_string()
+                .contains("not assigned to a local interface")
+        );
         // Self-consistency: any V4 address the OS reports (with an index) must
         // resolve back to that same index. Skips hosts where no indexed V4 exists.
         if let Some((ip, index)) = if_addrs::get_if_addrs().ok().and_then(|ifaces| {
@@ -338,6 +354,7 @@ mod tests {
             })
         }) {
             assert_eq!(resolve_bind_if_index(ip), Some(index));
+            assert_eq!(require_bind_if_index(ip, "test").unwrap(), index);
         }
     }
 
