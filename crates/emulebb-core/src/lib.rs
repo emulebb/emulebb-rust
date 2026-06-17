@@ -101,6 +101,7 @@ mod kad_udp_firewall_check;
 mod profile_state;
 mod search_query;
 mod search_state;
+mod shared_dir_monitor;
 mod shared_directories;
 mod source_publish;
 mod upload_view;
@@ -174,6 +175,7 @@ use shared_directories::{
     refresh_shared_directory_row, scan_shared_directory_roots, shared_directory_from_index,
     shared_directory_to_index, shared_directory_update_parts,
 };
+use shared_dir_monitor::SharedDirMonitor;
 
 mod rest_model;
 pub use rest_model::{
@@ -289,6 +291,10 @@ struct CoreState {
     download_source_registry: DownloadSourceRegistry,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
+    /// Source-path -> content-hash for files auto-shared by the live monitor, so a
+    /// later remove (file already gone, cannot be re-hashed) resolves the catalog
+    /// hash to drop. Populated only by monitor auto-share. See `shared_dir_monitor`.
+    monitor_shared_hashes: HashMap<PathBuf, String>,
     kad_running: bool,
 }
 
@@ -374,6 +380,10 @@ pub struct EmulebbCore {
     /// Reset to a fresh `JoinSet` on each connect; the same handle is stored in
     /// the session `Ed2kRuntime` and aborted on disconnect (FIX B3).
     ed2k_download_tasks: Arc<Mutex<JoinSet<()>>>,
+    /// Live shared-directory auto-pickup monitor (eMule directory auto-monitor
+    /// parity); rebuilt on reconfigure, torn down on `disconnect_ed2k`. See the
+    /// `shared_dir_monitor` module. `std::sync::Mutex` so start/stop is await-free.
+    shared_dir_monitor: Arc<std::sync::Mutex<Option<SharedDirMonitor>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -471,6 +481,7 @@ impl EmulebbCore {
             ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
             ed2k_reachability: ExternalReachability::new(),
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
+            shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1093,6 +1104,9 @@ impl EmulebbCore {
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
+        // Stop the live shared-directory monitor as part of graceful teardown
+        // (R11-2) so its watcher thread + consumer task do not leak. Idempotent.
+        self.stop_shared_directory_monitor();
         // Drop the reask detach handle so post-disconnect downloads stay on TCP
         // and the closed command channel lets the (aborted) loop wind down.
         *self.ed2k_reask_handle.lock().unwrap() = None;
@@ -1865,6 +1879,9 @@ impl EmulebbCore {
                 .collect::<Vec<_>>(),
         )?;
         self.state.lock().await.shared_directories = roots;
+        // Re-establish the live auto-pickup watch set for the new roots (it stops
+        // the previous monitor first), matching eMule re-monitoring on reconfigure.
+        self.start_shared_directory_monitor().await;
         Ok(self.shared_directories().await)
     }
 
@@ -1888,6 +1905,18 @@ impl EmulebbCore {
             );
         }
         Ok(shares)
+    }
+
+    /// (Re)start the live shared-directory auto-pickup monitor (eMule directory
+    /// auto-monitor parity); thin entry to `shared_dir_monitor`. Must run inside
+    /// a tokio runtime (it spawns the consumer task).
+    pub async fn start_shared_directory_monitor(&self) {
+        shared_dir_monitor::start_shared_directory_monitor(self).await;
+    }
+
+    /// Stop the live shared-directory monitor (if running). Idempotent.
+    pub fn stop_shared_directory_monitor(&self) {
+        shared_dir_monitor::stop_shared_directory_monitor(self);
     }
 
     pub async fn uploads(&self) -> Vec<Upload> {
