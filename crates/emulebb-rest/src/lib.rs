@@ -206,6 +206,9 @@ mod tests {
             ("GET", "/api/v1/transfers?unsupportedQuery=true"),
             ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
             ("GET", "/api/v1/logs?unsupportedQuery=true"),
+            ("GET", "/api/v1/app?unsupportedQuery=true"),
+            ("GET", "/api/v1/uploads?unsupportedQuery=true"),
+            ("POST", "/api/v1/kad/operations/start?unsupportedQuery=true"),
             (
                 "DELETE",
                 "/api/v1/transfers/00112233445566778899aabbccddeeff/files?unsupportedQuery=true",
@@ -214,6 +217,45 @@ mod tests {
         for (method, uri) in cases {
             assert_invalid_query_response(test_router(), method, uri).await;
         }
+
+        let allowed = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/uploads")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let allowed_query = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/upload-queue?includeScoreBreakdown=true")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed_query.status(), StatusCode::OK);
+
+        let unknown_operation = test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(
+                        "/api/v1/transfers/00112233445566778899aabbccddeeff/operations/unknown?unsupportedQuery=true",
+                    )
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_operation.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
