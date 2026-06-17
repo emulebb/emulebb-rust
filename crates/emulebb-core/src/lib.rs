@@ -535,8 +535,6 @@ impl EmulebbCore {
             ok: true,
             path: path.display().to_string(),
             full_memory,
-            kind: "json".to_string(),
-            size_bytes: payload.len() as u64,
         })
     }
 

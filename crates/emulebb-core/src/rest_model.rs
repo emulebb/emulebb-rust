@@ -28,8 +28,6 @@ pub struct DiagnosticDumpResult {
     pub ok: bool,
     pub path: String,
     pub full_memory: bool,
-    pub kind: String,
-    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

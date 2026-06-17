@@ -95,13 +95,13 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
     assert_eq!(value["data"]["fullMemory"], false);
-    assert_eq!(value["data"]["kind"], "json");
     let path = value["data"]["path"].as_str().unwrap();
     assert!(std::path::Path::new(path).is_file());
-    assert_eq!(
-        value["data"]["sizeBytes"].as_u64().unwrap(),
-        std::fs::metadata(path).unwrap().len()
-    );
+    let keys = value["data"].as_object().unwrap();
+    assert_eq!(keys.len(), 3);
+    assert!(keys.contains_key("ok"));
+    assert!(keys.contains_key("path"));
+    assert!(keys.contains_key("fullMemory"));
 }
 
 #[tokio::test]
