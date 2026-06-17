@@ -28,6 +28,80 @@ fn udp_round_marks_open_on_matching_port() {
 }
 
 #[test]
+fn udp_round_two_stays_open_for_a_consistently_open_node() {
+    // Regression: `udp_verified` is a sticky cross-round flag. If `begin_udp_check`
+    // does not reset it, the driver's result-wait loop (which breaks as soon as
+    // `udp_verified` is true) short-circuits round 2 before any reply is recorded,
+    // and `finish_udp_check` then finalizes the stale round as firewalled. This
+    // asserts an open node stays open across two consecutive rounds.
+    let mut state = KadFirewallState::default();
+    let helper = "203.0.113.30".parse().unwrap();
+
+    // Round 1: an open node gets a matching reply and verifies open.
+    let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 40, 0).unwrap();
+    let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 40, 5).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r1_start));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper, 0, 41000, r1_reply),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+    assert!(state.udp_open);
+    assert!(state.udp_verified);
+    assert!(!state.is_udp_firewalled());
+
+    // Round 2 begins: the sticky verdict must be reset so the wait loop waits.
+    let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 41, 0).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r2_start));
+    assert!(
+        !state.udp_verified,
+        "round 2 must start unverified so the wait loop does not short-circuit"
+    );
+    assert!(!state.udp_open);
+
+    // The helper's reply arrives within the round and is recorded as open.
+    let r2_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 41, 5).unwrap();
+    match state.record_firewall_udp_packet(helper, 0, 41000, r2_reply) {
+        FirewallUdpPacketOutcome::Open(summary) => {
+            assert!(summary.open);
+            assert_eq!(summary.helpers_succeeded, 1);
+        }
+        other => panic!("expected round 2 open result, got {other:?}"),
+    }
+    assert!(state.udp_open);
+    assert!(state.udp_verified);
+    assert!(!state.is_udp_firewalled());
+}
+
+#[test]
+fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
+    // The companion to the open case: after an open round 1, a round 2 that gets
+    // no positive reply must genuinely time out as firewalled (not be skipped).
+    let mut state = KadFirewallState::default();
+    let helper = "203.0.113.31".parse().unwrap();
+
+    let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 42, 0).unwrap();
+    let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 42, 5).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r1_start));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper, 0, 41000, r1_reply),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+    assert!(state.udp_open);
+
+    // Round 2: a negative reply, then the round times out -> firewalled.
+    let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 0).unwrap();
+    let r2_done = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 30).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r2_start));
+    let _ = state.record_firewall_udp_packet(helper, 1, 41000, r2_done);
+    let summary = state.finish_udp_check(r2_done).expect("summary");
+
+    assert!(!summary.open);
+    assert!(!state.udp_open);
+    assert!(state.udp_verified);
+    assert!(state.is_udp_firewalled());
+}
+
+#[test]
 fn is_udp_firewalled_assumes_open_until_verified_closed() {
     // Mirrors IsFirewalledUDP(true): unknown/unverified -> open (false).
     let mut state = KadFirewallState::default();

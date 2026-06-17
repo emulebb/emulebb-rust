@@ -367,6 +367,15 @@ impl KadFirewallState {
 
         self.last_udp_check_started_at = Some(started_at);
         self.last_error = None;
+        // Each round must be evaluated on its own completion. `udp_verified` is a
+        // sticky cross-round flag that the driver's result-wait loop watches to
+        // know when the verdict has settled; if we left it set from a prior round
+        // the loop would short-circuit immediately and finalize this round before
+        // any `KADEMLIA2_FIREWALLUDP` reply could be recorded, flipping a genuinely
+        // open node to "firewalled". Reset to the unverified/assume-open state so
+        // the wait loop genuinely waits for this round's replies.
+        self.udp_verified = false;
+        self.udp_open = false;
         self.active_round = Some(UdpFirewallCheckRound {
             started_at,
             expected_ports,
