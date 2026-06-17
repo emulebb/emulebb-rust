@@ -5,7 +5,7 @@
 //! behavior is unchanged. The route table wires the per-domain handlers from
 //! `crate::handlers`.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     Router,
@@ -303,16 +303,15 @@ async fn validate_route_metadata(request: Request<Body>, next: Next) -> Response
         return next.run(request).await;
     };
     if let Some(query) = request.uri().query() {
-        for pair in query.split('&') {
-            if pair.is_empty() {
-                continue;
-            }
-            let name = pair.split_once('=').map_or(pair, |(name, _)| name);
-            if !allowed_query_fields.contains(&name) {
+        for name in match parse_query_field_names(query) {
+            Ok(names) => names,
+            Err(response) => return *response,
+        } {
+            if !allowed_query_fields.contains(&name.as_str()) {
                 return api_error(
                     StatusCode::BAD_REQUEST,
                     "INVALID_ARGUMENT",
-                    format!("unknown JSON field: {name}"),
+                    format!("unknown query parameter: {name}"),
                 )
                 .into_response();
             }
@@ -375,6 +374,35 @@ fn is_json_content_type(content_type: &str) -> bool {
 
 fn is_ascii_whitespace_only(body: &[u8]) -> bool {
     body.iter().all(|byte| byte.is_ascii_whitespace())
+}
+
+fn parse_query_field_names(query: &str) -> Result<Vec<String>, Box<Response>> {
+    let fields = serde_urlencoded::from_str::<Vec<(String, String)>>(query).map_err(|error| {
+        Box::new(
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                error.to_string(),
+            )
+            .into_response(),
+        )
+    })?;
+    let mut seen = HashSet::new();
+    let mut names = Vec::with_capacity(fields.len());
+    for (name, _) in fields {
+        if !seen.insert(name.clone()) {
+            return Err(Box::new(
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    format!("duplicate query parameter: {name}"),
+                )
+                .into_response(),
+            ));
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str]> {

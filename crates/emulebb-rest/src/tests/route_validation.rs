@@ -197,7 +197,7 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         value["error"]["message"],
-        "unknown JSON field: unsupportedQuery"
+        "unknown query parameter: unsupportedQuery"
     );
 
     let unknown_route = test_router()
@@ -278,6 +278,58 @@ async fn query_routes_use_canonical_error_envelope() {
         .await
         .unwrap();
     assert_eq!(allowed_query.status(), StatusCode::OK);
+
+    let decoded_allowed_query = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/upload-queue?includeScore%42reakdown=true")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decoded_allowed_query.status(), StatusCode::OK);
+
+    let decoded_unknown_query = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/upload-queue?unsupported%51uery=true")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decoded_unknown_query.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(decoded_unknown_query.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["error"]["message"],
+        "unknown query parameter: unsupportedQuery"
+    );
+
+    let duplicate_query = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/upload-queue?limit=1&limit=2")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate_query.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(duplicate_query.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["error"]["message"],
+        "duplicate query parameter: limit"
+    );
 
     let unknown_operation = test_router()
         .oneshot(

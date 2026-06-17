@@ -68,7 +68,7 @@ pub(crate) async fn assert_invalid_query_response(app: Router, method: &str, uri
     assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
     assert_eq!(
         value["error"]["message"],
-        "unknown JSON field: unsupportedQuery"
+        "unknown query parameter: unsupportedQuery"
     );
 }
 
