@@ -388,7 +388,7 @@ pub async fn request_udp_firewall_check(
 
 /// Mirror the oracle's active peer callback path by opening an outgoing eD2k
 /// client connection and immediately sending `OP_HELLO`.
-pub(crate) async fn connect_callback_peer(
+pub async fn connect_callback_peer(
     bind_ip: Ipv4Addr,
     peer_addr: SocketAddr,
     hello_identity: Ed2kHelloIdentity,

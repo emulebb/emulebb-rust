@@ -51,6 +51,17 @@ pub(crate) enum ReaskInboundOutcome {
         callback: super::codec::ReaskCallbackUdp,
         from: SocketAddr,
     },
+    /// An inbound `OP_DIRECTCALLBACKREQ` — a peer that cannot reach us over TCP
+    /// (we are the firewalled LowID side that advertised direct UDP callback) asks
+    /// us to connect out to it. The caller verifies it is actually the firewalled
+    /// side it advertised and TCP-connects out to `(from.ip, req.tcp_port)`,
+    /// mirroring `ClientUDPSocket.cpp` `OP_DIRECTCALLBACKREQ` ->
+    /// `TryToConnectOrDelete`. `from` is the requester's UDP source IP (the TCP
+    /// port to connect to is in `req`).
+    DirectCallbackReq {
+        req: super::codec::DirectCallbackReq,
+        from: SocketAddr,
+    },
     /// Not a reask addressed to us (junk, a Kad packet, an unsolicited reply, or
     /// an unknown source) — the caller ignores it.
     Ignored,
@@ -198,6 +209,12 @@ impl ReaskService {
             // its served inbound buddy and relay it over the held buddy socket.
             InboundReaskMessage::CallbackUdp(callback) => {
                 return ReaskInboundOutcome::BuddyRelay { callback, from };
+            }
+            // Direct UDP callback request (we are the firewalled LowID source the
+            // requester cannot reach over TCP): hand it back so the caller can
+            // verify the firewalled gate and connect out to the requester.
+            InboundReaskMessage::DirectCallbackReq(req) => {
+                return ReaskInboundOutcome::DirectCallbackReq { req, from };
             }
         };
 
@@ -532,6 +549,30 @@ mod tests {
                 assert_eq!(from, peer_addr());
             }
             other => panic!("expected BuddyRelay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_direct_callback_req_is_handed_back_for_connect_out() {
+        use crate::ed2k_client_udp::codec::OP_DIRECTCALLBACKREQ;
+        let now = Instant::now();
+        let mut svc = service();
+        // A peer that cannot reach us over TCP asks us (the firewalled LowID side)
+        // to connect out. It keys on OUR hash + its own IP. Build the plaintext
+        // frame [OP_EMULEPROT][opcode][<tcp_port u16><userhash 16><opts u8>].
+        let mut body = Vec::new();
+        body.extend_from_slice(&4662u16.to_le_bytes());
+        body.extend_from_slice(&PEER_HASH);
+        body.push(0x01);
+        let mut datagram = vec![0xC5u8, OP_DIRECTCALLBACKREQ];
+        datagram.extend_from_slice(&body);
+        match svc.handle_inbound(&datagram, peer_addr(), now) {
+            ReaskInboundOutcome::DirectCallbackReq { req, from } => {
+                assert_eq!(req.tcp_port, 4662);
+                assert_eq!(req.user_hash, PEER_HASH);
+                assert_eq!(from, peer_addr());
+            }
+            other => panic!("expected DirectCallbackReq, got {other:?}"),
         }
     }
 

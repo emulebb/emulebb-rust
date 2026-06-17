@@ -17,9 +17,9 @@
 use std::borrow::Cow;
 
 use super::codec::{
-    OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck,
-    ReaskCallbackUdp, ReaskFilePing, decode_reask_ack, decode_reask_callback_udp,
-    decode_reask_file_ping,
+    DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK,
+    OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskCallbackUdp, ReaskFilePing,
+    decode_direct_callback_req, decode_reask_ack, decode_reask_callback_udp, decode_reask_file_ping,
 };
 use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 
@@ -41,6 +41,10 @@ pub(crate) enum InboundReaskMessage {
     FileNotFound,
     /// `OP_REASKCALLBACKUDP` — a LowID buddy relay (we are the buddy).
     CallbackUdp(ReaskCallbackUdp),
+    /// `OP_DIRECTCALLBACKREQ` — a peer that cannot reach us over TCP (we are the
+    /// firewalled LowID side that advertised direct UDP callback) asks us to
+    /// connect out to it (oracle `ClientUDPSocket.cpp` `OP_DIRECTCALLBACKREQ`).
+    DirectCallbackReq(DirectCallbackReq),
 }
 
 /// Parse a raw inbound datagram as a client-UDP reask message, or `None` if it
@@ -85,6 +89,9 @@ pub(crate) fn parse_inbound_reask_datagram(
         OP_REASKCALLBACKUDP => decode_reask_callback_udp(body, our_udp_version)
             .ok()
             .map(InboundReaskMessage::CallbackUdp),
+        OP_DIRECTCALLBACKREQ => decode_direct_callback_req(body)
+            .ok()
+            .map(InboundReaskMessage::DirectCallbackReq),
         _ => None,
     }
 }
@@ -134,6 +141,41 @@ mod tests {
         let datagram = obfuscate_client_udp_with(&OUR_HASH, SENDER_IP, &plain, 0x2468, 0x40);
         let msg = parse_inbound_reask_datagram(&datagram, SENDER_IP, &OUR_HASH, 4).unwrap();
         assert_eq!(msg, InboundReaskMessage::Ack(ReaskAck { part_status: None, queue_position: 9 }));
+    }
+
+    #[test]
+    fn parses_plaintext_direct_callback_req() {
+        // <TCPPort u16 LE><Userhash 16><ConnectOptions u8>.
+        let mut body = Vec::new();
+        body.extend_from_slice(&4662u16.to_le_bytes());
+        body.extend_from_slice(&[0x5A; 16]);
+        body.push(0x01);
+        let datagram = frame(0x95, &body); // OP_DIRECTCALLBACKREQ
+        let msg = parse_inbound_reask_datagram(&datagram, SENDER_IP, &OUR_HASH, 4).unwrap();
+        match msg {
+            InboundReaskMessage::DirectCallbackReq(req) => {
+                assert_eq!(req.tcp_port, 4662);
+                assert_eq!(req.user_hash, [0x5A; 16]);
+                assert_eq!(req.connect_options, 0x01);
+            }
+            other => panic!("expected DirectCallbackReq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_obfuscated_direct_callback_req() {
+        // The oracle obfuscates it under our hash + its own IP when we accept crypt.
+        let mut body = Vec::new();
+        body.extend_from_slice(&5000u16.to_le_bytes());
+        body.extend_from_slice(&[0x77; 16]);
+        body.push(0x00);
+        let plain = frame(0x95, &body);
+        let datagram = obfuscate_client_udp_with(&OUR_HASH, SENDER_IP, &plain, 0x1357, 0x40);
+        let msg = parse_inbound_reask_datagram(&datagram, SENDER_IP, &OUR_HASH, 4).unwrap();
+        match msg {
+            InboundReaskMessage::DirectCallbackReq(req) => assert_eq!(req.tcp_port, 5000),
+            other => panic!("expected DirectCallbackReq, got {other:?}"),
+        }
     }
 
     #[test]

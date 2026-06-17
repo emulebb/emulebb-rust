@@ -101,7 +101,8 @@ pub(in crate::ed2k_tcp) use dump::{dump_ed2k_tcp_download_recv, dump_ed2k_tcp_do
 pub use firewall_helper::emule_connect_options;
 pub use firewall_helper::request_udp_firewall_check;
 pub use firewall_helper::send_kad_firewall_tcp_ack;
-pub(crate) use firewall_helper::{connect_callback_peer, is_connection_shutdown_error};
+pub use firewall_helper::connect_callback_peer;
+pub(crate) use firewall_helper::is_connection_shutdown_error;
 pub(in crate::ed2k_tcp) use hello::{
     DecodedEmuleInfoProfile, build_hello_responses, decode_emule_info_profile,
     decode_hello_answer_profile, decode_hello_profile, encode_emule_info_answer,

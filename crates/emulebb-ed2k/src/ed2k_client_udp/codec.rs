@@ -29,6 +29,12 @@ pub(crate) const OP_QUEUEFULL: u8 = 0x93;
 /// relays it (and which eMule sends *unencrypted*, since the buddy's Kad version
 /// is unknown) is deferred with the rest of the reask transport.
 pub(crate) const OP_REASKCALLBACKUDP: u8 = 0x94;
+/// Direct-UDP-callback request (`OP_DIRECTCALLBACKREQ`): a peer that cannot reach
+/// us over TCP (we are the firewalled LowID side that advertised MISCOPTIONS2 bit
+/// 12) asks us to connect out to it. Body
+/// `<TCPPort u16 LE><Userhash 16><ConnectOptions u8>` (oracle `Opcodes.h` /
+/// `BaseClient.cpp:1481` `OP_DIRECTCALLBACKREQ`).
+pub(crate) const OP_DIRECTCALLBACKREQ: u8 = 0x95;
 
 /// Decoded `OP_REASKFILEPING` request (uploader/reciprocity side).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +65,37 @@ pub(crate) struct ReaskCallbackUdp {
     pub file_hash: Ed2kHash,
     pub part_status: Option<Vec<bool>>,
     pub complete_source_count: Option<u16>,
+}
+
+/// Decoded `OP_DIRECTCALLBACKREQ` request (we are the firewalled LowID source the
+/// requester cannot reach over TCP; we connect out to it). The requester's IP is
+/// the UDP sender IP (not in the body); the TCP port to connect to is `tcp_port`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectCallbackReq {
+    /// The requester's listen TCP port to connect back to.
+    pub tcp_port: u16,
+    /// The requester's user hash (passed to the outbound hello for secure ident).
+    pub user_hash: [u8; 16],
+    /// The requester's advertised connect options byte (`GetMyConnectOptions`).
+    pub connect_options: u8,
+}
+
+/// Decodes an `OP_DIRECTCALLBACKREQ` body
+/// `<TCPPort u16 LE><Userhash 16><ConnectOptions u8>` (oracle
+/// `ClientUDPSocket.cpp:438-442` + `ProtocolGuards.h HasUdpDirectCallbackRequest`
+/// which requires `>= 19` bytes).
+pub(crate) fn decode_direct_callback_req(body: &[u8]) -> Result<DirectCallbackReq> {
+    if body.len() < 19 {
+        bail!("short OP_DIRECTCALLBACKREQ body ({})", body.len());
+    }
+    let tcp_port = u16::from_le_bytes([body[0], body[1]]);
+    let user_hash: [u8; 16] = body[2..18].try_into()?;
+    let connect_options = body[18];
+    Ok(DirectCallbackReq {
+        tcp_port,
+        user_hash,
+        connect_options,
+    })
 }
 
 /// Encodes a `partstatus` field: `u16 count` + LSB-first bitfield. `None` (no
@@ -252,6 +289,27 @@ mod tests {
             0x9e, 0xce, 0xd4, 0x7d, 0xf2, 0xed, 0xfb, 0xd7, 0x2f, 0x29, 0xf9, 0x34, 0x47, 0xd6,
             0x0b, 0x7b,
         ])
+    }
+
+    #[test]
+    fn direct_callback_req_decodes_oracle_layout() {
+        // <TCPPort u16 LE><Userhash 16><ConnectOptions u8> (oracle BaseClient.cpp:1481).
+        let mut body = Vec::new();
+        body.extend_from_slice(&4662u16.to_le_bytes());
+        let user_hash = [0x5Au8; 16];
+        body.extend_from_slice(&user_hash);
+        body.push(0x03);
+        let decoded = decode_direct_callback_req(&body).unwrap();
+        assert_eq!(decoded.tcp_port, 4662);
+        assert_eq!(decoded.user_hash, user_hash);
+        assert_eq!(decoded.connect_options, 0x03);
+    }
+
+    #[test]
+    fn direct_callback_req_rejects_short_body() {
+        // 18 bytes is one short of the oracle HasUdpDirectCallbackRequest >= 19 gate.
+        assert!(decode_direct_callback_req(&[0u8; 18]).is_err());
+        assert!(decode_direct_callback_req(&[]).is_err());
     }
 
     #[test]

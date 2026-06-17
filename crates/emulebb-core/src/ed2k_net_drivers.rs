@@ -20,7 +20,7 @@ use std::{
 };
 
 use anyhow::Result;
-use emulebb_ed2k::ed2k_server::{Ed2kServerListEvent, Ed2kServerListEventReceiver};
+use emulebb_ed2k::ed2k_server::{Ed2kServerListEvent, Ed2kServerListEventReceiver, Ed2kServerState};
 use emulebb_ed2k::{
     MappedEndpoint, MappingExposure, MappingSpec, NatManager, TransportProtocol,
     reachability::ExternalReachability,
@@ -28,9 +28,31 @@ use emulebb_ed2k::{
 use emulebb_ed2k::stun::{
     DEFAULT_STUN_TIMEOUT, NatMappingBehavior, stun_probe, stun_probe_mapping_behavior,
 };
+use emulebb_ed2k::ed2k_tcp::{Ed2kHelloIdentity, connect_callback_peer};
+use emulebb_ed2k::kad_firewall::KadFirewallState;
 use emulebb_ed2k::{ReaskEvent, ReaskEventReceiver};
+use tokio::net::TcpListener;
+use tokio::sync::{Mutex, RwLock};
 
-use crate::{Ed2kNetworkConfig, EmulebbCore};
+use crate::{Ed2kNetworkConfig, EmulebbCore, current_tcp_firewalled};
+
+/// Shared runtime state the reask re-engage consumer needs to act on an inbound
+/// `OP_DIRECTCALLBACKREQ` (FIX 1): the firewalled-verdict inputs (oracle
+/// `Kademlia::IsRunning() && IsFirewalled()` gate) plus the TCP-connect identity
+/// to mirror `TryToConnectOrDelete`. Cloned cheaply (all `Arc`/`Copy`).
+#[derive(Clone)]
+pub(crate) struct ReaskReengageContext {
+    /// Our eD2k bind IP for the outbound callback connection (egress-pinned).
+    pub bind_ip: Ipv4Addr,
+    /// Our advertised hello identity for the outbound `OP_HELLO`.
+    pub hello_identity: Ed2kHelloIdentity,
+    /// The eD2k TCP listener, for the last-resort firewalled fallback verdict.
+    pub ed2k_listener: Arc<TcpListener>,
+    /// The eD2k server state (authoritative LowID flag).
+    pub server_state: Arc<RwLock<Ed2kServerState>>,
+    /// The Kad TCP firewall verdict (pure-Kad LowID detection).
+    pub kad_firewall: Arc<Mutex<KadFirewallState>>,
+}
 
 /// Fetches a URL body for server.met / nodes.dat import. A browser User-Agent
 /// is required: public eMule list mirrors reject or redirect the default agent.
@@ -175,6 +197,7 @@ pub(crate) async fn run_advertised_ports_sync(
 pub(crate) async fn run_ed2k_reask_reengage(
     core: EmulebbCore,
     mut events: ReaskEventReceiver,
+    direct_callback: ReaskReengageContext,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
@@ -187,7 +210,7 @@ pub(crate) async fn run_ed2k_reask_reengage(
         // in a spawned task we await, so a panic surfaces as a JoinError we log and
         // skip, keeping the loop alive.
         let handler_core = core.clone();
-        let handle = tokio::spawn(handle_reask_event(handler_core, event));
+        let handle = tokio::spawn(handle_reask_event(handler_core, event, direct_callback.clone()));
         if let Err(join_error) = handle.await {
             tracing::warn!(
                 "ED2K reask re-engage event handler panicked; continuing: {join_error}"
@@ -198,8 +221,27 @@ pub(crate) async fn run_ed2k_reask_reengage(
 
 /// Handle a single reask re-engage event. Isolated so a panic here cannot tear
 /// down [`run_ed2k_reask_reengage`].
-async fn handle_reask_event(core: EmulebbCore, event: ReaskEvent) {
+async fn handle_reask_event(
+    core: EmulebbCore,
+    event: ReaskEvent,
+    direct_callback: ReaskReengageContext,
+) {
     match event {
+        ReaskEvent::DirectCallbackReq {
+            requester_ip,
+            tcp_port,
+            user_hash,
+            connect_options,
+        } => {
+            handle_direct_callback_req(
+                &direct_callback,
+                requester_ip,
+                tcp_port,
+                user_hash,
+                connect_options,
+            )
+            .await;
+        }
         ReaskEvent::SourceReleased { endpoint } => {
             // The reask loop dropped a detached source: free the lease it kept
             // (active_download_peer_endpoints + the registry) so the next
@@ -219,6 +261,80 @@ async fn handle_reask_event(core: EmulebbCore, event: ReaskEvent) {
             }
         }
     }
+}
+
+/// Whether an inbound `OP_DIRECTCALLBACKREQ`'s connect-back endpoint is a usable
+/// dialable IPv4:TCP target. Mirrors the oracle reject of an obviously invalid
+/// requester (zero port / unspecified IP). Pure so the gate is unit-testable.
+fn direct_callback_target_is_valid(requester_ip: Ipv4Addr, tcp_port: u16) -> bool {
+    tcp_port != 0 && !requester_ip.is_unspecified() && !requester_ip.is_broadcast()
+}
+
+/// Handle an inbound `OP_DIRECTCALLBACKREQ` (FIX 1): a peer that cannot reach us
+/// over TCP asks us — the firewalled LowID side that advertised direct UDP
+/// callback (MISCOPTIONS2 bit 12) — to connect out to it. Mirrors the oracle
+/// `ClientUDPSocket.cpp` `OP_DIRECTCALLBACKREQ` handler: gate on
+/// `Kademlia::IsRunning() && Kademlia::IsFirewalled()`, then connect out to the
+/// requester (`TryToConnectOrDelete`). The reask loop only runs with Kad up, so
+/// the running half holds; we re-check the firewalled half live here (it can
+/// change as our reachability is learned), only acting when we are still the
+/// firewalled side we advertised.
+async fn handle_direct_callback_req(
+    ctx: &ReaskReengageContext,
+    requester_ip: Ipv4Addr,
+    tcp_port: u16,
+    user_hash: [u8; 16],
+    connect_options: u8,
+) {
+    if !direct_callback_target_is_valid(requester_ip, tcp_port) {
+        tracing::debug!(
+            "ignoring OP_DIRECTCALLBACKREQ: invalid connect-back endpoint {requester_ip}:{tcp_port}"
+        );
+        return;
+    }
+    // Only act when we are still the firewalled (LowID) side we advertised: a
+    // non-firewalled node never advertised direct UDP callback, so a request to
+    // it is stale/spurious (oracle gates on IsFirewalled()).
+    let firewalled = current_tcp_firewalled(
+        &ctx.ed2k_listener,
+        &ctx.server_state,
+        &ctx.kad_firewall,
+    )
+    .await;
+    if !firewalled {
+        tracing::debug!(
+            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: not firewalled (we do \
+             not accept direct callbacks)"
+        );
+        return;
+    }
+    let peer_addr = SocketAddr::new(IpAddr::V4(requester_ip), tcp_port);
+    let bind_ip = ctx.bind_ip;
+    let hello_identity = ctx.hello_identity;
+    // Connect out like the oracle TryToConnectOrDelete: open an outgoing eD2k
+    // client connection and send OP_HELLO, carrying the requester's user hash +
+    // connect options for the obfuscated handshake. Spawned so a slow connect
+    // never stalls the event consumer.
+    tokio::spawn(async move {
+        match connect_callback_peer(
+            bind_ip,
+            peer_addr,
+            hello_identity,
+            Some(user_hash),
+            Some(connect_options),
+            Duration::from_secs(20),
+        )
+        .await
+        {
+            Ok(mode) => tracing::info!(
+                "direct-UDP-callback connect-out to {peer_addr} completed transport={}",
+                mode.as_str()
+            ),
+            Err(error) => tracing::debug!(
+                "direct-UDP-callback connect-out to {peer_addr} failed: {error:#}"
+            ),
+        }
+    });
 }
 
 /// Consumer for server-list feedback raised by the ED2K server session loop
@@ -268,4 +384,19 @@ pub(crate) fn ed2k_nat_mappings(network: &Ed2kNetworkConfig) -> Vec<MappingSpec>
             preferred_external_port: Some(network.kad_bind_addr.port()),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_callback_target_rejects_invalid_endpoints() {
+        // Zero TCP port (oracle requires a dialable port) and the unspecified /
+        // broadcast IPs are rejected; an ordinary HighID requester is accepted.
+        assert!(!direct_callback_target_is_valid(Ipv4Addr::new(198, 51, 100, 7), 0));
+        assert!(!direct_callback_target_is_valid(Ipv4Addr::UNSPECIFIED, 4662));
+        assert!(!direct_callback_target_is_valid(Ipv4Addr::BROADCAST, 4662));
+        assert!(direct_callback_target_is_valid(Ipv4Addr::new(198, 51, 100, 7), 4662));
+    }
 }
