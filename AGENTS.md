@@ -17,3 +17,22 @@ Everything below is this repo's local deltas only:
   `repos\emulebb-rust\target` directory is a policy violation — delete it. See
   WORKSPACE-POLICY.md "Generated build … output belongs under
   EMULEBB_WORKSPACE_OUTPUT_ROOT".
+- WINDOWS LONG-PATH SCOPE (binds future work): long-path (>260 char) support is
+  for ONLY these operator-facing content path classes — (1) shared-directory
+  trees (the configured shared roots + every file scanned/ingested under them),
+  (2) incoming downloads (the download/incoming output destination +
+  completed-file paths), (3) category paths (per-category download/incoming
+  directories). EVERYTHING ELSE STAYS SHORT-PATH ON PURPOSE: config, logs, the
+  SQLite metadata DB, the hash-named per-transfer piece-store dirs
+  (`transfer_dir(file_hash)`/`pieces.bin`), and all other internals — do NOT add
+  long-path handling there. Mechanism (two parts): (A) the daemon EXE embeds a
+  `<ws2:longPathAware>true</ws2:longPathAware>` manifest via `embed-manifest` in
+  `crates/emulebb-daemon/build.rs` (Windows-gated, no-op elsewhere); (B) the
+  `emulebb_ed2k::long_path::long_path(&Path) -> PathBuf` helper rewrites an
+  absolute path to its verbatim `\\?\` form (drive + `\\?\UNC\` for UNC) on
+  Windows and is identity on non-Windows, applied ONLY at the three content
+  boundaries above. NOTE on the current model: there is no separate operator
+  download/incoming output path — completed payloads live in the internal
+  short-path piece store — and `Category.path` is validated/stored but not yet
+  used to open output files; the helper is wired where a category path is
+  consumed so the boundary is ready when category-rooted output lands.
