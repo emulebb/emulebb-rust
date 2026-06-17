@@ -14,6 +14,11 @@ use crate::{
     text::{normalize_path_key, normalize_search_text},
 };
 
+/// Age cap for `transfer_sources` rows. A source last seen longer ago than this
+/// almost certainly no longer carries the file, and a live transfer re-learns
+/// its current sources from the network, so older rows are pruned on startup.
+const TRANSFER_SOURCE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 #[derive(Debug, Clone)]
 pub struct MetadataStore {
     conn: Arc<Mutex<Connection>>,
@@ -72,8 +77,11 @@ impl MetadataStore {
     /// - An empty database is created fresh at the current version.
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
-            let mut conn = self.connection()?;
-            crate::migrations::migrate_to_current(&mut conn)?;
+            {
+                let mut conn = self.connection()?;
+                crate::migrations::migrate_to_current(&mut conn)?;
+            }
+            self.prune_transfer_sources()?;
             return Ok(());
         }
         if self.has_user_tables()? {
@@ -81,6 +89,36 @@ impl MetadataStore {
             return Ok(());
         }
         self.create_schema()
+    }
+
+    /// Bound the `transfer_sources` table on startup. Source rows accumulate per
+    /// transfer with no age cap of their own; this drops the rows that can no
+    /// longer be useful: those belonging to a transfer that has been removed
+    /// (`removed_at_ms` set), and those last seen beyond
+    /// [`TRANSFER_SOURCE_TTL_MS`]. Removed-transfer rows would otherwise survive
+    /// (a removed transfer's row is soft-kept) and stale rows describe peers that
+    /// almost certainly no longer have the file. Correctness-neutral: a live
+    /// transfer re-learns current sources from the network and rewrites them.
+    fn prune_transfer_sources(&self) -> Result<()> {
+        // A database migrated in place from an older version may predate the
+        // transfer_sources table (it only ships in the fresh schema.sql), so the
+        // prune is a no-op when the table is absent.
+        if !self.table_exists("transfer_sources")? {
+            return Ok(());
+        }
+        let cutoff = unix_ms().saturating_sub(TRANSFER_SOURCE_TTL_MS);
+        let conn = self.connection()?;
+        conn.execute(
+            r#"
+            DELETE FROM transfer_sources
+            WHERE last_seen_ms < ?1
+               OR transfer_id IN (
+                   SELECT id FROM transfers WHERE removed_at_ms IS NOT NULL
+               )
+            "#,
+            params![cutoff],
+        )?;
+        Ok(())
     }
 
     fn table_exists(&self, table: &str) -> Result<bool> {
@@ -531,6 +569,61 @@ mod tests {
         store.upsert_indexed_file(&file).unwrap();
 
         assert_eq!(store.table_count("file_names").unwrap(), 1);
+    }
+
+    #[test]
+    fn prune_transfer_sources_drops_removed_transfer_and_stale_rows() {
+        let store = MetadataStore::in_memory().unwrap();
+        let now = unix_ms();
+        {
+            let conn = store.connection().unwrap();
+            // Two known files + transfers: one live, one removed.
+            conn.execute(
+                "INSERT INTO content_objects(id, kind, first_seen_ms, last_seen_ms, updated_at_ms)
+                 VALUES (1, 'ed2k_file', 0, 0, 0), (2, 'ed2k_file', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO known_files(id, content_object_id, ed2k_hash, size_bytes, canonical_name, first_seen_ms, last_seen_ms, updated_at_ms)
+                 VALUES (1, 1, ?1, 1, 'a.bin', 0, 0, 0), (2, 2, ?2, 1, 'b.bin', 0, 0, 0)",
+                params![vec![0x11u8; 16], vec![0x22u8; 16]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transfers(id, known_file_id, visible_state, created_at_ms, updated_at_ms, removed_at_ms)
+                 VALUES (1, 1, 'downloading', 0, 0, NULL),
+                        (2, 2, 'downloading', 0, 0, ?1)",
+                params![now],
+            )
+            .unwrap();
+            // Live transfer: one fresh source (kept) + one stale source (pruned).
+            // Removed transfer: one fresh source (pruned by transfer removal).
+            conn.execute(
+                "INSERT INTO transfer_sources(transfer_id, ip, tcp_port, first_seen_ms, last_seen_ms)
+                 VALUES (1, '10.0.0.1', 4662, 0, ?1),
+                        (1, '10.0.0.2', 4662, 0, ?2),
+                        (2, '10.0.0.3', 4662, 0, ?1)",
+                params![now, now - TRANSFER_SOURCE_TTL_MS - 1],
+            )
+            .unwrap();
+        }
+
+        store.prune_transfer_sources().unwrap();
+
+        let conn = store.connection().unwrap();
+        let remaining: Vec<(i64, String)> = conn
+            .prepare("SELECT transfer_id, ip FROM transfer_sources ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![(1, "10.0.0.1".to_string())],
+            "only the fresh source of the live transfer should survive"
+        );
     }
 
     #[test]

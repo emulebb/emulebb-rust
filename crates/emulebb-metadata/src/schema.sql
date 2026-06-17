@@ -67,6 +67,10 @@ CREATE TABLE content_objects (
     CHECK (primary_hash IS NULL OR length(primary_hash) IN (16, 20))
 );
 
+-- RESERVED / UNUSED: no code path writes content_links yet. Kept in the schema
+-- as the forward content-fabric link model (collections/multi-part objects); no
+-- INSERT exists, so it is created empty and never grows. Do not remove without a
+-- migration step.
 CREATE TABLE content_links (
     id INTEGER PRIMARY KEY,
     parent_object_id INTEGER NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
@@ -314,6 +318,9 @@ CREATE TABLE transfer_sources (
 CREATE UNIQUE INDEX transfer_sources_identity_idx
 ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
 
+-- RESERVED / UNUSED: no code path writes peer_observations yet. Kept as the
+-- forward per-peer event-log surface; created empty and never grows until a
+-- writer is added. Do not remove without a migration step.
 CREATE TABLE peer_observations (
     id INTEGER PRIMARY KEY,
     peer_id INTEGER REFERENCES peers(id),
@@ -325,6 +332,9 @@ CREATE TABLE peer_observations (
     observed_at_ms INTEGER NOT NULL
 );
 
+-- RESERVED / UNUSED: no code path writes peer_file_history yet. Kept as the
+-- forward per-peer/per-file availability-history surface; created empty and
+-- never grows until a writer is added. Do not remove without a migration step.
 CREATE TABLE peer_file_history (
     id INTEGER PRIMARY KEY,
     peer_id INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
@@ -337,6 +347,10 @@ CREATE TABLE peer_file_history (
     UNIQUE(peer_id, known_file_id)
 );
 
+-- RESERVED / UNUSED: no code path writes kad_nodes yet (the live Kad routing
+-- table is persisted elsewhere). Kept as the forward durable-contacts surface;
+-- created empty and never grows until a writer is added. Do not remove without a
+-- migration step.
 CREATE TABLE kad_nodes (
     id INTEGER PRIMARY KEY,
     node_id BLOB NOT NULL UNIQUE CHECK(length(node_id) = 16),
@@ -355,6 +369,9 @@ CREATE TABLE kad_nodes (
     last_seen_ms INTEGER NOT NULL
 );
 
+-- RESERVED / UNUSED: no code path writes kad_node_observations yet. Kept as the
+-- forward per-Kad-node event-log surface; created empty and never grows until a
+-- writer is added. Do not remove without a migration step.
 CREATE TABLE kad_node_observations (
     id INTEGER PRIMARY KEY,
     kad_node_id INTEGER REFERENCES kad_nodes(id),
@@ -400,6 +417,9 @@ CREATE TABLE kad_note_publishes (
     observed_at_ms INTEGER NOT NULL
 );
 
+-- RESERVED / UNUSED: no code path writes kad_snoop_requests yet. Kept as the
+-- forward Kad snoop/harvest request-tracking surface; created empty and never
+-- grows until a writer is added. Do not remove without a migration step.
 CREATE TABLE kad_snoop_requests (
     id INTEGER PRIMARY KEY,
     family TEXT NOT NULL,
@@ -445,6 +465,10 @@ CREATE TABLE search_results (
     observed_at_ms INTEGER NOT NULL
 );
 
+-- RESERVED / UNUSED: no code path writes search_observations yet (search results
+-- land in search_results). Kept as the forward raw-search-payload audit surface;
+-- created empty and never grows until a writer is added. Do not remove without a
+-- migration step.
 CREATE TABLE search_observations (
     id INTEGER PRIMARY KEY,
     session_id INTEGER REFERENCES search_sessions(id) ON DELETE CASCADE,

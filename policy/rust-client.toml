@@ -80,6 +80,11 @@ hard_limit_lines = 922
 rationale = "Aggregated #[tokio::test] integration suite for the ED2K transfer runtime (source-exchange reask, partfile serving, hashset/verified-part tracking, session counters, etc.). Test-only file; allowlisted just over the 900 test budget for round-8 FIX 2's new recheck_transfer corruption-detection integration test (a complete 2-part file with a deliberately corrupted part is detected on recheck, the part demoted to Missing for re-download, the verified range shrunk). Bumped again (+1, 921 -> 922) for the `mod inbound_admission;` declaration: the connection-management safe-subset FIX 2 inbound-accept admission-cap tests live in the new tests/inbound_admission.rs submodule (the test bodies themselves are within budget there)."
 
 [[structure.large_file_allowlist]]
+path = "crates/emulebb-metadata/src/store.rs"
+hard_limit_lines = 668
+rationale = "MetadataStore open/schema-lifecycle orchestrator plus the file-index/shared-root store methods and their inline #[cfg(test)] suite. Allowlisted just over the 600 budget for the round-10 transfer_sources startup prune: a TRANSFER_SOURCE_TTL_MS cap (30 days), the prune_transfer_sources method (gated on the table existing so in-place-migrated older DBs are tolerated; drops sources of removed transfers and rows past the TTL), its ensure_schema wiring, and the prune_transfer_sources_drops_removed_transfer_and_stale_rows test. The prune method belongs here because it uses the store's private connection()/table_exists()/unix_ms(); it cannot move to a module without exposing those internals."
+
+[[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
 hard_limit_lines = 907
 rationale = "frozen legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
