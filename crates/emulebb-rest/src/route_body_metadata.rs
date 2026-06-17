@@ -11,6 +11,7 @@ use axum::{
 use crate::envelope::{api_error, json_error_message};
 
 type JsonObject = serde_json::Map<String, serde_json::Value>;
+const MAX_TRANSFER_ADD_LINKS: usize = 100;
 
 pub(crate) fn validate_json_body_fields(
     method: &str,
@@ -97,7 +98,14 @@ fn validate_transfer_add_body_fields(object: &JsonObject) -> Result<(), Box<Resp
     if !has_link && !has_links {
         return Err(invalid_body_error("link or links is required"));
     }
-    validate_paused_body_field(object)
+    validate_paused_body_field(object)?;
+    if let Some(link) = object.get("link") {
+        validate_transfer_add_link(link)?;
+    }
+    if let Some(links) = object.get("links") {
+        validate_transfer_add_links(links)?;
+    }
+    Ok(())
 }
 
 fn validate_paused_body_field(object: &JsonObject) -> Result<(), Box<Response>> {
@@ -106,6 +114,59 @@ fn validate_paused_body_field(object: &JsonObject) -> Result<(), Box<Response>> 
         .is_some_and(|value| !value.is_boolean())
     {
         return Err(invalid_body_error("paused must be a boolean"));
+    }
+    Ok(())
+}
+
+fn validate_transfer_add_link(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(link) = value.as_str() else {
+        return Err(invalid_body_error("link must be a string"));
+    };
+    validate_ed2k_link_text(link, "link").map_err(invalid_body_error)
+}
+
+fn validate_transfer_add_links(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(links) = value.as_array() else {
+        return Err(invalid_body_error("links must be a string array"));
+    };
+    if links.is_empty() {
+        return Err(invalid_body_error("links must not be empty"));
+    }
+    if links.len() > MAX_TRANSFER_ADD_LINKS {
+        return Err(invalid_body_error("links contains too many items"));
+    }
+    for link in links {
+        let Some(link) = link.as_str() else {
+            return Err(invalid_body_error("links must be a non-empty string array"));
+        };
+        if validate_ed2k_link_text(link, "link").is_err() {
+            return Err(invalid_body_error("links must be a non-empty string array"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ed2k_link_text(value: &str, field: &'static str) -> Result<(), String> {
+    let normalized = value.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if normalized.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(format!(
+            "{field} must be valid UTF-8 without control characters"
+        ));
+    }
+    if normalized.encode_utf16().count() > 2048 {
+        return Err(format!("{field} must be at most 2048 characters"));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(format!("{field} must not contain whitespace"));
+    }
+    if !normalized
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ed2k://"))
+    {
+        return Err(format!("{field} must start with ed2k://"));
     }
     Ok(())
 }
