@@ -1,7 +1,31 @@
 use super::{
     ServerLiveDetails, apply_server_connection_flags, apply_server_live_details,
-    server_info_from_parts,
+    kad_status_from_running, server_info_from_parts,
 };
+
+#[test]
+fn kad_status_running_is_bootstrapping_until_connected() {
+    let status = kad_status_from_running(true);
+
+    assert!(status.running);
+    assert!(!status.connected);
+    assert_eq!(status.bootstrapping, Some(true));
+    assert_eq!(status.firewalled, None);
+    assert_eq!(status.users, None);
+    assert_eq!(status.files, None);
+}
+
+#[test]
+fn kad_status_stopped_has_unknown_network_totals() {
+    let status = kad_status_from_running(false);
+
+    assert!(!status.running);
+    assert!(!status.connected);
+    assert_eq!(status.bootstrapping, Some(false));
+    assert_eq!(status.contact_count, None);
+    assert_eq!(status.users, None);
+    assert_eq!(status.files, None);
+}
 
 #[test]
 fn server_connection_flags_mark_connecting_server_current() {

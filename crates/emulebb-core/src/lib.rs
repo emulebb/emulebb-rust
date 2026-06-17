@@ -3868,8 +3868,8 @@ impl EmulebbCore {
             bootstrap_progress: Some(if connected { 100 } else { 0 }),
             contact_count: Some(contact_count),
             lan_mode: Some(false),
-            users: Some(0),
-            files: Some(0),
+            users: connected.then_some(0),
+            files: connected.then_some(0),
             indexed_sources: Some(indexed_sources),
             indexed_keywords: Some(indexed_keywords),
             operation_queued: None,
@@ -6235,6 +6235,8 @@ mod tests {
         assert!(!status.kad.connected);
         assert_eq!(status.kad.contact_count, Some(0));
         assert_eq!(status.kad.bootstrapping, Some(true));
+        assert_eq!(status.kad.users, None);
+        assert_eq!(status.kad.files, None);
         shutdown.store(true, Ordering::SeqCst);
         let _ = core.disconnect_ed2k().await;
     }
