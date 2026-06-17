@@ -14,7 +14,7 @@ mod peer_state;
 mod tests;
 
 use emulebb_kad_proto::NodeId;
-use peer_state::PeerCryptoState;
+use peer_state::{PeerCryptoState, VerifyKeyEntry};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
@@ -98,7 +98,7 @@ pub struct ObfuscationLayer {
     our_udp_key: u32,
     enabled: bool,
     peers: Mutex<HashMap<SocketAddr, PeerCryptoState>>,
-    receiver_verify_keys: Mutex<HashMap<IpAddr, u32>>,
+    receiver_verify_keys: Mutex<HashMap<IpAddr, VerifyKeyEntry>>,
 }
 
 impl ObfuscationLayer {
