@@ -160,3 +160,83 @@ async fn transfer_add_links_body_uses_mfc_array_validation() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn transfer_patch_body_uses_mfc_mutation_family_validation() {
+    let app = test_router();
+    let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
+    let cases = [
+        (
+            r#"{}"#,
+            "transfer PATCH requires priority, categoryId, categoryName, or name",
+        ),
+        (
+            r#"{"priority":"low","name":"Renamed.bin"}"#,
+            "transfer PATCH accepts only one mutation family",
+        ),
+        (
+            r#"{"categoryId":0,"name":"Renamed.bin"}"#,
+            "transfer PATCH accepts only one mutation family",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn transfer_patch_priority_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
+    let cases = [
+        (r#"{"priority":1}"#, "priority must be a string"),
+        (
+            r#"{"priority":"release"}"#,
+            "priority must be one of auto, verylow, low, normal, high, veryhigh",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn transfer_patch_name_body_uses_mfc_validation() {
+    let app = test_router();
+    let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
+    let cases = [
+        (r#"{"name":1}"#, "name must be a string"),
+        (r#"{"name":"   "}"#, "name must not be empty"),
+        (
+            r#"{"name":"Bad<Name.bin"}"#,
+            "name must be a valid eD2K filename",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}

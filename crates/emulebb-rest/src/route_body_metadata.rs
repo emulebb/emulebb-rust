@@ -83,6 +83,9 @@ fn validate_route_specific_body_fields(
     if method == "POST" && path == "/api/v1/transfers" {
         return validate_transfer_add_body_fields(object);
     }
+    if method == "PATCH" && path_matches_transfer(path) {
+        return validate_transfer_patch_body_fields(object);
+    }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
@@ -114,6 +117,65 @@ fn validate_paused_body_field(object: &JsonObject) -> Result<(), Box<Response>> 
         .is_some_and(|value| !value.is_boolean())
     {
         return Err(invalid_body_error("paused must be a boolean"));
+    }
+    Ok(())
+}
+
+fn validate_transfer_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let mut mutation_family_count = 0;
+    if object.contains_key("priority") {
+        mutation_family_count += 1;
+    }
+    if object.contains_key("categoryId") || object.contains_key("categoryName") {
+        mutation_family_count += 1;
+    }
+    if object.contains_key("name") {
+        mutation_family_count += 1;
+    }
+    if mutation_family_count == 0 {
+        return Err(invalid_body_error(
+            "transfer PATCH requires priority, categoryId, categoryName, or name",
+        ));
+    }
+    if mutation_family_count > 1 {
+        return Err(invalid_body_error(
+            "transfer PATCH accepts only one mutation family",
+        ));
+    }
+    if let Some(priority) = object.get("priority") {
+        validate_transfer_priority_body_field(priority)?;
+    }
+    if let Some(name) = object.get("name") {
+        validate_transfer_name_body_field(name)?;
+    }
+    Ok(())
+}
+
+fn validate_transfer_priority_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(priority) = value.as_str() else {
+        return Err(invalid_body_error("priority must be a string"));
+    };
+    if !matches!(
+        priority,
+        "auto" | "verylow" | "low" | "normal" | "high" | "veryhigh"
+    ) {
+        return Err(invalid_body_error(
+            "priority must be one of auto, verylow, low, normal, high, veryhigh",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transfer_name_body_field(value: &serde_json::Value) -> Result<(), Box<Response>> {
+    let Some(name) = value.as_str() else {
+        return Err(invalid_body_error("name must be a string"));
+    };
+    let name = name.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if name.is_empty() {
+        return Err(invalid_body_error("name must not be empty"));
+    }
+    if !is_valid_public_file_name(name) {
+        return Err(invalid_body_error("name must be a valid eD2K filename"));
     }
     Ok(())
 }
@@ -189,6 +251,10 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
 }
 
+fn path_matches_transfer(path: &str) -> bool {
+    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["transfers", _]))
+}
+
 fn uses_category_selector_body(method: &str, path: &str) -> bool {
     if method == "POST" && path == "/api/v1/transfers" {
         return true;
@@ -220,6 +286,15 @@ fn uses_paused_body(method: &str, path: &str) -> bool {
 fn api_segments(path: &str) -> Option<Vec<&str>> {
     path.strip_prefix("/api/v1/")
         .map(|path| path.split('/').collect::<Vec<_>>())
+}
+
+fn is_valid_public_file_name(name: &str) -> bool {
+    !name.chars().any(|character| {
+        matches!(
+            character,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+        ) || character.is_control()
+    })
 }
 
 fn invalid_body_error(message: impl Into<String>) -> Box<Response> {
