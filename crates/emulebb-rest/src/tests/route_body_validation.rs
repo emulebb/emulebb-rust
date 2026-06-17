@@ -240,3 +240,68 @@ async fn transfer_patch_name_body_uses_mfc_validation() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn shared_file_patch_body_uses_mfc_priority_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
+    let cases = [
+        (
+            r#"{}"#,
+            "shared-file PATCH requires priority, comment, or rating",
+        ),
+        (r#"{"priority":1}"#, "priority must be a string"),
+        (
+            r#"{"priority":"veryhigh"}"#,
+            "priority must be one of auto, verylow, low, normal, high, release",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn shared_file_patch_body_uses_mfc_comment_rating_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
+    let cases = [
+        (r#"{"rating":5}"#, "comment must be a string"),
+        (r#"{"comment":1,"rating":5}"#, "comment must be a string"),
+        (
+            r#"{"comment":"verified"}"#,
+            "rating must be an integer between 0 and 5",
+        ),
+        (
+            r#"{"comment":"verified","rating":"5"}"#,
+            "rating must be an integer between 0 and 5",
+        ),
+        (
+            r#"{"comment":"verified","rating":6}"#,
+            "rating must be an integer between 0 and 5",
+        ),
+        (
+            r#"{"comment":"verified","rating":-1}"#,
+            "rating must be an integer between 0 and 5",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(
+            app.clone(),
+            "PATCH",
+            uri,
+            body.to_string(),
+            expected_message,
+        )
+        .await;
+    }
+}

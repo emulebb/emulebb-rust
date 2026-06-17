@@ -86,6 +86,9 @@ fn validate_route_specific_body_fields(
     if method == "PATCH" && path_matches_transfer(path) {
         return validate_transfer_patch_body_fields(object);
     }
+    if method == "PATCH" && path_matches_shared_file(path) {
+        return validate_shared_file_patch_body_fields(object);
+    }
     if uses_paused_body(method, path) {
         return validate_paused_body_field(object);
     }
@@ -180,6 +183,64 @@ fn validate_transfer_name_body_field(value: &serde_json::Value) -> Result<(), Bo
     Ok(())
 }
 
+fn validate_shared_file_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    if !object.contains_key("priority")
+        && !object.contains_key("comment")
+        && !object.contains_key("rating")
+    {
+        return Err(invalid_body_error(
+            "shared-file PATCH requires priority, comment, or rating",
+        ));
+    }
+    if let Some(priority) = object.get("priority") {
+        validate_shared_upload_priority_body_field(priority)?;
+    }
+    if object.contains_key("comment") || object.contains_key("rating") {
+        validate_shared_file_comment_rating_body_fields(object)?;
+    }
+    Ok(())
+}
+
+fn validate_shared_upload_priority_body_field(
+    value: &serde_json::Value,
+) -> Result<(), Box<Response>> {
+    let Some(priority) = value.as_str() else {
+        return Err(invalid_body_error("priority must be a string"));
+    };
+    if !matches!(
+        priority,
+        "auto" | "verylow" | "low" | "normal" | "high" | "release"
+    ) {
+        return Err(invalid_body_error(
+            "priority must be one of auto, verylow, low, normal, high, release",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_shared_file_comment_rating_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if !object
+        .get("comment")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Err(invalid_body_error("comment must be a string"));
+    }
+
+    let Some(rating) = object.get("rating").and_then(serde_json::Value::as_i64) else {
+        return Err(invalid_body_error(
+            "rating must be an integer between 0 and 5",
+        ));
+    };
+    if !(0..=5).contains(&rating) {
+        return Err(invalid_body_error(
+            "rating must be an integer between 0 and 5",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_transfer_add_link(value: &serde_json::Value) -> Result<(), Box<Response>> {
     let Some(link) = value.as_str() else {
         return Err(invalid_body_error("link must be a string"));
@@ -237,6 +298,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const TRANSFER_ADD: &[&str] = &["link", "links", "categoryId", "categoryName", "paused"];
     const TRANSFER_PATCH: &[&str] = &["name", "priority", "categoryId", "categoryName"];
     const SEARCH_RESULT_DOWNLOAD: &[&str] = &["categoryId", "categoryName", "paused"];
+    const SHARED_FILE_PATCH: &[&str] = &["priority", "comment", "rating"];
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);
@@ -244,6 +306,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     let segments = api_segments(path)?;
     match (method, segments.as_slice()) {
         ("PATCH", ["transfers", _]) => Some(TRANSFER_PATCH),
+        ("PATCH", ["shared-files", _]) => Some(SHARED_FILE_PATCH),
         ("POST", ["searches", _, "results", _, "operations", "download"]) => {
             Some(SEARCH_RESULT_DOWNLOAD)
         }
@@ -253,6 +316,10 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
 
 fn path_matches_transfer(path: &str) -> bool {
     api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["transfers", _]))
+}
+
+fn path_matches_shared_file(path: &str) -> bool {
+    api_segments(path).is_some_and(|segments| matches!(segments.as_slice(), ["shared-files", _]))
 }
 
 fn uses_category_selector_body(method: &str, path: &str) -> bool {
