@@ -7,9 +7,10 @@
 //! from the crate root so the `EmulebbCore` impl reaches them by their bare
 //! names; `PR_NORMAL` is re-exported for the one inline default in `lib.rs`.
 
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result, ensure};
+use emulebb_ed2k::long_path::long_path;
 
 use crate::{
     Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate, NullableStringField,
@@ -79,8 +80,18 @@ fn apply_category_path(category: &mut Category, path: NullableStringField) -> Re
         NullableStringField::Value(path) => {
             let path = path.trim();
             ensure!(!path.is_empty(), "path must not be empty");
-            let canonical =
-                fs::canonicalize(path).with_context(|| format!("failed to resolve {path}"))?;
+            // Operator-facing category-path boundary: a per-category
+            // download/incoming directory is an operator content path, so it is
+            // resolved/opened through the long-path helper. The current model
+            // stores+validates the category path here but does not yet open a
+            // download file under it (completed payloads live in the internal
+            // short-path piece store), so this is where a category path is
+            // consumed today and the boundary is ready for when category-rooted
+            // output lands. (Operator-rule scope: category paths -- see
+            // long_path.rs.)
+            let long = long_path(Path::new(path));
+            let canonical = fs::canonicalize(&long)
+                .with_context(|| format!("failed to resolve {path}"))?;
             ensure!(canonical.is_dir(), "path is not a directory");
             Some(canonical.display().to_string())
         }

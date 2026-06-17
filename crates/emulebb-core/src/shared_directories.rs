@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use emulebb_ed2k::long_path::long_path;
 use emulebb_index::IndexedSharedDirectoryRoot;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -103,6 +104,13 @@ pub(crate) fn collect_shared_directory_files(
     recursive: bool,
     output: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    // Operator-facing shared-directory boundary: walk the root through the
+    // long-path helper so a shared tree deeper than the legacy MAX_PATH (260)
+    // limit is still enumerated. The verbatim root flows into every entry path
+    // walkdir produces, so the ingest read path inherits the long-path form.
+    // (Operator-rule scope: shared-directory trees -- see long_path.rs.)
+    let root = long_path(root);
+    let root = root.as_path();
     let max_depth = if recursive { usize::MAX } else { 1 };
     for entry in WalkDir::new(root)
         .max_depth(max_depth)

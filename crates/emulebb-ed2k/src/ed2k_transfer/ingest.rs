@@ -4,6 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::long_path::long_path;
+
 use super::hashset::{build_aich_hashset_from_payload, build_md4_hashset_from_payload};
 use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::{
@@ -23,6 +25,14 @@ impl Ed2kTransferRuntime {
         if canonical_name.is_empty() {
             anyhow::bail!("local ED2K ingest requires a non-empty canonical name");
         }
+        // Operator-facing shared-file ingest boundary: normalize the operator's
+        // source path to the long-path (`\\?\`) form before it is opened/hashed,
+        // so a shared file under a deep operator tree (beyond the legacy
+        // MAX_PATH limit) can still be read for ingest. The internal piece-store
+        // destination (`transfer_dir`/`pieces.bin`) below is deliberately left
+        // short-path. (Operator-rule scope: shared-directory trees -- see
+        // long_path.rs.)
+        let source_path = long_path(source_path);
         let source_path = source_path.canonicalize().with_context(|| {
             format!(
                 "failed to resolve local ingest source {}",

@@ -17,6 +17,7 @@ pub mod ed2k_tcp;
 pub mod ed2k_transfer;
 pub mod ipfilter;
 pub mod kad_firewall;
+pub mod long_path;
 pub mod nat;
 pub mod networking;
 pub mod reachability;
