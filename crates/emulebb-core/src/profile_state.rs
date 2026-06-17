@@ -65,6 +65,8 @@ pub(crate) fn load_core_state(
         server_fail_counts: HashMap::new(),
         banned_source_clients: HashSet::new(),
         active_download_attempts: HashSet::new(),
+        download_cancels: HashMap::new(),
+        next_download_cancel_id: 0,
         active_download_peer_endpoints: HashSet::new(),
         download_source_registry: crate::download_source_registry::DownloadSourceRegistry::default(
         ),

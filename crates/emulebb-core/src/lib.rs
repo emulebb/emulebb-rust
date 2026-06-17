@@ -272,6 +272,19 @@ struct CoreState {
     server_fail_counts: HashMap<String, u32>,
     banned_source_clients: HashSet<String>,
     active_download_attempts: HashSet<String>,
+    /// Per-hash cancellation signal for the in-flight background download attempt,
+    /// paired with a monotonic generation id so a stale, exiting attempt never
+    /// removes a newer attempt's entry (delete-then-recreate of the same hash).
+    /// An entry is created when an attempt is queued and removed by that attempt's
+    /// RAII guard on exit (only when the stored id still matches). Signalling the
+    /// token tells the attempt's requery loop to stop promptly (delete/pause/stop/
+    /// recheck) instead of running to the end of the current round and only
+    /// suppressing the next retry. Held behind the state lock and only ever read
+    /// or cloned under it (never awaited while held), so cancellation is a quick
+    /// lock and cannot deadlock the driver.
+    download_cancels: HashMap<String, (u64, CancellationToken)>,
+    /// Monotonic id source for `download_cancels` entries (see above).
+    next_download_cancel_id: u64,
     active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     download_source_registry: DownloadSourceRegistry,
     shared_directories: Vec<SharedDirectoryRoot>,
@@ -296,26 +309,40 @@ struct Ed2kRuntime {
     download_tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
-/// RAII guard that removes a transfer hash from `active_download_attempts` on
-/// drop, so the dedup slot is freed on every exit path of a background download
-/// attempt — normal return, early return, *or* a panic that unwinds the task
-/// (FIX B2). The map lives behind an async mutex, so the cleanup is performed by
-/// a short detached task spawned from `Drop`.
+/// RAII guard that removes a transfer hash from `active_download_attempts` (and
+/// its `download_cancels` entry) on drop, so the dedup slot and the per-hash
+/// cancel signal are freed on every exit path of a background download attempt —
+/// normal return, early return, *or* a panic that unwinds the task (FIX B2). The
+/// maps live behind an async mutex, so the cleanup is performed by a short
+/// detached task spawned from `Drop`.
+///
+/// The guard carries the generation id of the `download_cancels` entry it
+/// installed and only removes that entry when the stored id still matches: a
+/// delete or recreate of the same hash may have replaced the entry with a newer
+/// attempt's token, and this (now-cancelled, exiting) attempt must not clobber
+/// the live one. Removing the dedup slot is unconditional (one attempt per hash
+/// at a time by construction).
 struct DownloadAttemptGuard {
     core: EmulebbCore,
     hash: String,
+    cancel_id: u64,
 }
 
 impl Drop for DownloadAttemptGuard {
     fn drop(&mut self) {
         let core = self.core.clone();
         let hash = std::mem::take(&mut self.hash);
+        let cancel_id = self.cancel_id;
         tokio::spawn(async move {
-            core.state
-                .lock()
-                .await
-                .active_download_attempts
-                .remove(&hash);
+            let mut state = core.state.lock().await;
+            state.active_download_attempts.remove(&hash);
+            if state
+                .download_cancels
+                .get(&hash)
+                .is_some_and(|(id, _)| *id == cancel_id)
+            {
+                state.download_cancels.remove(&hash);
+            }
         });
     }
 }
@@ -2246,6 +2273,13 @@ impl EmulebbCore {
             !matches!(current.state.as_str(), "hashing" | "completing"),
             "transfer is already being hashed or completed"
         );
+        // Cancel any in-flight download attempt before re-verifying so the recheck
+        // does not race a live piece write for the same hash (state flap; the
+        // manifest IO is serialized so there is no corruption, but the recheck
+        // must observe a settled on-disk state). The attempt stops at its next
+        // cancel check; if recheck finds the transfer still wants data it re-queues
+        // a fresh attempt below.
+        self.cancel_download_attempt(hash).await;
         // Mark hashing while the on-disk parts are re-verified (oracle forces a
         // full part re-hash on recheck; CPartFile::HashSinglePart per part).
         self.set_transfer_state(hash, "hashing").await;
@@ -2297,6 +2331,11 @@ impl EmulebbCore {
             return Ok(None);
         }
         self.metadata_store.unmark_unshared_file(hash)?;
+        // Cancel any in-flight attempt and free everything it holds for this hash
+        // (candidates, leases, active endpoints, the dedup + cancel slots) so the
+        // orphan attempt stops churning peers and the hash can be re-created and
+        // re-download immediately instead of early-returning on a stale dedup slot.
+        self.teardown_download_for_delete(hash).await;
         let mut state = self.state.lock().await;
         state.transfers.remove(hash);
         state.unshared_hashes.remove(hash);
@@ -2411,6 +2450,13 @@ impl EmulebbCore {
             .ed2k_transfers
             .set_control_state(hash, Some(state_name))
             .await?;
+        // Pause/stop must stop the transfer NOW: the driver does not read
+        // control_state mid-attempt, so without this an in-flight attempt keeps
+        // connecting peers and writing pieces through the rest of the current
+        // round and only the next retry is suppressed. Cancel the in-flight
+        // attempt so it stops at its next loop-top/mid-round check. Resume
+        // re-queues a fresh attempt (its cancel token is recreated then).
+        self.cancel_download_attempt(hash).await;
         let transfer = self.transfer_from_manifest(&manifest, state_name);
         self.state
             .lock()
@@ -2717,7 +2763,16 @@ impl EmulebbCore {
     }
 
     #[allow(clippy::cognitive_complexity)]
-    async fn run_ed2k_download_attempt(&self, transfer: &Transfer) -> Result<Option<&'static str>> {
+    async fn run_ed2k_download_attempt(
+        &self,
+        transfer: &Transfer,
+        cancel: &CancellationToken,
+    ) -> Result<Option<&'static str>> {
+        // Already cancelled before any work started (delete/pause raced the
+        // queue): do nothing, don't touch state, don't retry.
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
         };
@@ -2795,6 +2850,16 @@ impl EmulebbCore {
         let mut deferred_active_direct_sources = false;
         let mut source_requery_round = 0usize;
         loop {
+            // Per-hash cancel check at the top of each requery round: delete /
+            // pause / stop / recheck signal this token to stop the in-flight
+            // attempt promptly (rather than running to the end of the current
+            // round and only suppressing the next retry). Return Ok(None) so the
+            // queued-attempt wrapper neither rewrites the transfer state nor
+            // re-queues a retry; the attempt's own per-endpoint lease release on
+            // exit is idempotent with any release the cancelling caller did.
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
             sort_download_sources(&mut sources);
             // A firewalled LowID Kad source whose Kad buddy is known is reasked via
             // its buddy (OP_REASKCALLBACKUDP), not through an eD2k-server callback:
@@ -2983,6 +3048,12 @@ impl EmulebbCore {
                 }
             }
 
+            // Mid-round cancel check (after the direct-download leg, before the
+            // requery sleep): stop promptly on delete/pause/stop/recheck instead
+            // of sleeping then requerying for a transfer that is going away.
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
             let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
             if manifest.completed {
                 return Ok(Some("completed"));
@@ -3139,6 +3210,42 @@ impl EmulebbCore {
         }
     }
 
+    /// Signal the in-flight background download attempt for `hash` to stop. Quick
+    /// lock, no await held: clones nothing across `.await`. Idempotent and
+    /// race-safe with a natural completion — if no attempt is running (or it just
+    /// finished and its guard removed the entry) this is a no-op; cancelling an
+    /// already-finished token has no effect. Returns whether a live cancel token
+    /// was signalled (only for diagnostics/tests; callers don't depend on it).
+    async fn cancel_download_attempt(&self, hash: &str) -> bool {
+        let state = self.state.lock().await;
+        if let Some((_, token)) = state.download_cancels.get(hash) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Tear down all download bookkeeping for `hash` (used by `delete`): cancel the
+    /// in-flight attempt, forget the hash's source candidates and release its
+    /// leases via [`DownloadSourceRegistry::release_file`], drop the matching
+    /// `active_download_peer_endpoints`, and clear the `active_download_attempts`
+    /// dedup slot + cancel entry so the hash can be immediately re-created and
+    /// re-download. The orphan attempt, on its next loop-top cancel check, exits;
+    /// its own per-endpoint release is then idempotent with the release done here.
+    async fn teardown_download_for_delete(&self, hash: &str) {
+        let mut state = self.state.lock().await;
+        if let Some((_, token)) = state.download_cancels.get(hash) {
+            token.cancel();
+        }
+        let cleared = state.download_source_registry.release_file(hash);
+        for endpoint in cleared {
+            state.active_download_peer_endpoints.remove(&endpoint);
+        }
+        state.active_download_attempts.remove(hash);
+        state.download_cancels.remove(hash);
+    }
+
     async fn register_download_source_candidates(
         &self,
         transfer: &Transfer,
@@ -3285,18 +3392,32 @@ impl EmulebbCore {
         let hash = transfer.hash.clone();
         // WHY: REST resume returns before the peer transfer finishes, so repeated
         // resume requests must not start duplicate writers for the same part file.
-        let guard = {
+        let (guard, cancel) = {
             let mut state = core.state.lock().await;
             if !state.active_download_attempts.insert(hash.clone()) {
                 return;
             }
-            DownloadAttemptGuard {
-                core: core.clone(),
-                hash: hash.clone(),
-            }
+            // Install a fresh per-hash cancel token for this attempt; the loop
+            // checks it each round and delete/pause/stop/recheck signal it to stop
+            // the attempt promptly. The guard removes it on exit (only when its
+            // generation id still matches, so a recreate's token is not clobbered).
+            let cancel = CancellationToken::new();
+            let cancel_id = state.next_download_cancel_id;
+            state.next_download_cancel_id = state.next_download_cancel_id.wrapping_add(1);
+            state
+                .download_cancels
+                .insert(hash.clone(), (cancel_id, cancel.clone()));
+            (
+                DownloadAttemptGuard {
+                    core: core.clone(),
+                    hash: hash.clone(),
+                    cancel_id,
+                },
+                cancel,
+            )
         };
 
-        let result = core.run_ed2k_download_attempt(&transfer).await;
+        let result = core.run_ed2k_download_attempt(&transfer, &cancel).await;
         let mut retry_downloading = false;
         match result {
             Ok(Some(next_state)) => {
@@ -7819,6 +7940,172 @@ mod tests {
         assert_eq!(re_deferred, 0);
         core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
             .await;
+    }
+
+    #[tokio::test]
+    async fn run_attempt_stops_immediately_when_pre_cancelled() {
+        // The requery loop checks the per-hash cancel token at the top of each
+        // round (and the function checks it before any work). A pre-cancelled token
+        // makes the attempt a no-op that returns Ok(None) so the queued-attempt
+        // wrapper neither rewrites the transfer state nor re-queues a retry.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let transfer = a4af_test_transfer(
+            &Ed2kHash::from_bytes([0x80; 16]).to_string(),
+            "downloading",
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = core
+            .run_ed2k_download_attempt(&transfer, &cancel)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "a cancelled attempt must return Ok(None) so it neither restates nor retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_transfer_files_cancels_attempt_and_releases_hash_leases() {
+        // Delete must promptly free everything the running attempt holds for the
+        // hash: cancel its in-flight token, release the hash's leases + the
+        // matching active endpoints, and clear the dedup + cancel slots so a
+        // re-create can immediately re-download (it no longer early-returns on a
+        // stale dedup slot or finds the peer deferred by a leaked lease).
+        let runtime_dir = unique_runtime_dir("emulebb-core-delete-cancels-attempt");
+        let transfer_root = runtime_dir.join("transfers");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        // Create paused so no background attempt is queued to race the simulated
+        // running-attempt state we install below.
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(
+                    "ed2k://|file|Cancel.Me.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: Some(true),
+            })
+            .await
+            .unwrap();
+        let hash = transfer.hash.clone();
+        let source = direct_test_source(
+            hash.parse().unwrap(),
+            Ipv4Addr::new(192, 0, 2, 60),
+            41030,
+        );
+        let endpoint = source_endpoint_key(&source);
+
+        // Simulate a running attempt for this hash: a registered + leased source
+        // (active endpoint), the dedup slot, and an installed cancel token.
+        let cancel = CancellationToken::new();
+        {
+            let mut state = core.state.lock().await;
+            state
+                .download_source_registry
+                .add_candidate(Instant::now(), DownloadSourceCandidate {
+                    file_hash: hash.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 0,
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                });
+            assert!(
+                state
+                    .download_source_registry
+                    .lease_best_for_file(&source, &hash)
+                    .is_some()
+            );
+            state.active_download_peer_endpoints.insert(endpoint);
+            state.active_download_attempts.insert(hash.clone());
+            state
+                .download_cancels
+                .insert(hash.clone(), (0, cancel.clone()));
+        }
+
+        let deleted = core
+            .delete_transfer_files(&hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.hash, hash);
+
+        // The in-flight attempt is signalled to stop.
+        assert!(
+            cancel.is_cancelled(),
+            "delete must cancel the in-flight attempt for the hash"
+        );
+        let state = core.state.lock().await;
+        assert_eq!(
+            state.download_source_registry.leased_peer_count(),
+            0,
+            "delete must release the hash's leases"
+        );
+        assert_eq!(
+            state.download_source_registry.candidate_count_for_file(Instant::now(), &hash),
+            0,
+            "delete must forget the hash's source candidates"
+        );
+        assert!(
+            !state.active_download_peer_endpoints.contains(&endpoint),
+            "delete must drop the matching active download endpoint"
+        );
+        assert!(
+            !state.active_download_attempts.contains(&hash),
+            "delete must clear the dedup slot so a re-create can re-download"
+        );
+        assert!(
+            !state.download_cancels.contains_key(&hash),
+            "delete must clear the cancel slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_transfer_cancels_in_flight_attempt() {
+        // Pause must stop the transfer now: the driver does not read control_state
+        // mid-attempt, so pause cancels the in-flight attempt's token (the loop
+        // then stops at its next cancel check) rather than only suppressing the
+        // next retry.
+        let runtime_dir = unique_runtime_dir("emulebb-core-pause-cancels-attempt");
+        let transfer_root = runtime_dir.join("transfers");
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+        // Create paused so no background attempt is queued to race our manually
+        // installed token (the attempt's own token would otherwise overwrite it).
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(
+                    "ed2k://|file|Pause.Me.bin|4096|00112233445566778899aabbccddeeff|/"
+                        .to_string(),
+                ),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: Some(true),
+            })
+            .await
+            .unwrap();
+        let hash = transfer.hash.clone();
+
+        // Simulate a running attempt's cancel token for this hash.
+        let cancel = CancellationToken::new();
+        core.state
+            .lock()
+            .await
+            .download_cancels
+            .insert(hash.clone(), (0, cancel.clone()));
+
+        let paused = core.pause_transfer(&hash).await.unwrap().unwrap();
+        assert_eq!(paused.state, "paused");
+        assert!(
+            cancel.is_cancelled(),
+            "pause must cancel the in-flight attempt so it stops now, not at next retry"
+        );
     }
 
     fn a4af_test_transfer(hash: &str, state_name: &str) -> Transfer {
