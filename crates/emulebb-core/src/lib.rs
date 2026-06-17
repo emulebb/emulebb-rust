@@ -2214,7 +2214,30 @@ impl EmulebbCore {
             !matches!(current.state.as_str(), "hashing" | "completing"),
             "transfer is already being hashed or completed"
         );
-        Ok(Some(()))
+        // Mark hashing while the on-disk parts are re-verified (oracle forces a
+        // full part re-hash on recheck; CPartFile::HashSinglePart per part).
+        self.set_transfer_state(hash, "hashing").await;
+        // Drive the real re-verification: re-read every part from disk and
+        // MD4-check it against the hashset, rewriting piece states + verified
+        // ranges + the completed flag (and demoting any corrupted part to Missing
+        // so it is re-downloaded). The piece store owns the manifest lock + IO.
+        let recheck = self.ed2k_transfers.recheck_transfer(hash).await;
+        // Re-derive the public transfer state from the freshly-rewritten manifest
+        // (completed -> "completed"; otherwise downloading/queued), regardless of
+        // success, so the transfer never gets stuck in "hashing".
+        let refreshed = self.refresh_transfer_from_manifest_default(hash).await;
+        recheck?;
+        match refreshed? {
+            Some(transfer) => {
+                // If the recheck found corruption (now not complete but with
+                // progress), re-engage the download so the demoted parts refetch.
+                if transfer.state == "downloading" {
+                    self.queue_ed2k_download_attempt(transfer);
+                }
+                Ok(Some(()))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn preview_transfer(&self, hash: &str) -> Result<Option<Transfer>> {

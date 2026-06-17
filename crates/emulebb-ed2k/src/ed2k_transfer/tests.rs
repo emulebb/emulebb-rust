@@ -225,6 +225,71 @@ async fn ensure_job_tracks_verified_parts_via_md4_hashset() {
 }
 
 #[tokio::test]
+async fn recheck_transfer_detects_corruption_and_marks_part_for_redownload() {
+    // A complete 2-part file: recheck re-verifies both parts against the MD4
+    // hashset. Corrupting part 1 on disk must demote it to Missing (0 bytes) so
+    // it is re-downloaded, and the file must no longer be reported complete; the
+    // intact part 0 stays Verified.
+    use std::io::{Seek, SeekFrom, Write};
+    let root = unique_test_dir("ed2k-transfer-recheck");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let first_piece = vec![7u8; ED2K_PART_SIZE as usize];
+    let last_piece = [8u8; 11];
+    let first_piece_hash: [u8; 16] = Md4::digest(&first_piece).into();
+    let last_piece_hash: [u8; 16] = Md4::digest(last_piece).into();
+    let mut file_hasher = Md4::new();
+    file_hasher.update(first_piece_hash);
+    file_hasher.update(last_piece_hash);
+    let file_hash = Ed2kHash::from_bytes(file_hasher.finalize().into());
+    let job = new_transfer_job(file_hash, "recheck.iso".to_string(), ED2K_PART_SIZE + 11);
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, vec![first_piece_hash, last_piece_hash])
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 0, &first_piece)
+        .await
+        .unwrap();
+    runtime
+        .store_piece_data(&job.file_hash, 1, &last_piece)
+        .await
+        .unwrap();
+    let complete = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(complete.completed);
+
+    // A recheck of the intact file leaves it complete (both parts re-verify).
+    assert!(runtime.recheck_transfer(&job.file_hash).await.unwrap());
+    let after_clean = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(after_clean.completed);
+
+    // Corrupt the on-disk bytes of part 1 (the trailing short part).
+    let payload_path = runtime.payload_path(&job.file_hash);
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&payload_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(ED2K_PART_SIZE)).unwrap();
+        file.write_all(&[0xFFu8; 11]).unwrap();
+        file.flush().unwrap();
+    }
+
+    // Recheck must now detect the corruption: not complete, part 1 demoted to
+    // Missing (re-download), part 0 still Verified.
+    assert!(!runtime.recheck_transfer(&job.file_hash).await.unwrap());
+    let after = runtime.manifest(&job.file_hash).await.unwrap();
+    assert!(!after.completed);
+    assert_eq!(after.pieces[0].state, Ed2kTransferState::Verified);
+    assert_eq!(after.pieces[1].state, Ed2kTransferState::Missing);
+    assert_eq!(after.pieces[1].bytes_written, 0);
+    // The verified range now covers only part 0.
+    assert_eq!(after.verified_ranges.len(), 1);
+    assert_eq!(after.verified_ranges[0].start, 0);
+    assert_eq!(after.verified_ranges[0].end, ED2K_PART_SIZE);
+}
+
+#[tokio::test]
 async fn partfile_serves_complete_parts_while_downloading() {
     // A two-part download: part 0 verified, part 1 still missing. eMule serves a
     // partfile's complete parts ("share while downloading"): the part-status

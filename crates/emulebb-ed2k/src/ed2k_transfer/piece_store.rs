@@ -118,6 +118,86 @@ impl Ed2kTransferRuntime {
         Ok(changed)
     }
 
+    /// Re-verify every on-disk part of a transfer against the MD4 hashset and
+    /// rewrite the piece states + verified ranges + completed flag accordingly
+    /// (oracle `CPartFile::HashSinglePart` over the whole file, the forced re-hash
+    /// behind the GUI "recheck" action). A part whose on-disk bytes no longer
+    /// MD4-match (or is short / unreadable) is demoted to `Missing` (0 bytes
+    /// written) so the normal download path re-fetches it; a part that re-verifies
+    /// is marked `Verified`. Requires the MD4 hashset to be known (it is the only
+    /// re-verification authority) — without it there is nothing to check against,
+    /// so the manifest is returned unchanged. Returns the recomputed `completed`
+    /// flag (true == still a complete, fully verified file).
+    pub async fn recheck_transfer(&self, file_hash: &str) -> Result<bool> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        if !manifest.md4_hashset_acquired {
+            // No hashset to verify against: a recheck cannot reclassify anything.
+            return Ok(manifest.completed);
+        }
+        let piece_size = manifest.piece_size;
+        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        // Open read-only; a missing payload means every part is gone (Missing).
+        let mut file = match tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&payload_path)
+            .await
+        {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to open piece store {}", payload_path.display())
+                });
+            }
+        };
+        let piece_indices: Vec<u32> = manifest.pieces.iter().map(|p| p.piece_index).collect();
+        for piece_index in piece_indices {
+            let piece_start = u64::from(piece_index) * piece_size;
+            let expected_piece_len =
+                expected_piece_length(manifest.file_size, piece_size, u64::from(piece_index));
+            // Re-read the part's on-disk bytes and MD4-verify them. Any read short
+            // of the expected length (truncated / corrupted file) fails the part.
+            let verified = if let Some(file) = file.as_mut() {
+                let mut piece_bytes = vec![0u8; usize::try_from(expected_piece_len).unwrap_or(0)];
+                let read_ok = file
+                    .seek(std::io::SeekFrom::Start(piece_start))
+                    .await
+                    .is_ok()
+                    && file.read_exact(&mut piece_bytes).await.is_ok();
+                read_ok && verify_piece_against_manifest(&manifest, piece_index, &piece_bytes)?
+            } else {
+                false
+            };
+            let piece = manifest
+                .pieces
+                .iter_mut()
+                .find(|piece| piece.piece_index == piece_index)
+                .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
+            if verified {
+                piece.bytes_written = expected_piece_len;
+                piece.state = Ed2kTransferState::Verified;
+            } else {
+                // Demote a part that no longer verifies so it is re-downloaded.
+                piece.bytes_written = 0;
+                piece.state = Ed2kTransferState::Missing;
+                piece.block_bitmap = None;
+            }
+        }
+        rebuild_verified_ranges(&mut manifest);
+        manifest.completed = manifest.is_fully_verified();
+        if manifest.completed {
+            refresh_completed_manifest_aich_hashset(
+                &self.transfer_dir(manifest.file_hash.as_str()),
+                &mut manifest,
+            )?;
+        }
+        self.upsert_verified_catalog_entry(&manifest).await;
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest.completed)
+    }
+
     /// Persist one downloaded piece into the local piece store.
     #[allow(dead_code)]
     pub async fn store_piece_data(
