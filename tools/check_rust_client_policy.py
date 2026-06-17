@@ -20,6 +20,7 @@ def main() -> int:
     omissions = read_toml(OMISSIONS_PATH)
     errors: list[str] = []
     errors.extend(check_omission_registry(policy, omissions))
+    errors.extend(check_review_reporting(policy, omissions))
     errors.extend(check_rust_file_sizes(policy))
     errors.extend(check_ipv4_only(policy))
     if errors:
@@ -71,6 +72,19 @@ def check_omission_registry(policy: dict, omissions: dict) -> list[str]:
             seen_ids.add(entry_id)
     if not seen_ids:
         errors.append("omission registry must contain at least one entry")
+    return errors
+
+
+def check_review_reporting(policy: dict, omissions: dict) -> list[str]:
+    reporting = policy.get("review_reporting", {})
+    excluded = set(reporting.get("excluded_surface_ids", []))
+    omission_ids = {entry.get("id") for entry in omissions.get("omissions", []) if entry.get("id")}
+    errors = []
+    missing = sorted(excluded.difference(omission_ids))
+    for entry_id in missing:
+        errors.append(f"review_reporting excluded surface is not in omission registry: {entry_id}")
+    if reporting.get("intentional_omissions_are_not_gaps") and not excluded:
+        errors.append("review_reporting excludes no surfaces while intentional omissions are not gaps")
     return errors
 
 

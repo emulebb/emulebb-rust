@@ -18,6 +18,27 @@ address_family = "ipv4-only"
 compatibility = "stock-compatible implemented surface"
 omission_registry = "policy/rust-client-omissions.toml"
 
+[review_reporting]
+# Intentional omissions are already product decisions, not open parity gaps.
+# Reviews must not report these surfaces again unless the implementation starts
+# advertising or partially implementing one of them.
+intentional_omissions_are_not_gaps = true
+excluded_surface_ids = [
+    "sx1-live-source-exchange",
+    "conn-rate-rolling-five-second-window",
+    "conn-rate-spike-modifier",
+    "upload-throttle-focus-slot-distribution",
+    "ipv6-ed2k-kad",
+    "legacy-html-webserver",
+    "peer-chat-messaging",
+    "ed2k-preview",
+    "pref-auto-connect",
+    "pref-safe-server-connect",
+    "pref-new-auto-up",
+    "pref-new-auto-down",
+    "pref-download-auto-broadband-io",
+]
+
 # Windows long-path (>260 char) support is SCOPED to operator-facing content
 # paths only (the operator rule, also recorded in AGENTS.md). See the
 # `emulebb_ed2k::long_path` module doc for the authoritative mechanism notes.
