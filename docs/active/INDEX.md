@@ -71,6 +71,7 @@ items.
 | [RUST-BUG-057](items/RUST-BUG-057.md) | Major | DONE | Match MFC connected-server keyword search timeout |
 | [RUST-BUG-058](items/RUST-BUG-058.md) | Major | DONE | Decode ED2K UDP search-result entries without TCP count prefix |
 | [RUST-BUG-059](items/RUST-BUG-059.md) | Major | DONE | Collect multiple ED2K UDP keyword replies per server |
+| [RUST-BUG-060](items/RUST-BUG-060.md) | Major | DONE | Accept ED2K UDP search replies from any requested server |
 
 ## Refactors (`REF`)
 

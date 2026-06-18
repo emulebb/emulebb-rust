@@ -83,6 +83,7 @@ pub async fn search_keyword_udp_servers(
     let socket = bind_server_udp_socket(bind_ip).await?;
     let mut results = Vec::new();
     let mut last_error = None;
+    let mut queried_servers = Vec::new();
     let per_server_timeout = Duration::from_millis(750);
     let overall_deadline = TokioInstant::now() + timeout.max(per_server_timeout);
 
@@ -130,6 +131,7 @@ pub async fn search_keyword_udp_servers(
             last_error = Some(error);
             continue;
         }
+        queried_servers.push(resolved_server.clone());
 
         let per_server_deadline = TokioInstant::now() + overall_remaining.min(per_server_timeout);
         loop {
@@ -147,9 +149,11 @@ pub async fn search_keyword_udp_servers(
                 .await
             {
                 Ok(Ok(Some(packet))) => {
-                    if packet.from.ip() != IpAddr::V4(resolved_server.ip) {
+                    let Some(response_server) =
+                        queried_udp_response_server(&queried_servers, packet.from)
+                    else {
                         continue;
-                    }
+                    };
                     if packet.opcode != OP_GLOBSEARCHRES {
                         continue;
                     }
@@ -160,7 +164,7 @@ pub async fn search_keyword_udp_servers(
                             // drops malformed datagrams and continues the global server walk.
                             warn!(
                                 "discarding malformed ED2K UDP keyword-search response endpoint={}: {error}",
-                                resolved_server.base_endpoint()
+                                response_server.base_endpoint()
                             );
                             continue;
                         }
@@ -185,6 +189,18 @@ pub async fn search_keyword_udp_servers(
         return Err(error);
     }
     Ok(results)
+}
+
+fn queried_udp_response_server(
+    queried_servers: &[ResolvedServerEntry],
+    response_endpoint: SocketAddr,
+) -> Option<&ResolvedServerEntry> {
+    // WHY: eMuleBB MFC accepts UDP search answers from any server IP that was
+    // requested for the active search, even after the timer has advanced to the
+    // next server. Do not tie valid late datagrams to only the current wait slot.
+    queried_servers
+        .iter()
+        .find(|server| response_endpoint.ip() == IpAddr::V4(server.ip))
 }
 
 /// Executes a one-shot ED2K keyword search against the configured servers.
@@ -432,4 +448,51 @@ async fn search_keyword_on_server(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
+    use super::queried_udp_response_server;
+
+    fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
+        ResolvedServerEntry {
+            entry: ConfiguredServerEntry {
+                host: ip.to_string(),
+                port,
+                name: None,
+                description: None,
+                udp_flags: 0,
+                udp_key: 0,
+                udp_key_ip: 0,
+                obfuscation_port_tcp: 0,
+                obfuscation_port_udp: 0,
+            },
+            ip,
+        }
+    }
+
+    #[test]
+    fn udp_keyword_search_accepts_replies_from_any_queried_server_ip() {
+        let first = resolved(Ipv4Addr::new(192, 0, 2, 10), 4661);
+        let second = resolved(Ipv4Addr::new(192, 0, 2, 20), 4661);
+        let queried = vec![first, second];
+
+        let matched = queried_udp_response_server(
+            &queried,
+            SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 4665)),
+        )
+        .expect("queried server accepted");
+
+        assert_eq!(matched.ip, Ipv4Addr::new(192, 0, 2, 10));
+        assert!(
+            queried_udp_response_server(
+                &queried,
+                SocketAddr::from((Ipv4Addr::new(198, 51, 100, 10), 4665)),
+            )
+            .is_none()
+        );
+    }
 }
