@@ -106,18 +106,47 @@ pub fn emit(
         keys,
         body,
     };
-    let Ok(line) = serde_json::to_string(&record) else {
+    let Some(line) = encode_record_line(&record) else {
         return;
     };
-    let _ = writeln!(file, "{line}");
+    let _ = file.write_all(&line);
+}
+
+fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
+    let mut line = serde_json::to_vec(record).ok()?;
+    line.push(b'\n');
+    Some(line)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DIAG_EVENT_FILE_PREFIX;
+    use super::{DIAG_EVENT_FILE_PREFIX, DiagEventRecord, encode_record_line};
+    use serde_json::json;
 
     #[test]
     fn diag_event_file_prefix_uses_emulebb_rust_name() {
         assert_eq!(DIAG_EVENT_FILE_PREFIX, "emulebb-rust-diag-");
+    }
+
+    #[test]
+    fn encoded_diag_event_line_is_single_json_record_with_newline() {
+        let record = DiagEventRecord {
+            schema: "diag_event_v1",
+            client: "rust",
+            ts: "2026-06-18T00:00:00.000Z".to_string(),
+            seq: 1,
+            family: "sched",
+            event: "source_dropped",
+            severity: "info",
+            keys: json!({"peer": "192.0.2.10:4662"}),
+            body: json!({"outcome": "dropped"}),
+        };
+
+        let line = encode_record_line(&record).expect("line encoded");
+        assert_eq!(line.last(), Some(&b'\n'));
+        let without_newline = &line[..line.len() - 1];
+        let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
+        assert_eq!(decoded["schema"], "diag_event_v1");
+        assert_eq!(decoded["family"], "sched");
     }
 }

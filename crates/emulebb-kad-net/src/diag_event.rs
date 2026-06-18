@@ -79,11 +79,15 @@ pub fn emit(
         keys,
         body,
     };
+    let Some(line) = encode_record_line(&record) else {
+        warn!("failed to encode diag_event line");
+        return;
+    };
     let Ok(mut guard) = writer.writer.lock() else {
         warn!("failed to lock diag_event writer");
         return;
     };
-    if serde_json::to_writer(&mut *guard, &record).is_err() || guard.write_all(b"\n").is_err() {
+    if guard.write_all(&line).is_err() {
         warn!(
             "failed to write diag_event line to {}",
             writer.path.display()
@@ -91,6 +95,12 @@ pub fn emit(
         return;
     }
     let _ = guard.flush();
+}
+
+fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
+    let mut line = serde_json::to_vec(record).ok()?;
+    line.push(b'\n');
+    Some(line)
 }
 
 /// `family:"kad_event"` `bootstrap` milestone `bootstrap_contact_added`
@@ -186,11 +196,37 @@ fn read_env_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DIAG_EVENT_FILE_PREFIX, bad_peer_kad_drop, kad_event_bootstrap_contact_added};
+    use super::{
+        DIAG_EVENT_FILE_PREFIX, DiagEventRecord, bad_peer_kad_drop, encode_record_line,
+        kad_event_bootstrap_contact_added,
+    };
+    use serde_json::json;
 
     #[test]
     fn diag_event_file_prefix_uses_emulebb_rust_name() {
         assert_eq!(DIAG_EVENT_FILE_PREFIX, "emulebb-rust-diag-");
+    }
+
+    #[test]
+    fn encoded_diag_event_line_is_single_json_record_with_newline() {
+        let record = DiagEventRecord {
+            schema: "diag_event_v1",
+            client: "rust",
+            ts: "2026-06-18T00:00:00.000Z".to_string(),
+            seq: 1,
+            family: "kad_udp",
+            event: "packet",
+            severity: "info",
+            keys: json!({"peer": "192.0.2.20:4672"}),
+            body: json!({"direction": "recv"}),
+        };
+
+        let line = encode_record_line(&record).expect("line encoded");
+        assert_eq!(line.last(), Some(&b'\n'));
+        let without_newline = &line[..line.len() - 1];
+        let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
+        assert_eq!(decoded["schema"], "diag_event_v1");
+        assert_eq!(decoded["family"], "kad_udp");
     }
 
     #[test]
