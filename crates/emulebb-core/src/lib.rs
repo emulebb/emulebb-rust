@@ -208,6 +208,7 @@ const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
+const ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS: u64 = 50;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
 const KAD_REQ_MAX_TYPE: u8 = 2;
@@ -2650,7 +2651,7 @@ impl EmulebbCore {
         // public-server traffic and repeats the source-search storm pattern.
         if let Some(handle) = self.connected_ed2k_search_handle().await {
             let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
-            let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
+            let timeout = connected_server_keyword_search_timeout(&config);
             let mut files = Vec::new();
             match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
                 .await
@@ -5700,6 +5701,16 @@ fn rust_test_tmp_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("emulebb-rust-tests"))
 }
 
+fn connected_server_keyword_search_timeout(config: &Ed2kConfig) -> Duration {
+    // WHY: eMuleBB MFC arms `TimerServerTimeout` for 50 seconds before a silent
+    // connected server search falls through to the global UDP walk.
+    Duration::from_secs(
+        config
+            .connect_timeout_secs
+            .max(ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use emulebb_ed2k::{NatConfig, ipfilter::IpFilter};
@@ -5707,6 +5718,25 @@ mod tests {
     use emulebb_kad_proto::{NodeId, Tag, TagValue};
 
     use super::*;
+
+    #[test]
+    fn connected_server_keyword_search_timeout_matches_mfc_floor() {
+        let mut config = Ed2kConfig {
+            connect_timeout_secs: 1,
+            ..Ed2kConfig::default()
+        };
+
+        assert_eq!(
+            connected_server_keyword_search_timeout(&config),
+            Duration::from_secs(ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS)
+        );
+
+        config.connect_timeout_secs = 75;
+        assert_eq!(
+            connected_server_keyword_search_timeout(&config),
+            Duration::from_secs(75)
+        );
+    }
 
     fn test_network_config_with_store(
         transfer_root: &Path,
