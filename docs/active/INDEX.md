@@ -65,6 +65,7 @@ items.
 | [RUST-BUG-051](items/RUST-BUG-051.md) | Major | DONE | Route public searches through the selected ED2K or Kad network |
 | [RUST-BUG-052](items/RUST-BUG-052.md) | Major | DONE | Persist transfer category assignments across restart |
 | [RUST-BUG-053](items/RUST-BUG-053.md) | Major | DONE | Reindex transfer categories after category deletion |
+| [RUST-BUG-054](items/RUST-BUG-054.md) | Major | DONE | Delay server endpoint advertisement until ED2K login is accepted |
 
 ## Refactors (`REF`)
 
