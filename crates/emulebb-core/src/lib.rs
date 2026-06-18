@@ -26,12 +26,12 @@ use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions,
-        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kSourceSearchOptions,
-        Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session,
-        request_callback_on_server, request_callback_via_background_session, run_ed2k_server_loop,
-        search_keyword_servers, search_keyword_via_background_session, search_source_servers,
-        search_source_udp_servers, search_source_via_background_session,
+        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpSourceSearchOptions,
+        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
+        publish_shared_catalog_via_background_session, request_callback_on_server,
+        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
+        search_keyword_via_background_session, search_source_udp_servers,
+        search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -116,11 +116,11 @@ use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
     drop_self_sources, ed2k_keyword_server_attempts, ed2k_server_callback_route,
-    found_source_from_hint, hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source,
-    keyword_target, manifest_has_ed2k_transfer_progress, merge_download_sources,
-    new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
-    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_exclude_background_source_endpoint, should_query_kad_source_supplement,
+    found_source_from_hint, global_udp_source_search_excluded_endpoint,
+    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
+    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
+    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
+    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
     should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
@@ -3514,8 +3514,6 @@ impl EmulebbCore {
         file_size: u64,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
-        let shared_catalog = self.ed2k_transfers.shared_catalog();
-        let shared_catalog_snapshot = shared_catalog.read().await.clone();
         let attempts = configured_server_attempts(&network.config)
             .min(network.config.source_server_attempt_budget.max(1));
         let mut sources = Vec::new();
@@ -3540,44 +3538,20 @@ impl EmulebbCore {
                 ),
             }
         }
-        let exclude_preferred_endpoint =
-            should_exclude_background_source_endpoint(has_background_search, sources.len());
-        let excluded_endpoint = if exclude_preferred_endpoint {
-            preferred_endpoint
-        } else {
-            None
-        };
-        if exclude_preferred_endpoint && attempts <= 1 {
-            // The connected background session already queried the only server in budget.
-            self.remember_ed2k_sources(file_hash, &sources).await?;
-            return Ok(sources);
-        }
-        match search_source_servers(Ed2kSourceSearchOptions {
-            bind_ip: network.bind_ip,
-            config: &network.config,
-            hello_identity: self.ed2k_hello_identity(network),
-            shared_catalog: &shared_catalog_snapshot,
-            preferred_endpoint,
-            excluded_endpoint,
-            max_attempts: attempts,
-            file_hash,
-            file_size,
-            cancel: &cancel,
-        })
-        .await
-        {
-            Ok(results) => merge_download_sources(&mut sources, results),
-            Err(error) => tracing::warn!(
-                "ED2K TCP source search failed file_hash={} error={error}",
-                file_hash
-            ),
-        }
-        if sources.is_empty() {
+        // Stock eMule obtains server sources through the connected server TCP
+        // session and global UDP walks. Do not open fresh TCP server login
+        // sessions for ordinary source refreshes: live packet captures showed
+        // hundreds of OP_LOGINREQUEST attempts and server closes before
+        // OP_IDCHANGE, which is both non-stock and hostile to public servers.
+        if has_background_search && sources.is_empty() {
             match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &network.config,
                 preferred_endpoint,
-                excluded_endpoint: None,
+                excluded_endpoint: global_udp_source_search_excluded_endpoint(
+                    has_background_search,
+                    preferred_endpoint,
+                ),
                 max_attempts: attempts,
                 file_hash,
                 file_size,
@@ -8342,10 +8316,18 @@ mod tests {
     }
 
     #[test]
-    fn zero_source_background_lookup_keeps_connected_server_eligible() {
-        assert!(!should_exclude_background_source_endpoint(false, 0));
-        assert!(!should_exclude_background_source_endpoint(true, 0));
-        assert!(should_exclude_background_source_endpoint(true, 1));
+    fn global_udp_source_search_skips_connected_server_only_when_background_is_available() {
+        let connected_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
+
+        assert_eq!(
+            global_udp_source_search_excluded_endpoint(false, Some(connected_server)),
+            None
+        );
+        assert_eq!(global_udp_source_search_excluded_endpoint(true, None), None);
+        assert_eq!(
+            global_udp_source_search_excluded_endpoint(true, Some(connected_server)),
+            Some(connected_server)
+        );
     }
 
     #[test]

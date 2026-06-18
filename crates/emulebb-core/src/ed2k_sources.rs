@@ -279,11 +279,16 @@ pub(crate) fn should_skip_no_progress_source_requery(
         && completed_source_requery_rounds != 0
 }
 
-pub(crate) fn should_exclude_background_source_endpoint(
+pub(crate) fn global_udp_source_search_excluded_endpoint(
     has_background_search: bool,
-    aggregated_source_count: usize,
-) -> bool {
-    has_background_search && aggregated_source_count != 0
+    connected_endpoint: Option<SocketAddr>,
+) -> Option<SocketAddr> {
+    // WHY: eMule queries the connected server over its long-lived TCP session and
+    // skips it during global UDP source walks. Querying it again over UDP wastes
+    // scarce live-server budget and drifts from the stock source-search cadence.
+    has_background_search
+        .then_some(connected_endpoint)
+        .flatten()
 }
 
 pub(crate) fn should_adopt_hash_only_metadata_name(transfer: &Transfer) -> bool {
