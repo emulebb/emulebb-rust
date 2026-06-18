@@ -81,6 +81,14 @@ fn register_command_respects_initial_reask_delay() {
 }
 
 #[test]
+fn udp_reask_sent_body_matches_mfc_diag_shape() {
+    assert_eq!(
+        udp_reask_sent_body(),
+        serde_json::json!({ "outcome": "sent", "transport": "udp", "reaskCount": 1 })
+    );
+}
+
+#[test]
 fn remove_command_for_unknown_endpoint_releases_no_lease() {
     let mut svc = service();
     let (events, mut rx) = reask_event_channel();

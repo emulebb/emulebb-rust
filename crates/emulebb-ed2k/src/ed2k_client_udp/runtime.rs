@@ -296,6 +296,10 @@ fn is_filtered_reask_source(from: SocketAddr, ip_filter: &IpFilter) -> bool {
     }
 }
 
+fn udp_reask_sent_body() -> serde_json::Value {
+    serde_json::json!({ "outcome": "sent", "transport": "udp", "reaskCount": 1 })
+}
+
 /// Route one inbound datagram through the service and act on the outcome.
 #[allow(clippy::too_many_arguments)]
 async fn handle_inbound_datagram(
@@ -509,7 +513,7 @@ async fn drive_reask_tick(
                     "reask_sent",
                     "info",
                     serde_json::json!({ "peer": addr.to_string() }),
-                    serde_json::json!({ "outcome": "sent", "transport": "udp" }),
+                    udp_reask_sent_body(),
                 );
             }
             Err(err) => trace!("ed2k udp reask: send to {addr} failed: {err}"),
