@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-067
 title: Reuse remembered ED2K sources alongside fresh lookups
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -33,7 +33,7 @@ lookup must not hide older direct endpoints that remain valid candidates.
       source merge.
 - [x] Focused unit coverage proves remembered endpoints are retained alongside a
       non-empty fresh source set.
-- [ ] The next hide.me live-wire run shows the direct attempt path can reuse
+- [x] The next hide.me live-wire run shows the direct attempt path can reuse
       durable remembered endpoints across retry attempts.
 
 ## Implementation Notes
@@ -47,3 +47,15 @@ lookup must not hide older direct endpoints that remain valid candidates.
 ## Evidence
 
 - `cargo test -p emulebb-core remembered_sources_are_merged_with_non_empty_fresh_sources --locked`
+- `python tools\rust_quality_gate.py quick`
+- Diagnostics build
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\logs\builds\20260618T184021Z-build-clients\build-result.json`:
+  Release diagnostics build passed with zero warnings.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T184108Z\report.json`:
+  VPN-bound HighID run started 16 downloads, completed 2 files, reached 21 peak
+  reported sources from 16 initial sources, captured packet diagnostics, and
+  made 24 direct peer attempts. This is the follow-up pass after
+  `RUST-BUG-067` increased direct peer attempts from 3 in
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T175809Z` to 16
+  in `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T182219Z`.
