@@ -26,11 +26,11 @@ use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session,
-        request_callback_via_background_session, run_ed2k_server_loop,
-        search_keyword_via_background_session, search_source_udp_servers,
-        search_source_via_background_session,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel,
+        new_ed2k_server_search_channel, parse_server_met,
+        publish_shared_catalog_via_background_session, request_callback_via_background_session,
+        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
+        search_source_udp_servers, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -2653,28 +2653,54 @@ impl EmulebbCore {
         // server connection; opening ad-hoc TCP logins here creates non-stock
         // public-server traffic and repeats the source-search storm pattern.
         if let Some(handle) = self.connected_ed2k_search_handle().await {
+            let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
             let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
+            let mut files = Vec::new();
             match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
                 .await
             {
-                Ok(files) if !files.is_empty() => {
-                    return Ok(Some(
-                        files
-                            .into_iter()
-                            .map(|file| search_result_from_ed2k(search_id, request, file))
-                            .collect(),
-                    ));
+                Ok(background_files) => {
+                    if background_files.is_empty() {
+                        tracing::warn!(
+                            "ED2K background keyword search returned no results query={:?}",
+                            request.query
+                        );
+                    } else {
+                        files.extend(background_files);
+                    }
                 }
-                Ok(_) => tracing::warn!(
-                    "ED2K background keyword search returned no results query={:?}",
-                    request.query
-                ),
                 Err(error) => tracing::warn!(
                     "ED2K background keyword search failed query={:?} error={error}",
                     request.query
                 ),
             }
-            return Ok(Some(Vec::new()));
+            if should_run_ed2k_global_keyword_search(&request.method) {
+                match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
+                    bind_ip: network.bind_ip,
+                    config: &config,
+                    excluded_endpoint: connected_server_endpoint,
+                    max_attempts: configured_server_attempts(&config),
+                    query: &request.query,
+                    timeout,
+                    cancel: &cancel,
+                })
+                .await
+                {
+                    Ok(global_files) => files.extend(global_files),
+                    Err(error) => tracing::warn!(
+                        "ED2K global UDP keyword search failed query={:?} error={error}",
+                        request.query
+                    ),
+                }
+            }
+            let mut seen_hashes = HashSet::new();
+            return Ok(Some(
+                files
+                    .into_iter()
+                    .filter(|file| seen_hashes.insert(file.file_hash))
+                    .map(|file| search_result_from_ed2k(search_id, request, file))
+                    .collect(),
+            ));
         }
         Ok(None)
     }
@@ -3821,6 +3847,13 @@ impl fmt::Debug for EmulebbCore {
             )
             .finish_non_exhaustive()
     }
+}
+
+fn should_run_ed2k_global_keyword_search(method: &str) -> bool {
+    matches!(
+        method.trim().to_ascii_lowercase().as_str(),
+        "" | "automatic" | "global"
+    )
 }
 
 async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
@@ -8270,6 +8303,16 @@ mod tests {
             global_udp_source_search_excluded_endpoint(true, Some(connected_server)),
             Some(connected_server)
         );
+    }
+
+    #[test]
+    fn ed2k_global_keyword_search_runs_for_automatic_and_global_methods() {
+        assert!(should_run_ed2k_global_keyword_search(""));
+        assert!(should_run_ed2k_global_keyword_search("automatic"));
+        assert!(should_run_ed2k_global_keyword_search(" global "));
+        assert!(should_run_ed2k_global_keyword_search("GLOBAL"));
+        assert!(!should_run_ed2k_global_keyword_search("server"));
+        assert!(!should_run_ed2k_global_keyword_search("kad"));
     }
 
     #[test]

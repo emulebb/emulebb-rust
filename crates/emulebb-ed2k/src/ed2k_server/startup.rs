@@ -19,18 +19,20 @@ use super::tag_codec::{
     push_short_string_tag, push_short_u8_tag, push_short_u32_tag, push_string_tag, push_u32_tag,
 };
 use super::{
-    CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_VERSION, ED2K_FILETYPE_ARCHIVE,
-    ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_PROGRAM, ED2K_FILETYPE_VIDEO,
-    EDONKEY_VERSION, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME,
-    FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, HELLO_NICKNAME,
+    CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
+    ED2K_FILETYPE_ARCHIVE, ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_PROGRAM,
+    ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR,
+    EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, HELLO_NICKNAME,
     OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
     OFFER_FILE_SAMPLE_HASH, OFFER_FILE_SAMPLE_NAME, OFFER_FILE_SAMPLE_SIZE,
     OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU,
-    OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_OFFERFILES, ResolvedServerEntry,
-    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_EXT_GETSOURCES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES2, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
-    SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession,
-    ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
+    OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
+    OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION,
+    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
+    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
+    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
+    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
+    is_low_id,
 };
 
 pub(super) fn encode_login_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
@@ -146,6 +148,29 @@ pub(super) fn encode_udp_source_request(
         let _supports_legacy_getsources =
             server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES != 0;
         (OP_GLOBGETSOURCES, file_hash.0.to_vec())
+    }
+}
+
+pub(super) fn encode_udp_search_request(
+    server: &ResolvedServerEntry,
+    search_payload: &[u8],
+) -> (u8, Vec<u8>) {
+    if server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETFILES != 0
+        && server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES != 0
+    {
+        let mut payload = Vec::with_capacity(search_payload.len() + 11);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        push_u32_tag(
+            &mut payload,
+            CT_SERVER_UDPSEARCH_FLAGS,
+            SRVCAP_UDP_NEWTAGS_LARGEFILES,
+        );
+        payload.extend_from_slice(search_payload);
+        (OP_GLOBSEARCHREQ3, payload)
+    } else if server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETFILES != 0 {
+        (OP_GLOBSEARCHREQ2, search_payload.to_vec())
+    } else {
+        (OP_GLOBSEARCHREQ, search_payload.to_vec())
     }
 }
 

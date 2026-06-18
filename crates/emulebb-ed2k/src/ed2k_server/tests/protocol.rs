@@ -10,6 +10,34 @@ fn server_udp_endpoint_uses_obfuscation_port_when_keyed() {
 }
 
 #[test]
+fn udp_keyword_search_request_uses_legacy_opcode_without_extensions() {
+    let server = test_server(0, 0);
+    let (opcode, payload) = encode_udp_search_request(&server, b"abc");
+
+    assert_eq!(opcode, OP_GLOBSEARCHREQ);
+    assert_eq!(payload, b"abc");
+}
+
+#[test]
+fn udp_keyword_search_request_uses_ext_opcode_when_supported() {
+    let server = test_server(0, SERVER_UDP_FLAG_EXT_GETFILES);
+    let (opcode, payload) = encode_udp_search_request(&server, b"abc");
+
+    assert_eq!(opcode, OP_GLOBSEARCHREQ2);
+    assert_eq!(payload, b"abc");
+}
+
+#[test]
+fn udp_keyword_search_request_adds_large_file_flags_when_supported() {
+    let server = test_server(0, SERVER_UDP_FLAG_EXT_GETFILES | SERVER_UDP_FLAG_LARGEFILES);
+    let (opcode, payload) = encode_udp_search_request(&server, b"abc");
+
+    assert_eq!(opcode, OP_GLOBSEARCHREQ3);
+    assert_eq!(&payload[..4], &1u32.to_le_bytes());
+    assert!(payload.ends_with(b"abc"));
+}
+
+#[test]
 fn server_udp_obfuscation_round_trips_plain_payload() {
     let server = test_udp_obfuscated_server();
     let (endpoint, packet) = encode_server_udp_datagram(&server, OP_GLOBGETSOURCES2, b"abc");

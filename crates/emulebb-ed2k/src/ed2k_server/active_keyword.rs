@@ -1,11 +1,11 @@
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result};
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -13,11 +13,13 @@ use crate::{config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2k
 
 use super::packet_handler::decode_id_change_payload;
 use super::{
-    Ed2kSearchFile, Ed2kServerState, OP_IDCHANGE, OP_LOGINREQUEST, OP_QUERY_MORE_RESULT, OP_REJECT,
-    OP_SEARCHREQUEST, OP_SEARCHRESULT, ResolvedServerEntry, ServerSession, ServerSessionPhase,
-    configured_server_entries, decode_search_result_page, encode_login_request, encode_packet,
-    encode_search_request, login_identity_for_server_transport, resolve_server_entry,
-    send_connected_server_startup, should_use_server_obfuscation, wait_for_offer_files_settle,
+    Ed2kSearchFile, Ed2kServerState, OP_GLOBSEARCHRES, OP_IDCHANGE, OP_LOGINREQUEST,
+    OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, ResolvedServerEntry,
+    ServerSession, ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
+    decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
+    encode_search_request, login_identity_for_server_transport, read_server_udp_packet,
+    resolve_server_entry, send_connected_server_startup, send_udp_keyword_search,
+    should_use_server_obfuscation, wait_for_offer_files_settle,
 };
 
 /// Inputs for a one-shot ED2K keyword search across configured servers.
@@ -30,6 +32,149 @@ pub struct Ed2kKeywordSearchOptions<'a> {
     pub max_attempts: usize,
     pub query: &'a str,
     pub cancel: &'a CancellationToken,
+}
+
+/// Inputs for a stock-style global ED2K UDP keyword search.
+pub struct Ed2kUdpKeywordSearchOptions<'a> {
+    pub bind_ip: Ipv4Addr,
+    pub config: &'a Ed2kConfig,
+    pub excluded_endpoint: Option<SocketAddr>,
+    pub max_attempts: usize,
+    pub query: &'a str,
+    pub timeout: Duration,
+    pub cancel: &'a CancellationToken,
+}
+
+/// Executes ED2K global UDP keyword searches across configured servers.
+///
+/// Stock eMule sends the local keyword search through the connected server TCP
+/// session and sends `OP_GLOBSEARCHREQ*` over UDP only to other servers. This
+/// helper implements that global UDP part without opening any extra TCP server
+/// login sessions.
+#[allow(clippy::cognitive_complexity)]
+pub async fn search_keyword_udp_servers(
+    options: Ed2kUdpKeywordSearchOptions<'_>,
+) -> Result<Vec<Ed2kSearchFile>> {
+    let Ed2kUdpKeywordSearchOptions {
+        bind_ip,
+        config,
+        excluded_endpoint,
+        max_attempts,
+        query,
+        timeout,
+        cancel,
+    } = options;
+    let mut configured_servers = configured_server_entries(config)?;
+    if let Some(excluded_endpoint) = excluded_endpoint {
+        configured_servers.retain(|entry| {
+            entry.host != excluded_endpoint.ip().to_string()
+                || entry.port != excluded_endpoint.port()
+        });
+    }
+    if configured_servers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let search_payload = encode_search_request(query)?;
+    if search_payload.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let socket = bind_server_udp_socket(bind_ip).await?;
+    let mut results = Vec::new();
+    let mut last_error = None;
+    let per_server_timeout = Duration::from_millis(750);
+    let overall_deadline = TokioInstant::now() + timeout.max(per_server_timeout);
+
+    for (attempt_index, configured_server) in configured_servers
+        .into_iter()
+        .take(max_attempts.max(1))
+        .enumerate()
+    {
+        if cancel.is_cancelled() {
+            return Ok(Vec::new());
+        }
+        let Some(overall_remaining) = overall_deadline.checked_duration_since(TokioInstant::now())
+        else {
+            break;
+        };
+        if overall_remaining.is_zero() {
+            break;
+        }
+        let resolved_server = match resolve_server_entry(&configured_server).await {
+            Ok(server) => server,
+            Err(error) => {
+                warn!(
+                    "failed to resolve ED2K UDP keyword-search server {} name={}: {error}",
+                    configured_server.base_endpoint_text(),
+                    configured_server.display_name()
+                );
+                last_error = Some(error);
+                continue;
+            }
+        };
+        info!(
+            "ED2K UDP keyword search attempt={}/{} endpoint={} name={}",
+            attempt_index + 1,
+            max_attempts.max(1),
+            resolved_server.base_endpoint(),
+            resolved_server.entry.display_name()
+        );
+        if let Err(error) =
+            send_udp_keyword_search(&socket, &resolved_server, &search_payload).await
+        {
+            warn!(
+                "failed to send ED2K UDP keyword search endpoint={}: {error}",
+                resolved_server.base_endpoint()
+            );
+            last_error = Some(error);
+            continue;
+        }
+
+        let per_server_deadline = TokioInstant::now() + overall_remaining.min(per_server_timeout);
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(Vec::new());
+            }
+            let Some(remaining) = per_server_deadline.checked_duration_since(TokioInstant::now())
+            else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, read_server_udp_packet(&socket, &resolved_server))
+                .await
+            {
+                Ok(Ok(Some(packet))) => {
+                    if packet.from.ip() != IpAddr::V4(resolved_server.ip) {
+                        continue;
+                    }
+                    if packet.opcode != OP_GLOBSEARCHRES {
+                        continue;
+                    }
+                    let pages = decode_udp_search_result_pages(&packet.payload)?;
+                    for page in pages {
+                        results.extend(page.files);
+                    }
+                    break;
+                }
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => {
+                    last_error = Some(error);
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    if results.is_empty()
+        && let Some(error) = last_error
+    {
+        return Err(error);
+    }
+    Ok(results)
 }
 
 /// Executes a one-shot ED2K keyword search against the configured servers.

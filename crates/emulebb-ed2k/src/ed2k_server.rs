@@ -43,7 +43,10 @@ mod types;
 mod udp;
 mod udp_runtime;
 pub use active_callback::{Ed2kCallbackRequestOptions, request_callback_on_server};
-pub use active_keyword::{Ed2kKeywordSearchOptions, search_keyword_servers};
+pub use active_keyword::{
+    Ed2kKeywordSearchOptions, Ed2kUdpKeywordSearchOptions, search_keyword_servers,
+    search_keyword_udp_servers,
+};
 pub use active_source::{
     Ed2kSourceSearchOptions, Ed2kUdpSourceSearchOptions, search_source_servers,
     search_source_udp_servers,
@@ -94,8 +97,8 @@ use source_utils::{
     annotate_found_sources_server, ipv4_from_client_id, merge_found_sources, validate_found_sources,
 };
 use startup::{
-    encode_login_request, encode_source_request, encode_udp_source_request,
-    login_identity_for_server_transport, send_connected_server_startup,
+    encode_login_request, encode_source_request, encode_udp_search_request,
+    encode_udp_source_request, login_identity_for_server_transport, send_connected_server_startup,
     send_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };
 #[cfg(test)]
@@ -108,7 +111,9 @@ pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServ
 #[cfg(test)]
 use udp::derive_server_udp_cipher;
 use udp::{decode_server_udp_datagram, encode_server_udp_datagram, server_udp_endpoint};
-use udp_runtime::{bind_server_udp_socket, read_server_udp_packet, send_udp_source_search};
+use udp_runtime::{
+    bind_server_udp_socket, read_server_udp_packet, send_udp_keyword_search, send_udp_source_search,
+};
 
 const OP_EDONKEYPROT: u8 = 0xE3;
 const OP_EMULEPROT: u8 = 0xC5;
@@ -121,9 +126,12 @@ const OP_GETSOURCES: u8 = 0x19;
 const OP_CALLBACKREQUEST: u8 = 0x1C;
 const OP_GETSOURCES_OBFU: u8 = 0x23;
 const OP_QUERY_MORE_RESULT: u8 = 0x21;
+const OP_GLOBSEARCHREQ3: u8 = 0x90;
+const OP_GLOBSEARCHREQ2: u8 = 0x92;
 const OP_GLOBGETSOURCES2: u8 = 0x94;
 const OP_GLOBSERVSTATREQ: u8 = 0x96;
 const OP_GLOBSERVSTATRES: u8 = 0x97;
+const OP_GLOBSEARCHREQ: u8 = 0x98;
 const OP_GLOBSEARCHRES: u8 = 0x99;
 const OP_GLOBGETSOURCES: u8 = 0x9A;
 const OP_GLOBFOUNDSOURCES: u8 = 0x9B;
