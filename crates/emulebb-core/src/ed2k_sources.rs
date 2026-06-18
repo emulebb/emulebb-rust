@@ -94,6 +94,12 @@ pub(crate) fn configured_server_attempts(config: &Ed2kConfig) -> usize {
         .max(1)
 }
 
+pub(crate) fn global_udp_source_batch_server_attempts(config: &Ed2kConfig) -> usize {
+    // WHY: MFC's UDP source walk uses the server list, not the tiny diagnostic
+    // budget. Batched Rust sends selected packets before waiting for replies.
+    configured_server_attempts(config)
+}
+
 pub(crate) fn exact_ed2k_hash_query_token(query: &str) -> Option<String> {
     let trimmed = query.trim();
     let candidate = trimmed

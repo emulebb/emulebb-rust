@@ -123,13 +123,13 @@ use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
     drop_self_sources, ed2k_server_callback_route, found_source_from_hint,
-    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
-    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
-    merge_download_sources, new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
-    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
-    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    sort_download_sources, source_endpoint_key, source_key,
+    global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
+    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
+    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
+    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
+    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
+    should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
+    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -3398,8 +3398,6 @@ impl EmulebbCore {
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
         let config = self.effective_ed2k_config(&network.config, None).await?;
-        let attempts =
-            configured_server_attempts(&config).min(config.source_server_attempt_budget.max(1));
         let mut sources = Vec::new();
         let (preferred_endpoint, background_search) =
             if let Some(handle) = self.connected_ed2k_search_handle().await {
@@ -3454,7 +3452,7 @@ impl EmulebbCore {
                         has_background_search,
                         preferred_endpoint,
                     ),
-                    max_attempts: attempts,
+                    max_attempts: global_udp_source_batch_server_attempts(&config),
                     targets: &claimed_batch.targets,
                     timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
                     cancel: &cancel,

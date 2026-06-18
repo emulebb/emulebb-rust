@@ -1,9 +1,13 @@
 use std::net::Ipv4Addr;
 
+use emulebb_ed2k::config::Ed2kConfig;
 use emulebb_kad_dht::SourceResult;
 use emulebb_kad_proto::Ed2kHash;
 
-use super::kad_source_result_to_ed2k_found_source;
+use super::{
+    configured_server_attempts, global_udp_source_batch_server_attempts,
+    kad_source_result_to_ed2k_found_source,
+};
 
 fn kad_source(udp_port: u16) -> SourceResult {
     SourceResult {
@@ -31,4 +35,23 @@ fn kad_high_id_source_preserves_nonzero_source_udp_port() {
         kad_source_result_to_ed2k_found_source(kad_source(0)).source_udp_port,
         None
     );
+}
+
+#[test]
+fn global_udp_source_batch_attempts_cover_effective_server_list() {
+    let mut config = Ed2kConfig {
+        source_server_attempt_budget: 1,
+        server_endpoints: vec![
+            "192.0.2.10:4661".to_string(),
+            "192.0.2.20:4661".to_string(),
+            "192.0.2.30:4661".to_string(),
+        ],
+        ..Ed2kConfig::default()
+    };
+
+    assert_eq!(configured_server_attempts(&config), 3);
+    assert_eq!(global_udp_source_batch_server_attempts(&config), 3);
+
+    config.server_endpoints.clear();
+    assert_eq!(global_udp_source_batch_server_attempts(&config), 1);
 }
