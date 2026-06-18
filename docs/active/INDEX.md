@@ -76,7 +76,7 @@ items.
 | [RUST-BUG-062](items/RUST-BUG-062.md) | Major | DONE | Batch ED2K global UDP source requests like MFC |
 | [RUST-BUG-063](items/RUST-BUG-063.md) | Major | DONE | Do not serialize ED2K UDP source-batch sends behind per-server waits |
 | [RUST-BUG-064](items/RUST-BUG-064.md) | Major | DONE | Cover all effective servers in ED2K UDP source batches |
-| [RUST-BUG-065](items/RUST-BUG-065.md) | Major | IN_PROGRESS | Deduplicate remembered ED2K sources across plaintext fallback |
+| [RUST-BUG-065](items/RUST-BUG-065.md) | Major | DONE | Deduplicate remembered ED2K sources across plaintext fallback |
 
 ## Refactors (`REF`)
 
