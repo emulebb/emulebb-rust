@@ -72,6 +72,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -161,7 +162,7 @@ use preferences::{
 };
 use search_query::{
     SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
-    search_result_from_ed2k, search_result_from_indexed,
+    search_result_from_ed2k, search_result_from_indexed, search_result_from_kad,
 };
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
@@ -204,6 +205,8 @@ use views::{
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
+const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
+const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = 15;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
@@ -1363,7 +1366,8 @@ impl EmulebbCore {
                 self.search_ed2k_servers(&search_id, &request, network_method)
                     .await
             }
-            Some(SearchNetworkMethod::Kad) | None => Ok(None),
+            Some(SearchNetworkMethod::Kad) => self.search_kad_keywords(&search_id, &request).await,
+            None => Ok(None),
         };
         let mut state = self.state.lock().await;
         let Some(search) = state.searches.get_mut(&search_id) else {
@@ -2726,6 +2730,49 @@ impl EmulebbCore {
             ));
         }
         Ok(None)
+    }
+
+    async fn search_kad_keywords(
+        &self,
+        search_id: &str,
+        request: &SearchCreate,
+    ) -> Result<Option<Vec<SearchResult>>> {
+        let Some(dht) = self.ed2k_dht_node().await else {
+            return Ok(None);
+        };
+        if !dht.is_bootstrapped() {
+            return Ok(None);
+        }
+
+        let cancel = CancellationToken::new();
+        let mut stream = dht.search_keywords_with_cancel_and_class(
+            keyword_target(&request.query),
+            cancel.clone(),
+            RpcWorkClass::Interactive,
+        );
+        let timeout = tokio::time::sleep(Duration::from_secs(KAD_KEYWORD_SEARCH_TIMEOUT_SECS));
+        tokio::pin!(timeout);
+        let mut results = Vec::new();
+        let mut seen_hashes = HashSet::new();
+
+        loop {
+            tokio::select! {
+                _ = &mut timeout => break,
+                result = stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    if seen_hashes.insert(result.hash) {
+                        results.push(search_result_from_kad(search_id, request, result));
+                        if results.len() >= KAD_KEYWORD_SEARCH_RESULT_LIMIT {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        cancel.cancel();
+        Ok(Some(results))
     }
 
     #[allow(clippy::cognitive_complexity)]

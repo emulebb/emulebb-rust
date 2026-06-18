@@ -2,6 +2,7 @@
 
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 use emulebb_index::IndexedFile;
+use emulebb_kad_dht::SearchResult as KadSearchResult;
 
 use crate::{SearchCreate, SearchResult};
 
@@ -116,9 +117,37 @@ pub(crate) fn search_result_from_ed2k(
     }
 }
 
+pub(crate) fn search_result_from_kad(
+    search_id: &str,
+    request: &SearchCreate,
+    result: KadSearchResult,
+) -> SearchResult {
+    let hash = result.hash.to_string();
+    let name = result
+        .names
+        .into_iter()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| hash.clone());
+    SearchResult {
+        search_id: search_id.to_string(),
+        method: request.method.clone(),
+        r#type: request.r#type.clone(),
+        hash,
+        name,
+        size_bytes: result.size.unwrap_or_default(),
+        sources: result.source_count.unwrap_or_default(),
+        complete_sources: 0,
+        file_type: "unknown".to_string(),
+        complete: false,
+        known_type: "unknown".to_string(),
+        directory: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emulebb_kad_proto::Ed2kHash;
 
     fn result(name: &str, size_bytes: u64, sources: u32) -> SearchResult {
         SearchResult {
@@ -208,5 +237,29 @@ mod tests {
         apply_search_filters(&mut results, &req);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Movie.One.mkv");
+    }
+
+    #[test]
+    fn kad_result_maps_to_rest_search_result() {
+        let req = request();
+        let file_hash = Ed2kHash::from_bytes([0x11; 16]);
+        let result = search_result_from_kad(
+            "42",
+            &req,
+            KadSearchResult {
+                hash: file_hash,
+                names: vec!["Sample File.bin".to_string()],
+                size: Some(1234),
+                source_count: Some(9),
+                tags: Vec::new(),
+            },
+        );
+
+        assert_eq!(result.search_id, "42");
+        assert_eq!(result.hash, file_hash.to_string());
+        assert_eq!(result.name, "Sample File.bin");
+        assert_eq!(result.size_bytes, 1234);
+        assert_eq!(result.sources, 9);
+        assert_eq!(result.known_type, "unknown");
     }
 }
