@@ -11,14 +11,30 @@ pub(crate) fn should_retry_after_exhausted_direct_sources(
     had_direct_sources && has_last_direct_error
 }
 
+pub(crate) fn should_wait_for_deferred_direct_sources(
+    acquired_direct_sources: usize,
+    deferred_direct_sources: usize,
+) -> bool {
+    acquired_direct_sources == 0 && deferred_direct_sources != 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_retry_after_exhausted_direct_sources;
+    use super::{
+        should_retry_after_exhausted_direct_sources, should_wait_for_deferred_direct_sources,
+    };
 
     #[test]
     fn direct_peer_failures_keep_active_transfer_retrying() {
         assert!(should_retry_after_exhausted_direct_sources(true, true));
         assert!(!should_retry_after_exhausted_direct_sources(false, true));
         assert!(!should_retry_after_exhausted_direct_sources(true, false));
+    }
+
+    #[test]
+    fn cooldown_deferred_direct_sources_wait_without_source_requery_spin() {
+        assert!(should_wait_for_deferred_direct_sources(0, 1));
+        assert!(!should_wait_for_deferred_direct_sources(1, 1));
+        assert!(!should_wait_for_deferred_direct_sources(0, 0));
     }
 }

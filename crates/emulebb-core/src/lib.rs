@@ -2784,12 +2784,13 @@ impl EmulebbCore {
             let (direct_sources, deferred_count) = self
                 .acquire_direct_download_source_leases(&transfer.hash, &candidate_direct_sources)
                 .await;
+            let acquired_direct_source_count = direct_sources.len();
             deferred_active_direct_sources |= deferred_count != 0;
             for source in &direct_sources {
                 attempted_direct_endpoints.insert(source_endpoint_key(source));
             }
 
-            if !direct_sources.is_empty() {
+            if acquired_direct_source_count != 0 {
                 let leased_endpoints = direct_sources
                     .iter()
                     .map(source_endpoint_key)
@@ -2881,6 +2882,17 @@ impl EmulebbCore {
             // of sleeping then requerying for a transfer that is going away.
             if cancel.is_cancelled() {
                 return Ok(None);
+            }
+            if ed2k_download_retry::should_wait_for_deferred_direct_sources(
+                acquired_direct_source_count,
+                deferred_count,
+            ) {
+                tracing::info!(
+                    "ED2K source refresh skipped file_hash={} reason=direct_sources_deferred deferred_direct_sources={}",
+                    transfer.hash,
+                    deferred_count
+                );
+                break;
             }
             let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
             if manifest.completed {

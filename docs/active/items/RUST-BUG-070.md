@@ -35,6 +35,8 @@ supplementation still reset with each background retry task.
 - [x] The first Kad refresh suppresses another Kad refresh for one hour.
 - [x] Later Kad refreshes increase the due window up to the MFC seven-search cap.
 - [x] Connected-server and UDP-server source pacing remain independent.
+- [x] Cooldown-deferred direct sources wait for the retry driver instead of
+      spinning no-op source refresh rounds.
 - [x] Focused unit coverage proves same-file Kad refreshes are deferred while a
       different file can still claim a refresh.
 - [ ] The next hide.me live-wire diagnostics run shows Kad source-refresh churn is
@@ -50,3 +52,4 @@ supplementation still reset with each background retry task.
 ## Evidence
 
 - `cargo test -p emulebb-core kad_source_refresh_uses_mfc_backoff_per_file --locked`
+- `cargo test -p emulebb-core cooldown_deferred_direct_sources_wait_without_source_requery_spin --locked`
