@@ -159,7 +159,10 @@ use preferences::{
     ed2k_download_limit_bytes_per_sec_from_preferences, ed2k_upload_queue_policy_from_preferences,
     initial_ed2k_upload_queue_policy, preferences_update_is_empty,
 };
-use search_query::{apply_search_filters, search_result_from_ed2k, search_result_from_indexed};
+use search_query::{
+    SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
+    search_result_from_ed2k, search_result_from_indexed,
+};
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
 };
@@ -1345,10 +1348,23 @@ impl EmulebbCore {
         Ok(search)
     }
 
-    /// Runs the ED2K network search for an already-created "running" search,
+    /// Runs the network search for an already-created "running" search,
     /// merges any results with the local-index ones, and marks it completed.
     async fn run_background_search(&self, search_id: String, request: SearchCreate) {
-        let outcome = self.search_ed2k_servers(&search_id, &request).await;
+        let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
+        let kad_connected = self
+            .ed2k_dht_node()
+            .await
+            .is_some_and(|dht| dht.is_bootstrapped());
+        let network_method =
+            resolve_search_network_method(&request.method, ed2k_connected, kad_connected);
+        let outcome = match network_method {
+            Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => {
+                self.search_ed2k_servers(&search_id, &request, network_method)
+                    .await
+            }
+            Some(SearchNetworkMethod::Kad) | None => Ok(None),
+        };
         let mut state = self.state.lock().await;
         let Some(search) = state.searches.get_mut(&search_id) else {
             return;
@@ -1371,7 +1387,7 @@ impl EmulebbCore {
                 search.status = "completed".to_string();
             }
             Err(error) => {
-                tracing::warn!("ED2K background search failed for {search_id}: {error:#}");
+                tracing::warn!("background search failed for {search_id}: {error:#}");
                 search.status = "error".to_string();
             }
         }
@@ -2639,7 +2655,14 @@ impl EmulebbCore {
         &self,
         search_id: &str,
         request: &SearchCreate,
+        network_method: Option<SearchNetworkMethod>,
     ) -> Result<Option<Vec<SearchResult>>> {
+        if !matches!(
+            network_method,
+            Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal)
+        ) {
+            return Ok(None);
+        }
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(None);
         };
@@ -2674,7 +2697,7 @@ impl EmulebbCore {
                     request.query
                 ),
             }
-            if should_run_ed2k_global_keyword_search(&request.method) {
+            if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
                 match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
                     bind_ip: network.bind_ip,
                     config: &config,
@@ -3847,13 +3870,6 @@ impl fmt::Debug for EmulebbCore {
             )
             .finish_non_exhaustive()
     }
-}
-
-fn should_run_ed2k_global_keyword_search(method: &str) -> bool {
-    matches!(
-        method.trim().to_ascii_lowercase().as_str(),
-        "" | "automatic" | "global"
-    )
 }
 
 async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
@@ -8303,16 +8319,6 @@ mod tests {
             global_udp_source_search_excluded_endpoint(true, Some(connected_server)),
             Some(connected_server)
         );
-    }
-
-    #[test]
-    fn ed2k_global_keyword_search_runs_for_automatic_and_global_methods() {
-        assert!(should_run_ed2k_global_keyword_search(""));
-        assert!(should_run_ed2k_global_keyword_search("automatic"));
-        assert!(should_run_ed2k_global_keyword_search(" global "));
-        assert!(should_run_ed2k_global_keyword_search("GLOBAL"));
-        assert!(!should_run_ed2k_global_keyword_search("server"));
-        assert!(!should_run_ed2k_global_keyword_search("kad"));
     }
 
     #[test]
