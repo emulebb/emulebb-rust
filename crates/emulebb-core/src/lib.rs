@@ -82,6 +82,7 @@ mod diag_sched;
 mod download_source_registry;
 mod ed2k_buddy_reask;
 mod ed2k_direct_download_types;
+mod ed2k_download_retry;
 mod ed2k_net_drivers;
 mod ed2k_source_batch;
 mod ed2k_sources;
@@ -3027,6 +3028,12 @@ impl EmulebbCore {
             return Ok(Some("downloading"));
         }
         if let Some(error) = last_direct_error {
+            if ed2k_download_retry::should_retry_after_exhausted_direct_sources(
+                had_direct_sources,
+                true,
+            ) {
+                return Ok(Some("downloading"));
+            }
             return Err(error).context("ED2K direct download did not complete");
         }
         Ok(Some("queued"))

@@ -79,6 +79,7 @@ items.
 | [RUST-BUG-065](items/RUST-BUG-065.md) | Major | DONE | Deduplicate remembered ED2K sources across plaintext fallback |
 | [RUST-BUG-066](items/RUST-BUG-066.md) | Major | DONE | Pace connected-server source refreshes across retry attempts |
 | [RUST-BUG-067](items/RUST-BUG-067.md) | Major | IN_PROGRESS | Reuse remembered ED2K sources alongside fresh lookups |
+| [RUST-BUG-068](items/RUST-BUG-068.md) | Major | IN_PROGRESS | Keep active ED2K downloads retrying after exhausted direct peers |
 
 ## Refactors (`REF`)
 
