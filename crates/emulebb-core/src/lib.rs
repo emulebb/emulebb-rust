@@ -118,7 +118,7 @@ use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
-use ed2k_source_batch::claim_ed2k_udp_source_batch;
+use ed2k_source_batch::{claim_connected_server_source_refresh, claim_ed2k_udp_source_batch};
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
@@ -255,6 +255,7 @@ struct CoreState {
     next_download_cancel_id: u64,
     active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     download_source_registry: DownloadSourceRegistry,
+    ed2k_server_source_last_queried: HashMap<String, Instant>,
     ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
@@ -3406,7 +3407,12 @@ impl EmulebbCore {
                 (None, None)
             };
         let has_background_search = background_search.is_some();
-        if allow_server_source_refresh && let Some(handle) = background_search {
+        let allow_connected_server_source_refresh =
+            allow_server_source_refresh && has_background_search && {
+                let mut state = self.state.lock().await;
+                claim_connected_server_source_refresh(&mut state, &transfer.hash, Instant::now())
+            };
+        if allow_connected_server_source_refresh && let Some(handle) = background_search {
             let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
             match search_source_via_background_session(
                 &handle, file_hash, file_size, timeout, &cancel,

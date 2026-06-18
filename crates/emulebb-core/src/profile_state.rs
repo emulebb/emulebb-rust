@@ -74,6 +74,7 @@ pub(crate) fn load_core_state(
         active_download_peer_endpoints: HashSet::new(),
         download_source_registry: crate::download_source_registry::DownloadSourceRegistry::default(
         ),
+        ed2k_server_source_last_queried: HashMap::new(),
         ed2k_udp_source_batch_last_queried: HashMap::new(),
         shared_directories,
         unshared_hashes: metadata.load_unshared_file_hashes()?.into_iter().collect(),

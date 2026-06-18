@@ -9,6 +9,7 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{CoreState, Transfer};
 
 pub(crate) const ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedEd2kUdpSourceBatch {
@@ -72,6 +73,31 @@ pub(crate) fn claim_ed2k_udp_source_batch(
     ClaimedEd2kUdpSourceBatch { targets, transfers }
 }
 
+pub(crate) fn claim_connected_server_source_refresh(
+    state: &mut CoreState,
+    file_hash: &str,
+    now: Instant,
+) -> bool {
+    state
+        .ed2k_server_source_last_queried
+        .retain(|_, last_queried| {
+            now.saturating_duration_since(*last_queried) < ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN
+        });
+    if state
+        .ed2k_server_source_last_queried
+        .get(file_hash)
+        .is_some_and(|last_queried| {
+            now.saturating_duration_since(*last_queried) < ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN
+        })
+    {
+        return false;
+    }
+    state
+        .ed2k_server_source_last_queried
+        .insert(file_hash.to_string(), now);
+    true
+}
+
 fn was_recently_queried(state: &CoreState, file_hash: &str, now: Instant) -> bool {
     state
         .ed2k_udp_source_batch_last_queried
@@ -128,6 +154,36 @@ mod tests {
         assert!(claimed.targets.is_empty());
     }
 
+    #[test]
+    fn connected_server_source_refresh_is_paced_per_file() {
+        let now = Instant::now();
+        let current_hash = Ed2kHash::from_bytes([0x55; 16]);
+        let other_hash = Ed2kHash::from_bytes([0x66; 16]);
+        let current = transfer(current_hash, "downloading", 1024);
+        let mut state = core_state_with_transfers([current]);
+
+        assert!(claim_connected_server_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now
+        ));
+        assert!(!claim_connected_server_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + Duration::from_secs(5)
+        ));
+        assert!(claim_connected_server_source_refresh(
+            &mut state,
+            &other_hash.to_string(),
+            now + Duration::from_secs(5)
+        ));
+        assert!(claim_connected_server_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN + Duration::from_secs(1)
+        ));
+    }
+
     fn core_state_with_transfers(transfers: impl IntoIterator<Item = Transfer>) -> CoreState {
         let transfers = transfers
             .into_iter()
@@ -151,6 +207,7 @@ mod tests {
             next_download_cancel_id: 0,
             active_download_peer_endpoints: HashSet::new(),
             download_source_registry: DownloadSourceRegistry::default(),
+            ed2k_server_source_last_queried: HashMap::new(),
             ed2k_udp_source_batch_last_queried: HashMap::new(),
             shared_directories: Vec::new(),
             unshared_hashes: HashSet::new(),
