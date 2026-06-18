@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use anyhow::Result;
+use emulebb_ed2k::config::Ed2kConfig;
+
 use super::{
     EmulebbCore, ServerInfo, parse_server_endpoint,
     views::{
@@ -68,5 +71,45 @@ impl EmulebbCore {
             apply_server_live_details(server, &connection.2);
         }
         server_map.into_values().collect::<Vec<_>>()
+    }
+
+    pub(crate) async fn effective_ed2k_config(
+        &self,
+        base: &Ed2kConfig,
+        target_endpoint: Option<&str>,
+    ) -> Result<Ed2kConfig> {
+        if let Some(target) = target_endpoint {
+            let _ = parse_server_endpoint(target)?;
+        }
+        let mut config = base.clone();
+        let state = self.state.lock().await;
+        config.server_entries.retain(|entry| {
+            let endpoint = format!("{}:{}", entry.host, entry.port);
+            !state.disabled_servers.contains(&endpoint)
+                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(&endpoint))
+        });
+        config.server_endpoints.retain(|endpoint| {
+            !state.disabled_servers.contains(endpoint)
+                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(endpoint))
+        });
+        for (endpoint, server) in &state.servers {
+            if state.disabled_servers.contains(endpoint)
+                || target_endpoint.is_some_and(|target| !target.eq_ignore_ascii_case(endpoint))
+            {
+                continue;
+            }
+            let exists = config.server_entries.iter().any(|entry| {
+                format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)
+            }) || config
+                .server_endpoints
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(endpoint));
+            if !exists {
+                config
+                    .server_endpoints
+                    .push(format!("{}:{}", server.address, server.port));
+            }
+        }
+        Ok(config)
     }
 }

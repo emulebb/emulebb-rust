@@ -2422,46 +2422,6 @@ impl EmulebbCore {
         self.index.lock().await.upsert_file(&file)
     }
 
-    async fn effective_ed2k_config(
-        &self,
-        base: &Ed2kConfig,
-        target_endpoint: Option<&str>,
-    ) -> Result<Ed2kConfig> {
-        if let Some(target) = target_endpoint {
-            let _ = parse_server_endpoint(target)?;
-        }
-        let mut config = base.clone();
-        let state = self.state.lock().await;
-        config.server_entries.retain(|entry| {
-            let endpoint = format!("{}:{}", entry.host, entry.port);
-            !state.disabled_servers.contains(&endpoint)
-                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(&endpoint))
-        });
-        config.server_endpoints.retain(|endpoint| {
-            !state.disabled_servers.contains(endpoint)
-                && target_endpoint.is_none_or(|target| target.eq_ignore_ascii_case(endpoint))
-        });
-        for (endpoint, server) in &state.servers {
-            if state.disabled_servers.contains(endpoint)
-                || target_endpoint.is_some_and(|target| !target.eq_ignore_ascii_case(endpoint))
-            {
-                continue;
-            }
-            let exists = config.server_entries.iter().any(|entry| {
-                format!("{}:{}", entry.host, entry.port).eq_ignore_ascii_case(endpoint)
-            }) || config
-                .server_endpoints
-                .iter()
-                .any(|existing| existing.eq_ignore_ascii_case(endpoint));
-            if !exists {
-                config
-                    .server_endpoints
-                    .push(format!("{}:{}", server.address, server.port));
-            }
-        }
-        Ok(config)
-    }
-
     async fn upsert_transfer_from_parts(
         &self,
         hash: String,
@@ -3473,8 +3433,9 @@ impl EmulebbCore {
         allow_server_source_refresh: bool,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
-        let attempts = configured_server_attempts(&network.config)
-            .min(network.config.source_server_attempt_budget.max(1));
+        let config = self.effective_ed2k_config(&network.config, None).await?;
+        let attempts =
+            configured_server_attempts(&config).min(config.source_server_attempt_budget.max(1));
         let mut sources = Vec::new();
         let (preferred_endpoint, background_search) =
             if let Some(handle) = self.connected_ed2k_search_handle().await {
@@ -3484,7 +3445,7 @@ impl EmulebbCore {
             };
         let has_background_search = background_search.is_some();
         if allow_server_source_refresh && let Some(handle) = background_search {
-            let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+            let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
             match search_source_via_background_session(
                 &handle, file_hash, file_size, timeout, &cancel,
             )
@@ -3506,12 +3467,12 @@ impl EmulebbCore {
             && has_background_search
             && should_query_server_udp_source_supplement(
                 sources.len(),
-                network.config.kad_source_supplement_max_existing_sources,
+                config.kad_source_supplement_max_existing_sources,
             )
         {
             match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
                 bind_ip: network.bind_ip,
-                config: &network.config,
+                config: &config,
                 preferred_endpoint,
                 excluded_endpoint: global_udp_source_search_excluded_endpoint(
                     has_background_search,
@@ -3520,7 +3481,7 @@ impl EmulebbCore {
                 max_attempts: attempts,
                 file_hash,
                 file_size,
-                timeout: Duration::from_secs(network.config.connect_timeout_secs.max(15)),
+                timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
                 cancel: &cancel,
             })
             .await
@@ -3535,13 +3496,12 @@ impl EmulebbCore {
         if file_size != 0
             && should_query_kad_source_supplement(
                 sources.len(),
-                network.config.kad_source_supplement_max_existing_sources,
+                config.kad_source_supplement_max_existing_sources,
             )
             && let Some(dht) = self.ed2k_dht_node().await
         {
             let timeout = Duration::from_secs(
-                network
-                    .config
+                config
                     .connect_timeout_secs
                     .max(ED2K_DOWNLOAD_KAD_SOURCE_TIMEOUT_FLOOR_SECS),
             );
@@ -6828,6 +6788,40 @@ mod tests {
             servers
                 .iter()
                 .any(|server| server.address == "45.82.80.155" && server.port == 5687)
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_ed2k_config_includes_runtime_servers() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let base = Ed2kConfig {
+            server_endpoints: vec!["203.0.113.10:4661".to_string()],
+            ..Ed2kConfig::default()
+        };
+        core.add_server(ServerCreate {
+            address: "203.0.113.20".to_string(),
+            port: 4661,
+            name: None,
+            priority: None,
+            static_server: Some(false),
+            connect: None,
+        })
+        .await
+        .unwrap();
+
+        let config = core.effective_ed2k_config(&base, None).await.unwrap();
+
+        assert!(
+            config
+                .server_endpoints
+                .iter()
+                .any(|endpoint| endpoint == "203.0.113.10:4661")
+        );
+        assert!(
+            config
+                .server_endpoints
+                .iter()
+                .any(|endpoint| endpoint == "203.0.113.20:4661")
         );
     }
 
