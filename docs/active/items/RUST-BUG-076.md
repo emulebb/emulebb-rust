@@ -46,3 +46,6 @@ append between those two writes.
 - `cargo test -p emulebb-kad-net diag_event --locked`
 - `cargo fmt --all --check`
 - `python tools/rust_quality_gate.py quick`
+- hide.me live-wire run `rust-hideme-20260618T232801Z`: packet diagnostics
+  captured 5,286 `diag_event_v1` records and every non-empty line parsed as one
+  JSON object.

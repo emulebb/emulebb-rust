@@ -60,3 +60,10 @@ Comparing the path against eMuleBB MFC showed a parity drift:
 - `cargo test -p emulebb-ed2k ed2k_transfer::tests::salvage --locked`
 - `cargo fmt --all --check`
 - `python tools/rust_quality_gate.py quick`
+- hide.me live-wire run `rust-hideme-20260618T230806Z`: passed, VPN-bound,
+  HighID, Kad connected, 20 downloads started, 1 completed, packet diagnostics
+  captured, `unexpected block` count 0, `out_of_order_block` count 1.
+- hide.me live-wire run `rust-hideme-20260618T232801Z`: VPN-bound, HighID, Kad
+  connected, 20 downloads started, packet diagnostics captured, harness failed
+  only because no file completed before timeout; `unexpected block` count 0,
+  `out_of_order_block` count 3.
