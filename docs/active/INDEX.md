@@ -83,6 +83,7 @@ items.
 | [RUST-BUG-069](items/RUST-BUG-069.md) | Major | DONE | Pace failed direct source retries per endpoint |
 | [RUST-BUG-070](items/RUST-BUG-070.md) | Major | DONE | Pace Kad source refreshes across retry attempts |
 | [RUST-BUG-071](items/RUST-BUG-071.md) | Major | DONE | Wait until direct source retry cooldown before reattempting |
+| [RUST-BUG-072](items/RUST-BUG-072.md) | Major | DONE | Do not expire queued connected-server source requests before dispatch |
 
 ## Refactors (`REF`)
 

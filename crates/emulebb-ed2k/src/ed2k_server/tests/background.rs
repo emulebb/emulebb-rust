@@ -92,6 +92,61 @@ async fn background_source_search_channel_round_trips_results() {
 }
 
 #[tokio::test]
+async fn background_source_search_waits_while_queued_before_dispatch() {
+    let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+    let file_hash = Ed2kHash([0x52; 16]);
+    let queued_handle = handle.clone();
+    let search = tokio::spawn(async move {
+        let cancel = CancellationToken::new();
+        search_source_via_background_session(
+            &queued_handle,
+            file_hash,
+            42,
+            Duration::from_millis(20),
+            &cancel,
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let request = inbox.receiver.recv().await.unwrap();
+    match request {
+        BackgroundServerSearchRequest::Source {
+            file_hash: requested_hash,
+            timeout,
+            response,
+            ..
+        } => {
+            assert_eq!(requested_hash, file_hash);
+            assert_eq!(timeout, Duration::from_millis(20));
+            let _ = response.send(Ok(Vec::new()));
+        }
+        other => panic!("unexpected background request: {other:?}"),
+    }
+
+    assert_eq!(search.await.unwrap().unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn background_source_search_cancel_stops_queued_wait() {
+    let (handle, _inbox) = new_ed2k_server_search_channel(1);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let results = search_source_via_background_session(
+        &handle,
+        Ed2kHash([0x53; 16]),
+        42,
+        Duration::from_secs(60),
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
 async fn background_udp_source_search_preserves_responding_server() {
     let server = test_udp_obfuscated_server();
     let file_hash = Ed2kHash([0x73; 16]);

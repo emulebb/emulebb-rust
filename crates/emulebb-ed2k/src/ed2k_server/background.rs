@@ -158,10 +158,8 @@ pub async fn search_source_via_background_session(
 
     tokio::select! {
         _ = cancel.cancelled() => Ok(Vec::new()),
-        result = tokio::time::timeout(timeout, receive_response) => {
-            let response = result
-                .with_context(|| format!("timed out waiting for ED2K background source response after {timeout:?}"))?
-                .context("ED2K background source responder dropped")?;
+        response = receive_response => {
+            let response = response.context("ED2K background source responder dropped")?;
             response.map_err(anyhow::Error::msg)
         }
     }
