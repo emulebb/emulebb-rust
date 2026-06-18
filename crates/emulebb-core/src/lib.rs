@@ -3070,9 +3070,12 @@ impl EmulebbCore {
                 crate::diag_sched::source_dropped(file_hash, source);
                 continue;
             }
-            let registry_lease = state
-                .download_source_registry
-                .lease_best_for_file(source, file_hash);
+            let registry_lease = state.download_source_registry.lease_best_for_file(
+                now,
+                ed2k_download_retry::ED2K_DIRECT_SOURCE_RETRY_COOLDOWN,
+                source,
+                file_hash,
+            );
             if registry_lease.is_some() && state.active_download_peer_endpoints.insert(endpoint) {
                 acquired.push(source.clone());
                 crate::diag_sched::source_engaged(file_hash, source);
@@ -8017,7 +8020,7 @@ mod tests {
             assert!(
                 state
                     .download_source_registry
-                    .lease_best_for_file(&source, &hash)
+                    .lease_best_for_file(Instant::now(), Duration::ZERO, &source, &hash)
                     .is_some()
             );
             state.active_download_peer_endpoints.insert(endpoint);

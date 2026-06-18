@@ -37,6 +37,7 @@ pub(crate) struct DownloadSourceCandidate {
 pub(crate) struct DownloadSourceRegistry {
     peers: HashMap<DownloadPeerKey, Vec<DownloadSourceCandidate>>,
     leased_peers: HashSet<DownloadPeerKey>,
+    last_attempted_endpoints: HashMap<(Ipv4Addr, u16), Instant>,
 }
 
 impl DownloadSourceRegistry {
@@ -109,15 +110,31 @@ impl DownloadSourceRegistry {
 
     pub(crate) fn lease_best_for_file(
         &mut self,
+        now: Instant,
+        retry_cooldown: Duration,
         source: &Ed2kFoundSource,
         file_hash: &str,
     ) -> Option<DownloadSourceCandidate> {
         let peer_key = DownloadPeerKey::from_source(source);
+        let endpoint = (source.ip, source.tcp_port);
+        self.last_attempted_endpoints.retain(|_, last_attempted| {
+            now.saturating_duration_since(*last_attempted) < retry_cooldown
+        });
+        if self
+            .last_attempted_endpoints
+            .get(&endpoint)
+            .is_some_and(|last_attempted| {
+                now.saturating_duration_since(*last_attempted) < retry_cooldown
+            })
+        {
+            return None;
+        }
         let candidates = self.peers.get(&peer_key)?;
         let candidate = candidates.iter().max_by_key(candidate_score)?;
         if candidate.file_hash != file_hash || !self.leased_peers.insert(peer_key) {
             return None;
         }
+        self.last_attempted_endpoints.insert(endpoint, now);
         Some(candidate.clone())
     }
 
@@ -286,19 +303,34 @@ mod tests {
         );
 
         let leased = registry
-            .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .lease_best_for_file(
+                now,
+                Duration::ZERO,
+                &source,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
             .unwrap();
 
         assert_eq!(leased.file_hash, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert!(
             registry
-                .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .lease_best_for_file(
+                    now,
+                    Duration::ZERO,
+                    &source,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                )
                 .is_none()
         );
         registry.release_peer(&source);
         assert!(
             registry
-                .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .lease_best_for_file(
+                    now,
+                    Duration::ZERO,
+                    &source,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                )
                 .is_some()
         );
     }
@@ -319,12 +351,22 @@ mod tests {
 
         assert!(
             registry
-                .lease_best_for_file(&source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .lease_best_for_file(
+                    now,
+                    Duration::ZERO,
+                    &source,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
                 .is_none()
         );
         assert!(
             registry
-                .lease_best_for_file(&source, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .lease_best_for_file(
+                    now,
+                    Duration::ZERO,
+                    &source,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                )
                 .is_some()
         );
     }
@@ -430,12 +472,20 @@ mod tests {
         // Peer 1 serves only the target file and is leased on it.
         let peer_target = source_with_endpoint(0x01, 41200);
         registry.add_candidate(now, candidate(target, 5, 1, peer_target.clone()));
-        assert!(registry.lease_best_for_file(&peer_target, target).is_some());
+        assert!(
+            registry
+                .lease_best_for_file(now, Duration::ZERO, &peer_target, target)
+                .is_some()
+        );
 
         // Peer 2 serves a different file and is leased on it.
         let peer_other = source_with_endpoint(0x02, 41201);
         registry.add_candidate(now, candidate(other, 5, 1, peer_other.clone()));
-        assert!(registry.lease_best_for_file(&peer_other, other).is_some());
+        assert!(
+            registry
+                .lease_best_for_file(now, Duration::ZERO, &peer_other, other)
+                .is_some()
+        );
 
         // Peer 3 serves the target file but is NOT leased.
         let peer_unleased = source_with_endpoint(0x03, 41202);
@@ -454,8 +504,43 @@ mod tests {
         // Peer 2's lease (for the other file) is untouched; peer 1's is gone.
         assert_eq!(registry.leased_peer_count(), 1);
         assert!(
-            registry.lease_best_for_file(&peer_other, other).is_none(),
+            registry
+                .lease_best_for_file(now, Duration::ZERO, &peer_other, other)
+                .is_none(),
             "the other file's lease must still be held"
+        );
+    }
+
+    #[test]
+    fn released_endpoint_stays_cooldown_deferred_until_retry_window_expires() {
+        let source = source_with_endpoint(0x04, 41203);
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cooldown = Duration::from_secs(20 * 60);
+        registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+
+        assert!(
+            registry
+                .lease_best_for_file(now, cooldown, &source, file)
+                .is_some()
+        );
+        registry.release_peer(&source);
+        assert!(
+            registry
+                .lease_best_for_file(now + Duration::from_secs(60), cooldown, &source, file)
+                .is_none(),
+            "a failed endpoint should not be re-dialed inside the MFC retry window"
+        );
+        assert!(
+            registry
+                .lease_best_for_file(
+                    now + cooldown + Duration::from_secs(1),
+                    cooldown,
+                    &source,
+                    file
+                )
+                .is_some()
         );
     }
 

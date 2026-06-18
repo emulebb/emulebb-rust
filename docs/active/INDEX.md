@@ -80,6 +80,7 @@ items.
 | [RUST-BUG-066](items/RUST-BUG-066.md) | Major | DONE | Pace connected-server source refreshes across retry attempts |
 | [RUST-BUG-067](items/RUST-BUG-067.md) | Major | DONE | Reuse remembered ED2K sources alongside fresh lookups |
 | [RUST-BUG-068](items/RUST-BUG-068.md) | Major | DONE | Keep active ED2K downloads retrying after exhausted direct peers |
+| [RUST-BUG-069](items/RUST-BUG-069.md) | Major | IN_PROGRESS | Pace failed direct source retries per endpoint |
 
 ## Refactors (`REF`)
 

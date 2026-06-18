@@ -1,5 +1,9 @@
 //! eD2K download retry-state decisions.
 
+use std::time::Duration;
+
+pub(crate) const ED2K_DIRECT_SOURCE_RETRY_COOLDOWN: Duration = Duration::from_secs(20 * 60);
+
 pub(crate) fn should_retry_after_exhausted_direct_sources(
     had_direct_sources: bool,
     has_last_direct_error: bool,
