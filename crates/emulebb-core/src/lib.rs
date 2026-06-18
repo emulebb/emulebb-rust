@@ -121,8 +121,9 @@ use ed2k_sources::{
     kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
     merge_download_sources, new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
     select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_query_kad_source_supplement, should_refresh_ed2k_server_sources,
-    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
+    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
+    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -3501,7 +3502,13 @@ impl EmulebbCore {
         // sessions for ordinary source refreshes: live packet captures showed
         // hundreds of OP_LOGINREQUEST attempts and server closes before
         // OP_IDCHANGE, which is both non-stock and hostile to public servers.
-        if allow_server_source_refresh && has_background_search && sources.is_empty() {
+        if allow_server_source_refresh
+            && has_background_search
+            && should_query_server_udp_source_supplement(
+                sources.len(),
+                network.config.kad_source_supplement_max_existing_sources,
+            )
+        {
             match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &network.config,
@@ -8339,6 +8346,14 @@ mod tests {
             global_udp_source_search_excluded_endpoint(true, Some(connected_server)),
             Some(connected_server)
         );
+    }
+
+    #[test]
+    fn server_udp_source_supplement_runs_for_empty_or_scarce_server_sources() {
+        assert!(should_query_server_udp_source_supplement(0, 2));
+        assert!(should_query_server_udp_source_supplement(1, 2));
+        assert!(should_query_server_udp_source_supplement(2, 2));
+        assert!(!should_query_server_udp_source_supplement(3, 2));
     }
 
     #[test]

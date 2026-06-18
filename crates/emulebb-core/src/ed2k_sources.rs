@@ -287,6 +287,17 @@ pub(crate) fn should_refresh_ed2k_server_sources(source_requery_round: usize) ->
     source_requery_round == 0
 }
 
+pub(crate) fn should_query_server_udp_source_supplement(
+    existing_source_count: usize,
+    supplement_threshold: usize,
+) -> bool {
+    // WHY: MFC keeps the global UDP server source walk active for files below
+    // their source cap. Until Rust has MFC-style multi-file UDP batching, use
+    // the same scarcity threshold as Kad supplementation so a single connected
+    // server source does not suppress UDP server discovery entirely.
+    existing_source_count <= supplement_threshold
+}
+
 pub(crate) fn global_udp_source_search_excluded_endpoint(
     has_background_search: bool,
     connected_endpoint: Option<SocketAddr>,
