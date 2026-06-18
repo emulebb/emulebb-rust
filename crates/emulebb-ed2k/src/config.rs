@@ -11,7 +11,7 @@ pub struct Ed2kConfig {
     pub server_endpoints: Vec<String>,
     /// Whether the client should advertise and use ED2K TCP obfuscation.
     pub obfuscation_enabled: bool,
-    /// Optional one-shot ED2K server search probe term used for parity runs.
+    /// Optional connected-session ED2K server search probe term used for parity runs.
     pub probe_search_term: Option<String>,
     /// Timeout for one outbound direct ED2K *peer* connection attempt (the
     /// connect + handshake budget for a download source). eMule reaps a pending
@@ -54,11 +54,18 @@ pub struct Ed2kConfig {
     pub max_sources_per_file: usize,
     /// Maximum number of direct ED2K peers one download may keep in flight.
     pub max_parallel_download_peers: usize,
-    /// Maximum number of one-shot ED2K servers to probe for a keyword search.
+    /// Legacy diagnostic budget for the inactive one-shot keyword helper.
+    ///
+    /// Normal core keyword searches use the connected ED2K server session.
     pub keyword_server_attempt_budget: usize,
-    /// Maximum number of one-shot ED2K servers to probe for exact hash metadata.
+    /// Legacy diagnostic budget for the inactive one-shot exact-hash helper.
+    ///
+    /// Normal core metadata resolution uses the connected server session and Kad.
     pub exact_hash_keyword_server_attempt_budget: usize,
-    /// Maximum number of one-shot ED2K servers to probe while acquiring sources.
+    /// Maximum number of ED2K servers to probe while acquiring sources.
+    ///
+    /// This applies only to the initial source acquisition round; short source
+    /// requery rounds do not open extra server source probes.
     pub source_server_attempt_budget: usize,
     /// Only run Kad source supplementation when server search found few sources.
     pub kad_source_supplement_max_existing_sources: usize,
