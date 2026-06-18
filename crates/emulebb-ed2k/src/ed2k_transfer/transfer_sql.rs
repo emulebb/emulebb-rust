@@ -51,6 +51,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         auto_upload_priority: manifest.auto_upload_priority,
         comment: manifest.comment.clone(),
         rating: manifest.rating,
+        category_id: manifest.category_id,
         control_state: manifest.control_state.clone(),
         transfer_row_removed: manifest.transfer_row_removed,
     }
@@ -114,6 +115,7 @@ pub(super) fn manifest_from_metadata(
         auto_upload_priority: manifest.auto_upload_priority,
         comment: manifest.comment,
         rating: manifest.rating,
+        category_id: manifest.category_id,
         control_state: manifest.control_state,
         transfer_row_removed: manifest.transfer_row_removed,
     })
@@ -172,6 +174,7 @@ mod tests {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
+            category_id: 0,
             control_state: None,
             transfer_row_removed: false,
         }

@@ -4,6 +4,16 @@ use crate::MetadataStore;
 #[test]
 fn transfer_manifest_roundtrips_sql_tables() {
     let store = MetadataStore::in_memory().unwrap();
+    store
+        .upsert_category(&crate::MetadataCategory {
+            id: 2,
+            name: "Samples".to_string(),
+            path: None,
+            comment: String::new(),
+            priority: 1,
+            color: None,
+        })
+        .unwrap();
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
         canonical_name: "Sample.Transfer.bin".to_string(),
@@ -34,6 +44,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         auto_upload_priority: true,
         comment: "synthetic comment".to_string(),
         rating: 4,
+        category_id: 2,
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
     };
@@ -74,6 +85,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
+        category_id: 0,
         control_state: None,
         transfer_row_removed: false,
     };
@@ -122,6 +134,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         auto_upload_priority: false,
         comment: String::new(),
         rating: 0,
+        category_id: 0,
         control_state: None,
         transfer_row_removed: false,
     };

@@ -302,6 +302,19 @@ impl Ed2kTransferRuntime {
         Ok(manifest)
     }
 
+    /// Persist the user-facing download category across restarts.
+    pub async fn set_category_id(
+        &self,
+        file_hash: &str,
+        category_id: u32,
+    ) -> Result<Ed2kResumeManifest> {
+        let _guard = self.manifest_io.lock().await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        manifest.category_id = category_id;
+        self.store_manifest_unlocked(&manifest).await?;
+        Ok(manifest)
+    }
+
     /// Restore a completed transfer row when the same link is explicitly added again.
     pub async fn restore_transfer_row(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;

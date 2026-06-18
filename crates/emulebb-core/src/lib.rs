@@ -192,15 +192,15 @@ pub use rest_model::{
     VpnGuardConfig, VpnGuardStatus,
 };
 use views::{
-    ServerLiveDetails, apply_server_update, download_priority_score, enrich_sources_with_live,
-    ensure_category_selector_is_unambiguous, kad_status_from_running, manifest_default_state_name,
-    normalize_transfer_name, preserve_transfer_public_metadata, server_endpoint_from_create,
-    server_info_from_parts, source_by_client_id, source_friend_name, transfer_create_links,
-    transfer_create_state_name, transfer_from_manifest, transfer_parts_from_manifest,
-    transfer_sources_from_manifest, validate_server_priority, validate_server_update,
-    validate_shared_file_comment_rating, validate_shared_upload_priority,
-    validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
-    validate_url_import,
+    ServerLiveDetails, apply_server_update, default_transfer_category_name,
+    download_priority_score, enrich_sources_with_live, ensure_category_selector_is_unambiguous,
+    kad_status_from_running, manifest_default_state_name, normalize_transfer_name,
+    preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
+    source_by_client_id, source_friend_name, transfer_create_links, transfer_create_state_name,
+    transfer_from_manifest, transfer_parts_from_manifest, transfer_sources_from_manifest,
+    validate_server_priority, validate_server_update, validate_shared_file_comment_rating,
+    validate_shared_upload_priority, validate_source_client_id, validate_transfer_priority,
+    validate_transfer_update_family, validate_url_import,
 };
 
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
@@ -2038,6 +2038,9 @@ impl EmulebbCore {
             let (category_id, category_name) = self
                 .resolve_transfer_category(request.category_id, request.category_name.as_deref())
                 .await?;
+            self.ed2k_transfers
+                .set_category_id(hash, category_id)
+                .await?;
             let mut state = self.state.lock().await;
             let Some(transfer) = state.transfers.get_mut(hash) else {
                 return Ok(None);
@@ -2427,10 +2430,13 @@ impl EmulebbCore {
         // attempt so it stops at its next loop-top/mid-round check. Resume
         // re-queues a fresh attempt (its cancel token is recreated then).
         self.cancel_download_attempt(hash).await;
-        let transfer = self.transfer_from_manifest(&manifest, state_name);
-        self.state
-            .lock()
-            .await
+        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        let mut state = self.state.lock().await;
+        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        if let Some(existing) = state.transfers.get(&transfer.hash) {
+            preserve_transfer_public_metadata(&mut transfer, existing);
+        }
+        state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(Some(transfer))
@@ -2526,26 +2532,26 @@ impl EmulebbCore {
                 .set_control_state(&manifest.file_hash, None)
                 .await?;
         }
+        if let Some((category_id, _)) = category.as_ref() {
+            manifest = self
+                .ed2k_transfers
+                .set_category_id(&manifest.file_hash, *category_id)
+                .await?;
+        }
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
-        if let Some(existing) = self
-            .state
-            .lock()
-            .await
-            .transfers
-            .get(&transfer.hash)
-            .cloned()
-        {
-            preserve_transfer_public_metadata(&mut transfer, &existing);
+        let mut state = self.state.lock().await;
+        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        if let Some(existing) = state.transfers.get(&transfer.hash) {
+            preserve_transfer_public_metadata(&mut transfer, existing);
         }
         if let Some((category_id, category_name)) = category {
             transfer.category_id = category_id;
             transfer.category_name = category_name;
         }
-        self.state
-            .lock()
-            .await
+        state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
+        drop(state);
         // Non-paused downloads start immediately: kick the download driver so
         // ED2K source acquisition begins without requiring an explicit resume.
         if !matches!(state_name, "paused" | "stopped") {
@@ -2568,6 +2574,7 @@ impl EmulebbCore {
                 .map(|transfer| transfer.state.clone())
                 .unwrap_or_else(|| manifest_default_state_name(&manifest).to_string());
             let mut transfer = self.transfer_from_manifest(&manifest, &state_name);
+            apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
             if let Some(existing) = state.transfers.get(&manifest.file_hash) {
                 preserve_transfer_public_metadata(&mut transfer, existing);
             }
@@ -2584,6 +2591,7 @@ impl EmulebbCore {
         let manifest = self.ed2k_transfers.manifest(hash).await?;
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         let mut state = self.state.lock().await;
+        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -2606,6 +2614,7 @@ impl EmulebbCore {
         let state_name = manifest_default_state_name(&manifest);
         let mut transfer = self.transfer_from_manifest(&manifest, state_name);
         let mut state = self.state.lock().await;
+        apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -5693,6 +5702,23 @@ fn parse_ed2k_link(link: &str) -> Result<(String, String, u64)> {
         parts[0].to_string(),
         parts[1].parse()?,
     ))
+}
+
+fn apply_persisted_transfer_category(
+    transfer: &mut Transfer,
+    manifest: &Ed2kResumeManifest,
+    categories: &BTreeMap<u32, Category>,
+) {
+    if let Some(category) = categories
+        .get(&manifest.category_id)
+        .or_else(|| categories.get(&0))
+    {
+        transfer.category_id = category.id;
+        transfer.category_name = category.name.clone();
+    } else {
+        transfer.category_id = 0;
+        transfer.category_name = default_transfer_category_name().to_string();
+    }
 }
 
 fn unique_runtime_dir(name: &str) -> std::path::PathBuf {

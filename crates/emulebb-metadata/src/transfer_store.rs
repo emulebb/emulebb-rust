@@ -102,12 +102,14 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, control_state, priority,
-                payload_directory, created_at_ms, updated_at_ms, completed_at_ms, removed_at_ms
+                category_id, payload_directory, created_at_ms, updated_at_ms, completed_at_ms,
+                removed_at_ms
             )
-            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?5, ?6, ?7)
+            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?6, ?6, ?7, ?8)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 control_state = excluded.control_state,
+                category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms,
@@ -117,6 +119,7 @@ impl super::MetadataStore {
                 known_file_id,
                 visible_state(manifest),
                 manifest.control_state,
+                (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
                 manifest.file_hash,
                 now,
                 if manifest.completed { Some(now) } else { None },
@@ -158,7 +161,7 @@ impl super::MetadataStore {
                        END,
                        known_files.upload_priority, known_files.auto_upload_priority,
                        known_files.comment, known_files.rating,
-                       transfers.control_state, transfers.removed_at_ms
+                       transfers.category_id, transfers.control_state, transfers.removed_at_ms
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
@@ -180,8 +183,9 @@ impl super::MetadataStore {
                         auto_upload_priority: row.get::<_, i64>(11)? != 0,
                         comment: row.get(12)?,
                         rating: row.get::<_, i64>(13)? as u8,
-                        control_state: row.get(14)?,
-                        transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                        category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
+                        control_state: row.get(15)?,
+                        transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
                     })
                 },
             )
@@ -275,7 +279,7 @@ impl super::MetadataStore {
                    END,
                    known_files.upload_priority, known_files.auto_upload_priority,
                    known_files.comment, known_files.rating,
-                   transfers.control_state, transfers.removed_at_ms
+                   transfers.category_id, transfers.control_state, transfers.removed_at_ms
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             ORDER BY known_files.ed2k_hash
@@ -297,8 +301,9 @@ impl super::MetadataStore {
                 auto_upload_priority: row.get::<_, i64>(11)? != 0,
                 comment: row.get(12)?,
                 rating: row.get::<_, i64>(13)? as u8,
-                control_state: row.get(14)?,
-                transfer_row_removed: row.get::<_, Option<i64>>(15)?.is_some(),
+                category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
+                control_state: row.get(15)?,
+                transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -334,6 +339,7 @@ struct TransferRow {
     auto_upload_priority: bool,
     comment: String,
     rating: u8,
+    category_id: u32,
     control_state: Option<String>,
     transfer_row_removed: bool,
 }
@@ -467,6 +473,7 @@ fn manifest_from_row(
         auto_upload_priority: row.auto_upload_priority,
         comment: row.comment,
         rating: row.rating,
+        category_id: row.category_id,
         control_state: row.control_state,
         transfer_row_removed: row.transfer_row_removed,
     })

@@ -17,6 +17,7 @@ pub struct MetadataTransferManifest {
     pub auto_upload_priority: bool,
     pub comment: String,
     pub rating: u8,
+    pub category_id: u32,
     pub control_state: Option<String>,
     pub transfer_row_removed: bool,
 }

@@ -63,6 +63,7 @@ items.
 |----|----------|--------|-------|
 | [RUST-BUG-001](items/RUST-BUG-001.md) | Minor | IN_PROGRESS | kad_swarm multi-node transfer tests are isolated in CI |
 | [RUST-BUG-051](items/RUST-BUG-051.md) | Major | DONE | Route public searches through the selected ED2K or Kad network |
+| [RUST-BUG-052](items/RUST-BUG-052.md) | Major | DONE | Persist transfer category assignments across restart |
 
 ## Refactors (`REF`)
 

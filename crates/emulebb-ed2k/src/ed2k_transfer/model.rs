@@ -240,6 +240,9 @@ pub struct Ed2kResumeManifest {
     /// Locally configured shared-file rating in the public 0..5 range.
     #[serde(default)]
     pub rating: u8,
+    /// Download category index, matching eMule's persisted FT_CATEGORY tag.
+    #[serde(default)]
+    pub category_id: u32,
     /// User-facing transfer control state persisted across restarts.
     #[serde(default)]
     pub control_state: Option<String>,
@@ -279,6 +282,7 @@ impl Ed2kResumeManifest {
             auto_upload_priority: false,
             comment: String::new(),
             rating: 0,
+            category_id: 0,
             control_state: None,
             transfer_row_removed: false,
         }

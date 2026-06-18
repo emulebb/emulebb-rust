@@ -402,6 +402,7 @@ mod tests {
                 auto_upload_priority: false,
                 comment: String::new(),
                 rating: 0,
+                category_id: 0,
                 control_state: None,
                 transfer_row_removed: false,
                 pieces: Vec::new(),

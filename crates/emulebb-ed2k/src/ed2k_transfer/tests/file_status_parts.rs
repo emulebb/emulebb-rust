@@ -62,6 +62,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         auto_upload_priority: true,
         comment: String::new(),
         rating: 0,
+        category_id: 0,
         control_state: None,
         transfer_row_removed: false,
     }
