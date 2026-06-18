@@ -32,7 +32,7 @@ multiple scarce transfers together.
       `MAX_REQUESTS_PER_SERVER` rules.
 - [x] The ED2K server source-search layer exposes a batch UDP request API that
       returns sources grouped by file hash.
-- [ ] Active transfer source acquisition coalesces scarce transfers into
+- [x] Active transfer source acquisition coalesces scarce transfers into
       batched per-server UDP source requests.
 - [ ] Live hide.me diagnostics show fewer global UDP source packets than
       transfer/server pairs when multiple scarce transfers are active, with
@@ -47,11 +47,17 @@ multiple scarce transfers together.
   shape again.
 - Added an ED2K source-search API that sends one batched UDP request per server
   and merges `OP_GLOBFOUNDSOURCES` replies per requested file hash.
+- Added a core-side 30-minute per-file claim window, matching MFC
+  `UDPSERVERREASKTIME`, so the first concurrent scarce transfer can batch other
+  active scarce transfers and later concurrent attempts do not duplicate the
+  same server UDP walk.
 
 ## Evidence
 
 - `cargo test -p emulebb-ed2k udp_source_request_batch --locked`
 - `cargo test -p emulebb-ed2k udp_source --locked`
+- `cargo test -p emulebb-core claim_batches_current_and_other_active_scarce_transfers_once --locked`
+- `cargo test -p emulebb-core claim_skips_terminal_or_rich_transfers --locked`
 - Live-wire hide.me diagnostics run
   `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T155348Z\report.json`
   showed 213 outbound one-hash `OP_GLOBGETSOURCES` packets for 16 active

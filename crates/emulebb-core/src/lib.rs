@@ -26,11 +26,11 @@ use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel,
-        new_ed2k_server_search_channel, parse_server_met,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions,
+        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
-        search_source_udp_servers, search_source_via_background_session,
+        search_source_udp_server_batches, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -81,7 +81,9 @@ mod diag_kad_event;
 mod diag_sched;
 mod download_source_registry;
 mod ed2k_buddy_reask;
+mod ed2k_direct_download_types;
 mod ed2k_net_drivers;
+mod ed2k_source_batch;
 mod ed2k_sources;
 mod kad_buddy;
 mod kad_control;
@@ -109,10 +111,14 @@ pub mod vpn_guard;
 use categories::default_categories;
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
+use ed2k_direct_download_types::{
+    DirectDownloadJoin, DirectDownloadOptions, DirectDownloadOutcome, DirectDownloadSpawnContext,
+};
 use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
+use ed2k_source_batch::claim_ed2k_udp_source_batch;
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
@@ -216,52 +222,6 @@ const KAD_REQ_MAX_TYPE: u8 = 2;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 
-type DirectDownloadJoin = (SocketAddr, Ed2kFoundSource, Result<Ed2kPeerDownloadOutcome>);
-
-#[derive(Debug)]
-struct DirectDownloadOutcome {
-    completed: bool,
-    accepted_incomplete_peers: u32,
-    last_error: Option<anyhow::Error>,
-    /// Endpoints that detached their TCP socket onto the UDP reask loop. Their
-    /// source leases are deliberately NOT released so the next download cycle
-    /// does not re-connect them over TCP while the reask loop holds them (the
-    /// loop owns re-engagement; on UDP failure it drops them back to TCP).
-    detached_reask_endpoints: Vec<(Ipv4Addr, u16)>,
-    /// Sources that reported No Needed Parts for this file (eMuleBB
-    /// `DS_NONEEDEDPARTS` / `OP_OUTOFPARTREQS`). The driver runs the A4AF-lite
-    /// swap (`CUpDownClient::SwapToAnotherFile`) on each: if the registry shows
-    /// the peer serves another wanted file, the source is moved to that file
-    /// instead of being dropped.
-    no_needed_parts_sources: Vec<Ed2kFoundSource>,
-}
-
-struct DirectDownloadOptions {
-    bind_ip: Ipv4Addr,
-    hello_identity: Ed2kHelloIdentity,
-    secure_ident: Arc<Ed2kSecureIdent>,
-    transfer_runtime: Arc<Ed2kTransferRuntime>,
-    file_hash_hex: String,
-    file_name: String,
-    file_size: u64,
-    sources: Vec<Ed2kFoundSource>,
-    connect_timeout: Duration,
-    max_parallel_download_peers: usize,
-}
-
-struct DirectDownloadSpawnContext<'a, DownloadFn> {
-    bind_ip: Ipv4Addr,
-    hello_identity: Ed2kHelloIdentity,
-    secure_ident: &'a Arc<Ed2kSecureIdent>,
-    transfer_runtime: &'a Arc<Ed2kTransferRuntime>,
-    file_hash_hex: &'a str,
-    file_name: &'a str,
-    file_size: u64,
-    connect_timeout: Duration,
-    retry_round: u32,
-    download_peer: &'a DownloadFn,
-}
-
 #[derive(Debug)]
 struct CoreState {
     searches: HashMap<String, Search>,
@@ -295,6 +255,7 @@ struct CoreState {
     next_download_cancel_id: u64,
     active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     download_source_registry: DownloadSourceRegistry,
+    ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
     shared_directories: Vec<SharedDirectoryRoot>,
     unshared_hashes: HashSet<String>,
     /// Source-path -> content-hash for files auto-shared by the live monitor, so a
@@ -2713,6 +2674,7 @@ impl EmulebbCore {
         let mut sources = self
             .acquire_ed2k_sources(
                 network,
+                &transfer,
                 file_hash,
                 transfer.size_bytes,
                 should_refresh_ed2k_server_sources(0),
@@ -2997,6 +2959,7 @@ impl EmulebbCore {
                 match self
                     .acquire_ed2k_sources(
                         network,
+                        &transfer,
                         file_hash,
                         transfer.size_bytes,
                         should_refresh_ed2k_server_sources(source_requery_round),
@@ -3428,6 +3391,7 @@ impl EmulebbCore {
     async fn acquire_ed2k_sources(
         &self,
         network: &Ed2kNetworkConfig,
+        transfer: &Transfer,
         file_hash: Ed2kHash,
         file_size: u64,
         allow_server_source_refresh: bool,
@@ -3470,27 +3434,59 @@ impl EmulebbCore {
                 config.kad_source_supplement_max_existing_sources,
             )
         {
-            match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
-                bind_ip: network.bind_ip,
-                config: &config,
-                preferred_endpoint,
-                excluded_endpoint: global_udp_source_search_excluded_endpoint(
-                    has_background_search,
+            let claimed_batch = {
+                let mut state = self.state.lock().await;
+                claim_ed2k_udp_source_batch(
+                    &mut state,
+                    transfer,
+                    file_hash,
+                    sources.len(),
+                    config.kad_source_supplement_max_existing_sources,
+                    Instant::now(),
+                )
+            };
+            if !claimed_batch.targets.is_empty() {
+                match search_source_udp_server_batches(Ed2kUdpSourceBatchSearchOptions {
+                    bind_ip: network.bind_ip,
+                    config: &config,
                     preferred_endpoint,
-                ),
-                max_attempts: attempts,
-                file_hash,
-                file_size,
-                timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
-                cancel: &cancel,
-            })
-            .await
-            {
-                Ok(results) => merge_download_sources(&mut sources, results),
-                Err(error) => tracing::warn!(
-                    "ED2K UDP source search failed file_hash={} error={error}",
-                    file_hash
-                ),
+                    excluded_endpoint: global_udp_source_search_excluded_endpoint(
+                        has_background_search,
+                        preferred_endpoint,
+                    ),
+                    max_attempts: attempts,
+                    targets: &claimed_batch.targets,
+                    timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),
+                    cancel: &cancel,
+                })
+                .await
+                {
+                    Ok(results_by_hash) => {
+                        for (result_hash, mut results) in results_by_hash {
+                            if !network.ip_filter.is_empty() {
+                                results.retain(|source| !network.ip_filter.is_filtered(source.ip));
+                            }
+                            let ban_store = self.ed2k_transfers.ban_store();
+                            results.retain(|source| {
+                                !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
+                            });
+                            if result_hash == file_hash {
+                                merge_download_sources(&mut sources, results);
+                            } else if let Some(batch_transfer) =
+                                claimed_batch.transfers.get(&result_hash)
+                            {
+                                self.register_download_source_candidates(batch_transfer, &results)
+                                    .await;
+                                self.remember_ed2k_sources(result_hash, &results).await?;
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        "ED2K UDP source batch search failed file_hash={} target_count={} error={error}",
+                        file_hash,
+                        claimed_batch.targets.len()
+                    ),
+                }
             }
         }
         if file_size != 0
