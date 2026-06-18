@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-070
 title: Pace Kad source refreshes across retry attempts
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -39,7 +39,7 @@ supplementation still reset with each background retry task.
       spinning no-op source refresh rounds.
 - [x] Focused unit coverage proves same-file Kad refreshes are deferred while a
       different file can still claim a refresh.
-- [ ] The next hide.me live-wire diagnostics run shows Kad source-refresh churn is
+- [x] The next hide.me live-wire diagnostics run shows Kad source-refresh churn is
       suppressed versus
       `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T190522Z`.
 
@@ -53,3 +53,23 @@ supplementation still reset with each background retry task.
 
 - `cargo test -p emulebb-core kad_source_refresh_uses_mfc_backoff_per_file --locked`
 - `cargo test -p emulebb-core cooldown_deferred_direct_sources_wait_without_source_requery_spin --locked`
+- `python tools\rust_quality_gate.py quick`
+- Diagnostics build
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\logs\builds\20260618T194535Z-build-clients\build-result.json`:
+  Release diagnostics build passed with zero warnings.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T194623Z\report.json`:
+  VPN-bound HighID run started 18 downloads, completed candidate 5
+  (307454 bytes), kept Kad connected with 72 contacts, and captured packet
+  diagnostics (4733 diagnostic records, 351 ED2K packet records, 4159 Kad UDP
+  packet records).
+- Kad/source-refresh comparison:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T190522Z` had
+  34 source-refresh starts, 189 Kad source supplement completions, and 378
+  protocol-log Kad source records. The fixed run had 3 source-refresh starts, 18
+  Kad source supplement completions, and 36 protocol-log Kad source records while
+  still completing a file. The intermediate run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T192849Z` exposed a
+  no-op retry spin around cooldown-deferred remembered sources; the follow-up
+  direct-source wait guard eliminated network refresh churn and the final run
+  passed.
