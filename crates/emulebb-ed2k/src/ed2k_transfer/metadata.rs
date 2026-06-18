@@ -238,8 +238,24 @@ impl Ed2kTransferRuntime {
     pub async fn remember_source(&self, file_hash: &str, source: Ed2kSourceHint) -> Result<()> {
         let _guard = self.manifest_io.lock().await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
-        if !manifest.sources.contains(&source) {
+        let mut changed = false;
+        if let Some(existing) = manifest
+            .sources
+            .iter_mut()
+            .find(|existing| existing.ip == source.ip && existing.tcp_port == source.tcp_port)
+        {
+            // WHY: plaintext fallback retries carry the same endpoint without a
+            // user hash. Persisting both collides with the durable source
+            // identity index; keep one endpoint hint and retain the best hash.
+            if source.user_hash.is_some() && existing.user_hash != source.user_hash {
+                existing.user_hash = source.user_hash;
+                changed = true;
+            }
+        } else {
             manifest.sources.push(source);
+            changed = true;
+        }
+        if changed {
             self.store_manifest_unlocked(&manifest).await?;
         }
         Ok(())

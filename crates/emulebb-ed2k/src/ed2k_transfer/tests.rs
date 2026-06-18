@@ -24,6 +24,7 @@ mod inbound_admission;
 mod reask_reciprocity;
 mod salvage;
 mod shared_entry;
+mod source_hints;
 mod upload_queue;
 mod upload_queue_credit;
 mod upload_queue_firewalled_callback;
