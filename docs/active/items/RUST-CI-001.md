@@ -38,3 +38,8 @@ server UDP replies could not be diffed as structured packet records.
 
 - `cargo fmt --all`
 - `cargo test -p emulebb-ed2k server_dump_names_global_udp_opcodes --locked`
+- hide.me-bound live-wire diagnostics:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T142938Z\report.json`
+  - Result: structured ED2K packet dump included UDP-role
+    `OP_GLOBSEARCHREQ` and `OP_GLOBSEARCHRES` records for the global search
+    path.

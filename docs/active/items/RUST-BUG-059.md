@@ -35,4 +35,8 @@ stopped the per-server receive loop after the first decoded UDP result.
 ## Evidence
 
 - `cargo test -p emulebb-ed2k ed2k_server --locked`
-- Live-wire verification pending on the next diagnostics run.
+- hide.me-bound live-wire verification:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T144423Z\report.json`
+  - Result: live UDP global search produced multiple REST-visible results from
+    the same search pass; the full download pass still failed because no
+    harness-safe candidate was available in that small result set.

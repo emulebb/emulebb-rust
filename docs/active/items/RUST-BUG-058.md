@@ -36,3 +36,7 @@ parses `OP_GLOBSEARCHRES` through `ProcessUDPSearchAnswer`, which constructs one
 
 - `cargo test -p emulebb-ed2k udp_search_result_decodes_single_entry_without_count_prefix --locked`
 - `cargo test -p emulebb-ed2k ed2k_server --locked`
+- hide.me-bound live-wire verification:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T143542Z\report.json`
+  - Result: live UDP global search results reached the REST search output after
+    the decoder stopped treating UDP replies as TCP count-prefixed pages.
