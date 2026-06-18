@@ -10,6 +10,8 @@ use crate::{CoreState, Transfer};
 
 pub(crate) const ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+pub(crate) const ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+const ED2K_KAD_SOURCE_REASK_MAX_MULTIPLIER: u8 = 7;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedEd2kUdpSourceBatch {
@@ -95,6 +97,32 @@ pub(crate) fn claim_connected_server_source_refresh(
     state
         .ed2k_server_source_last_queried
         .insert(file_hash.to_string(), now);
+    true
+}
+
+pub(crate) fn claim_kad_source_refresh(
+    state: &mut CoreState,
+    file_hash: &str,
+    now: Instant,
+) -> bool {
+    if let Some((last_queried, searches)) = state.ed2k_kad_source_last_queried.get(file_hash) {
+        let multiplier = (*searches).max(1) as u32;
+        let cooldown = ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN.saturating_mul(multiplier);
+        if now.saturating_duration_since(*last_queried) < cooldown {
+            return false;
+        }
+    }
+    let searches = state
+        .ed2k_kad_source_last_queried
+        .get(file_hash)
+        .map_or(1, |(_, searches)| {
+            searches
+                .saturating_add(1)
+                .min(ED2K_KAD_SOURCE_REASK_MAX_MULTIPLIER)
+        });
+    state
+        .ed2k_kad_source_last_queried
+        .insert(file_hash.to_string(), (now, searches));
     true
 }
 
@@ -184,6 +212,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn kad_source_refresh_uses_mfc_backoff_per_file() {
+        let now = Instant::now();
+        let current_hash = Ed2kHash::from_bytes([0x77; 16]);
+        let other_hash = Ed2kHash::from_bytes([0x88; 16]);
+        let current = transfer(current_hash, "downloading", 1024);
+        let mut state = core_state_with_transfers([current]);
+
+        assert!(claim_kad_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now
+        ));
+        assert!(!claim_kad_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + Duration::from_secs(5 * 60)
+        ));
+        assert!(claim_kad_source_refresh(
+            &mut state,
+            &other_hash.to_string(),
+            now + Duration::from_secs(5 * 60)
+        ));
+        assert!(claim_kad_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN + Duration::from_secs(1)
+        ));
+        assert!(!claim_kad_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN + Duration::from_secs(10 * 60)
+        ));
+        assert!(claim_kad_source_refresh(
+            &mut state,
+            &current_hash.to_string(),
+            now + ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN.saturating_mul(3) + Duration::from_secs(2)
+        ));
+    }
+
     fn core_state_with_transfers(transfers: impl IntoIterator<Item = Transfer>) -> CoreState {
         let transfers = transfers
             .into_iter()
@@ -209,6 +277,7 @@ mod tests {
             download_source_registry: DownloadSourceRegistry::default(),
             ed2k_server_source_last_queried: HashMap::new(),
             ed2k_udp_source_batch_last_queried: HashMap::new(),
+            ed2k_kad_source_last_queried: HashMap::new(),
             shared_directories: Vec::new(),
             unshared_hashes: HashSet::new(),
             monitor_shared_hashes: HashMap::new(),

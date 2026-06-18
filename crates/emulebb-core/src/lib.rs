@@ -77,6 +77,7 @@ use uuid::Uuid;
 
 mod categories;
 mod category_runtime;
+mod core_state;
 mod diag_kad_event;
 mod diag_sched;
 mod download_source_registry;
@@ -110,7 +111,8 @@ mod upload_view;
 mod views;
 pub mod vpn_guard;
 use categories::default_categories;
-use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
+pub(crate) use core_state::CoreState;
+use download_source_registry::DownloadSourceCandidate;
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_direct_download_types::{
     DirectDownloadJoin, DirectDownloadOptions, DirectDownloadOutcome, DirectDownloadSpawnContext,
@@ -119,7 +121,9 @@ use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
-use ed2k_source_batch::{claim_connected_server_source_refresh, claim_ed2k_udp_source_batch};
+use ed2k_source_batch::{
+    claim_connected_server_source_refresh, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
+};
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
@@ -222,50 +226,6 @@ const ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS: u64 = 50;
 const KAD_REQ_MAX_TYPE: u8 = 2;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
-
-#[derive(Debug)]
-struct CoreState {
-    searches: HashMap<String, Search>,
-    next_search_id: u32,
-    transfers: HashMap<String, Transfer>,
-    preferences: Preferences,
-    categories: BTreeMap<u32, Category>,
-    next_category_id: u32,
-    friends: BTreeMap<String, Friend>,
-    servers: HashMap<String, ServerInfo>,
-    server_overrides: HashMap<String, ServerUpdate>,
-    disabled_servers: HashSet<String>,
-    /// Consecutive connect/ping failures per server endpoint (eMule
-    /// `CServer::IncFailedCount`). A non-static server is dropped at the
-    /// `dead_server_retries` threshold; a successful connect clears the count.
-    server_fail_counts: HashMap<String, u32>,
-    banned_source_clients: HashSet<String>,
-    active_download_attempts: HashSet<String>,
-    /// Per-hash cancellation signal for the in-flight background download attempt,
-    /// paired with a monotonic generation id so a stale, exiting attempt never
-    /// removes a newer attempt's entry (delete-then-recreate of the same hash).
-    /// An entry is created when an attempt is queued and removed by that attempt's
-    /// RAII guard on exit (only when the stored id still matches). Signalling the
-    /// token tells the attempt's requery loop to stop promptly (delete/pause/stop/
-    /// recheck) instead of running to the end of the current round and only
-    /// suppressing the next retry. Held behind the state lock and only ever read
-    /// or cloned under it (never awaited while held), so cancellation is a quick
-    /// lock and cannot deadlock the driver.
-    download_cancels: HashMap<String, (u64, CancellationToken)>,
-    /// Monotonic id source for `download_cancels` entries (see above).
-    next_download_cancel_id: u64,
-    active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
-    download_source_registry: DownloadSourceRegistry,
-    ed2k_server_source_last_queried: HashMap<String, Instant>,
-    ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
-    shared_directories: Vec<SharedDirectoryRoot>,
-    unshared_hashes: HashSet<String>,
-    /// Source-path -> content-hash for files auto-shared by the live monitor, so a
-    /// later remove (file already gone, cannot be re-hashed) resolves the catalog
-    /// hash to drop. Populated only by monitor auto-share. See `shared_dir_monitor`.
-    monitor_shared_hashes: HashMap<PathBuf, String>,
-    kad_running: bool,
-}
 
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
@@ -3508,6 +3468,10 @@ impl EmulebbCore {
                 sources.len(),
                 config.kad_source_supplement_max_existing_sources,
             )
+            && {
+                let mut state = self.state.lock().await;
+                claim_kad_source_refresh(&mut state, &transfer.hash, Instant::now())
+            }
             && let Some(dht) = self.ed2k_dht_node().await
         {
             let timeout = Duration::from_secs(
