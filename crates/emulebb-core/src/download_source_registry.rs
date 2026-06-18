@@ -138,6 +138,18 @@ impl DownloadSourceRegistry {
         Some(candidate.clone())
     }
 
+    pub(crate) fn endpoint_retry_delay(
+        &self,
+        now: Instant,
+        retry_cooldown: Duration,
+        source: &Ed2kFoundSource,
+    ) -> Option<Duration> {
+        let last = *self
+            .last_attempted_endpoints
+            .get(&(source.ip, source.tcp_port))?;
+        retry_cooldown.checked_sub(now.saturating_duration_since(last))
+    }
+
     /// A4AF-lite NNP swap target (master `CUpDownClient::SwapToAnotherFile`):
     /// when a source reports No Needed Parts for `current_file_hash`, find the
     /// best OTHER file this same peer is registered to serve, so the source is

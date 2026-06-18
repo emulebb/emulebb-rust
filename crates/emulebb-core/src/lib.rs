@@ -2781,7 +2781,7 @@ impl EmulebbCore {
             let candidate_direct_sources =
                 direct_download_candidate_sources(&sources, &attempted_direct_endpoints);
             had_direct_sources |= !candidate_direct_sources.is_empty();
-            let (direct_sources, deferred_count) = self
+            let (direct_sources, deferred_count, deferred_retry_delay) = self
                 .acquire_direct_download_source_leases(&transfer.hash, &candidate_direct_sources)
                 .await;
             let acquired_direct_source_count = direct_sources.len();
@@ -2887,11 +2887,19 @@ impl EmulebbCore {
                 acquired_direct_source_count,
                 deferred_count,
             ) {
-                tracing::info!(
-                    "ED2K source refresh skipped file_hash={} reason=direct_sources_deferred deferred_direct_sources={}",
-                    transfer.hash,
-                    deferred_count
-                );
+                if let Some(delay) = deferred_retry_delay {
+                    tracing::info!(
+                        "ED2K direct source retry deferred file_hash={} deferred_direct_sources={} retry_delay_ms={}",
+                        transfer.hash,
+                        deferred_count,
+                        delay.as_millis()
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = cancel.cancelled() => return Ok(None),
+                    }
+                    continue;
+                }
                 break;
             }
             let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
@@ -3015,10 +3023,11 @@ impl EmulebbCore {
         &self,
         file_hash: &str,
         sources: &[Ed2kFoundSource],
-    ) -> (Vec<Ed2kFoundSource>, usize) {
+    ) -> (Vec<Ed2kFoundSource>, usize, Option<Duration>) {
         let mut state = self.state.lock().await;
         let mut acquired = Vec::new();
         let mut deferred = 0usize;
+        let mut deferred_retry_delay: Option<Duration> = None;
         // Opportunistic prune so the per-file count (and the candidate map) reflect
         // only live sources: stale candidates age out of the soft-cap check and the
         // map stays bounded over many requery rounds.
@@ -3030,6 +3039,11 @@ impl EmulebbCore {
         // comes from the registry (live candidates only).
         for source in sources {
             let endpoint = source_endpoint_key(source);
+            if state.active_download_peer_endpoints.contains(&endpoint) {
+                deferred = deferred.saturating_add(1);
+                crate::diag_sched::source_dropped(file_hash, source);
+                continue;
+            }
             let file_source_count = state
                 .download_source_registry
                 .candidate_count_for_file(now, file_hash);
@@ -3052,12 +3066,20 @@ impl EmulebbCore {
                 acquired.push(source.clone());
                 crate::diag_sched::source_engaged(file_hash, source);
             } else {
+                if let Some(delay) = state.download_source_registry.endpoint_retry_delay(
+                    now,
+                    ed2k_download_retry::ED2K_DIRECT_SOURCE_RETRY_COOLDOWN,
+                    source,
+                ) {
+                    deferred_retry_delay =
+                        Some(deferred_retry_delay.map_or(delay, |current| current.min(delay)));
+                }
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
                 crate::diag_sched::source_dropped(file_hash, source);
             }
         }
-        (acquired, deferred)
+        (acquired, deferred, deferred_retry_delay)
     }
 
     async fn release_direct_download_source_leases(&self, endpoints: &[(Ipv4Addr, u16)]) {
@@ -7841,17 +7863,19 @@ mod tests {
             );
         }
 
-        let (lower_sources, lower_deferred) = core
+        let (lower_sources, lower_deferred, lower_delay) = core
             .acquire_direct_download_source_leases(&lower_hash, std::slice::from_ref(&source))
             .await;
-        let (higher_sources, higher_deferred) = core
+        let (higher_sources, higher_deferred, higher_delay) = core
             .acquire_direct_download_source_leases(&higher_hash, std::slice::from_ref(&source))
             .await;
 
         assert!(lower_sources.is_empty());
         assert_eq!(lower_deferred, 1);
+        assert!(lower_delay.is_none());
         assert_eq!(higher_sources, vec![source.clone()]);
         assert_eq!(higher_deferred, 0);
+        assert!(higher_delay.is_none());
         core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
             .await;
     }
@@ -7887,11 +7911,12 @@ mod tests {
 
         // Engage (lease) the source, as a download attempt would before detaching
         // it onto the reask loop.
-        let (engaged, deferred) = core
+        let (engaged, deferred, retry_delay) = core
             .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
             .await;
         assert_eq!(engaged, vec![source.clone()]);
         assert_eq!(deferred, 0);
+        assert!(retry_delay.is_none());
         {
             let state = core.state.lock().await;
             assert_eq!(state.active_download_peer_endpoints.len(), 1);
@@ -7914,15 +7939,13 @@ mod tests {
             );
         }
 
-        // The freed source is re-engageable on the next acquire (not deferred
-        // forever by a stale lease).
-        let (re_engaged, re_deferred) = core
+        // The lease is gone, but the endpoint retry cooldown still gates redial.
+        let (re_engaged, re_deferred, re_retry_delay) = core
             .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
             .await;
-        assert_eq!(re_engaged, vec![source.clone()]);
-        assert_eq!(re_deferred, 0);
-        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
-            .await;
+        assert!(re_engaged.is_empty());
+        assert_eq!(re_deferred, 1);
+        assert!(re_retry_delay.is_some());
     }
 
     #[tokio::test]
@@ -8145,10 +8168,10 @@ mod tests {
             }
         }
 
-        let (a_sources, a_deferred) = core
+        let (a_sources, a_deferred, a_delay) = core
             .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
             .await;
-        let (b_sources, b_deferred) = core
+        let (b_sources, b_deferred, b_delay) = core
             .acquire_direct_download_source_leases(&file_b, std::slice::from_ref(&source))
             .await;
 
@@ -8156,8 +8179,10 @@ mod tests {
         // for file B: one active relationship per peer, like eMule.
         assert_eq!(a_sources, vec![source.clone()]);
         assert_eq!(a_deferred, 0);
+        assert!(a_delay.is_none());
         assert!(b_sources.is_empty());
         assert_eq!(b_deferred, 1);
+        assert!(b_delay.is_none());
 
         // The peer holds exactly one active engagement across both files (no
         // double-engage / one relationship per peer).
@@ -8166,17 +8191,16 @@ mod tests {
             1
         );
 
-        // After the peer is released, a fresh acquisition for the best file reuses
-        // the same source rather than being permanently consumed.
+        // After the peer is released, the same endpoint remains cooldown-deferred
+        // until the MFC-style retry window expires instead of being redialed.
         core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
             .await;
-        let (a_again, a_again_deferred) = core
+        let (a_again, a_again_deferred, a_again_delay) = core
             .acquire_direct_download_source_leases(&file_a, std::slice::from_ref(&source))
             .await;
-        assert_eq!(a_again, vec![source.clone()]);
-        assert_eq!(a_again_deferred, 0);
-        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
-            .await;
+        assert!(a_again.is_empty());
+        assert_eq!(a_again_deferred, 1);
+        assert!(a_again_delay.is_some());
     }
 
     #[tokio::test]

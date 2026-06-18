@@ -82,6 +82,7 @@ items.
 | [RUST-BUG-068](items/RUST-BUG-068.md) | Major | DONE | Keep active ED2K downloads retrying after exhausted direct peers |
 | [RUST-BUG-069](items/RUST-BUG-069.md) | Major | DONE | Pace failed direct source retries per endpoint |
 | [RUST-BUG-070](items/RUST-BUG-070.md) | Major | DONE | Pace Kad source refreshes across retry attempts |
+| [RUST-BUG-071](items/RUST-BUG-071.md) | Major | DONE | Wait until direct source retry cooldown before reattempting |
 
 ## Refactors (`REF`)
 
