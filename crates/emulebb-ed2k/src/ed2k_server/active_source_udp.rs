@@ -15,8 +15,8 @@ use emulebb_kad_proto::Ed2kHash;
 use super::{
     Ed2kFoundSource, OP_GLOBFOUNDSOURCES, annotate_found_sources_server, bind_server_udp_socket,
     configured_server_entries, decode_udp_found_source_sets, merge_found_sources,
-    read_server_udp_packet, resolve_server_entry, send_udp_source_search,
-    send_udp_source_search_batch, validate_found_sources,
+    read_server_udp_packet, read_server_udp_packet_from_any, resolve_server_entry,
+    send_udp_source_search, send_udp_source_search_batch, validate_found_sources,
 };
 
 /// Inputs for an ED2K server UDP source search.
@@ -291,6 +291,7 @@ pub async fn search_source_udp_server_batches(
     let mut results_by_hash: HashMap<Ed2kHash, Vec<Ed2kFoundSource>> = HashMap::new();
     let mut last_error = None;
     let per_server_timeout = timeout.max(Duration::from_secs(5));
+    let mut queried_servers = Vec::new();
 
     for (attempt_index, configured_server) in configured_servers
         .into_iter()
@@ -330,67 +331,75 @@ pub async fn search_source_udp_server_batches(
             last_error = Some(error);
             continue;
         }
+        queried_servers.push(resolved_server);
+    }
 
-        let deadline = TokioInstant::now() + per_server_timeout;
-        loop {
-            if cancel.is_cancelled() {
-                return Ok(HashMap::new());
-            }
-            let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
-                break;
-            };
-            match tokio::time::timeout(remaining, read_server_udp_packet(&socket, &resolved_server))
-                .await
-            {
-                Ok(Ok(Some(packet))) => {
-                    if packet.from.ip() != IpAddr::V4(resolved_server.ip) {
+    if queried_servers.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+        return Ok(HashMap::new());
+    }
+
+    let deadline = TokioInstant::now() + per_server_timeout;
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(HashMap::new());
+        }
+        let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
+            break;
+        };
+        match tokio::time::timeout(
+            remaining,
+            read_server_udp_packet_from_any(&socket, &queried_servers),
+        )
+        .await
+        {
+            Ok(Ok(Some((response_server, packet)))) => {
+                if packet.opcode != OP_GLOBFOUNDSOURCES {
+                    continue;
+                }
+                let source_sets = match decode_udp_found_source_sets(&packet.payload) {
+                    Ok(source_sets) => source_sets,
+                    Err(error) => {
+                        warn!(
+                            "discarding malformed ED2K UDP source batch-search response endpoint={}: {error}",
+                            response_server.base_endpoint()
+                        );
                         continue;
                     }
-                    if packet.opcode != OP_GLOBFOUNDSOURCES {
+                };
+                for results in source_sets {
+                    let Some(file_hash) = results.first().map(|source| source.file_hash) else {
                         continue;
-                    }
-                    let source_sets = match decode_udp_found_source_sets(&packet.payload) {
-                        Ok(source_sets) => source_sets,
-                        Err(error) => {
-                            warn!(
-                                "discarding malformed ED2K UDP source batch-search response endpoint={}: {error}",
-                                resolved_server.base_endpoint()
-                            );
-                            continue;
-                        }
                     };
-                    for results in source_sets {
-                        let Some(file_hash) = results.first().map(|source| source.file_hash) else {
-                            continue;
-                        };
-                        if !requested_hashes.contains(&file_hash) {
-                            warn!(
-                                "discarding unrequested ED2K UDP source batch-search response file_hash={} endpoint={}",
-                                file_hash,
-                                resolved_server.base_endpoint()
-                            );
-                            continue;
-                        }
-                        let results =
-                            annotate_found_sources_server(results, resolved_server.base_endpoint());
-                        if let Err(error) = validate_found_sources(&results, file_hash) {
-                            warn!(
-                                "discarding mismatched ED2K UDP source batch-search response file_hash={} endpoint={}: {error}",
-                                file_hash,
-                                resolved_server.base_endpoint()
-                            );
-                            continue;
-                        }
-                        merge_found_sources(results_by_hash.entry(file_hash).or_default(), results);
+                    if !requested_hashes.contains(&file_hash) {
+                        warn!(
+                            "discarding unrequested ED2K UDP source batch-search response file_hash={} endpoint={}",
+                            file_hash,
+                            response_server.base_endpoint()
+                        );
+                        continue;
                     }
+                    let results =
+                        annotate_found_sources_server(results, response_server.base_endpoint());
+                    if let Err(error) = validate_found_sources(&results, file_hash) {
+                        warn!(
+                            "discarding mismatched ED2K UDP source batch-search response file_hash={} endpoint={}: {error}",
+                            file_hash,
+                            response_server.base_endpoint()
+                        );
+                        continue;
+                    }
+                    merge_found_sources(results_by_hash.entry(file_hash).or_default(), results);
                 }
-                Ok(Ok(None)) => continue,
-                Ok(Err(error)) => {
-                    last_error = Some(error);
-                    break;
-                }
-                Err(_) => break,
             }
+            Ok(Ok(None)) => continue,
+            Ok(Err(error)) => {
+                last_error = Some(error);
+                break;
+            }
+            Err(_) => break,
         }
     }
 

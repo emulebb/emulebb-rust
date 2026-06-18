@@ -125,3 +125,95 @@ pub(super) async fn read_server_udp_packet(
         from,
     }))
 }
+
+pub(super) async fn read_server_udp_packet_from_any(
+    socket: &UdpSocket,
+    servers: &[ResolvedServerEntry],
+) -> Result<Option<(ResolvedServerEntry, ServerUdpPacket)>> {
+    let mut buffer = vec![0u8; 65_535];
+    let (len, from) = socket
+        .recv_from(&mut buffer)
+        .await
+        .context("failed to receive ED2K server UDP datagram")?;
+    let transport_mode = if buffer[..len].first().copied() == Some(OP_EDONKEYPROT) {
+        "plaintext"
+    } else {
+        "obfuscated"
+    };
+    for server in udp_response_candidate_servers(servers, from) {
+        let Some(packet) = decode_server_udp_datagram(server, &buffer[..len]) else {
+            continue;
+        };
+        if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {
+            continue;
+        }
+        let opcode = packet[1];
+        let payload = packet[2..].to_vec();
+        dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
+        return Ok(Some((
+            server.clone(),
+            ServerUdpPacket {
+                opcode,
+                payload,
+                from,
+            },
+        )));
+    }
+    Ok(None)
+}
+
+fn udp_response_candidate_servers(
+    servers: &[ResolvedServerEntry],
+    from: SocketAddr,
+) -> impl Iterator<Item = &ResolvedServerEntry> {
+    servers
+        .iter()
+        .filter(move |server| from.ip() == IpAddr::V4(server.ip))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::super::{ConfiguredServerEntry, ResolvedServerEntry};
+    use super::udp_response_candidate_servers;
+
+    fn resolved(ip: Ipv4Addr, port: u16) -> ResolvedServerEntry {
+        ResolvedServerEntry {
+            entry: ConfiguredServerEntry {
+                host: ip.to_string(),
+                port,
+                name: None,
+                description: None,
+                udp_flags: 0,
+                udp_key: 0,
+                udp_key_ip: 0,
+                obfuscation_port_tcp: 0,
+                obfuscation_port_udp: 0,
+            },
+            ip,
+        }
+    }
+
+    #[test]
+    fn udp_response_candidates_match_queried_server_ip() {
+        let first = resolved(Ipv4Addr::new(192, 0, 2, 10), 4661);
+        let second = resolved(Ipv4Addr::new(192, 0, 2, 20), 4661);
+        let queried = vec![first, second];
+
+        let matched =
+            udp_response_candidate_servers(&queried, (Ipv4Addr::new(192, 0, 2, 20), 4236).into())
+                .collect::<Vec<_>>();
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].ip, Ipv4Addr::new(192, 0, 2, 20));
+        assert!(
+            udp_response_candidate_servers(
+                &queried,
+                (Ipv4Addr::new(198, 51, 100, 20), 4236).into(),
+            )
+            .next()
+            .is_none()
+        );
+    }
+}
