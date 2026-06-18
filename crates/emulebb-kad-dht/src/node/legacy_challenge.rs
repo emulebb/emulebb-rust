@@ -278,7 +278,7 @@ mod tests {
         .await
         .unwrap();
         let node_id = id(0x42);
-        let contact_ip = Ipv4Addr::new(203, 0, 113, 7);
+        let contact_ip = Ipv4Addr::LOCALHOST;
         // A pre-v7 contact already in the routing table, not yet verified.
         dht.add_contact(Contact::new(node_id, contact_ip, 42007, 42008, 6))
             .await
@@ -330,7 +330,7 @@ mod tests {
         .await
         .unwrap();
         let node_id = id(0x43);
-        let contact_ip = Ipv4Addr::new(203, 0, 113, 8);
+        let contact_ip = Ipv4Addr::LOCALHOST;
         dht.add_contact(Contact::new(node_id, contact_ip, 5000, 5001, 6))
             .await
             .unwrap();
