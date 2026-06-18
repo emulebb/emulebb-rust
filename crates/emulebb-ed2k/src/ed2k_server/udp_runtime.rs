@@ -7,8 +7,8 @@ use emulebb_kad_proto::Ed2kHash;
 
 use super::{
     OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry, ServerUdpPacket,
-    decode_server_udp_datagram, encode_server_udp_datagram, encode_udp_search_request,
-    encode_udp_source_request, server_status::server_status_challenge,
+    decode_server_udp_datagram, encode_server_udp_datagram, encode_udp_source_request,
+    server_status::server_status_challenge,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -51,15 +51,6 @@ pub(super) async fn send_server_udp_status_request(
     let challenge = server_status_challenge();
     send_server_udp_packet(socket, server, OP_GLOBSERVSTATREQ, &challenge.to_le_bytes()).await?;
     Ok(challenge)
-}
-
-pub(super) async fn send_udp_keyword_search(
-    socket: &UdpSocket,
-    server: &ResolvedServerEntry,
-    search_payload: &[u8],
-) -> Result<()> {
-    let (opcode, payload) = encode_udp_search_request(server, search_payload);
-    send_server_udp_packet(socket, server, opcode, &payload).await
 }
 
 pub(super) async fn send_udp_source_search(

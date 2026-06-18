@@ -6,12 +6,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::{
-    net::UdpSocket,
     sync::{RwLock, mpsc, oneshot},
     time::Instant as TokioInstant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 use emulebb_kad_proto::Ed2kHash;
 
@@ -20,9 +19,8 @@ use super::{
     OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, ResolvedServerEntry, ServerSession,
     ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
     decode_udp_search_result_pages, encode_search_request, encode_source_request,
-    merge_found_sources, send_offer_files_advertisement, send_udp_keyword_search,
-    send_udp_source_search, source_request_opcode, validate_found_sources,
-    wait_for_offer_files_settle,
+    merge_found_sources, send_offer_files_advertisement, source_request_opcode,
+    validate_found_sources, wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
@@ -67,7 +65,6 @@ pub(super) enum BackgroundServerSearchRequest {
 
 pub(super) struct BackgroundServerSearchContext<'a> {
     pub(super) server: &'a ResolvedServerEntry,
-    pub(super) server_udp_socket: Option<&'a UdpSocket>,
     pub(super) connect_options: u8,
     pub(super) shared_catalog: &'a Ed2kSharedCatalog,
     pub(super) bind_ip: Ipv4Addr,
@@ -374,16 +371,6 @@ pub(super) async fn start_background_server_search(
             session
                 .send_packet(OP_SEARCHREQUEST, &search_payload)
                 .await?;
-            if let Some(socket) = context.server_udp_socket
-                && let Err(error) =
-                    send_udp_keyword_search(socket, context.server, &search_payload).await
-            {
-                warn!(
-                    "failed to send ED2K background UDP keyword search query={:?} endpoint={}: {error}",
-                    query,
-                    context.server.base_endpoint()
-                );
-            }
             info!(
                 "sent ED2K background keyword search query={:?} endpoint={} trace_id={} role={}",
                 query, session.endpoint, session.trace_id, session.trace_role
@@ -410,16 +397,6 @@ pub(super) async fn start_background_server_search(
             let source_request = encode_source_request(file_hash, file_size);
             let opcode = source_request_opcode(context.connect_options, session.server_flags);
             session.send_packet(opcode, &source_request).await?;
-            if let Some(socket) = context.server_udp_socket
-                && let Err(error) =
-                    send_udp_source_search(socket, context.server, file_hash, file_size).await
-            {
-                warn!(
-                    "failed to send ED2K background UDP source search file_hash={} endpoint={}: {error}",
-                    file_hash,
-                    context.server.base_endpoint()
-                );
-            }
             info!(
                 "sent ED2K background source search file_hash={} endpoint={} trace_id={} role={} opcode=0x{:02X}",
                 file_hash, session.endpoint, session.trace_id, session.trace_role, opcode

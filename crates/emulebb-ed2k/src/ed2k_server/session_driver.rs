@@ -190,7 +190,6 @@ pub(super) async fn run_one_server_session(
                             &mut session,
                             BackgroundServerSearchContext {
                                 server,
-                                server_udp_socket: server_udp_socket.as_ref(),
                                 connect_options: context.hello_identity.connect_options,
                                 shared_catalog: &context.shared_catalog,
                                 bind_ip: context.bind_ip,
@@ -373,7 +372,6 @@ pub(super) async fn run_one_server_session(
                         &mut session,
                         BackgroundServerSearchContext {
                             server,
-                            server_udp_socket: server_udp_socket.as_ref(),
                             connect_options: context.hello_identity.connect_options,
                             shared_catalog: &context.shared_catalog,
                             bind_ip: context.bind_ip,
