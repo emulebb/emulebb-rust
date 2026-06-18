@@ -25,10 +25,9 @@ use emulebb_ed2k::{
     built_in_upnp_port_mapping_providers,
     config::Ed2kConfig,
     ed2k_server::{
-        Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle,
-        Ed2kServerState, Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel,
-        new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_on_server,
+        Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
+        Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
+        parse_server_met, publish_shared_catalog_via_background_session,
         request_callback_via_background_session, run_ed2k_server_loop,
         search_keyword_via_background_session, search_source_udp_servers,
         search_source_via_background_session,
@@ -2760,8 +2759,6 @@ impl EmulebbCore {
                 .max(network.config.connect_timeout_secs),
         );
         let max_peers = network.config.max_parallel_download_peers.max(1);
-        let shared_catalog = self.ed2k_transfers.shared_catalog();
-        let shared_catalog_snapshot = shared_catalog.read().await.clone();
         let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
         let connected_search_handle = self.connected_ed2k_search_handle().await;
 
@@ -2805,6 +2802,21 @@ impl EmulebbCore {
                 if !requested_callback_sources.insert(source_key(&source)) {
                     continue;
                 }
+                let callback_route =
+                    ed2k_server_callback_route(source.source_server, connected_server_endpoint);
+                if matches!(callback_route, Ed2kServerCallbackRoute::Unavailable) {
+                    tracing::debug!(
+                        "ED2K server callback unavailable file_hash={} client_id={} source_server={} connected_server={}",
+                        transfer.hash,
+                        source.client_id,
+                        source
+                            .source_server
+                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
+                        connected_server_endpoint
+                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
+                    );
+                    continue;
+                }
                 self.ed2k_transfers
                     .register_callback_intent(Ed2kCallbackIntent {
                         client_id: source.client_id,
@@ -2828,10 +2840,7 @@ impl EmulebbCore {
                         .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
                     source_requery_round
                 );
-                let callback_result = match ed2k_server_callback_route(
-                    source.source_server,
-                    connected_server_endpoint,
-                ) {
+                let callback_result = match callback_route {
                     Ed2kServerCallbackRoute::BackgroundSession => {
                         if let Some(handle) = connected_search_handle.as_ref() {
                             request_callback_via_background_session(
@@ -2847,19 +2856,7 @@ impl EmulebbCore {
                             ))
                         }
                     }
-                    Ed2kServerCallbackRoute::SourceServer(source_server) => {
-                        request_callback_on_server(Ed2kCallbackRequestOptions {
-                            bind_ip: network.bind_ip,
-                            config: &network.config,
-                            hello_identity,
-                            shared_catalog: &shared_catalog_snapshot,
-                            server_endpoint: source_server,
-                            client_id: source.client_id,
-                            timeout: callback_timeout,
-                            cancel: &callback_cancel,
-                        })
-                        .await
-                    }
+                    Ed2kServerCallbackRoute::Unavailable => Ok(()),
                 };
                 if let Err(error) = callback_result {
                     tracing::warn!(
@@ -8276,7 +8273,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_route_reuses_background_session_for_connected_server() {
+    fn callback_route_uses_only_matching_connected_server() {
         let connected_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
         let other_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 4661));
 
@@ -8286,11 +8283,15 @@ mod tests {
         );
         assert_eq!(
             ed2k_server_callback_route(Some(other_server), Some(connected_server)),
-            Ed2kServerCallbackRoute::SourceServer(other_server)
+            Ed2kServerCallbackRoute::Unavailable
         );
         assert_eq!(
             ed2k_server_callback_route(None, Some(connected_server)),
-            Ed2kServerCallbackRoute::BackgroundSession
+            Ed2kServerCallbackRoute::Unavailable
+        );
+        assert_eq!(
+            ed2k_server_callback_route(Some(connected_server), None),
+            Ed2kServerCallbackRoute::Unavailable
         );
     }
 

@@ -36,7 +36,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kServerCallbackRoute {
     BackgroundSession,
-    SourceServer(SocketAddr),
+    Unavailable,
 }
 
 pub(crate) fn source_key(
@@ -308,12 +308,14 @@ pub(crate) fn ed2k_server_callback_route(
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
 ) -> Ed2kServerCallbackRoute {
+    // WHY: stock eMule only sends OP_CALLBACKREQUEST through the currently
+    // connected server when the LowID source is registered there. It does not
+    // open ad-hoc TCP logins to another server just to relay a callback.
     match (source_server, connected_server) {
         (Some(source_server), Some(connected_server)) if source_server == connected_server => {
             Ed2kServerCallbackRoute::BackgroundSession
         }
-        (Some(source_server), _) => Ed2kServerCallbackRoute::SourceServer(source_server),
-        (None, _) => Ed2kServerCallbackRoute::BackgroundSession,
+        _ => Ed2kServerCallbackRoute::Unavailable,
     }
 }
 
