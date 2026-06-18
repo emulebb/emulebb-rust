@@ -279,6 +279,13 @@ pub(crate) fn should_skip_no_progress_source_requery(
         && completed_source_requery_rounds != 0
 }
 
+pub(crate) fn should_refresh_ed2k_server_sources(source_requery_round: usize) -> bool {
+    // WHY: eMule's local ED2K server source request is per-file paced by
+    // SERVERREASKTIME (15 minutes). Rust's short retry rounds are only seconds
+    // apart, so they may reuse remembered/Kad sources but must not hit servers.
+    source_requery_round == 0
+}
+
 pub(crate) fn global_udp_source_search_excluded_endpoint(
     has_background_search: bool,
     connected_endpoint: Option<SocketAddr>,

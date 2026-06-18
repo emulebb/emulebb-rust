@@ -121,7 +121,8 @@ use ed2k_sources::{
     manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
     plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
     should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
-    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
+    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -2763,7 +2764,12 @@ impl EmulebbCore {
             }
         }
         let mut sources = self
-            .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
+            .acquire_ed2k_sources(
+                network,
+                file_hash,
+                transfer.size_bytes,
+                should_refresh_ed2k_server_sources(0),
+            )
             .await?;
         if !network.ip_filter.is_empty() {
             sources.retain(|source| !network.ip_filter.is_filtered(source.ip));
@@ -3044,7 +3050,12 @@ impl EmulebbCore {
                 }
 
                 match self
-                    .acquire_ed2k_sources(network, file_hash, transfer.size_bytes)
+                    .acquire_ed2k_sources(
+                        network,
+                        file_hash,
+                        transfer.size_bytes,
+                        should_refresh_ed2k_server_sources(source_requery_round),
+                    )
                     .await
                 {
                     Ok(refreshed_sources) => {
@@ -3512,6 +3523,7 @@ impl EmulebbCore {
         network: &Ed2kNetworkConfig,
         file_hash: Ed2kHash,
         file_size: u64,
+        allow_server_source_refresh: bool,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
         let attempts = configured_server_attempts(&network.config)
@@ -3524,7 +3536,7 @@ impl EmulebbCore {
                 (None, None)
             };
         let has_background_search = background_search.is_some();
-        if let Some(handle) = background_search {
+        if allow_server_source_refresh && let Some(handle) = background_search {
             let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
             match search_source_via_background_session(
                 &handle, file_hash, file_size, timeout, &cancel,
@@ -3543,7 +3555,7 @@ impl EmulebbCore {
         // sessions for ordinary source refreshes: live packet captures showed
         // hundreds of OP_LOGINREQUEST attempts and server closes before
         // OP_IDCHANGE, which is both non-stock and hostile to public servers.
-        if has_background_search && sources.is_empty() {
+        if allow_server_source_refresh && has_background_search && sources.is_empty() {
             match search_source_udp_servers(Ed2kUdpSourceSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &network.config,
@@ -8313,6 +8325,13 @@ mod tests {
         assert!(!should_skip_no_progress_source_requery(true, true, 0, 1));
         assert!(!should_skip_no_progress_source_requery(true, false, 1, 1));
         assert!(!should_skip_no_progress_source_requery(false, false, 0, 1));
+    }
+
+    #[test]
+    fn ed2k_server_source_refresh_is_initial_round_only() {
+        assert!(should_refresh_ed2k_server_sources(0));
+        assert!(!should_refresh_ed2k_server_sources(1));
+        assert!(!should_refresh_ed2k_server_sources(2));
     }
 
     #[test]
