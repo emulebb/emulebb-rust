@@ -21,6 +21,7 @@ use emulebb_kad_proto::Ed2kHash;
 mod active_callback;
 mod active_keyword;
 mod active_source;
+mod active_source_udp;
 mod background;
 mod diagnostics;
 mod flags;
@@ -47,9 +48,10 @@ pub use active_keyword::{
     Ed2kKeywordSearchOptions, Ed2kUdpKeywordSearchOptions, search_keyword_servers,
     search_keyword_udp_servers,
 };
-pub use active_source::{
-    Ed2kSourceSearchOptions, Ed2kUdpSourceSearchOptions, search_source_servers,
-    search_source_udp_servers,
+pub use active_source::{Ed2kSourceSearchOptions, search_source_servers};
+pub use active_source_udp::{
+    Ed2kUdpSourceBatchSearchOptions, Ed2kUdpSourceBatchTarget, Ed2kUdpSourceSearchOptions,
+    search_source_udp_server_batches, search_source_udp_servers,
 };
 use background::{
     BackgroundServerSearchContext, BackgroundServerSearchRequest, PendingBackgroundServerSearch,
@@ -113,7 +115,8 @@ pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServ
 use udp::derive_server_udp_cipher;
 use udp::{decode_server_udp_datagram, encode_server_udp_datagram, server_udp_endpoint};
 use udp_runtime::{
-    bind_server_udp_socket, read_server_udp_packet, send_udp_keyword_search, send_udp_source_search,
+    bind_server_udp_socket, read_server_udp_packet, send_udp_keyword_search,
+    send_udp_source_search, send_udp_source_search_batch,
 };
 
 const OP_EDONKEYPROT: u8 = 0xE3;

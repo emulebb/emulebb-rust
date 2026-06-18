@@ -30,6 +30,8 @@ multiple scarce transfers together.
       `OP_GLOBGETSOURCES2` requests, including large-file sizes.
 - [x] The packet fill behavior matches the MFC `MAX_UDP_PACKET_DATA` /
       `MAX_REQUESTS_PER_SERVER` rules.
+- [x] The ED2K server source-search layer exposes a batch UDP request API that
+      returns sources grouped by file hash.
 - [ ] Active transfer source acquisition coalesces scarce transfers into
       batched per-server UDP source requests.
 - [ ] Live hide.me diagnostics show fewer global UDP source packets than
@@ -43,10 +45,13 @@ multiple scarce transfers together.
 - Kept the existing single-transfer source acquisition path on the batch encoder
   so the next slice can wire cross-transfer batching without changing packet
   shape again.
+- Added an ED2K source-search API that sends one batched UDP request per server
+  and merges `OP_GLOBFOUNDSOURCES` replies per requested file hash.
 
 ## Evidence
 
 - `cargo test -p emulebb-ed2k udp_source_request_batch --locked`
+- `cargo test -p emulebb-ed2k udp_source --locked`
 - Live-wire hide.me diagnostics run
   `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T155348Z\report.json`
   showed 213 outbound one-hash `OP_GLOBGETSOURCES` packets for 16 active

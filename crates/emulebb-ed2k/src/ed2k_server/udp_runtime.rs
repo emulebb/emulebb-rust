@@ -86,6 +86,16 @@ pub(super) async fn send_udp_source_search(
     send_server_udp_packet(socket, server, encoded.opcode, &encoded.payload).await
 }
 
+pub(super) async fn send_udp_source_search_batch(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+    targets: &[Ed2kUdpSourceRequestTarget],
+) -> Result<()> {
+    let encoded = encode_udp_source_request_batch(server, targets)
+        .context("ED2K UDP source search batch had no encodable targets")?;
+    send_server_udp_packet(socket, server, encoded.opcode, &encoded.payload).await
+}
+
 pub(super) async fn read_server_udp_packet(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
