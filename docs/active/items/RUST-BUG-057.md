@@ -34,3 +34,7 @@ timer expires. Rust's shorter 15-second floor was a behavioral drift.
 ## Evidence
 
 - `cargo test -p emulebb-core connected_server_keyword_search_timeout_matches_mfc_floor --locked`
+- hide.me-bound live-wire pass:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T140539Z\report.json`
+  - Result: passed after the connected-server search used the MFC 50-second
+    silent-server timeout before the global UDP walk.

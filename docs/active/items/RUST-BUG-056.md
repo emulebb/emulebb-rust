@@ -42,3 +42,9 @@ fatal search error.
 
 - `cargo fmt --all`
 - `cargo test -p emulebb-ed2k background_udp --locked`
+- hide.me-bound live-wire pass:
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T140539Z\report.json`
+  - Result: passed with VPN bind, ED2K HighID, Kad connected, public search
+    results, completed downloads, and packet diagnostics captured.
+  - Malformed ED2K UDP keyword-search response was discarded without aborting
+    the global server walk.
