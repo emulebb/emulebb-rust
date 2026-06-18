@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-069
 title: Pace failed direct source retries per endpoint
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -36,7 +36,7 @@ endpoint again.
 - [x] Connected-server source refresh pacing remains independent.
 - [x] Focused unit coverage proves released endpoints cannot be re-leased inside
       the retry window.
-- [ ] The next hide.me live-wire diagnostics run shows repeated same-endpoint
+- [x] The next hide.me live-wire diagnostics run shows repeated same-endpoint
       redials are suppressed versus
       `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T184108Z`.
 
@@ -51,3 +51,21 @@ endpoint again.
 ## Evidence
 
 - `cargo test -p emulebb-core released_endpoint_stays_cooldown_deferred_until_retry_window_expires --locked`
+- `python tools\rust_quality_gate.py quick`
+- Diagnostics build
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\logs\builds\20260618T190434Z-build-clients\build-result.json`:
+  Release diagnostics build passed with zero warnings.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T190522Z\report.json`:
+  VPN-bound HighID run started 18 downloads, completed candidate 2
+  (103303 bytes), reached 24 peak reported sources from 18 initial sources, and
+  captured packet diagnostics (6333 diagnostic records, 326 ED2K packet records,
+  5903 Kad UDP packet records).
+- Retry-pacing comparison against
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T184108Z`:
+  direct attempts dropped from 24 to 12. The previously repeated endpoint
+  `195.154.51.215:14662` dropped from 12 attempts for
+  `09a6d19d267a1d5f1cf2aeb0342f3755` to 1 attempt. The peer-level repeats for
+  `89.141.127.85:60662` dropped from 7 attempts to 1 attempt. The only repeated
+  endpoints in the fixed run were the expected obfuscated attempt plus immediate
+  plaintext fallback inside the same leased source, not retry-task redials.
