@@ -315,3 +315,86 @@ async fn contiguous_download_still_verifies_with_block_bitmap() {
     assert_eq!(half.present_count(), 3);
     assert_eq!(half.contiguous_prefix_bytes(), ED2K_EMBLOCK_SIZE * 3);
 }
+
+#[tokio::test]
+async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
+    // MFC accepts any incoming range covered by a pending requested block. Live
+    // peers can send the second requested block before the first, so the Rust
+    // piece store must preserve that data instead of treating it as a bad range.
+    let root = unique_test_dir("ed2k-requested-out-of-order-block");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+
+    let mut payload = Vec::with_capacity((ED2K_EMBLOCK_SIZE * 2) as usize);
+    payload.extend(std::iter::repeat_n(0x31u8, ED2K_EMBLOCK_SIZE as usize));
+    payload.extend(std::iter::repeat_n(0x92u8, ED2K_EMBLOCK_SIZE as usize));
+    let file_hash = Ed2kHash::from_bytes(md4(&payload));
+    let job = new_transfer_job(
+        file_hash,
+        "out-of-order.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .mark_piece_requested(&job.file_hash, 0)
+        .await
+        .unwrap();
+
+    let second_start = ED2K_EMBLOCK_SIZE;
+    let second_end = ED2K_EMBLOCK_SIZE * 2;
+    let (first_outcome, first_manifest) = runtime
+        .append_or_salvage_block_with_manifest(
+            &job.file_hash,
+            0,
+            second_start,
+            second_end,
+            &payload[second_start as usize..second_end as usize],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !first_outcome.is_completed(),
+        "a later block alone cannot complete the part"
+    );
+    let piece = &first_manifest.pieces[0];
+    assert_eq!(piece.state, Ed2kTransferState::Requested);
+    assert_eq!(
+        piece.bytes_written, 0,
+        "the contiguous prefix is still missing"
+    );
+    assert!(
+        piece.block_bitmap.is_some(),
+        "non-contiguous presence is persisted in the bitmap"
+    );
+    let bitmap = piece.resolve_block_bitmap(payload.len() as u64);
+    assert!(!bitmap.is_present(0), "first block is still missing");
+    assert!(bitmap.is_present(1), "second block was preserved");
+
+    let (completed, final_manifest) = runtime
+        .append_or_salvage_block_with_manifest(
+            &job.file_hash,
+            0,
+            0,
+            ED2K_EMBLOCK_SIZE,
+            &payload[..ED2K_EMBLOCK_SIZE as usize],
+        )
+        .await
+        .unwrap();
+    assert!(
+        completed.is_completed(),
+        "the part verifies when the missing prefix arrives"
+    );
+    assert_eq!(final_manifest.pieces[0].state, Ed2kTransferState::Verified);
+    assert_eq!(final_manifest.pieces[0].bytes_written, payload.len() as u64);
+    assert!(
+        final_manifest.pieces[0].block_bitmap.is_none(),
+        "verified parts return to the compact representation"
+    );
+    assert!(final_manifest.completed);
+
+    let on_disk = fs::read(runtime.payload_path(&job.file_hash)).unwrap();
+    assert_eq!(on_disk, payload);
+}

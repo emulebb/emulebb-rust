@@ -261,12 +261,14 @@ impl Ed2kTransferRuntime {
         self.store_manifest_unlocked(&manifest).await
     }
 
-    /// Append one contiguous download block into a requested piece.
+    /// Append one downloaded block into a requested piece.
     ///
     /// This is used for single-part ED2K downloads where peers expect
     /// eMule-sized `OP_REQUESTPARTS` block ranges instead of one whole-file
-    /// range. The method only accepts strictly contiguous writes for the
-    /// claimed piece and verifies the full piece once the final block arrives.
+    /// range. The common path accepts strictly contiguous writes for the
+    /// claimed piece. A non-prefix response is accepted only when it is exactly
+    /// one requested eMule block; those bytes are tracked with the per-part
+    /// block bitmap until the missing prefix arrives.
     pub(crate) async fn append_piece_block(
         &self,
         file_hash: &str,
@@ -284,18 +286,37 @@ impl Ed2kTransferRuntime {
             expected_piece_length(manifest.file_size, piece_size, u64::from(piece_index));
         let piece_end = piece_start + expected_piece_len;
         let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-        let current_piece_bytes_written = manifest
+        let piece_snapshot = manifest
             .pieces
             .iter()
             .find(|piece| piece.piece_index == piece_index)
-            .map(|piece| piece.bytes_written)
+            .cloned()
             .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
+        let current_piece_bytes_written = piece_snapshot.bytes_written;
         let expected_start = piece_start + current_piece_bytes_written;
         let expected_end = expected_start + data_len;
-        if start != expected_start || end != expected_end || end > piece_end {
-            anyhow::bail!(
-                "piece {piece_index} for {file_hash} received unexpected block {start}..{end} expected {expected_start}..{expected_end} within {piece_start}..{piece_end}"
-            );
+        if piece_snapshot.has_block_bitmap()
+            || start != expected_start
+            || end != expected_end
+            || end > piece_end
+        {
+            // WHY: live peers can send a later requested OP_REQUESTPARTS block
+            // before the current prefix. MFC accepts any received range covered
+            // by a pending request and writes it at the absolute file offset, so
+            // preserve that data instead of dropping the session on ordering.
+            return self
+                .append_requested_block_by_bitmap_unlocked(
+                    &mut manifest,
+                    file_hash,
+                    piece_index,
+                    piece_start,
+                    expected_piece_len,
+                    start,
+                    end,
+                    data,
+                    block_received_at,
+                )
+                .await;
         }
 
         let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
@@ -476,17 +497,17 @@ impl Ed2kTransferRuntime {
     }
 }
 
-struct AppendPieceBlockLog<'a> {
-    manifest: &'a Ed2kResumeManifest,
-    piece_index: u32,
-    start: u64,
-    end: u64,
-    block_received_at: Instant,
-    should_checkpoint: bool,
-    checkpoint_reason: Option<&'static str>,
+pub(super) struct AppendPieceBlockLog<'a> {
+    pub(super) manifest: &'a Ed2kResumeManifest,
+    pub(super) piece_index: u32,
+    pub(super) start: u64,
+    pub(super) end: u64,
+    pub(super) block_received_at: Instant,
+    pub(super) should_checkpoint: bool,
+    pub(super) checkpoint_reason: Option<&'static str>,
 }
 
-fn log_append_piece_block(event: AppendPieceBlockLog<'_>) {
+pub(super) fn log_append_piece_block(event: AppendPieceBlockLog<'_>) {
     debug!(
         file_hash = %event.manifest.file_hash,
         piece_index = event.piece_index,

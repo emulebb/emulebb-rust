@@ -86,6 +86,7 @@ items.
 | [RUST-BUG-072](items/RUST-BUG-072.md) | Major | DONE | Do not expire queued connected-server source requests before dispatch |
 | [RUST-BUG-073](items/RUST-BUG-073.md) | Major | DONE | Preserve MFC queued-source UDP reask cadence |
 | [RUST-BUG-074](items/RUST-BUG-074.md) | Minor | DONE | Include reaskCount in Rust UDP reask diagnostics |
+| [RUST-BUG-075](items/RUST-BUG-075.md) | Major | DONE | Preserve out-of-order requested ED2K blocks |
 
 ## Refactors (`REF`)
 

@@ -47,6 +47,7 @@ mod metadata;
 mod model;
 mod piece_store;
 mod reask_reciprocity;
+mod requested_block;
 mod salvage;
 mod shared_catalog;
 mod store;
