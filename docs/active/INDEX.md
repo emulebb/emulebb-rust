@@ -70,6 +70,7 @@ items.
 | [RUST-BUG-056](items/RUST-BUG-056.md) | Major | DONE | Ignore malformed ED2K UDP global-search replies |
 | [RUST-BUG-057](items/RUST-BUG-057.md) | Major | DONE | Match MFC connected-server keyword search timeout |
 | [RUST-BUG-058](items/RUST-BUG-058.md) | Major | DONE | Decode ED2K UDP search-result entries without TCP count prefix |
+| [RUST-BUG-059](items/RUST-BUG-059.md) | Major | DONE | Collect multiple ED2K UDP keyword replies per server |
 
 ## Refactors (`REF`)
 

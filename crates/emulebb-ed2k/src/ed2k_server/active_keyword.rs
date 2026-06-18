@@ -162,13 +162,12 @@ pub async fn search_keyword_udp_servers(
                                 "discarding malformed ED2K UDP keyword-search response endpoint={}: {error}",
                                 resolved_server.base_endpoint()
                             );
-                            break;
+                            continue;
                         }
                     };
                     for page in pages {
                         results.extend(page.files);
                     }
-                    break;
                 }
                 Ok(Ok(None)) => continue,
                 Ok(Err(error)) => {
