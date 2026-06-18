@@ -38,6 +38,94 @@ fn udp_keyword_search_request_adds_large_file_flags_when_supported() {
 }
 
 #[test]
+fn udp_source_request_batch_encodes_legacy_hashes() {
+    let server = test_server(0, SERVER_UDP_FLAG_EXT_GETSOURCES);
+    let targets = [
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x11; 16]),
+            file_size: 1234,
+        },
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x22; 16]),
+            file_size: 5678,
+        },
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x33; 16]),
+            file_size: 0,
+        },
+    ];
+
+    let encoded = encode_udp_source_request_batch(&server, &targets).expect("encode source batch");
+
+    assert_eq!(encoded.opcode, OP_GLOBGETSOURCES);
+    assert_eq!(encoded.included_files, 3);
+    assert_eq!(encoded.included_large_files, 0);
+    assert_eq!(encoded.payload.len(), 48);
+    assert_eq!(&encoded.payload[0..16], &[0x11; 16]);
+    assert_eq!(&encoded.payload[16..32], &[0x22; 16]);
+    assert_eq!(&encoded.payload[32..48], &[0x33; 16]);
+}
+
+#[test]
+fn udp_source_request_batch_encodes_getsources2_sizes() {
+    let server = test_server(
+        0,
+        SERVER_UDP_FLAG_EXT_GETSOURCES2 | SERVER_UDP_FLAG_LARGEFILES,
+    );
+    let large_size = u64::from(u32::MAX) + 1;
+    let targets = [
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x44; 16]),
+            file_size: 1234,
+        },
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x55; 16]),
+            file_size: large_size,
+        },
+    ];
+
+    let encoded = encode_udp_source_request_batch(&server, &targets).expect("encode source batch");
+
+    assert_eq!(encoded.opcode, OP_GLOBGETSOURCES2);
+    assert_eq!(encoded.included_files, 2);
+    assert_eq!(encoded.included_large_files, 1);
+    assert_eq!(encoded.payload.len(), 48);
+    assert_eq!(&encoded.payload[0..16], &[0x44; 16]);
+    assert_eq!(
+        u32::from_le_bytes(encoded.payload[16..20].try_into().unwrap()),
+        1234
+    );
+    assert_eq!(&encoded.payload[20..36], &[0x55; 16]);
+    assert_eq!(
+        u32::from_le_bytes(encoded.payload[36..40].try_into().unwrap()),
+        0
+    );
+    assert_eq!(
+        u64::from_le_bytes(encoded.payload[40..48].try_into().unwrap()),
+        large_size
+    );
+}
+
+#[test]
+fn udp_source_request_batch_matches_mfc_packet_fill_limit() {
+    let server = test_server(0, SERVER_UDP_FLAG_EXT_GETSOURCES);
+    let targets = (0..40)
+        .map(|index| Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([index; 16]),
+            file_size: 1024,
+        })
+        .collect::<Vec<_>>();
+
+    let encoded = encode_udp_source_request_batch(&server, &targets).expect("encode source batch");
+
+    assert_eq!(encoded.opcode, OP_GLOBGETSOURCES);
+    assert_eq!(encoded.included_files, 32);
+    assert_eq!(encoded.payload.len(), 512);
+    assert_eq!(&encoded.payload[0..16], &[0; 16]);
+    assert_eq!(&encoded.payload[496..512], &[31; 16]);
+}
+
+#[test]
 fn server_udp_obfuscation_round_trips_plain_payload() {
     let server = test_udp_obfuscated_server();
     let (endpoint, packet) = encode_server_udp_datagram(&server, OP_GLOBGETSOURCES2, b"abc");

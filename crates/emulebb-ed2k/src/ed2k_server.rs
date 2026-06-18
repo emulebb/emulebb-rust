@@ -97,8 +97,9 @@ use source_utils::{
     annotate_found_sources_server, ipv4_from_client_id, merge_found_sources, validate_found_sources,
 };
 use startup::{
-    encode_login_request, encode_source_request, encode_udp_search_request,
-    encode_udp_source_request, login_identity_for_server_transport, send_connected_server_startup,
+    Ed2kUdpSourceRequestTarget, encode_login_request, encode_source_request,
+    encode_udp_search_request, encode_udp_source_request_batch,
+    login_identity_for_server_transport, send_connected_server_startup,
     send_offer_files_advertisement, source_request_opcode, wait_for_offer_files_settle,
 };
 #[cfg(test)]

@@ -48,3 +48,8 @@ that left the UDP source-search path with no candidate servers.
 - `cargo test -p emulebb-core server_udp_source_supplement_runs_for_empty_or_scarce_server_sources --locked`
 - `cargo test -p emulebb-core effective_ed2k_config_includes_runtime_servers --locked`
 - `python tools\rust_quality_gate.py quick`
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T155348Z\report.json`:
+  VPN-bound HighID run passed, started 16 downloads, completed one candidate,
+  and captured 213 outbound `OP_GLOBGETSOURCES` packets in the ED2K server UDP
+  dump.

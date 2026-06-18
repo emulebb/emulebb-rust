@@ -6,9 +6,9 @@ use tokio::net::UdpSocket;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry, ServerUdpPacket,
-    decode_server_udp_datagram, diagnostics::dump_ed2k_server_udp_packet,
-    encode_server_udp_datagram, encode_udp_search_request, encode_udp_source_request,
+    Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry,
+    ServerUdpPacket, decode_server_udp_datagram, diagnostics::dump_ed2k_server_udp_packet,
+    encode_server_udp_datagram, encode_udp_search_request, encode_udp_source_request_batch,
     server_status::server_status_challenge,
 };
 
@@ -75,8 +75,15 @@ pub(super) async fn send_udp_source_search(
     file_hash: Ed2kHash,
     file_size: u64,
 ) -> Result<()> {
-    let (opcode, payload) = encode_udp_source_request(server, file_hash, file_size);
-    send_server_udp_packet(socket, server, opcode, &payload).await
+    let encoded = encode_udp_source_request_batch(
+        server,
+        &[Ed2kUdpSourceRequestTarget {
+            file_hash,
+            file_size,
+        }],
+    )
+    .context("ED2K UDP source search had no encodable target")?;
+    send_server_udp_packet(socket, server, encoded.opcode, &encoded.payload).await
 }
 
 pub(super) async fn read_server_udp_packet(

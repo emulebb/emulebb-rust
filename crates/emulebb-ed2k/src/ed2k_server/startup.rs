@@ -35,6 +35,26 @@ use super::{
     is_low_id,
 };
 
+const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
+const MAX_UDP_SOURCE_REQUESTS_PER_SERVER: usize = 35;
+const UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE: usize = 16;
+const UDP_SOURCE_REQUEST_G2_BYTES_PER_FILE: usize = 20;
+const UDP_SOURCE_REQUEST_G2_LARGE_FILE_EXTRA_BYTES: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Ed2kUdpSourceRequestTarget {
+    pub file_hash: Ed2kHash,
+    pub file_size: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct EncodedUdpSourceRequestBatch {
+    pub opcode: u8,
+    pub payload: Vec<u8>,
+    pub included_files: usize,
+    pub included_large_files: usize,
+}
+
 pub(super) fn encode_login_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.extend_from_slice(&identity.user_hash);
@@ -139,21 +159,65 @@ pub(super) fn encode_source_request(file_hash: Ed2kHash, file_size: u64) -> Vec<
     payload
 }
 
-pub(super) fn encode_udp_source_request(
+pub(super) fn encode_udp_source_request_batch(
     server: &ResolvedServerEntry,
-    file_hash: Ed2kHash,
-    file_size: u64,
-) -> (u8, Vec<u8>) {
-    if server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES2 != 0 {
-        (
-            OP_GLOBGETSOURCES2,
-            encode_source_request(file_hash, file_size),
-        )
+    targets: &[Ed2kUdpSourceRequestTarget],
+) -> Option<EncodedUdpSourceRequestBatch> {
+    let use_getsources2 = server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES2 != 0;
+    let supports_large_files = server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES != 0;
+    let opcode = if use_getsources2 {
+        OP_GLOBGETSOURCES2
     } else {
         let _supports_legacy_getsources =
             server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES != 0;
-        (OP_GLOBGETSOURCES, file_hash.0.to_vec())
+        OP_GLOBGETSOURCES
+    };
+    let mut payload = Vec::with_capacity(MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES);
+    let mut included_files = 0usize;
+    let mut included_large_files = 0usize;
+
+    for target in targets {
+        if is_udp_source_request_batch_full(use_getsources2, included_files, included_large_files) {
+            break;
+        }
+        let is_large_file = target.file_size > u64::from(u32::MAX);
+        if is_large_file && !supports_large_files {
+            continue;
+        }
+        if use_getsources2 {
+            payload.extend_from_slice(&encode_source_request(target.file_hash, target.file_size));
+            if is_large_file {
+                included_large_files += 1;
+            }
+        } else {
+            payload.extend_from_slice(&target.file_hash.0);
+        }
+        included_files += 1;
     }
+
+    (included_files > 0).then_some(EncodedUdpSourceRequestBatch {
+        opcode,
+        payload,
+        included_files,
+        included_large_files,
+    })
+}
+
+fn is_udp_source_request_batch_full(
+    use_getsources2: bool,
+    included_files: usize,
+    included_large_files: usize,
+) -> bool {
+    if included_files >= MAX_UDP_SOURCE_REQUESTS_PER_SERVER {
+        return true;
+    }
+    if !use_getsources2 {
+        return included_files * UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE
+            >= MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES;
+    }
+    included_files * UDP_SOURCE_REQUEST_G2_BYTES_PER_FILE
+        + included_large_files * UDP_SOURCE_REQUEST_G2_LARGE_FILE_EXTRA_BYTES
+        >= MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES
 }
 
 pub(super) fn encode_udp_search_request(
