@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-066
 title: Pace connected-server source refreshes across retry attempts
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -29,7 +29,7 @@ hit the connected server again immediately.
 - [x] UDP source batch pacing remains independent at its 30-minute cadence.
 - [x] Focused unit coverage proves same-file retries are suppressed while other
       files and expired entries can still refresh.
-- [ ] The next hide.me live-wire run shows connected-server source timeout
+- [x] The next hide.me live-wire run shows connected-server source timeout
       churn is reduced versus the 72 warnings seen in
       `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T173921Z`.
 
@@ -45,3 +45,20 @@ hit the connected server again immediately.
 - `cargo test -p emulebb-core connected_server_source_refresh_is_paced_per_file --locked`
 - `python tools\check_rust_client_policy.py`
 - `python tools\rust_quality_gate.py quick`
+- Diagnostics build
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\logs\builds\20260618T175715Z-build-clients\build-result.json`:
+  Release diagnostics build passed with zero warnings.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T175809Z\report.json`:
+  VPN-bound HighID run started 18 downloads and captured packet diagnostics.
+  The daemon log showed 18 connected-server source-search timeout warnings and
+  18 sent connected-server source searches, down from 72 timeout warnings and
+  41 sent searches in
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T173921Z`. The
+  same run captured 30 batched outbound `OP_GLOBGETSOURCES` packets, each with
+  an 18-file payload, sent to 30 distinct servers.
+
+The live run did not complete a download before timeout, so it is not a full
+end-to-end pass. It is sufficient evidence for this server-source pacing fix
+because the connected-server retry churn was eliminated while VPN binding,
+HighID, Kad connectivity, and packet diagnostics were active.

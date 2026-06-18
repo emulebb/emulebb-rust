@@ -77,7 +77,7 @@ items.
 | [RUST-BUG-063](items/RUST-BUG-063.md) | Major | DONE | Do not serialize ED2K UDP source-batch sends behind per-server waits |
 | [RUST-BUG-064](items/RUST-BUG-064.md) | Major | DONE | Cover all effective servers in ED2K UDP source batches |
 | [RUST-BUG-065](items/RUST-BUG-065.md) | Major | DONE | Deduplicate remembered ED2K sources across plaintext fallback |
-| [RUST-BUG-066](items/RUST-BUG-066.md) | Major | IN_PROGRESS | Pace connected-server source refreshes across retry attempts |
+| [RUST-BUG-066](items/RUST-BUG-066.md) | Major | DONE | Pace connected-server source refreshes across retry attempts |
 
 ## Refactors (`REF`)
 
