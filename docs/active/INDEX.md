@@ -69,6 +69,7 @@ items.
 | [RUST-BUG-055](items/RUST-BUG-055.md) | Major | DONE | Match MFC obfuscated server login for metadata-poor ED2K servers |
 | [RUST-BUG-056](items/RUST-BUG-056.md) | Major | DONE | Ignore malformed ED2K UDP global-search replies |
 | [RUST-BUG-057](items/RUST-BUG-057.md) | Major | DONE | Match MFC connected-server keyword search timeout |
+| [RUST-BUG-058](items/RUST-BUG-058.md) | Major | DONE | Decode ED2K UDP search-result entries without TCP count prefix |
 
 ## Refactors (`REF`)
 

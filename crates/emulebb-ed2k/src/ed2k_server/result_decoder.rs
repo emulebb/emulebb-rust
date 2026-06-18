@@ -50,13 +50,27 @@ pub(super) fn decode_search_result_page(payload: &[u8]) -> Result<SearchResultPa
 
 pub(super) fn decode_udp_search_result_pages(payload: &[u8]) -> Result<Vec<SearchResultPage>> {
     let mut cursor = payload;
-    let mut pages = Vec::new();
+    let mut files = Vec::new();
     while !cursor.is_empty() {
-        let (page, rest) = decode_search_result_page_from(cursor)?;
-        pages.push(page);
-        cursor = rest;
+        if udp_chain_matches(cursor, OP_GLOBSEARCHRES) {
+            cursor = &cursor[2..];
+            continue;
+        }
+        let (file, rest) = decode_search_result_entry(cursor)?;
+        files.push(file);
+        cursor = if udp_chain_matches(rest, OP_GLOBSEARCHRES) {
+            &rest[2..]
+        } else {
+            rest
+        };
     }
-    Ok(pages)
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![SearchResultPage {
+        files,
+        more_results_available: false,
+    }])
 }
 
 pub(super) fn decode_udp_found_source_sets(payload: &[u8]) -> Result<Vec<Vec<Ed2kFoundSource>>> {
@@ -102,60 +116,9 @@ fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &
     let mut files = Vec::with_capacity((count as usize).min(cursor.len() / MIN_SEARCH_ENTRY_SIZE));
 
     for _ in 0..count {
-        if cursor.len() < MIN_SEARCH_ENTRY_SIZE {
-            anyhow::bail!("short ED2K search result entry");
-        }
-        let file_hash = Ed2kHash(cursor[..16].try_into().unwrap());
-        cursor = &cursor[16..];
-        cursor = &cursor[4..];
-        cursor = &cursor[2..];
-        let tag_count = u32::from_le_bytes(cursor[..4].try_into().unwrap());
-        cursor = &cursor[4..];
-        let mut name = None;
-        let mut size = None;
-        let mut size_hi = None;
-        let mut file_type = None;
-        let mut source_count = None;
-        for _ in 0..tag_count {
-            let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
-            cursor = rest;
-            match (tag_name, tag_value) {
-                (Some(FT_FILENAME), Some(DecodedTagValue::String(value))) if name.is_none() => {
-                    name = Some(value);
-                }
-                (Some(FT_FILESIZE), Some(DecodedTagValue::Unsigned(value))) => {
-                    size = Some(value);
-                }
-                (Some(FT_FILESIZE_HI), Some(DecodedTagValue::Unsigned(value))) => {
-                    size_hi = Some(value);
-                }
-                (Some(FT_FILETYPE), Some(DecodedTagValue::String(value)))
-                    if file_type.is_none() =>
-                {
-                    file_type = Some(value);
-                }
-                (Some(FT_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
-                    source_count =
-                        Some(u32::try_from(value).context("ED2K source count overflow")?);
-                }
-                _ => {}
-            }
-        }
-        let file_size = match (size, size_hi) {
-            (Some(value), Some(upper)) if value <= u32::MAX as u64 && upper != 0 => {
-                Some((upper << 32) | value)
-            }
-            (Some(value), _) => Some(value),
-            (None, Some(upper)) => Some(upper << 32),
-            (None, None) => None,
-        };
-        files.push(Ed2kSearchFile {
-            file_hash,
-            file_name: name,
-            file_size,
-            file_type,
-            source_count,
-        });
+        let (file, rest) = decode_search_result_entry(cursor)?;
+        files.push(file);
+        cursor = rest;
     }
 
     let (more_results_available, rest) = match cursor {
@@ -178,6 +141,64 @@ fn decode_search_result_page_from(payload: &[u8]) -> Result<(SearchResultPage, &
             more_results_available,
         },
         rest,
+    ))
+}
+
+fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])> {
+    const MIN_SEARCH_ENTRY_SIZE: usize = 26;
+    if payload.len() < MIN_SEARCH_ENTRY_SIZE {
+        anyhow::bail!("short ED2K search result entry");
+    }
+    let file_hash = Ed2kHash(payload[..16].try_into().unwrap());
+    let mut cursor = &payload[16..];
+    cursor = &cursor[4..];
+    cursor = &cursor[2..];
+    let tag_count = u32::from_le_bytes(cursor[..4].try_into().unwrap());
+    cursor = &cursor[4..];
+    let mut name = None;
+    let mut size = None;
+    let mut size_hi = None;
+    let mut file_type = None;
+    let mut source_count = None;
+    for _ in 0..tag_count {
+        let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
+        cursor = rest;
+        match (tag_name, tag_value) {
+            (Some(FT_FILENAME), Some(DecodedTagValue::String(value))) if name.is_none() => {
+                name = Some(value);
+            }
+            (Some(FT_FILESIZE), Some(DecodedTagValue::Unsigned(value))) => {
+                size = Some(value);
+            }
+            (Some(FT_FILESIZE_HI), Some(DecodedTagValue::Unsigned(value))) => {
+                size_hi = Some(value);
+            }
+            (Some(FT_FILETYPE), Some(DecodedTagValue::String(value))) if file_type.is_none() => {
+                file_type = Some(value);
+            }
+            (Some(FT_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
+                source_count = Some(u32::try_from(value).context("ED2K source count overflow")?);
+            }
+            _ => {}
+        }
+    }
+    let file_size = match (size, size_hi) {
+        (Some(value), Some(upper)) if value <= u32::MAX as u64 && upper != 0 => {
+            Some((upper << 32) | value)
+        }
+        (Some(value), _) => Some(value),
+        (None, Some(upper)) => Some(upper << 32),
+        (None, None) => None,
+    };
+    Ok((
+        Ed2kSearchFile {
+            file_hash,
+            file_name: name,
+            file_size,
+            file_type,
+            source_count,
+        },
+        cursor,
     ))
 }
 
@@ -283,5 +304,26 @@ mod tests {
         let page = decode_search_result_page(&payload).expect("legitimate page decodes");
         assert_eq!(page.files.len(), 1);
         assert_eq!(page.files[0].file_name.as_deref(), Some("a.txt"));
+    }
+
+    #[test]
+    fn udp_search_result_decodes_single_entry_without_count_prefix() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0x11; 16]); // file hash
+        payload.extend_from_slice(&[0u8; 4]); // client id
+        payload.extend_from_slice(&[0u8; 2]); // port
+        payload.extend_from_slice(&2u32.to_le_bytes()); // tag count
+        push_short_string_tag(&mut payload, FT_FILENAME, "Sample Payload.bin");
+        super::super::tag_codec::push_u32_tag(&mut payload, FT_FILESIZE, 12345);
+
+        let pages = decode_udp_search_result_pages(&payload).expect("UDP result decodes");
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].files.len(), 1);
+        assert_eq!(
+            pages[0].files[0].file_name.as_deref(),
+            Some("Sample Payload.bin")
+        );
+        assert_eq!(pages[0].files[0].file_size, Some(12345));
     }
 }
