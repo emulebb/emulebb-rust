@@ -417,6 +417,7 @@ async fn enrich_hello_identity_sets_direct_udp_callback_for_low_id_with_verified
     let server_state = Arc::new(RwLock::new(Ed2kServerState {
         endpoint: Some(SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031))),
         client_id: Some(0x0000_1234),
+        connected: true,
         ..Ed2kServerState::default()
     }));
     let mut firewall = KadFirewallState::default();
@@ -447,10 +448,40 @@ async fn enrich_hello_identity_sets_direct_udp_callback_for_low_id_with_verified
 }
 
 #[tokio::test]
+async fn enrich_hello_identity_keeps_server_endpoint_zero_until_connected() {
+    let server_state = Arc::new(RwLock::new(Ed2kServerState {
+        endpoint: Some(SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031))),
+        connecting: true,
+        ..Ed2kServerState::default()
+    }));
+    let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+
+    let identity = enrich_hello_identity(
+        Ed2kHelloIdentity {
+            user_hash: [0xEF; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(true),
+            direct_udp_callback: false,
+        },
+        &server_state,
+        &kad_firewall,
+    )
+    .await;
+
+    assert_eq!(identity.server_ip, 0);
+    assert_eq!(identity.server_port, 0);
+}
+
+#[tokio::test]
 async fn enrich_hello_identity_keeps_direct_udp_callback_off_for_high_id() {
     let server_state = Arc::new(RwLock::new(Ed2kServerState {
         endpoint: Some(SocketAddr::from((Ipv4Addr::new(185, 237, 185, 226), 31031))),
         client_id: Some(0x521B_5895),
+        connected: true,
         ..Ed2kServerState::default()
     }));
     let mut firewall = KadFirewallState::default();

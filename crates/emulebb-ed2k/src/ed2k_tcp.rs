@@ -551,7 +551,9 @@ pub(crate) fn apply_server_state(
     if let Some(client_id) = state.client_id {
         identity.client_id = client_id;
     }
-    if let Some(SocketAddr::V4(endpoint)) = state.endpoint {
+    if state.connected
+        && let Some(SocketAddr::V4(endpoint)) = state.endpoint
+    {
         identity.server_ip = u32::from_le_bytes(endpoint.ip().octets());
         identity.server_port = endpoint.port();
     }
