@@ -3517,9 +3517,10 @@ impl EmulebbCore {
                 sources.len()
             );
         }
-        if sources.is_empty() {
-            merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
-        }
+        // MFC keeps sources attached to the part file across later source
+        // searches, so fresh non-empty lookups must not hide older direct
+        // endpoints that remain valid candidates for the same file.
+        merge_download_sources(&mut sources, self.remembered_ed2k_sources(file_hash).await?);
         // Self-source exclusion (eMule `CDownloadQueue::CheckAndAddSource`): never
         // treat our own client as a download source. A server or Kad lookup can
         // reflect our own (ip, tcp_port) or user-hash back to us, which would
