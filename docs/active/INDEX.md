@@ -74,7 +74,7 @@ items.
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| _none yet_ | | | |
+| [RUST-CI-001](items/RUST-CI-001.md) | Major | DONE | Capture ED2K global UDP packets in diagnostics |
 
 ## CI / Tooling (`CI`)
 

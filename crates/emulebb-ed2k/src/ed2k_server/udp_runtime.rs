@@ -7,8 +7,9 @@ use emulebb_kad_proto::Ed2kHash;
 
 use super::{
     OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry, ServerUdpPacket,
-    decode_server_udp_datagram, encode_server_udp_datagram, encode_udp_search_request,
-    encode_udp_source_request, server_status::server_status_challenge,
+    decode_server_udp_datagram, diagnostics::dump_ed2k_server_udp_packet,
+    encode_server_udp_datagram, encode_udp_search_request, encode_udp_source_request,
+    server_status::server_status_challenge,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -32,6 +33,12 @@ async fn send_server_udp_packet(
     payload: &[u8],
 ) -> Result<()> {
     let (endpoint, packet) = encode_server_udp_datagram(server, opcode, payload);
+    let transport_mode = if packet.first().copied() == Some(OP_EDONKEYPROT) {
+        "plaintext"
+    } else {
+        "obfuscated"
+    };
+    dump_ed2k_server_udp_packet(server, "tx", endpoint, transport_mode, opcode, payload);
     socket.send_to(&packet, endpoint).await.with_context(|| {
         format!(
             "failed to send ED2K server UDP opcode=0x{opcode:02X} to {}",
@@ -81,15 +88,23 @@ pub(super) async fn read_server_udp_packet(
         .recv_from(&mut buffer)
         .await
         .context("failed to receive ED2K server UDP datagram")?;
+    let transport_mode = if buffer[..len].first().copied() == Some(OP_EDONKEYPROT) {
+        "plaintext"
+    } else {
+        "obfuscated"
+    };
     let Some(packet) = decode_server_udp_datagram(server, &buffer[..len]) else {
         return Ok(None);
     };
     if packet.len() < 2 || packet[0] != OP_EDONKEYPROT {
         return Ok(None);
     }
+    let opcode = packet[1];
+    let payload = packet[2..].to_vec();
+    dump_ed2k_server_udp_packet(server, "rx", from, transport_mode, opcode, &payload);
     Ok(Some(ServerUdpPacket {
-        opcode: packet[1],
-        payload: packet[2..].to_vec(),
+        opcode,
+        payload,
         from,
     }))
 }

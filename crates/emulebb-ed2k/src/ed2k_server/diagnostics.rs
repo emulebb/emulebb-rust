@@ -5,6 +5,7 @@
 
 use std::{
     fs,
+    net::SocketAddr,
     sync::{
         Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -16,9 +17,11 @@ use serde::Serialize;
 
 use super::{
     OP_CALLBACK_FAIL, OP_CALLBACKREQUESTED, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU,
-    OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_IDCHANGE, OP_LOGINREQUEST,
-    OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
-    OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ServerSession,
+    OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBFOUNDSOURCES, OP_GLOBGETSOURCES,
+    OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES,
+    OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_IDCHANGE, OP_LOGINREQUEST, OP_OFFERFILES,
+    OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT, OP_SERVERIDENT,
+    OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ResolvedServerEntry, ServerSession,
 };
 
 const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
@@ -101,6 +104,65 @@ pub(super) fn dump_ed2k_server_packet(
     _opcode: u8,
     _payload: &[u8],
 ) {
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_udp_packet(
+    _server: &ResolvedServerEntry,
+    _direction: &'static str,
+    _remote_addr: SocketAddr,
+    _transport_mode: &'static str,
+    _opcode: u8,
+    _payload: &[u8],
+) {
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_udp_packet(
+    server: &ResolvedServerEntry,
+    direction: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: &'static str,
+    opcode: u8,
+    payload: &[u8],
+) {
+    let direction = match direction {
+        "tx" => "send",
+        "rx" => "recv",
+        other => other,
+    };
+    let truncated = payload.len() > MAX_SERVER_DUMP_HEX_BYTES;
+    let payload_hex = if truncated {
+        hex::encode(&payload[..MAX_SERVER_DUMP_HEX_BYTES])
+    } else {
+        hex::encode(payload)
+    };
+    let base_endpoint = server.base_endpoint();
+    let record = Ed2kServerDumpRecord {
+        schema: "ed2k_packet_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: next_ed2k_server_dump_event_seq(),
+        trace_id: 0,
+        trace_key: format!("server:udp:{base_endpoint}"),
+        state_id: format!("server.udp.{direction}"),
+        state_label: "udp",
+        role: "udp",
+        flow: "server",
+        phase: "udp",
+        direction,
+        remote_addr: remote_addr.to_string(),
+        transport_mode,
+        protocol: Some("ed2k"),
+        protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+        opcode: Some(opcode),
+        opcode_name: Some(server_opcode_name(opcode)),
+        payload_len: Some(payload.len()),
+        payload_hex: Some(payload_hex),
+        payload_hex_truncated: Some(truncated),
+        note: None,
+    };
+    dump_ed2k_server_record(&record);
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -226,6 +288,15 @@ fn server_opcode_name(opcode: u8) -> &'static str {
         OP_SERVERIDENT => "OP_SERVERIDENT",
         OP_FOUNDSOURCES => "OP_FOUNDSOURCES",
         OP_FOUNDSOURCES_OBFU => "OP_FOUNDSOURCES_OBFU",
+        OP_GLOBSEARCHREQ => "OP_GLOBSEARCHREQ",
+        OP_GLOBSEARCHREQ2 => "OP_GLOBSEARCHREQ2",
+        OP_GLOBSEARCHREQ3 => "OP_GLOBSEARCHREQ3",
+        OP_GLOBSEARCHRES => "OP_GLOBSEARCHRES",
+        OP_GLOBGETSOURCES => "OP_GLOBGETSOURCES",
+        OP_GLOBGETSOURCES2 => "OP_GLOBGETSOURCES2",
+        OP_GLOBFOUNDSOURCES => "OP_GLOBFOUNDSOURCES",
+        OP_GLOBSERVSTATREQ => "OP_GLOBSERVSTATREQ",
+        OP_GLOBSERVSTATRES => "OP_GLOBSERVSTATRES",
         OP_REJECT => "OP_REJECT",
         _ => "UNKNOWN",
     }
@@ -233,13 +304,28 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::ED2K_SERVER_DUMP_FILE_PREFIX;
+    use super::{
+        ED2K_SERVER_DUMP_FILE_PREFIX, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
+        OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, server_opcode_name,
+    };
 
     #[test]
     fn server_dump_prefix_uses_emulebb_rust_name() {
         assert_eq!(
             ED2K_SERVER_DUMP_FILE_PREFIX,
             "emulebb-rust-ed2k-server-dump-"
+        );
+    }
+
+    #[test]
+    fn server_dump_names_global_udp_opcodes() {
+        assert_eq!(server_opcode_name(OP_GLOBSEARCHREQ), "OP_GLOBSEARCHREQ");
+        assert_eq!(server_opcode_name(OP_GLOBSEARCHREQ2), "OP_GLOBSEARCHREQ2");
+        assert_eq!(server_opcode_name(OP_GLOBSEARCHREQ3), "OP_GLOBSEARCHREQ3");
+        assert_eq!(server_opcode_name(OP_GLOBSEARCHRES), "OP_GLOBSEARCHRES");
+        assert_eq!(
+            server_opcode_name(OP_GLOBFOUNDSOURCES),
+            "OP_GLOBFOUNDSOURCES"
         );
     }
 }
