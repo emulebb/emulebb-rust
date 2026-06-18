@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-063
 title: Do not serialize ED2K UDP source-batch sends behind per-server waits
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -27,7 +27,7 @@ packets.
       waiting for replies.
 - [x] Replies are decoded against the server that actually sent the datagram,
       preserving UDP obfuscation-key handling.
-- [ ] Live hide.me diagnostics show batched `OP_GLOBGETSOURCES*` packets are no
+- [x] Live hide.me diagnostics show batched `OP_GLOBGETSOURCES*` packets are no
       longer spaced by the per-server response timeout.
 
 ## Implementation Notes
@@ -41,3 +41,14 @@ packets.
 
 - `cargo test -p emulebb-ed2k udp_response_candidates_match_queried_server_ip --locked`
 - `cargo test -p emulebb-ed2k udp_source --locked`
+- `python tools\rust_quality_gate.py quick`
+- Diagnostics build
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\logs\builds\20260618T165153Z-build-clients\build-result.json`:
+  Release diagnostics build passed with zero warnings.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T165255Z\report.json`:
+  VPN-bound HighID run passed, started 16 downloads, completed one candidate,
+  and captured three outbound `OP_GLOBGETSOURCES` packets. Each packet had a
+  256-byte payload and all three packets were sent at the same timestamp
+  (`2026-06-18T16:57:00.520Z`), proving the source-batch sends are no longer
+  serialized behind per-server response waits.

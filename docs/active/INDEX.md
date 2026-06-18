@@ -74,7 +74,7 @@ items.
 | [RUST-BUG-060](items/RUST-BUG-060.md) | Major | DONE | Accept ED2K UDP search replies from any requested server |
 | [RUST-BUG-061](items/RUST-BUG-061.md) | Major | DONE | Supplement scarce connected-server sources with global UDP source search |
 | [RUST-BUG-062](items/RUST-BUG-062.md) | Major | DONE | Batch ED2K global UDP source requests like MFC |
-| [RUST-BUG-063](items/RUST-BUG-063.md) | Major | IN_PROGRESS | Do not serialize ED2K UDP source-batch sends behind per-server waits |
+| [RUST-BUG-063](items/RUST-BUG-063.md) | Major | DONE | Do not serialize ED2K UDP source-batch sends behind per-server waits |
 
 ## Refactors (`REF`)
 
