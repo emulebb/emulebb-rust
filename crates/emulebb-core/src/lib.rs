@@ -72,7 +72,6 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::{JoinHandle, JoinSet},
 };
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -87,6 +86,7 @@ mod kad_buddy;
 mod kad_control;
 mod kad_hello;
 mod kad_passive_replay;
+mod kad_public_search;
 mod kad_publish_schedule;
 mod kad_routing_maintenance;
 mod kad_snoop_entry;
@@ -117,17 +117,16 @@ use ed2k_sources::{
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
     drop_self_sources, ed2k_server_callback_route, found_source_from_hint,
     global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
-    kad_public_search_keyword_target, kad_source_result_to_ed2k_found_source, keyword_target,
-    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
-    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
-    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    sort_download_sources, source_endpoint_key, source_key,
+    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
+    merge_download_sources, new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
+    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
+    should_query_kad_source_supplement, should_refresh_ed2k_server_sources,
+    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
-    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, kad_public_search_keyword,
-    select_kad_keyword_metadata, significant_keyword_words,
+    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, select_kad_keyword_metadata,
+    significant_keyword_words,
 };
 use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, IncomingBuddy, KadBuddyState, OutgoingBuddy,
@@ -148,6 +147,7 @@ use kad_passive_replay::{
     remember_passive_note_results, remember_passive_source_results,
 };
 use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
+use kad_public_search::search_kad_keywords;
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
@@ -163,7 +163,7 @@ use preferences::{
 };
 use search_query::{
     SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
-    search_result_from_ed2k, search_result_from_indexed, search_result_from_kad,
+    search_result_from_ed2k, search_result_from_indexed,
 };
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
@@ -206,8 +206,6 @@ use views::{
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_SOURCE_SEARCH_RESPONSE_LIMIT: usize = 300;
 const LOCAL_NOTES_SEARCH_RESPONSE_LIMIT: usize = 150;
-const KAD_KEYWORD_SEARCH_RESULT_LIMIT: usize = 200;
-const KAD_KEYWORD_SEARCH_TIMEOUT_SECS: u64 = 15;
 const KAD_SHARED_FILE_PUBLISH_RETRY_SECS: u64 = 5;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
@@ -1367,7 +1365,10 @@ impl EmulebbCore {
                 self.search_ed2k_servers(&search_id, &request, network_method)
                     .await
             }
-            Some(SearchNetworkMethod::Kad) => self.search_kad_keywords(&search_id, &request).await,
+            Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
+                Some(dht) => search_kad_keywords(dht, &search_id, &request).await,
+                None => Ok(None),
+            },
             None => Ok(None),
         };
         let mut state = self.state.lock().await;
@@ -2731,49 +2732,6 @@ impl EmulebbCore {
             ));
         }
         Ok(None)
-    }
-
-    async fn search_kad_keywords(
-        &self,
-        search_id: &str,
-        request: &SearchCreate,
-    ) -> Result<Option<Vec<SearchResult>>> {
-        let Some(dht) = self.ed2k_dht_node().await else {
-            return Ok(None);
-        };
-        if !dht.is_bootstrapped() {
-            return Ok(None);
-        }
-
-        let cancel = CancellationToken::new();
-        let mut stream = dht.search_keywords_with_cancel_and_class(
-            kad_public_search_keyword_target(&request.query)?,
-            cancel.clone(),
-            RpcWorkClass::Interactive,
-        );
-        let timeout = tokio::time::sleep(Duration::from_secs(KAD_KEYWORD_SEARCH_TIMEOUT_SECS));
-        tokio::pin!(timeout);
-        let mut results = Vec::new();
-        let mut seen_hashes = HashSet::new();
-
-        loop {
-            tokio::select! {
-                _ = &mut timeout => break,
-                result = stream.next() => {
-                    let Some(result) = result else {
-                        break;
-                    };
-                    if seen_hashes.insert(result.hash) {
-                        results.push(search_result_from_kad(search_id, request, result));
-                        if results.len() >= KAD_KEYWORD_SEARCH_RESULT_LIMIT {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        cancel.cancel();
-        Ok(Some(results))
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -6999,29 +6957,6 @@ mod tests {
             keyword_target(&format!("ed2k::{exact_hash}")),
             keyword_target(&exact_hash.to_ascii_uppercase())
         );
-    }
-
-    #[test]
-    fn kad_public_search_keyword_matches_mfc_first_token_rules() {
-        assert_eq!(
-            kad_public_search_keyword("Alpha Beta").unwrap(),
-            "alpha".to_string()
-        );
-        assert_eq!(
-            kad_public_search_keyword("\"Alpha Beta\" gamma").unwrap(),
-            "alpha".to_string()
-        );
-        assert_eq!(
-            kad_public_search_keyword("\"Alpha\" beta").unwrap(),
-            "alpha".to_string()
-        );
-    }
-
-    #[test]
-    fn kad_public_search_keyword_rejects_mfc_invalid_keyword_chars() {
-        assert!(kad_public_search_keyword("").is_err());
-        assert!(kad_public_search_keyword("Alpha-Beta").is_err());
-        assert!(kad_public_search_keyword("\"unterminated").is_err());
     }
 
     #[test]
