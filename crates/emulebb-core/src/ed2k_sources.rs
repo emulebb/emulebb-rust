@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{Ed2kFoundSource, Ed2kSearchFile},
@@ -32,6 +32,8 @@ use crate::{
     ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS, ED2K_HASH_ONLY_QUERY_PREFIX,
     ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT, Transfer,
 };
+
+const INVALID_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kServerCallbackRoute {
@@ -216,6 +218,44 @@ pub(crate) fn keyword_target(query: &str) -> NodeId {
             .next()
             .unwrap_or_else(|| query.to_lowercase())
     });
+    keyword_hash_target(&first_word)
+}
+
+pub(crate) fn kad_public_search_keyword(query: &str) -> Result<String> {
+    let expression = query.trim();
+    let mut keyword = expression
+        .split(' ')
+        .find(|part| !part.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if keyword.starts_with('"') {
+        let len = keyword.len();
+        if len > 1 && keyword.ends_with('"') {
+            keyword = keyword[1..len - 1].to_string();
+        } else if expression
+            .char_indices()
+            .skip(1)
+            .any(|(index, char)| char == '"' && index > len)
+        {
+            keyword = keyword[1..].to_string();
+        }
+    }
+    let keyword = keyword.trim().to_lowercase();
+    ensure!(
+        !keyword.is_empty()
+            && !keyword
+                .chars()
+                .any(|char| INVALID_KAD_KEYWORD_CHARS.contains(char)),
+        "invalid Kad search keyword"
+    );
+    Ok(keyword)
+}
+
+pub(crate) fn kad_public_search_keyword_target(query: &str) -> Result<NodeId> {
+    Ok(keyword_hash_target(&kad_public_search_keyword(query)?))
+}
+
+fn keyword_hash_target(first_word: &str) -> NodeId {
     let mut hasher = Md4::new();
     hasher.update(first_word.as_bytes());
     let digest: [u8; 16] = hasher.finalize().into();

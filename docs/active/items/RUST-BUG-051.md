@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-051
 title: Route public searches through the selected ED2K or Kad network
-status: IN_PROGRESS
+status: done
 priority: Major
 type: bug
 workflow: local
@@ -28,7 +28,7 @@ network.
 - [x] Explicit `kad` searches collect Kad keyword results.
 - [x] Automatic searches fall back to Kad keyword results when Kad is connected
       and ED2K is not.
-- [ ] Kad keyword query selection follows the MFC first-keyword/invalid-character
+- [x] Kad keyword query selection follows the MFC first-keyword/invalid-character
       rules.
 
 ## Implementation Notes
@@ -40,3 +40,5 @@ network.
 - `search_kad_keywords` now streams DHT keyword results into the same REST
   `SearchResult` DTO used by local and ED2K server searches, with per-search
   hash de-duplication and a bounded result cap.
+- Public Kad search now hashes the MFC-style first keyword, with quote trimming,
+  lowercase normalization, and the stock invalid-character set.

@@ -117,16 +117,17 @@ use ed2k_sources::{
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
     drop_self_sources, ed2k_server_callback_route, found_source_from_hint,
     global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
-    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
-    merge_download_sources, new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
-    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_query_kad_source_supplement, should_refresh_ed2k_server_sources,
-    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
+    kad_public_search_keyword_target, kad_source_result_to_ed2k_found_source, keyword_target,
+    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
+    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
+    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
+    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
-    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, select_kad_keyword_metadata,
-    significant_keyword_words,
+    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, kad_public_search_keyword,
+    select_kad_keyword_metadata, significant_keyword_words,
 };
 use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, IncomingBuddy, KadBuddyState, OutgoingBuddy,
@@ -2746,7 +2747,7 @@ impl EmulebbCore {
 
         let cancel = CancellationToken::new();
         let mut stream = dht.search_keywords_with_cancel_and_class(
-            keyword_target(&request.query),
+            kad_public_search_keyword_target(&request.query)?,
             cancel.clone(),
             RpcWorkClass::Interactive,
         );
@@ -6998,6 +6999,29 @@ mod tests {
             keyword_target(&format!("ed2k::{exact_hash}")),
             keyword_target(&exact_hash.to_ascii_uppercase())
         );
+    }
+
+    #[test]
+    fn kad_public_search_keyword_matches_mfc_first_token_rules() {
+        assert_eq!(
+            kad_public_search_keyword("Alpha Beta").unwrap(),
+            "alpha".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("\"Alpha Beta\" gamma").unwrap(),
+            "alpha".to_string()
+        );
+        assert_eq!(
+            kad_public_search_keyword("\"Alpha\" beta").unwrap(),
+            "alpha".to_string()
+        );
+    }
+
+    #[test]
+    fn kad_public_search_keyword_rejects_mfc_invalid_keyword_chars() {
+        assert!(kad_public_search_keyword("").is_err());
+        assert!(kad_public_search_keyword("Alpha-Beta").is_err());
+        assert!(kad_public_search_keyword("\"unterminated").is_err());
     }
 
     #[test]
