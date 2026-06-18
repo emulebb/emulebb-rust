@@ -77,3 +77,7 @@ Reviewing the Rust state machine against eMuleBB MFC found two related drifts:
   started, 2 downloads completed, 2 TCP queue-rank packets observed, 6
   `OP_ACCEPTUPLOADREQ` packets observed, and no immediate queue-rank
   `QueuedDetached` diagnostics.
+- hide.me live-wire rerun `rust-hideme-20260618T223339Z` after the harness
+  counter fix: passed, VPN-bound, HighID, Kad connected, 20 downloads started, 2
+  downloads completed, corrected outbound `udp reask` count was 5, and both
+  observed queued-source detaches occurred only after `peer_timeout_incomplete`.
