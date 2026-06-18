@@ -107,6 +107,7 @@ pub(crate) fn exact_ed2k_hash_query_token(query: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ed2k_keyword_server_attempts(config: &Ed2kConfig, query: &str) -> usize {
     let requested_budget = if exact_ed2k_hash_query_token(query).is_some() {
         config.exact_hash_keyword_server_attempt_budget

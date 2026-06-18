@@ -25,11 +25,11 @@ use emulebb_ed2k::{
     built_in_upnp_port_mapping_providers,
     config::Ed2kConfig,
     ed2k_server::{
-        Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kKeywordSearchOptions,
-        Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpSourceSearchOptions,
-        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
+        Ed2kCallbackRequestOptions, Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle,
+        Ed2kServerState, Ed2kUdpSourceSearchOptions, ed2k_server_list_event_channel,
+        new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_on_server,
-        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_servers,
+        request_callback_via_background_session, run_ed2k_server_loop,
         search_keyword_via_background_session, search_source_udp_servers,
         search_source_via_background_session,
     },
@@ -115,18 +115,18 @@ use ed2k_net_drivers::{
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
     collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
-    drop_self_sources, ed2k_keyword_server_attempts, ed2k_server_callback_route,
-    found_source_from_hint, global_udp_source_search_excluded_endpoint,
-    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
-    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
-    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
-    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    sort_download_sources, source_endpoint_key, source_key,
+    drop_self_sources, ed2k_server_callback_route, found_source_from_hint,
+    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
+    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
+    merge_download_sources, new_direct_ed2k_source_count, plaintext_fallback_for_obfuscated_source,
+    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
+    should_query_kad_source_supplement, should_refresh_ed2k_server_sources,
+    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
-    exact_ed2k_hash_query_token, select_kad_keyword_metadata, significant_keyword_words,
+    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, select_kad_keyword_metadata,
+    significant_keyword_words,
 };
 use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, IncomingBuddy, KadBuddyState, OutgoingBuddy,
@@ -2650,9 +2650,10 @@ impl EmulebbCore {
         }
 
         let cancel = CancellationToken::new();
-        let mut background_search_available = false;
+        // WHY: stock eMule/eMuleBB sends keyword searches through the current
+        // server connection; opening ad-hoc TCP logins here creates non-stock
+        // public-server traffic and repeats the source-search storm pattern.
         if let Some(handle) = self.connected_ed2k_search_handle().await {
-            background_search_available = true;
             let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
             match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
                 .await
@@ -2666,54 +2667,17 @@ impl EmulebbCore {
                     ));
                 }
                 Ok(_) => tracing::warn!(
-                    "ED2K background keyword search returned no results query={:?}; falling back to one-shot search",
+                    "ED2K background keyword search returned no results query={:?}",
                     request.query
                 ),
                 Err(error) => tracing::warn!(
-                    "ED2K background keyword search failed query={:?} error={error}; falling back to one-shot search",
+                    "ED2K background keyword search failed query={:?} error={error}",
                     request.query
                 ),
             }
+            return Ok(Some(Vec::new()));
         }
-        let hello_identity = Ed2kHelloIdentity {
-            user_hash: network.user_hash,
-            client_id: 0,
-            tcp_port: self
-                .ed2k_reachability
-                .advertised_tcp_port(network.listen_port),
-            udp_port: self
-                .ed2k_reachability
-                .advertised_udp_port(network.kad_bind_addr.port()),
-            server_ip: 0,
-            server_port: 0,
-            connect_options: emule_connect_options(config.obfuscation_enabled),
-            direct_udp_callback: false,
-        };
-        let shared_catalog = self.ed2k_transfers.shared_catalog();
-        let shared_catalog_snapshot = shared_catalog.read().await.clone();
-        let preferred_endpoint = if background_search_available {
-            self.connected_ed2k_server_endpoint().await
-        } else {
-            None
-        };
-        let max_attempts = ed2k_keyword_server_attempts(&config, &request.query);
-        let files = search_keyword_servers(Ed2kKeywordSearchOptions {
-            bind_ip: network.bind_ip,
-            config: &config,
-            hello_identity,
-            shared_catalog: &shared_catalog_snapshot,
-            preferred_endpoint,
-            max_attempts,
-            query: &request.query,
-            cancel: &cancel,
-        })
-        .await?;
-        Ok(Some(
-            files
-                .into_iter()
-                .map(|file| search_result_from_ed2k(search_id, request, file))
-                .collect(),
-        ))
+        Ok(None)
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -3436,17 +3400,12 @@ impl EmulebbCore {
         let cancel = CancellationToken::new();
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
         let query = hash_only_ed2k_search_query(file_hash);
-        let shared_catalog = self.ed2k_transfers.shared_catalog();
-        let shared_catalog_snapshot = shared_catalog.read().await.clone();
         let mut learned = LearnedEd2kMetadata::default();
-        let (preferred_endpoint, background_search) =
-            if let Some(handle) = self.connected_ed2k_search_handle().await {
-                (self.connected_ed2k_server_endpoint().await, Some(handle))
-            } else {
-                (None, None)
-            };
-        let has_background_search = background_search.is_some();
+        let background_search = self.connected_ed2k_search_handle().await;
 
+        // WHY: hash-only metadata resolution shares the same keyword-search
+        // server path; do not create extra one-shot TCP logins when the stock
+        // client would use the connected server and then fall back to Kad data.
         if let Some(handle) = background_search {
             match search_keyword_via_background_session(&handle, &query, timeout, &cancel).await {
                 Ok(results) => {
@@ -3462,39 +3421,6 @@ impl EmulebbCore {
                 }
                 Err(error) => tracing::warn!(
                     "ED2K background metadata search failed file_hash={} error={error}",
-                    file_hash
-                ),
-            }
-        }
-
-        if !learned.is_complete() {
-            match search_keyword_servers(Ed2kKeywordSearchOptions {
-                bind_ip: network.bind_ip,
-                config: &network.config,
-                hello_identity: self.ed2k_hello_identity(network),
-                shared_catalog: &shared_catalog_snapshot,
-                preferred_endpoint: (!has_background_search)
-                    .then_some(preferred_endpoint)
-                    .flatten(),
-                max_attempts: ed2k_keyword_server_attempts(&network.config, &query),
-                query: &query,
-                cancel: &cancel,
-            })
-            .await
-            {
-                Ok(results) => {
-                    if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
-                        learned.merge_missing_from(candidate);
-                        tracing::info!(
-                            "ED2K hash-only metadata learned from active search file_hash={} file_name={} file_size={}",
-                            file_hash,
-                            learned.canonical_name.as_deref().unwrap_or("-"),
-                            learned.file_size.unwrap_or_default()
-                        );
-                    }
-                }
-                Err(error) => tracing::warn!(
-                    "ED2K active metadata search failed file_hash={} error={error}",
                     file_hash
                 ),
             }
