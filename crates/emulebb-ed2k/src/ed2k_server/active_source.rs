@@ -290,10 +290,30 @@ pub async fn search_source_udp_servers(
                     if packet.opcode != OP_GLOBFOUNDSOURCES {
                         continue;
                     }
-                    for results in decode_udp_found_source_sets(&packet.payload)? {
+                    let source_sets = match decode_udp_found_source_sets(&packet.payload) {
+                        Ok(source_sets) => source_sets,
+                        Err(error) => {
+                            // WHY: public ED2K UDP source replies are untrusted. Stock eMule
+                            // drops malformed datagrams and keeps probing other servers.
+                            warn!(
+                                "discarding malformed ED2K UDP source-search response file_hash={} endpoint={}: {error}",
+                                file_hash,
+                                resolved_server.base_endpoint()
+                            );
+                            break;
+                        }
+                    };
+                    for results in source_sets {
                         let results =
                             annotate_found_sources_server(results, resolved_server.base_endpoint());
-                        validate_found_sources(&results, file_hash)?;
+                        if let Err(error) = validate_found_sources(&results, file_hash) {
+                            warn!(
+                                "discarding mismatched ED2K UDP source-search response file_hash={} endpoint={}: {error}",
+                                file_hash,
+                                resolved_server.base_endpoint()
+                            );
+                            continue;
+                        }
                         merge_found_sources(&mut aggregated_results, results);
                     }
                     info!(

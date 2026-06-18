@@ -67,6 +67,7 @@ items.
 | [RUST-BUG-053](items/RUST-BUG-053.md) | Major | DONE | Reindex transfer categories after category deletion |
 | [RUST-BUG-054](items/RUST-BUG-054.md) | Major | DONE | Delay server endpoint advertisement until ED2K login is accepted |
 | [RUST-BUG-055](items/RUST-BUG-055.md) | Major | DONE | Match MFC obfuscated server login for metadata-poor ED2K servers |
+| [RUST-BUG-056](items/RUST-BUG-056.md) | Major | DONE | Ignore malformed ED2K UDP global-search replies |
 
 ## Refactors (`REF`)
 

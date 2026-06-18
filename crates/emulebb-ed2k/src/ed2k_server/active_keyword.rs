@@ -153,7 +153,18 @@ pub async fn search_keyword_udp_servers(
                     if packet.opcode != OP_GLOBSEARCHRES {
                         continue;
                     }
-                    let pages = decode_udp_search_result_pages(&packet.payload)?;
+                    let pages = match decode_udp_search_result_pages(&packet.payload) {
+                        Ok(pages) => pages,
+                        Err(error) => {
+                            // WHY: public ED2K UDP search replies are untrusted. Stock eMule
+                            // drops malformed datagrams and continues the global server walk.
+                            warn!(
+                                "discarding malformed ED2K UDP keyword-search response endpoint={}: {error}",
+                                resolved_server.base_endpoint()
+                            );
+                            break;
+                        }
+                    };
                     for page in pages {
                         results.extend(page.files);
                     }

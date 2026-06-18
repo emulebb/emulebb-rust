@@ -127,6 +127,87 @@ async fn background_udp_source_search_preserves_responding_server() {
     assert_eq!(sources[0].source_server, Some(server.base_endpoint()));
 }
 
+#[test]
+fn background_udp_keyword_search_keeps_pending_after_malformed_reply() {
+    let server = test_udp_obfuscated_server();
+    let (response, _receive_response) = tokio::sync::oneshot::channel();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut pending = Some(PendingBackgroundServerSearch::Keyword {
+        query: "linux".to_string(),
+        deadline,
+        results: Vec::new(),
+        page_count: 0,
+        response,
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+
+    handle_background_udp_packet(
+        &server,
+        &ServerUdpPacket {
+            opcode: OP_GLOBSEARCHRES,
+            payload: vec![1, 0, 0],
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server_udp_endpoint(&server).port())),
+        },
+        &mut pending,
+        &state,
+        &mut None,
+    )
+    .unwrap();
+
+    match pending {
+        Some(PendingBackgroundServerSearch::Keyword {
+            query,
+            deadline: actual_deadline,
+            page_count,
+            ..
+        }) => {
+            assert_eq!(query, "linux");
+            assert_eq!(actual_deadline, deadline);
+            assert_eq!(page_count, 0);
+        }
+        other => panic!("malformed UDP search reply consumed pending search: {other:?}"),
+    }
+}
+
+#[test]
+fn background_udp_source_search_keeps_pending_after_malformed_reply() {
+    let server = test_udp_obfuscated_server();
+    let file_hash = Ed2kHash([0x73; 16]);
+    let (response, _receive_response) = tokio::sync::oneshot::channel();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut pending = Some(PendingBackgroundServerSearch::Source {
+        file_hash,
+        deadline,
+        response,
+    });
+    let state = Arc::new(RwLock::new(Ed2kServerState::default()));
+
+    handle_background_udp_packet(
+        &server,
+        &ServerUdpPacket {
+            opcode: OP_GLOBFOUNDSOURCES,
+            payload: vec![1, 0, 0],
+            from: SocketAddr::from((Ipv4Addr::LOCALHOST, server_udp_endpoint(&server).port())),
+        },
+        &mut pending,
+        &state,
+        &mut None,
+    )
+    .unwrap();
+
+    match pending {
+        Some(PendingBackgroundServerSearch::Source {
+            file_hash: actual_hash,
+            deadline: actual_deadline,
+            ..
+        }) => {
+            assert_eq!(actual_hash, file_hash);
+            assert_eq!(actual_deadline, deadline);
+        }
+        other => panic!("malformed UDP source reply consumed pending search: {other:?}"),
+    }
+}
+
 fn server_status_payload(
     challenge: u32,
     users: u32,

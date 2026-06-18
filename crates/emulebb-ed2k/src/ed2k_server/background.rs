@@ -10,7 +10,7 @@ use tokio::{
     time::Instant as TokioInstant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use emulebb_kad_proto::Ed2kHash;
 
@@ -234,14 +234,35 @@ pub(super) fn handle_background_udp_packet(
         OP_GLOBSEARCHRES => {
             let Some(Keyword {
                 query,
+                deadline,
                 mut results,
+                page_count,
                 response,
-                ..
             }) = pending_background_search.take()
             else {
                 return Ok(());
             };
-            for page in decode_udp_search_result_pages(&packet.payload)? {
+            let pages = match decode_udp_search_result_pages(&packet.payload) {
+                Ok(pages) => pages,
+                Err(error) => {
+                    // WHY: public ED2K UDP search replies are untrusted. Keep the pending
+                    // search alive so a later valid packet or the normal timeout decides it.
+                    warn!(
+                        "discarding malformed ED2K background UDP keyword-search response query={:?} endpoint={}: {error}",
+                        query,
+                        server.base_endpoint()
+                    );
+                    *pending_background_search = Some(Keyword {
+                        query,
+                        deadline,
+                        results,
+                        response,
+                        page_count,
+                    });
+                    return Ok(());
+                }
+            };
+            for page in pages {
                 log_search_result_page(server.base_endpoint(), &page.files);
                 results.extend(page.files);
             }
@@ -256,16 +277,46 @@ pub(super) fn handle_background_udp_packet(
         OP_GLOBFOUNDSOURCES => {
             let Some(Source {
                 file_hash,
+                deadline,
                 response,
-                ..
             }) = pending_background_search.take()
             else {
                 return Ok(());
             };
             let mut aggregated_results = Vec::new();
-            for results in decode_udp_found_source_sets(&packet.payload)? {
+            let source_sets = match decode_udp_found_source_sets(&packet.payload) {
+                Ok(source_sets) => source_sets,
+                Err(error) => {
+                    // WHY: public ED2K UDP source replies are untrusted. Keep the pending
+                    // search alive so a later valid packet or the normal timeout decides it.
+                    warn!(
+                        "discarding malformed ED2K background UDP source-search response file_hash={} endpoint={}: {error}",
+                        file_hash,
+                        server.base_endpoint()
+                    );
+                    *pending_background_search = Some(Source {
+                        file_hash,
+                        deadline,
+                        response,
+                    });
+                    return Ok(());
+                }
+            };
+            for results in source_sets {
                 let results = super::annotate_found_sources_server(results, server.base_endpoint());
-                validate_found_sources(&results, file_hash)?;
+                if let Err(error) = validate_found_sources(&results, file_hash) {
+                    warn!(
+                        "discarding mismatched ED2K background UDP source-search response file_hash={} endpoint={}: {error}",
+                        file_hash,
+                        server.base_endpoint()
+                    );
+                    *pending_background_search = Some(Source {
+                        file_hash,
+                        deadline,
+                        response,
+                    });
+                    return Ok(());
+                }
                 merge_found_sources(&mut aggregated_results, results);
             }
             info!(
