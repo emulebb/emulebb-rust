@@ -3,9 +3,7 @@
 //! The default category set plus the create/update appliers, name/path/color
 //! normalizers, and the priority parser. Moved verbatim out of `lib.rs` during
 //! the maintainability restructuring; pure helpers over the `Category` REST
-//! model with no behavior beyond what they had inline. Imported `pub(crate)`
-//! from the crate root so the `EmulebbCore` impl reaches them by their bare
-//! names; `PR_NORMAL` is re-exported for the one inline default in `lib.rs`.
+//! model with no behavior beyond what they had inline.
 
 use std::{collections::BTreeMap, fs, path::Path};
 

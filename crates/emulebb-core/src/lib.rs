@@ -76,6 +76,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod categories;
+mod category_runtime;
 mod diag_kad_event;
 mod diag_sched;
 mod download_source_registry;
@@ -105,7 +106,7 @@ mod source_publish;
 mod upload_view;
 mod views;
 pub mod vpn_guard;
-use categories::{PR_NORMAL, apply_category_create, apply_category_update, default_categories};
+use categories::default_categories;
 use download_source_registry::{DownloadSourceCandidate, DownloadSourceRegistry};
 use ed2k_buddy_reask::detach_kad_buddy_sources_for_reask;
 use ed2k_net_drivers::{
@@ -1426,41 +1427,15 @@ impl EmulebbCore {
     }
 
     pub async fn categories(&self) -> Vec<Category> {
-        self.state
-            .lock()
-            .await
-            .categories
-            .values()
-            .cloned()
-            .collect()
+        category_runtime::categories(&self.state).await
     }
 
     pub async fn category(&self, category_id: u32) -> Option<Category> {
-        self.state
-            .lock()
-            .await
-            .categories
-            .get(&category_id)
-            .cloned()
+        category_runtime::category(&self.state, category_id).await
     }
 
     pub async fn create_category(&self, request: CategoryCreate) -> Result<Category> {
-        let mut category = Category {
-            id: 0,
-            name: String::new(),
-            path: None,
-            comment: String::new(),
-            priority: PR_NORMAL,
-            color: None,
-        };
-        apply_category_create(&mut category, request)?;
-        let mut state = self.state.lock().await;
-        let category_id = state.next_category_id;
-        state.next_category_id = state.next_category_id.saturating_add(1).max(1);
-        category.id = category_id;
-        profile_state::persist_category(&self.metadata_store, &category)?;
-        state.categories.insert(category_id, category.clone());
-        Ok(category)
+        category_runtime::create_category(&self.state, &self.metadata_store, request).await
     }
 
     pub async fn update_category(
@@ -1468,35 +1443,18 @@ impl EmulebbCore {
         category_id: u32,
         request: CategoryUpdate,
     ) -> Result<Option<Category>> {
-        ensure!(category_id != 0, "default category cannot be updated");
-        let mut state = self.state.lock().await;
-        let Some(category) = state.categories.get_mut(&category_id) else {
-            return Ok(None);
-        };
-        let mut updated = category.clone();
-        apply_category_update(&mut updated, request)?;
-        profile_state::persist_category(&self.metadata_store, &updated)?;
-        *category = updated.clone();
-        Ok(Some(updated))
+        category_runtime::update_category(&self.state, &self.metadata_store, category_id, request)
+            .await
     }
 
     pub async fn delete_category(&self, category_id: u32) -> Result<Option<Category>> {
-        ensure!(category_id != 0, "default category cannot be deleted");
-        let mut state = self.state.lock().await;
-        let Some(category) = state.categories.get(&category_id).cloned() else {
-            return Ok(None);
-        };
-        self.metadata_store.delete_category(category_id)?;
-        state.categories.remove(&category_id);
-        // Reset transfers that referenced this category back to uncategorized so
-        // their category_id does not dangle at a removed id.
-        for transfer in state.transfers.values_mut() {
-            if transfer.category_id == category_id {
-                transfer.category_id = 0;
-                transfer.category_name = String::new();
-            }
-        }
-        Ok(Some(category))
+        category_runtime::delete_category(
+            &self.state,
+            &self.metadata_store,
+            &self.ed2k_transfers,
+            category_id,
+        )
+        .await
     }
 
     pub async fn friends(&self) -> Vec<Friend> {
