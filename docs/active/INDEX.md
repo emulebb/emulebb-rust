@@ -73,7 +73,7 @@ items.
 | [RUST-BUG-059](items/RUST-BUG-059.md) | Major | DONE | Collect multiple ED2K UDP keyword replies per server |
 | [RUST-BUG-060](items/RUST-BUG-060.md) | Major | DONE | Accept ED2K UDP search replies from any requested server |
 | [RUST-BUG-061](items/RUST-BUG-061.md) | Major | DONE | Supplement scarce connected-server sources with global UDP source search |
-| [RUST-BUG-062](items/RUST-BUG-062.md) | Major | IN_PROGRESS | Batch ED2K global UDP source requests like MFC |
+| [RUST-BUG-062](items/RUST-BUG-062.md) | Major | DONE | Batch ED2K global UDP source requests like MFC |
 
 ## Refactors (`REF`)
 

@@ -1,7 +1,7 @@
 ---
 id: RUST-BUG-062
 title: Batch ED2K global UDP source requests like MFC
-status: in_progress
+status: done
 priority: Major
 category: bug
 workflow: local
@@ -34,7 +34,7 @@ multiple scarce transfers together.
       returns sources grouped by file hash.
 - [x] Active transfer source acquisition coalesces scarce transfers into
       batched per-server UDP source requests.
-- [ ] Live hide.me diagnostics show fewer global UDP source packets than
+- [x] Live hide.me diagnostics show fewer global UDP source packets than
       transfer/server pairs when multiple scarce transfers are active, with
       payloads containing multiple file IDs.
 
@@ -62,3 +62,8 @@ multiple scarce transfers together.
   `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T155348Z\report.json`
   showed 213 outbound one-hash `OP_GLOBGETSOURCES` packets for 16 active
   downloads.
+- Live-wire hide.me diagnostics run
+  `EMULEBB_WORKSPACE_OUTPUT_ROOT\live-wire\rust-hideme-20260618T163052Z\report.json`:
+  VPN-bound HighID run passed, started 16 downloads, completed three candidates,
+  and captured only three outbound `OP_GLOBGETSOURCES` packets. Each packet had
+  a 256-byte payload, i.e. 16 file IDs per packet.
