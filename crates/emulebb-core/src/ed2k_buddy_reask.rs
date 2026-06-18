@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use emulebb_ed2k::{ReaskDetachArgs, ReaskSourceHandle, ed2k_server::Ed2kFoundSource};
 use emulebb_kad_proto::Ed2kHash;
@@ -62,6 +63,9 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
             file_hash,
             endpoint,
             udp_version: ED2K_DEFAULT_UDP_VERSION,
+            // Kad buddy sources have no direct TCP file request to timestamp, so
+            // the first buddy-relayed UDP reask is due immediately.
+            initial_reask_delay: Duration::ZERO,
             user_hash: source.user_hash,
             should_crypt: source.obfuscation_options.is_some(),
             low_id: true,

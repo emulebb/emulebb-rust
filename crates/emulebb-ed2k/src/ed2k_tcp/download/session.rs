@@ -46,11 +46,13 @@ use super::{
 mod browse;
 mod notify;
 mod parts;
+mod reask_detach;
 mod secure_ident;
 mod startup;
 mod state;
 
 use parts::{DownloadPartPacket, handle_download_part_packet};
+use reask_detach::incomplete_or_detached_queued_source;
 use startup::{DownloadStartupStep, HASHSET_STALL_UPLOAD_FALLBACK, advance_download_startup};
 use state::DownloadSessionState;
 
@@ -76,63 +78,6 @@ fn apply_emule_info_profile(
     if profile.udp_version != 0 {
         session_state.peer_udp_version = profile.udp_version;
     }
-}
-
-/// Detach a just-queued source onto UDP reask when reask is enabled and the peer
-/// is UDP-eligible (eMuleBB §4.1 `QueuedDetached`). Returns whether it was handed
-/// off (so the session closes its TCP socket and returns early).
-fn try_detach_queued_source_for_reask(
-    reask_register: &Option<crate::ed2k_client_udp::ReaskSourceHandle>,
-    peer_addr: SocketAddr,
-    file_hash: Ed2kHash,
-    session_state: &DownloadSessionState,
-    should_crypt: bool,
-) -> bool {
-    let Some(handle) = reask_register else {
-        return false;
-    };
-    let SocketAddr::V4(v4) = peer_addr else {
-        return false; // IPv4-only client
-    };
-    // A peer advertising a non-zero eD2k UDP port (CT_EMULE_UDPPORTS) supports client
-    // UDP even without OP_EMULEINFO ET_UDPVER; default the version to our own (4) (the
-    // reask ping is framed by OUR version).
-    const DEFAULT_PEER_UDP_VERSION: u8 = 4;
-    let effective_udp_version = if session_state.peer_udp_version != 0 {
-        session_state.peer_udp_version
-    } else {
-        DEFAULT_PEER_UDP_VERSION
-    };
-    // We hold the shared Kad UDP port; detaching means no live TCP socket.
-    let eligible = crate::ed2k_client_udp::udp_reask_eligible(
-        session_state.peer_udp_port,
-        effective_udp_version,
-        true,
-        false,
-        false,
-        false,
-    );
-    tracing::debug!(
-        "reask detach check for {peer_addr}: peer_udp_port={} peer_udp_version={} (effective={effective_udp_version}) low_id={} eligible={eligible}",
-        session_state.peer_udp_port,
-        session_state.peer_udp_version,
-        session_state.peer_low_id,
-    );
-    if !eligible {
-        return false;
-    }
-    handle.detach(crate::ed2k_client_udp::ReaskDetachArgs {
-        file_hash,
-        endpoint: (*v4.ip(), session_state.peer_udp_port),
-        udp_version: effective_udp_version,
-        user_hash: session_state.peer_user_hash,
-        should_crypt,
-        // LowID + hello buddy endpoint gate a buddy-relayed reask; buddy id is Kad-only.
-        low_id: session_state.peer_low_id,
-        buddy_endpoint: session_state.peer_buddy_endpoint,
-        buddy_id: None,
-    });
-    true
 }
 
 /// Outcome of one outbound ED2K peer download attempt.
@@ -286,7 +231,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "peer_closed_incomplete",
                             format!("file_hash={file_hash_hex}"),
                         );
-                        return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                        return Ok(incomplete_or_detached_queued_source(
+                            &reask_register,
+                            peer_addr,
+                            file_hash,
+                            &session_state,
+                            transport.mode.is_obfuscated(),
+                        ));
                     }
                     anyhow::bail!("peer {peer_addr} closed ED2K download session");
                 }
@@ -298,7 +249,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "peer_shutdown_incomplete",
                             format!("file_hash={file_hash_hex}"),
                         );
-                        return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                        return Ok(incomplete_or_detached_queued_source(
+                            &reask_register,
+                            peer_addr,
+                            file_hash,
+                            &session_state,
+                            transport.mode.is_obfuscated(),
+                        ));
                     }
                     return Err(error)
                         .with_context(|| format!("failed to read eD2k packet from {peer_addr}"));
@@ -325,7 +282,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "peer_timeout_incomplete",
                             format!("file_hash={file_hash_hex}"),
                         );
-                        return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                        return Ok(incomplete_or_detached_queued_source(
+                            &reask_register,
+                            peer_addr,
+                            file_hash,
+                            &session_state,
+                            transport.mode.is_obfuscated(),
+                        ));
                     }
                     anyhow::bail!("timed out waiting for ED2K peer packet from {peer_addr}");
                 }
@@ -833,15 +796,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "queue_ranking",
                         format!("file_hash={file_hash_hex} rank={rank} protocol=edonkey"),
                     );
-                    if try_detach_queued_source_for_reask(
-                        &reask_register,
-                        peer_addr,
-                        file_hash,
-                        &session_state,
-                        transport.mode.is_obfuscated(),
-                    ) {
-                        return Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask);
-                    }
                 }
                 (OP_EMULEPROT, OP_QUEUERANKING) => {
                     let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
@@ -852,15 +806,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "queue_ranking",
                         format!("file_hash={file_hash_hex} rank={rank} protocol=emule"),
                     );
-                    if try_detach_queued_source_for_reask(
-                        &reask_register,
-                        peer_addr,
-                        file_hash,
-                        &session_state,
-                        transport.mode.is_obfuscated(),
-                    ) {
-                        return Ok(Ed2kPeerDownloadOutcome::QueuedDetachedForUdpReask);
-                    }
                 }
                 (OP_EDONKEYPROT, OP_END_OF_DOWNLOAD) => {
                     let ended_hash = decode_optional_file_hash_payload(&packet.payload);

@@ -63,6 +63,13 @@ pub struct ReaskDetachArgs {
     pub file_hash: Ed2kHash,
     pub endpoint: (Ipv4Addr, u16),
     pub udp_version: u8,
+    /// Delay before the first detached UDP reask is due.
+    ///
+    /// `Duration::ZERO` is used for sources that have not just been asked over
+    /// TCP. TCP-queued sources pass `FILE_REASK_TIME`, because MFC stamps
+    /// `SetLastAskedTime()` when the TCP file request is sent and does not
+    /// immediately reask the same source over UDP.
+    pub initial_reask_delay: Duration,
     pub user_hash: Option<[u8; 16]>,
     pub should_crypt: bool,
     /// Source is a firewalled LowID client (oracle `HasLowID()`).
@@ -405,13 +412,16 @@ fn apply_reask_command(
                 file_hash,
                 endpoint,
                 udp_version,
+                initial_reask_delay,
                 user_hash,
                 should_crypt,
                 low_id,
                 buddy_endpoint,
                 buddy_id,
             } = args;
-            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, Instant::now());
+            let now = Instant::now();
+            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, now);
+            source.next_reask = now + initial_reask_delay;
             if let Some(hash) = user_hash {
                 source = source.with_obfuscation(hash, should_crypt);
             }

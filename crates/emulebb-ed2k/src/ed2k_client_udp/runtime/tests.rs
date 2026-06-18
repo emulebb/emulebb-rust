@@ -20,6 +20,7 @@ fn register_command_adds_a_source_and_remove_drops_it() {
             file_hash,
             endpoint,
             udp_version: 4,
+            initial_reask_delay: Duration::ZERO,
             user_hash: Some([0x55; 16]),
             should_crypt: true,
             low_id: false,
@@ -38,6 +39,45 @@ fn register_command_adds_a_source_and_remove_drops_it() {
         ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, endpoint),
         other => panic!("expected SourceReleased, got {other:?}"),
     }
+}
+
+#[test]
+fn register_command_respects_initial_reask_delay() {
+    let mut svc = service();
+    let (events, mut rx) = reask_event_channel();
+    let file_hash = Ed2kHash::from_bytes([0xAC; 16]);
+    let endpoint = (Ipv4Addr::new(198, 51, 100, 8), 4672);
+    apply_reask_command(
+        &mut svc,
+        &events,
+        ReaskCommand::Register(ReaskDetachArgs {
+            file_hash,
+            endpoint,
+            udp_version: 4,
+            initial_reask_delay: crate::ed2k_client_udp::FILE_REASK_TIME,
+            user_hash: None,
+            should_crypt: false,
+            low_id: false,
+            buddy_endpoint: None,
+            buddy_id: None,
+        }),
+    );
+    assert_eq!(svc.source_count(), 1);
+    assert!(rx.try_recv().is_err());
+
+    let not_due = Instant::now() + Duration::from_secs(1);
+    let out = svc.tick(not_due, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert!(out.send.is_empty());
+
+    let due = Instant::now() + crate::ed2k_client_udp::FILE_REASK_TIME + Duration::from_secs(1);
+    let out = svc.tick(due, Duration::from_secs(20), |_| TransferReaskInfo {
+        part_status: None,
+        complete_source_count: 0,
+    });
+    assert_eq!(out.send.len(), 1);
 }
 
 #[test]
@@ -115,6 +155,7 @@ fn retry_tcp_timeout_releases_held_lease() {
             file_hash,
             endpoint,
             udp_version: 4,
+            initial_reask_delay: Duration::ZERO,
             user_hash: None,
             should_crypt: false,
             low_id: false,
@@ -200,6 +241,7 @@ fn detach_handle_register_is_received_as_a_command() {
         file_hash,
         endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
         udp_version: 4,
+        initial_reask_delay: Duration::ZERO,
         user_hash: None,
         should_crypt: false,
         low_id: true,

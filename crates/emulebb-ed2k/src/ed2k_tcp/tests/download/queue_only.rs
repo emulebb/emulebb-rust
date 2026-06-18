@@ -31,7 +31,7 @@ async fn queue_only_peer_is_accepted_without_counting_as_failure() {
             user_hash: [0x42; 16],
             client_id: 0x5912_0559,
             tcp_port: peer_addr.port(),
-            udp_port: 0,
+            udp_port: 41010,
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(false),
@@ -139,7 +139,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
             user_hash: [0x42; 16],
             client_id: 0x5912_0559,
             tcp_port: peer_addr.port(),
-            udp_port: 0,
+            udp_port: 41010,
             server_ip: 0,
             server_port: 0,
             connect_options: emule_connect_options(false),
@@ -229,9 +229,10 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
         stream.write_all(&sending_part).await.unwrap();
     });
 
-    let result = download_file_from_peer_test!(
-        test_bind_ip(),
-        &Ed2kFoundSource {
+    let (reask_handle, mut reask_rx) = crate::ed2k_client_udp::reask_command_channel();
+    let result = download_file_from_peer(Ed2kPeerDownloadOptions {
+        bind_ip: test_bind_ip(),
+        peer: &Ed2kFoundSource {
             file_hash,
             ip: test_bind_ip(),
             tcp_port: peer_addr.port(),
@@ -245,7 +246,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
             buddy_endpoint: None,
             source_udp_port: None,
         },
-        Ed2kHelloIdentity {
+        hello_identity: Ed2kHelloIdentity {
             user_hash: [0x11; 16],
             client_id: 0,
             tcp_port: 41001,
@@ -255,19 +256,21 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
             connect_options: emule_connect_options(false),
             direct_udp_callback: false,
         },
-        &Arc::new(
+        secure_ident: &Arc::new(
             Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
                 .unwrap(),
         ),
-        &transfer_runtime,
-        "queued.epub".to_string(),
-        32_768,
-        Duration::from_secs(1),
-    )
+        transfer_runtime: &transfer_runtime,
+        canonical_name: "queued.epub".to_string(),
+        file_size: 32_768,
+        timeout: Duration::from_secs(1),
+        reask_register: Some(reask_handle),
+    })
     .await
     .unwrap();
 
     assert_eq!(result, Ed2kPeerDownloadOutcome::Completed);
+    assert!(reask_rx.try_recv().is_err());
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(manifest.completed);
     server.await.unwrap();
