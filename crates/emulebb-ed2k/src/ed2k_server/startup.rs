@@ -53,10 +53,15 @@ pub(super) fn encode_login_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
 }
 
 pub(super) fn login_identity_for_server_transport(
-    identity: Ed2kHelloIdentity,
+    mut identity: Ed2kHelloIdentity,
     use_server_obfuscation: bool,
 ) -> Ed2kHelloIdentity {
-    let _ = use_server_obfuscation;
+    if use_server_obfuscation {
+        // WHY: stock eMule/eMuleBB suppresses request/require crypt flags when
+        // the server TCP transport is already obfuscated; some public servers
+        // close plaintext-shaped logins that ask for crypt negotiation twice.
+        identity.connect_options &= 0x01;
+    }
     identity
 }
 

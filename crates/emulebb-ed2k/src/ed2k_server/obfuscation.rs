@@ -54,14 +54,16 @@ impl Rc4KeyStream {
 /// Returns whether the Rust client should start an ED2K server session with TCP
 /// obfuscation.
 ///
-/// The oracle only chooses an obfuscated server TCP connect when the server
-/// advertises the needed metadata, primarily `ST_TCPPORTOBFUSCATION` plus the
-/// UDP capability bits which signal TCP obfuscation support.
+/// Stock eMule/eMuleBB tries an obfuscated server TCP connect when the server
+/// advertises support, and also once for metadata-poor servers which have not
+/// been probed yet. Endpoint-only Rust configs are metadata-poor, so the first
+/// transport choice should be obfuscated when local crypt is enabled.
 pub(super) fn should_use_server_obfuscation(
     connect_options: u8,
     server: &ResolvedServerEntry,
 ) -> bool {
-    connect_options != 0 && server.entry.supports_obfuscation_tcp()
+    connect_options != 0
+        && (server.entry.supports_obfuscation_tcp() || !server.entry.has_obfuscation_metadata())
 }
 
 pub(super) fn random_nonzero_biguint(byte_len: usize) -> BigUint {

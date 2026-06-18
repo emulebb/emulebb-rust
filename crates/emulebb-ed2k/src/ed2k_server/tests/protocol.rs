@@ -218,26 +218,82 @@ fn login_request_matches_stock_072a_obfuscated_preference_sample() {
 }
 
 #[test]
-fn metadata_poor_server_defaults_to_plaintext_even_if_client_supports_crypt() {
-    assert!(!should_use_server_obfuscation(
+fn metadata_poor_server_tries_obfuscation_when_client_supports_crypt() {
+    assert!(should_use_server_obfuscation(
         emule_connect_options(true),
         &test_server(0, 0)
     ));
 }
 
 #[test]
-fn server_obfuscation_requires_capability_flags_not_only_aux_port() {
+fn metadata_known_plain_server_uses_plaintext() {
     assert!(!should_use_server_obfuscation(
         emule_connect_options(true),
-        &test_server(4661, 0)
+        &test_server(0, SERVER_UDP_FLAG_EXT_GETSOURCES2)
     ));
 }
 
 #[test]
-fn server_obfuscation_requires_positive_server_metadata() {
+fn obfuscated_server_transport_suppresses_request_and_require_flags() {
+    let identity = Ed2kHelloIdentity {
+        user_hash: [0x33; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: 0x07,
+        direct_udp_callback: false,
+    };
+
+    let login_identity = login_identity_for_server_transport(identity, true);
+
+    assert_eq!(login_identity.connect_options, 0x01);
+    assert_eq!(
+        server_capabilities(login_identity.connect_options) & 0x0E00,
+        0x0200
+    );
+}
+
+#[test]
+fn plaintext_server_transport_preserves_request_flags() {
+    let identity = Ed2kHelloIdentity {
+        user_hash: [0x44; 16],
+        client_id: 0,
+        tcp_port: 41001,
+        udp_port: 41000,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(true),
+        direct_udp_callback: false,
+    };
+
+    let login_identity = login_identity_for_server_transport(identity, false);
+
+    assert_eq!(login_identity.connect_options, emule_connect_options(true));
+}
+
+#[test]
+fn metadata_known_obfuscation_server_uses_obfuscated_transport() {
     assert!(should_use_server_obfuscation(
         emule_connect_options(true),
         &test_server(4661, SERVER_UDP_FLAG_UDPOBFUSCATION)
+    ));
+}
+
+#[test]
+fn obfuscation_disabled_uses_plaintext_even_with_positive_server_metadata() {
+    assert!(!should_use_server_obfuscation(
+        emule_connect_options(false),
+        &test_server(4661, SERVER_UDP_FLAG_UDPOBFUSCATION)
+    ));
+}
+
+#[test]
+fn metadata_with_tcp_obfuscation_flag_uses_obfuscated_transport() {
+    assert!(should_use_server_obfuscation(
+        emule_connect_options(true),
+        &test_server(4661, SERVER_UDP_FLAG_TCPOBFUSCATION)
     ));
 }
 

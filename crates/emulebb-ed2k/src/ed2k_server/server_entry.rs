@@ -69,6 +69,14 @@ impl ConfiguredServerEntry {
                 != 0
     }
 
+    pub(super) fn has_obfuscation_metadata(&self) -> bool {
+        self.obfuscation_port_tcp != 0
+            || self.obfuscation_port_udp != 0
+            || self.udp_key != 0
+            || self.udp_key_ip != 0
+            || self.udp_flags != 0
+    }
+
     pub(super) fn supports_obfuscation_udp(&self) -> bool {
         self.udp_flags & SERVER_UDP_FLAG_UDPOBFUSCATION != 0
     }
