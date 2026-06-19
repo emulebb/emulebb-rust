@@ -398,3 +398,107 @@ async fn out_of_order_requested_blocks_are_persisted_by_bitmap() {
     let on_disk = fs::read(runtime.payload_path(&job.file_hash)).unwrap();
     assert_eq!(on_disk, payload);
 }
+
+#[tokio::test]
+async fn out_of_order_transition_preserves_cached_prefix_blocks() {
+    // Live peers can pipeline several blocks after the last durable checkpoint
+    // and then deliver a later requested range first. When the part switches to
+    // bitmap tracking, all already accepted prefix blocks must seed the bitmap.
+    let root = unique_test_dir("ed2k-requested-out-of-order-after-cached-prefix");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+
+    let block_count = 31usize;
+    let mut payload = Vec::with_capacity(block_count * ED2K_EMBLOCK_SIZE as usize);
+    for idx in 0..block_count {
+        payload.extend(std::iter::repeat_n(
+            block_fill(idx),
+            ED2K_EMBLOCK_SIZE as usize,
+        ));
+    }
+    let file_hash = Ed2kHash::from_bytes(md4(&payload));
+    let job = new_transfer_job(
+        file_hash,
+        "cached-prefix-out-of-order.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .store_md4_hashset(&job.file_hash, Vec::new())
+        .await
+        .unwrap();
+    runtime
+        .mark_piece_requested(&job.file_hash, 0)
+        .await
+        .unwrap();
+
+    for idx in 0..29usize {
+        let start = idx as u64 * ED2K_EMBLOCK_SIZE;
+        let end = start + ED2K_EMBLOCK_SIZE;
+        let outcome = runtime
+            .append_or_salvage_block_with_manifest(
+                &job.file_hash,
+                0,
+                start,
+                end,
+                &payload[start as usize..end as usize],
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            !outcome.is_completed(),
+            "block {idx} should not complete the file"
+        );
+    }
+
+    let reloaded_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let reloaded_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(
+        reloaded_manifest.pieces[0].bytes_written,
+        29 * ED2K_EMBLOCK_SIZE,
+        "every accepted full request block is durable before bitmap transition"
+    );
+
+    let later_start = 30 * ED2K_EMBLOCK_SIZE;
+    let later_end = later_start + ED2K_EMBLOCK_SIZE;
+    let (_outcome, manifest) = runtime
+        .append_or_salvage_block_with_manifest(
+            &job.file_hash,
+            0,
+            later_start,
+            later_end,
+            &payload[later_start as usize..later_end as usize],
+        )
+        .await
+        .unwrap();
+
+    let piece = &manifest.pieces[0];
+    let bitmap = piece.resolve_block_bitmap(payload.len() as u64);
+    for idx in 0..29usize {
+        assert!(
+            bitmap.is_present(idx),
+            "cached prefix block {idx} stayed present"
+        );
+    }
+    assert!(!bitmap.is_present(29), "only the skipped block is missing");
+    assert!(
+        bitmap.is_present(30),
+        "later out-of-order block was preserved"
+    );
+
+    let missing_start = 29 * ED2K_EMBLOCK_SIZE;
+    let missing_end = missing_start + ED2K_EMBLOCK_SIZE;
+    let (completed, manifest) = runtime
+        .append_or_salvage_block_with_manifest(
+            &job.file_hash,
+            0,
+            missing_start,
+            missing_end,
+            &payload[missing_start as usize..missing_end as usize],
+        )
+        .await
+        .unwrap();
+    assert!(completed.is_completed());
+    assert_eq!(manifest.pieces[0].state, Ed2kTransferState::Verified);
+    assert!(manifest.completed);
+}

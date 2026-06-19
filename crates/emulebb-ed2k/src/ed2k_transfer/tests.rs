@@ -761,7 +761,7 @@ async fn release_piece_request_preserves_partial_piece_progress() {
 }
 
 #[tokio::test]
-async fn append_piece_block_keeps_partial_progress_in_memory_until_checkpoint() {
+async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint() {
     let root = unique_test_dir("ed2k-transfer-cached-partial-progress");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5Au8; 65_536];

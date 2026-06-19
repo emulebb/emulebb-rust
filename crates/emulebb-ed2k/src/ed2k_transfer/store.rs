@@ -15,7 +15,10 @@ use super::{
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
-const ED2K_RESUME_CHECKPOINT_BYTES: u64 = ED2K_EMBLOCK_SIZE * 16;
+// WHY: request-window bitmap recovery may have to seed from the durable
+// manifest after a later block arrives out of order. Persist every full eMule
+// block so accepted ranges cannot be lost at that transition.
+const ED2K_RESUME_CHECKPOINT_BYTES: u64 = ED2K_EMBLOCK_SIZE;
 
 impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_or_rebuild_unlocked(
