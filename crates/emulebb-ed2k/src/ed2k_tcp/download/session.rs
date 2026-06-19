@@ -15,10 +15,10 @@ use super::super::{
     OP_ACCEPTUPLOADREQ, OP_AICHANSWER, OP_AICHFILEHASHANS, OP_AICHREQUEST, OP_ANSWERSOURCES,
     OP_ANSWERSOURCES2, OP_ASKSHAREDDENIEDANS, OP_ASKSHAREDDIRS, OP_ASKSHAREDDIRSANS,
     OP_ASKSHAREDFILES, OP_ASKSHAREDFILESANSWER, OP_ASKSHAREDFILESDIR, OP_ASKSHAREDFILESDIRANS,
-    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CHANGE_CLIENT_ID, OP_CHANGE_SLOT,
-    OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64, OP_EDONKEYPROT,
-    OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC,
-    OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_HASHSETANSWER, OP_HASHSETANSWER2, OP_HELLO,
+    OP_BUDDYPING, OP_BUDDYPONG, OP_CALLBACK, OP_CANCELTRANSFER, OP_CHANGE_CLIENT_ID,
+    OP_CHANGE_SLOT, OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_COMPRESSEDPART, OP_COMPRESSEDPART_I64,
+    OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_END_OF_DOWNLOAD,
+    OP_FILEDESC, OP_FILEREQANSNOFIL, OP_FILESTATUS, OP_HASHSETANSWER, OP_HASHSETANSWER2, OP_HELLO,
     OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE, OP_MULTIPACKETANSWER,
     OP_MULTIPACKETANSWER_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
     OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
@@ -34,14 +34,14 @@ use super::super::{
     decode_optional_file_hash_payload, decode_request_filename_answer,
     decode_request_filename_answer_body, dump_ed2k_tcp_download_meta, dump_ed2k_tcp_download_recv,
     dump_ed2k_tcp_download_send, encode_aich_recovery_answer, encode_aich_recovery_failure_answer,
-    encode_emule_info_answer, encode_port_test_answer, encode_public_ip_answer,
+    encode_emule_info_answer, encode_packet, encode_port_test_answer, encode_public_ip_answer,
     handle_aich_recovery_answer, is_connection_shutdown_error, validate_file_status_part_count,
 };
 use super::{
-    ActiveDownloadPiece, AichRecoveryRequestState, DownloadRequestWindowState,
-    PendingCompressedPart, PendingPartRequest, flush_buffered_download_prefixes,
-    next_download_read_timeout, pump_aich_recovery_requests, pump_download_request_window,
-    reconcile_download_manifest_metadata,
+    ActiveDownloadPiece, AichRecoveryRequestState, DownloadRequestWindowOutcome,
+    DownloadRequestWindowState, PendingCompressedPart, PendingPartRequest,
+    flush_buffered_download_prefixes, next_download_read_timeout, pump_aich_recovery_requests,
+    pump_download_request_window, reconcile_download_manifest_metadata,
 };
 mod browse;
 mod notify;
@@ -177,9 +177,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             })
             .await?;
 
-            if manifest.md4_hashset_acquired
-                && session_state.upload_accepted
-                && let Some(next_deadline) = pump_download_request_window(
+            if manifest.md4_hashset_acquired && session_state.upload_accepted {
+                match pump_download_request_window(
                     transport,
                     peer_addr,
                     DownloadRequestWindowState {
@@ -199,8 +198,34 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     },
                 )
                 .await?
-            {
-                session_state.part_response_deadline = Some(next_deadline);
+                {
+                    DownloadRequestWindowOutcome::RequestSent(next_deadline) => {
+                        session_state.part_response_deadline = Some(next_deadline);
+                    }
+                    DownloadRequestWindowOutcome::NoClaimablePart => {
+                        // WHY: an accepted upload slot with no locally claimable block is
+                        // useful to neither peer. Mirror MFC SendBlockRequests by freeing
+                        // the remote slot immediately instead of idling until timeout.
+                        let cancel = encode_packet(OP_EDONKEYPROT, OP_CANCELTRANSFER, &[]);
+                        dump_ed2k_tcp_download_send(
+                            peer_addr,
+                            transport.mode,
+                            "cancel_no_needed_parts",
+                            &cancel,
+                        );
+                        transport.write_all(&cancel).await.with_context(|| {
+                            format!("failed to send OP_CANCELTRANSFER to {peer_addr}")
+                        })?;
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "no_needed_parts_request_window",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
+                    }
+                    DownloadRequestWindowOutcome::Idle => {}
+                }
             }
 
             let fallback_poll_delay = if send_initial_requests

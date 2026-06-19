@@ -95,11 +95,18 @@ pub(in crate::ed2k_tcp) struct DownloadRequestWindowState<'a> {
     pub(in crate::ed2k_tcp) part_response_grace: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ed2k_tcp) enum DownloadRequestWindowOutcome {
+    RequestSent(tokio::time::Instant),
+    NoClaimablePart,
+    Idle,
+}
+
 pub(in crate::ed2k_tcp) async fn pump_download_request_window(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     state: DownloadRequestWindowState<'_>,
-) -> Result<Option<tokio::time::Instant>> {
+) -> Result<DownloadRequestWindowOutcome> {
     let DownloadRequestWindowState {
         transfer_runtime,
         file_hash,
@@ -171,7 +178,10 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
         }
     }
     if requested_ranges.is_empty() {
-        return Ok(None);
+        if pending_part_requests.is_empty() && active_piece_request.is_none() {
+            return Ok(DownloadRequestWindowOutcome::NoClaimablePart);
+        }
+        return Ok(DownloadRequestWindowOutcome::Idle);
     }
 
     let request_parts = encode_request_parts_batch(file_hash, &requested_ranges)?;
@@ -195,7 +205,9 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
             window.min_pending_blocks
         ),
     );
-    Ok(Some(tokio::time::Instant::now() + part_response_grace))
+    Ok(DownloadRequestWindowOutcome::RequestSent(
+        tokio::time::Instant::now() + part_response_grace,
+    ))
 }
 
 /// Advance `active_piece.next_offset` past any blocks already marked present in

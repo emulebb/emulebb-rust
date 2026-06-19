@@ -15,8 +15,8 @@ pub use session::Ed2kPeerDownloadOutcome;
 pub(in crate::ed2k_tcp) use session::{DownloadSessionOptions, drive_download_session};
 pub use startup::{Ed2kPeerDownloadOptions, download_file_from_peer};
 pub(in crate::ed2k_tcp) use window::{
-    ActiveDownloadPiece, DownloadRequestWindowState, PendingPartRequest,
-    next_download_read_timeout, pump_download_request_window,
+    ActiveDownloadPiece, DownloadRequestWindowOutcome, DownloadRequestWindowState,
+    PendingPartRequest, next_download_read_timeout, pump_download_request_window,
 };
 #[cfg(test)]
 pub(in crate::ed2k_tcp) use window::{DownloadWindowLimits, select_download_window_limits};

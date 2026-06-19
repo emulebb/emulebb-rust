@@ -108,6 +108,148 @@ async fn queue_only_peer_is_accepted_without_counting_as_failure() {
 }
 
 #[tokio::test]
+async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts() {
+    let root = unique_test_dir("ed2k-accepted-empty-window-cancel");
+    let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let payload = vec![0x5C; 32_768];
+    let payload_len = payload.len() as u64;
+    let file_hash = emulebb_kad_proto::Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let file_hash_hex = file_hash.to_string();
+    transfer_runtime
+        .ensure_job(&new_transfer_job(
+            file_hash,
+            "claimed.epub".to_string(),
+            payload_len,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        transfer_runtime
+            .mark_piece_requested(&file_hash_hex, 0)
+            .await
+            .unwrap()
+    );
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let peer_public_key = Arc::new(
+        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
+    );
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        let hello = read_packet(&mut stream).await;
+        assert_eq!(hello[5], OP_HELLO);
+
+        let hello_answer = encode_hello_answer(Ed2kHelloIdentity {
+            user_hash: [0x42; 16],
+            client_id: 0x5912_0559,
+            tcp_port: peer_addr.port(),
+            udp_port: 41010,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        });
+        stream.write_all(&hello_answer).await.unwrap();
+
+        let secure_ident_probe = read_packet(&mut stream).await;
+        assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
+        stream
+            .write_all(&encode_secident_state(
+                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
+                0x4436_EEAC,
+            ))
+            .await
+            .unwrap();
+
+        let public_key = read_packet(&mut stream).await;
+        assert_eq!(public_key[5], super::OP_PUBLICKEY);
+        stream
+            .write_all(&encode_packet(
+                OP_EMULEPROT,
+                super::OP_PUBLICKEY,
+                &peer_public_key.public_key_payload().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let signature = read_packet(&mut stream).await;
+        assert_eq!(signature[5], super::OP_SIGNATURE);
+        stream
+            .write_all(&encode_packet(
+                OP_EMULEPROT,
+                super::OP_SIGNATURE,
+                &peer_signature_payload(),
+            ))
+            .await
+            .unwrap();
+
+        let startup_request = read_packet(&mut stream).await;
+        assert_startup_multipacket_ext2(
+            startup_request[0],
+            startup_request[5],
+            &startup_request[6..],
+            &file_hash,
+            payload_len,
+            false,
+        );
+        let filename_answer =
+            encode_startup_multipacket_ext2_answer(&file_hash, payload_len, "claimed.epub", false);
+        stream.write_all(&filename_answer).await.unwrap();
+
+        let start_upload = read_packet(&mut stream).await;
+        assert_eq!(start_upload[5], super::OP_STARTUPLOADREQ);
+        stream.write_all(&encode_accept_upload_req()).await.unwrap();
+
+        let cancel = read_packet(&mut stream).await;
+        assert_eq!(cancel[0], OP_EDONKEYPROT);
+        assert_eq!(cancel[5], OP_CANCELTRANSFER);
+    });
+
+    let result = download_file_from_peer_test!(
+        test_bind_ip(),
+        &Ed2kFoundSource {
+            file_hash,
+            ip: test_bind_ip(),
+            tcp_port: peer_addr.port(),
+            client_id: u32::from_le_bytes(test_bind_ip().octets()),
+            low_id: false,
+            obfuscated: false,
+            obfuscation_options: None,
+            user_hash: None,
+            source_server: None,
+            buddy_id: None,
+            buddy_endpoint: None,
+            source_udp_port: None,
+        },
+        Ed2kHelloIdentity {
+            user_hash: [0x11; 16],
+            client_id: 0,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(false),
+            direct_udp_callback: false,
+        },
+        &Arc::new(
+            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
+                .unwrap(),
+        ),
+        &transfer_runtime,
+        "claimed.epub".to_string(),
+        payload_len,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, Ed2kPeerDownloadOutcome::NoNeededParts);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
     let root = unique_test_dir("ed2k-queued-peer-late-accept");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
