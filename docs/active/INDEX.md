@@ -107,6 +107,7 @@ items.
 | [RUST-BUG-093](items/RUST-BUG-093.md) | Minor | DONE | Retain client UDP reask packet diagnostics |
 | [RUST-BUG-094](items/RUST-BUG-094.md) | Minor | DONE | Filter client UDP diagnostic noise and dump replies |
 | [RUST-BUG-095](items/RUST-BUG-095.md) | Major | DONE | Skip incomplete LowID UDP reasks |
+| [RUST-BUG-096](items/RUST-BUG-096.md) | Major | DONE | Keep unroutable LowID queue sources on TCP retry |
 
 ## Refactors (`REF`)
 

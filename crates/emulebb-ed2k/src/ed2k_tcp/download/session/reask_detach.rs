@@ -70,6 +70,17 @@ fn try_detach_queued_source_for_reask(
     if !eligible {
         return false;
     }
+    if session_state.peer_low_id {
+        // WHY: A TCP hello can advertise a LowID peer's buddy endpoint but not
+        // its buddy id. MFC only emits LowID UDP reasks when the buddy id is
+        // known from Kad source discovery, so TCP-discovered LowID queue sources
+        // must stay on the normal reconnect/callback path instead of being
+        // stranded in the UDP reask loop.
+        tracing::debug!(
+            "not detaching LowID queued source {peer_addr} for UDP reask: missing buddy id"
+        );
+        return false;
+    }
     handle.detach(crate::ed2k_client_udp::ReaskDetachArgs {
         file_hash,
         endpoint: (*v4.ip(), session_state.peer_udp_port),
@@ -85,4 +96,73 @@ fn try_detach_queued_source_for_reask(
         buddy_id: None,
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ed2k_client_udp::{ReaskCommand, reask_command_channel};
+    use crate::ed2k_tcp::download::session::DownloadSessionState;
+    use std::net::Ipv4Addr;
+    use tokio::time::Instant;
+
+    fn session_state(low_id: bool) -> DownloadSessionState {
+        let mut state = DownloadSessionState::new(false, false, false, Some([0x42; 16]), None);
+        state.queued_until = Some(Instant::now());
+        state.peer_udp_port = 4672;
+        state.peer_udp_version = 4;
+        state.peer_low_id = low_id;
+        state.peer_buddy_endpoint = Some((Ipv4Addr::new(198, 51, 100, 10), 5000));
+        state
+    }
+
+    #[test]
+    fn high_id_queued_source_detaches_for_udp_reask() {
+        let file_hash = Ed2kHash::from_bytes([0x5a; 16]);
+        let peer_addr = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 10).into(), 4662);
+        let state = session_state(false);
+        let (handle, mut rx) = reask_command_channel();
+
+        assert!(try_detach_queued_source_for_reask(
+            &Some(handle),
+            peer_addr,
+            file_hash,
+            &state,
+            true,
+        ));
+
+        match rx.try_recv().expect("register command") {
+            ReaskCommand::Register(args) => {
+                assert_eq!(args.file_hash, file_hash);
+                assert_eq!(args.endpoint, (Ipv4Addr::new(192, 0, 2, 10), 4672));
+                assert_eq!(args.udp_version, 4);
+                assert_eq!(args.user_hash, Some([0x42; 16]));
+                assert!(args.should_crypt);
+                assert!(!args.low_id);
+                assert_eq!(
+                    args.buddy_endpoint,
+                    Some((Ipv4Addr::new(198, 51, 100, 10), 5000))
+                );
+                assert_eq!(args.buddy_id, None);
+            }
+            other => panic!("expected Register, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn low_id_tcp_queued_source_without_buddy_id_stays_on_tcp_path() {
+        let file_hash = Ed2kHash::from_bytes([0x6b; 16]);
+        let peer_addr = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 20).into(), 4662);
+        let state = session_state(true);
+        let (handle, mut rx) = reask_command_channel();
+
+        assert!(!try_detach_queued_source_for_reask(
+            &Some(handle),
+            peer_addr,
+            file_hash,
+            &state,
+            false,
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 }
