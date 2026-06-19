@@ -53,13 +53,15 @@ impl ReaskSourceSet {
 
     /// Build the outbound reask datagrams for every source that is due (and not
     /// already awaiting a reply), marking each pending. Each entry is
-    /// `(destination, datagram)`: a HighID (or buddy-unknown) source gets a direct
-    /// `OP_REASKFILEPING` to its own endpoint; a firewalled LowID source whose Kad
-    /// buddy is known gets an `OP_REASKCALLBACKUDP` targeted at the **buddy**
-    /// endpoint instead (oracle `UDPReaskForDownload` LowID branch). Either way the
-    /// pending gate is keyed on the **source** endpoint, since the source itself
-    /// answers (directly, or relayed back over UDP via its buddy). UDP-disqualified
-    /// sources (`fallback_tcp_only`) are skipped — the caller reasks those over TCP.
+    /// `(destination, datagram)`: a HighID source gets a direct `OP_REASKFILEPING`
+    /// to its own endpoint; a firewalled LowID source whose Kad buddy is known gets
+    /// an `OP_REASKCALLBACKUDP` targeted at the **buddy** endpoint instead (oracle
+    /// `UDPReaskForDownload` LowID branch). LowID sources without a complete buddy
+    /// endpoint + id are skipped because MFC cannot route the callback request.
+    /// Either send path keys the pending gate on the **source** endpoint, since the
+    /// source itself answers (directly, or relayed back over UDP via its buddy).
+    /// UDP-disqualified sources (`fallback_tcp_only`) are skipped — the caller
+    /// reasks those over TCP.
     pub(crate) fn due_datagrams(
         &mut self,
         now: Instant,
@@ -85,6 +87,11 @@ impl ReaskSourceSet {
                 our_udp_version,
             ) {
                 (buddy_addr, datagram)
+            } else if source.low_id {
+                // WHY: MFC only sends OP_REASKCALLBACKUDP for LowID sources when
+                // both the buddy endpoint and buddy id are known. Direct-pinging
+                // the firewalled source would create wire behavior MFC never emits.
+                continue;
             } else {
                 let target = OutboundReaskTarget {
                     dest_user_hash: source.user_hash.unwrap_or([0u8; 16]),
@@ -375,8 +382,8 @@ mod tests {
         // the source is no longer due after origination.
         assert!(set.due(now).is_empty());
 
-        // A LowID source missing the buddy id (hello-only buddy) falls back to the
-        // direct ping destined to its own endpoint (no origination).
+        // A LowID source missing the buddy id (hello-only buddy) cannot originate
+        // the MFC callback request and must not fall back to a direct ping.
         let no_id_endpoint = (ip(21), 4672);
         set.insert(ReaskSource::new(no_id_endpoint, hash(), 4, now).with_buddy(
             true,
@@ -384,11 +391,16 @@ mod tests {
             None,
         ));
         let next = set.due_datagrams(now, None, 0, 4, our_ip);
-        let entry = next
-            .iter()
-            .find(|(dest, _)| *dest == SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1))
-            .expect("LowID source without a buddy id reasks directly to its own endpoint");
-        assert_eq!(entry.1.opcode, super::super::codec::OP_REASKFILEPING);
+        assert!(
+            next.iter().all(
+                |(dest, _)| *dest != SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1)
+            ),
+            "LowID source without a complete buddy target must not be direct-pinged"
+        );
+        assert!(
+            set.due(now).contains(&no_id_endpoint),
+            "skipped LowID source stays due because no UDP request was sent"
+        );
     }
 
     #[test]
