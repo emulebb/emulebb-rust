@@ -29,8 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ED2K_DOWNLOAD_KAD_SOURCE_CAP, ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS,
-    ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS, ED2K_HASH_ONLY_QUERY_PREFIX,
-    ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT, Transfer,
+    ED2K_DOWNLOAD_KAD_SOURCE_RETRY_DELAY_MS, ED2K_HASH_ONLY_QUERY_PREFIX, Transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,20 +517,6 @@ pub(crate) async fn collect_kad_ed2k_sources(
         sources.len() as u32,
     );
     sources
-}
-
-pub(crate) fn plaintext_fallback_for_obfuscated_source(
-    source: &Ed2kFoundSource,
-) -> Option<Ed2kFoundSource> {
-    let options = source.obfuscation_options?;
-    if options & ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT != 0 {
-        return None;
-    }
-    let mut fallback = source.clone();
-    fallback.obfuscated = false;
-    fallback.obfuscation_options = None;
-    fallback.user_hash = None;
-    Some(fallback)
 }
 
 /// Identity used to recognize and drop our own client from a learned source set

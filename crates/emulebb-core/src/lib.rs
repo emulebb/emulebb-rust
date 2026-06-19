@@ -131,10 +131,10 @@ use ed2k_sources::{
     global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
     hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
     manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
-    plaintext_fallback_for_obfuscated_source, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
-    should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
-    should_skip_no_progress_source_requery, sort_download_sources, source_endpoint_key, source_key,
+    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
+    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
+    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -5389,16 +5389,6 @@ where
                         peer_addr
                     );
                     last_error = Some(error);
-                    if let Some(fallback_source) = plaintext_fallback_for_obfuscated_source(&source)
-                    {
-                        tracing::info!(
-                            "ED2K direct download scheduling plaintext fallback file_hash={} peer={}:{}",
-                            file_hash_hex,
-                            source.ip,
-                            source.tcp_port
-                        );
-                        pending_sources.push_front(fallback_source);
-                    }
                 }
             }
 
@@ -5551,8 +5541,6 @@ const ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS: u64 = 750;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
-const ED2K_SOURCE_OBFUSCATION_REQUIRES_CRYPT: u8 = 0x04;
-
 /// Parse a REST-surface IP string (the `Upload.address` / `TransferSource.ip`
 /// fields) into an `Ipv4Addr` for the ban store. Returns `None` when the value
 /// is empty or not a dialable IPv4 (e.g. a LowID client-id), so the ban falls
@@ -7724,9 +7712,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_download_scheduler_tries_plaintext_after_optional_obfuscated_failure() {
+    async fn direct_download_scheduler_does_not_downgrade_failed_obfuscated_peer() {
         let (transfer_runtime, secure_ident, file_hash_hex, file_name, file_size) =
-            completed_ed2k_transfer_runtime("emulebb-core-direct-download-plaintext-fallback")
+            completed_ed2k_transfer_runtime("emulebb-core-direct-download-no-plaintext-downgrade")
                 .await;
         let file_hash: Ed2kHash = file_hash_hex.parse().unwrap();
         let attempts = Arc::new(Mutex::new(Vec::new()));
@@ -7771,22 +7759,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(outcome.completed);
         assert_eq!(
-            *attempts.lock().await,
-            vec![(41001, true, true), (41001, false, false)]
+            outcome
+                .last_error
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("simulated obfuscated peer close")
         );
-    }
-
-    #[test]
-    fn plaintext_fallback_preserves_crypt_required_sources() {
-        let file_hash = Ed2kHash::from_bytes([0x33; 16]);
-        let mut source = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
-        source.obfuscated = true;
-        source.obfuscation_options = Some(0x07);
-        source.user_hash = Some([0x22; 16]);
-
-        assert!(plaintext_fallback_for_obfuscated_source(&source).is_none());
+        assert_eq!(*attempts.lock().await, vec![(41001, true, true)]);
     }
 
     #[test]

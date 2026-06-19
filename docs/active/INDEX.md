@@ -89,6 +89,7 @@ items.
 | [RUST-BUG-075](items/RUST-BUG-075.md) | Major | DONE | Preserve out-of-order requested ED2K blocks |
 | [RUST-BUG-076](items/RUST-BUG-076.md) | Major | DONE | Keep diag_event JSONL records line-atomic across shims |
 | [RUST-BUG-077](items/RUST-BUG-077.md) | Major | DONE | Persist accepted ED2K request blocks before bitmap recovery |
+| [RUST-BUG-078](items/RUST-BUG-078.md) | Major | DONE | Do not immediately downgrade failed obfuscated ED2K peers |
 
 ## Refactors (`REF`)
 
