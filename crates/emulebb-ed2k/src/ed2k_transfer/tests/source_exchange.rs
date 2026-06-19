@@ -127,3 +127,67 @@ async fn source_exchange_respects_soft_source_cap() {
         "a cap-denied request must not consume the peer throttle"
     );
 }
+
+#[tokio::test]
+async fn source_exchange_answer_cools_down_rare_and_common_files() {
+    let root = unique_test_dir("ed2k-transfer-source-exchange-answer-cooldown");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 6), 4662));
+
+    runtime.note_source_exchange_answer("very_rare", now).await;
+    assert!(
+        runtime
+            .should_request_source_exchange("very_rare", peer_addr, None, 10, now)
+            .await,
+        "very rare files do not use the file-level answer cooldown"
+    );
+
+    runtime.note_source_exchange_answer("rare", now).await;
+    assert!(
+        !runtime
+            .should_request_source_exchange(
+                "rare",
+                peer_addr,
+                None,
+                11,
+                now + Duration::from_secs(60)
+            )
+            .await
+    );
+    assert!(
+        runtime
+            .should_request_source_exchange(
+                "rare",
+                peer_addr,
+                None,
+                11,
+                now + Duration::from_secs(5 * 60 + 1),
+            )
+            .await
+    );
+
+    runtime.note_source_exchange_answer("common", now).await;
+    assert!(
+        !runtime
+            .should_request_source_exchange(
+                "common",
+                peer_addr,
+                None,
+                51,
+                now + Duration::from_secs(5 * 60 + 1),
+            )
+            .await
+    );
+    assert!(
+        runtime
+            .should_request_source_exchange(
+                "common",
+                peer_addr,
+                None,
+                51,
+                now + Duration::from_secs(20 * 60 + 1),
+            )
+            .await
+    );
+}

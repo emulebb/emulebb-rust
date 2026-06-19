@@ -1104,6 +1104,10 @@ async fn remember_source_exchange_sources(
         return Ok(());
     }
 
+    transfer_runtime
+        .note_source_exchange_answer(file_hash_hex, std::time::Instant::now())
+        .await;
+
     for source in sources {
         if source.tcp_port == 0 || source.ip == [0, 0, 0, 0] {
             continue;

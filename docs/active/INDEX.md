@@ -96,6 +96,7 @@ items.
 | [RUST-BUG-082](items/RUST-BUG-082.md) | Minor | DONE | Report SX2 answer source counts in live-wire evidence |
 | [RUST-BUG-083](items/RUST-BUG-083.md) | Major | DONE | Gate SX2 requests on the MFC soft source cap |
 | [RUST-BUG-084](items/RUST-BUG-084.md) | Major | DONE | Use MFC common-file SX2 reask timing |
+| [RUST-BUG-085](items/RUST-BUG-085.md) | Major | DONE | Apply MFC SX2 answer cooldown per file |
 
 ## Refactors (`REF`)
 
