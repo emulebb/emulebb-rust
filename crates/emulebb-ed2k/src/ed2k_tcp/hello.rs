@@ -3,6 +3,9 @@ use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::hello_buddy::hello_buddy_snapshot;
+use super::hello_miscoptions::{
+    MiscOptions1, decode_misc_options1, decode_misc_options2_connect_options,
+};
 use super::{
     CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
     CT_EMULE_UDPPORTS, CT_EMULE_VERSION, CT_MOD_VERSION, CT_NAME, CT_VERSION, EDONKEY_VERSION,
@@ -397,13 +400,9 @@ pub(super) struct DecodedHelloProfile {
     pub(super) supports_source_exchange: bool,
     pub(super) supports_source_exchange2: bool,
     pub(super) supports_file_identifiers: bool,
-    /// Peer advertised a known GPL-breaker mod-version (eMule
-    /// `CUpDownClient::CheckForGPLEvilDoer`): its upload score is zeroed.
+    pub(super) connect_options: u8,
     pub(super) gpl_evildoer: bool,
-    /// Fully-decoded `CT_EMULE_MISCOPTIONS1` sub-fields (oracle BaseClient.cpp:515-533).
-    pub(super) misc_options1: super::hello_miscoptions::MiscOptions1,
-    /// Peer's advertised buddy endpoint (`CT_EMULE_BUDDYIP`/`CT_EMULE_BUDDYUDP`,
-    /// oracle BaseClient.cpp:492-510); `None` unless a LowID source advertised it.
+    pub(super) misc_options1: MiscOptions1,
     pub(super) buddy: Option<super::hello_buddy::DecodedHelloBuddy>,
 }
 
@@ -500,8 +499,9 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut supports_source_exchange = false;
     let mut supports_source_exchange2 = false;
     let mut supports_file_identifiers = false;
+    let mut connect_options = 0;
     let mut gpl_evildoer = false;
-    let mut misc_options1 = super::hello_miscoptions::MiscOptions1::default();
+    let mut misc_options1 = MiscOptions1::default();
     let (mut buddy_ip, mut buddy_udp) = (None, None);
     for _ in 0..tag_count {
         let tag = decode_hello_tag(cursor)?;
@@ -519,21 +519,19 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         {
             supports_file_identifiers = ((misc_options2 >> 13) & 1) != 0;
             supports_source_exchange2 = ((misc_options2 >> 10) & 1) != 0;
+            connect_options = decode_misc_options2_connect_options(misc_options2);
             supports_ext_multipacket = ((misc_options2 >> 5) & 1) != 0;
         }
         if tag.tag_name == Some(CT_EMULE_MISCOPTIONS1)
             && let Some(misc_options1_value) = decode_hello_tag_u32(&tag)
         {
-            // Decode every sub-field (keeps the full 3-bit AICH version).
-            misc_options1 = super::hello_miscoptions::decode_misc_options1(misc_options1_value);
-            // SX version (bits 12-15) is deprecated/ignored by the oracle here.
+            misc_options1 = decode_misc_options1(misc_options1_value);
             source_exchange_version = ((misc_options1_value >> 12) & 0x0F) as u8;
             supports_source_exchange = source_exchange_version != 0;
         }
         if tag.tag_name == Some(CT_EMULE_UDPPORTS)
             && let Some(udp_ports) = decode_hello_tag_u32(&tag)
         {
-            // eMule CT_EMULE_UDPPORTS: high 16 = Kad port, low 16 = eD2k UDP port.
             identity.udp_port = udp_ports as u16;
             identity.kad_port = (udp_ports >> 16) as u16;
         }
@@ -557,6 +555,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         supports_source_exchange,
         supports_source_exchange2,
         supports_file_identifiers,
+        connect_options,
         gpl_evildoer,
         misc_options1,
         buddy: super::hello_buddy::DecodedHelloBuddy::from_tag_values(buddy_ip, buddy_udp),

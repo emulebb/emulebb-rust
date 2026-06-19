@@ -36,6 +36,7 @@ pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {
     pub(in crate::ed2k_tcp) session_payload_down: &'a mut u64,
     pub(in crate::ed2k_tcp) part_response_deadline: &'a mut Option<tokio::time::Instant>,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
+    pub(in crate::ed2k_tcp) peer_connect_options: Option<u8>,
     /// The peer user hash to attribute *download credit* to, set to `Some` only
     /// when the peer's secure identity is cryptographically verified (eMule
     /// `CClientCredits::AddDownloaded` early-returns for IS_IDFAILED/IDBADGUY/
@@ -63,6 +64,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         session_payload_down,
         part_response_deadline,
         peer_user_hash,
+        peer_connect_options,
         credit_user_hash,
         aich_recovery_parts,
     } = blocks;
@@ -114,6 +116,7 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             file_hash_hex,
             peer_addr,
             peer_user_hash,
+            peer_connect_options,
             downloaded_bytes,
         );
     }
@@ -183,6 +186,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     peer_addr: SocketAddr,
     transport_mode: Ed2kTransportMode,
     peer_user_hash: Option<[u8; 16]>,
+    peer_connect_options: Option<u8>,
     credit_user_hash: Option<[u8; 16]>,
     aich_recovery_parts: &mut Vec<u16>,
 ) -> Result<()> {
@@ -245,6 +249,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             file_hash_hex,
             peer_addr,
             peer_user_hash,
+            peer_connect_options,
             end.saturating_sub(start),
         );
         dump_ed2k_tcp_download_meta(

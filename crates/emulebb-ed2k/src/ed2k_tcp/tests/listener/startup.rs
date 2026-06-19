@@ -569,3 +569,102 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn listener_source_exchange_preserves_live_source_connect_options() {
+    let payload = b"source exchange live crypt options".repeat(512);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let file_hash_hex = file_hash.to_string();
+    let root = unique_test_dir("ed2k-listener-sx-live-connect-options");
+    let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(&root).unwrap());
+    let job = new_transfer_job(
+        file_hash,
+        "sx-live-options.txt".to_string(),
+        payload.len() as u64,
+    );
+    transfer_runtime.ensure_job(&job).await.unwrap();
+    transfer_runtime
+        .store_md4_hashset(&file_hash_hex, Vec::new())
+        .await
+        .unwrap();
+    transfer_runtime
+        .store_piece_data(&file_hash_hex, 0, &payload)
+        .await
+        .unwrap();
+
+    let advertised_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 42)), 4662);
+    transfer_runtime.note_download_source_bytes_at(
+        &file_hash_hex,
+        advertised_source,
+        Some([0x63; 16]),
+        Some(0x03),
+        1,
+        std::time::Instant::now(),
+    );
+
+    let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let dht = test_dht().await;
+    let server_state = Arc::new(RwLock::new(Ed2kServerState::default()));
+    let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+    let secure_ident = listener_secure_ident();
+    let hello_identity = Ed2kHelloIdentity {
+        user_hash: [0x31; 16],
+        client_id: 0x1357_2468,
+        tcp_port: 41011,
+        udp_port: 41010,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    };
+    let server = spawn_single_listener_connection(
+        listener,
+        dht,
+        server_state,
+        kad_firewall,
+        secure_ident,
+        Arc::clone(&transfer_runtime),
+        hello_identity,
+    );
+
+    let peer_identity = Ed2kHelloIdentity {
+        user_hash: [0x41; 16],
+        client_id: 0x2468_1357,
+        tcp_port: 4662,
+        udp_port: 4672,
+        server_ip: 0,
+        server_port: 0,
+        connect_options: emule_connect_options(false),
+        direct_udp_callback: false,
+    };
+    let mut stream = connect_peer_and_exchange_hello(peer_addr, peer_identity).await;
+
+    stream
+        .write_all(&super::encode_request_sources2(&file_hash))
+        .await
+        .unwrap();
+    let source_answer =
+        read_until_opcode(&mut stream, OP_EMULEPROT, super::OP_ANSWERSOURCES2).await;
+    assert_eq!(&source_answer[7..23], &file_hash.0);
+    assert_eq!(
+        u16::from_le_bytes([source_answer[23], source_answer[24]]),
+        1
+    );
+    assert_eq!(&source_answer[25..29], &[42, 30, 20, 10]);
+    assert_eq!(&source_answer[37..53], &[0x63; 16]);
+    assert_eq!(source_answer[53], 0x03);
+
+    stream
+        .write_all(&super::encode_packet(
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD,
+            &file_hash.0,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}

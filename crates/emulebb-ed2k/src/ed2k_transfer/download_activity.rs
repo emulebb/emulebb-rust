@@ -69,6 +69,7 @@ pub(super) struct Ed2kDownloadActivity {
 pub(super) struct Ed2kSourceActivity {
     endpoint: SocketAddr,
     user_hash: Option<[u8; 16]>,
+    connect_options: Option<u8>,
     last_seen_at: Instant,
     last_payload_at: Option<Instant>,
     window: DatarateWindow,
@@ -82,6 +83,7 @@ pub(super) struct Ed2kSourceActivity {
 pub struct Ed2kLiveSource {
     pub endpoint: SocketAddr,
     pub user_hash: Option<[u8; 16]>,
+    pub connect_options: Option<u8>,
     pub download_speed_bytes_per_sec: u64,
     pub transferring: bool,
     pub available_parts: u32,
@@ -124,9 +126,17 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
+        connect_options: Option<u8>,
         byte_count: u64,
     ) {
-        self.note_download_source_bytes_at(file_hash, peer, user_hash, byte_count, Instant::now());
+        self.note_download_source_bytes_at(
+            file_hash,
+            peer,
+            user_hash,
+            connect_options,
+            byte_count,
+            Instant::now(),
+        );
     }
 
     pub(crate) fn note_download_source_bytes_at(
@@ -134,6 +144,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
+        connect_options: Option<u8>,
         byte_count: u64,
         now: Instant,
     ) {
@@ -152,6 +163,7 @@ impl Ed2kTransferRuntime {
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
                 user_hash,
+                connect_options,
                 last_seen_at: now,
                 last_payload_at: None,
                 window: DatarateWindow::default(),
@@ -160,6 +172,9 @@ impl Ed2kTransferRuntime {
         entry.endpoint = peer;
         if user_hash.is_some() {
             entry.user_hash = user_hash;
+        }
+        if connect_options.is_some() {
+            entry.connect_options = connect_options;
         }
         entry.last_seen_at = now;
         if byte_count > 0 {
@@ -174,6 +189,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         peer: SocketAddr,
         user_hash: Option<[u8; 16]>,
+        connect_options: Option<u8>,
         bitmap: Vec<bool>,
     ) {
         let now = Instant::now();
@@ -187,6 +203,7 @@ impl Ed2kTransferRuntime {
             .or_insert_with(|| Ed2kSourceActivity {
                 endpoint: peer,
                 user_hash,
+                connect_options,
                 last_seen_at: now,
                 last_payload_at: None,
                 window: DatarateWindow::default(),
@@ -195,6 +212,9 @@ impl Ed2kTransferRuntime {
         entry.endpoint = peer;
         if user_hash.is_some() {
             entry.user_hash = user_hash;
+        }
+        if connect_options.is_some() {
+            entry.connect_options = connect_options;
         }
         entry.last_seen_at = now;
         entry.part_bitmap = Some(bitmap);
@@ -229,6 +249,7 @@ impl Ed2kTransferRuntime {
             .map(|peer| Ed2kLiveSource {
                 endpoint: peer.endpoint,
                 user_hash: peer.user_hash,
+                connect_options: peer.connect_options,
                 download_speed_bytes_per_sec: source_speed_bytes_per_sec(peer, now),
                 transferring: is_transferring(peer, now),
                 available_parts: peer

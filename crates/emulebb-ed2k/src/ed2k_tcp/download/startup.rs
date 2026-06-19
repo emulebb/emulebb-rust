@@ -144,6 +144,7 @@ pub async fn download_file_from_peer(
             initial_hello_complete: false,
             initial_secure_ident_started: false,
             peer_user_hash: peer.user_hash,
+            peer_connect_options: peer.obfuscation_options,
             reask_register,
         })
         .await;

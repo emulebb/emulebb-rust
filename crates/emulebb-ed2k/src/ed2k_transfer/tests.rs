@@ -78,7 +78,14 @@ async fn stale_download_sources_are_evicted_on_next_write() {
     let stale_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4662));
     let fresh_peer = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 4662));
 
-    runtime.note_download_source_bytes_at(file_hash, stale_peer, Some([0x01; 16]), 4_096, now);
+    runtime.note_download_source_bytes_at(
+        file_hash,
+        stale_peer,
+        Some([0x01; 16]),
+        None,
+        4_096,
+        now,
+    );
     {
         let sources = runtime.download_sources.lock().unwrap();
         assert_eq!(sources.get(file_hash).map(|peers| peers.len()), Some(1));
@@ -87,7 +94,14 @@ async fn stale_download_sources_are_evicted_on_next_write() {
     // A write well past the staleness window for a different peer must evict the
     // now-stale entry, leaving only the fresh peer.
     let later = now + Duration::from_secs(31);
-    runtime.note_download_source_bytes_at(file_hash, fresh_peer, Some([0x02; 16]), 4_096, later);
+    runtime.note_download_source_bytes_at(
+        file_hash,
+        fresh_peer,
+        Some([0x02; 16]),
+        None,
+        4_096,
+        later,
+    );
     {
         let sources = runtime.download_sources.lock().unwrap();
         let peers = sources.get(file_hash).expect("file entry present");

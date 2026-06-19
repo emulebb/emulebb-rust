@@ -114,6 +114,7 @@ pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
     pub(in crate::ed2k_tcp) initial_hello_complete: bool,
     pub(in crate::ed2k_tcp) initial_secure_ident_started: bool,
     pub(in crate::ed2k_tcp) peer_user_hash: Option<[u8; 16]>,
+    pub(in crate::ed2k_tcp) peer_connect_options: Option<u8>,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches its TCP
     /// socket onto UDP reask via this handle. `None` keeps the legacy TCP-only path.
     pub(in crate::ed2k_tcp) reask_register: Option<crate::ed2k_client_udp::ReaskSourceHandle>,
@@ -136,6 +137,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         initial_hello_complete,
         initial_secure_ident_started,
         peer_user_hash,
+        peer_connect_options,
         reask_register,
     } = options;
     const QUEUE_RANK_GRACE: Duration = Duration::from_secs(20);
@@ -152,6 +154,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         initial_secure_ident_started,
         source_exchange_allowed,
         peer_user_hash,
+        peer_connect_options,
     );
 
     let session_result = async {
@@ -306,6 +309,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    session_state.peer_connect_options = Some(hello_profile.connect_options);
                     if hello_profile.identity.udp_port != 0 {
                         session_state.peer_udp_port = hello_profile.identity.udp_port;
                     }
@@ -344,6 +348,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    session_state.peer_connect_options = Some(hello_profile.connect_options);
                     // The peer's eD2k UDP port rides in the hello (CT_EMULE_UDPPORTS);
                     // capture it for UDP-reask detach (udp_version comes from OP_EMULEINFO).
                     if hello_profile.identity.udp_port != 0 {
@@ -558,6 +563,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         file_hash_hex,
                         peer_addr,
                         session_state.peer_user_hash,
+                        session_state.peer_connect_options,
                         availability,
                         manifest.pieces.len(),
                     );
@@ -612,6 +618,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                         file_hash_hex,
                                         peer_addr,
                                         session_state.peer_user_hash,
+                                        session_state.peer_connect_options,
                                         availability,
                                         manifest.pieces.len(),
                                     ));
@@ -697,6 +704,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                         file_hash_hex,
                                         peer_addr,
                                         session_state.peer_user_hash,
+                                        session_state.peer_connect_options,
                                         availability,
                                         manifest.pieces.len(),
                                     ));
@@ -1060,6 +1068,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         // recovered over this connection, so the recovery queue is discarded.
         let mut teardown_recovery_parts = Vec::new();
         let teardown_peer_user_hash = session_state.peer_user_hash;
+        let teardown_peer_connect_options = session_state.peer_connect_options;
         let teardown_credit_user_hash = session_state.verified_credit_user_hash();
         flush_buffered_download_prefixes(
             transfer_runtime,
@@ -1070,6 +1079,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             peer_addr,
             transport.mode,
             teardown_peer_user_hash,
+            teardown_peer_connect_options,
             teardown_credit_user_hash,
             &mut teardown_recovery_parts,
         )
@@ -1137,6 +1147,7 @@ fn record_source_part_availability(
     file_hash_hex: &str,
     peer_addr: SocketAddr,
     peer_user_hash: Option<[u8; 16]>,
+    peer_connect_options: Option<u8>,
     availability: Vec<bool>,
     manifest_part_count: usize,
 ) -> Vec<bool> {
@@ -1149,6 +1160,7 @@ fn record_source_part_availability(
         file_hash_hex,
         peer_addr,
         peer_user_hash,
+        peer_connect_options,
         bitmap.clone(),
     );
     bitmap

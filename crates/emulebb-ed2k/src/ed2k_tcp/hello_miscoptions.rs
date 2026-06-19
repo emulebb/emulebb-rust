@@ -22,6 +22,8 @@
 //! Oracle reference (do not modify): `srchybrid/BaseClient.cpp`
 //! `CUpDownClient::ProcessHelloTypePacket` `case CT_EMULE_MISCOPTIONS1`.
 
+use super::{EMULE_CRYPT_REQUESTS, EMULE_CRYPT_REQUIRES, EMULE_CRYPT_SUPPORTS};
+
 /// Fully-decoded `CT_EMULE_MISCOPTIONS1` capability bitfield.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MiscOptions1 {
@@ -78,6 +80,15 @@ pub(super) fn decode_misc_options1(value: u32) -> MiscOptions1 {
         multipacket: ((value >> 1) & 0x01) != 0,
         preview: (value & 0x01) != 0,
     }
+}
+
+/// Decode the crypt-layer subfields from `CT_EMULE_MISCOPTIONS2` into the same
+/// source-exchange v4 connect-options byte that `CreateSrcInfoPacket` writes.
+pub(super) fn decode_misc_options2_connect_options(value: u32) -> u8 {
+    let supports = u8::from(((value >> 7) & 1) != 0) * EMULE_CRYPT_SUPPORTS;
+    let requests = u8::from(((value >> 8) & 1) != 0) * EMULE_CRYPT_REQUESTS;
+    let requires = u8::from(((value >> 9) & 1) != 0) * EMULE_CRYPT_REQUIRES;
+    supports | requests | requires
 }
 
 #[cfg(test)]

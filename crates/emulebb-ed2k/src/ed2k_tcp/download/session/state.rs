@@ -38,6 +38,7 @@ pub(super) struct DownloadSessionState {
     pub(super) completed_block_count: usize,
     pub(super) session_payload_down: u64,
     pub(super) peer_user_hash: Option<[u8; 16]>,
+    pub(super) peer_connect_options: Option<u8>,
     /// Peer's advertised eD2k UDP port (from OP_EMULEINFO ET_UDPPORT), 0 if none.
     /// Used to detach a queued source onto UDP reask.
     pub(super) peer_udp_port: u16,
@@ -69,6 +70,7 @@ impl DownloadSessionState {
         initial_secure_ident_started: bool,
         source_exchange_allowed: bool,
         peer_user_hash: Option<[u8; 16]>,
+        peer_connect_options: Option<u8>,
     ) -> Self {
         Self {
             peer_secure_ident: Ed2kPeerSecureIdentState::default(),
@@ -103,6 +105,7 @@ impl DownloadSessionState {
             completed_block_count: 0,
             session_payload_down: 0,
             peer_user_hash,
+            peer_connect_options,
             peer_udp_port: 0,
             peer_udp_version: 0,
             peer_low_id: false,
@@ -157,7 +160,7 @@ mod tests {
 
     #[test]
     fn secure_ident_wait_does_not_block_on_peer_signature() {
-        let mut state = DownloadSessionState::new(false, true, false, None);
+        let mut state = DownloadSessionState::new(false, true, false, None, None);
         state.peer_secure_ident.requested_peer_key = true;
         state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
         state.peer_secure_ident.challenge_for = Some(1234);
@@ -167,7 +170,7 @@ mod tests {
 
     #[test]
     fn secure_ident_wait_blocks_while_local_signature_is_pending() {
-        let mut state = DownloadSessionState::new(false, true, false, None);
+        let mut state = DownloadSessionState::new(false, true, false, None, None);
         state.peer_secure_ident.requested_peer_key = true;
         state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
         state.peer_secure_ident.challenge_for = Some(1234);

@@ -297,7 +297,7 @@ mod tests {
     use super::*;
 
     fn state(sx1: bool, sx2: bool, allowed: bool) -> DownloadSessionState {
-        let mut s = DownloadSessionState::new(true, false, allowed, None);
+        let mut s = DownloadSessionState::new(true, false, allowed, None, None);
         s.remote_supports_source_exchange = sx1;
         s.remote_supports_source_exchange2 = sx2;
         s

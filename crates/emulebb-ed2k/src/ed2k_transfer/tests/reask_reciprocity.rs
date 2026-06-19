@@ -186,11 +186,13 @@ async fn reask_transfer_info_advertises_partfile_bitmap_for_incomplete_download(
         &hex,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 4662),
         None,
+        None,
         vec![true, true],
     );
     runtime.note_download_source_part_bitmap(
         &hex,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 4662),
+        None,
         None,
         vec![true, false],
     );

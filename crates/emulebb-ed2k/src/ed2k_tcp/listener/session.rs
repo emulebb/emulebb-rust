@@ -356,6 +356,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         initial_hello_complete: true,
                         initial_secure_ident_started: true,
                         peer_user_hash: Some(hello_profile.identity.user_hash),
+                        peer_connect_options: Some(hello_profile.connect_options),
                         // Inbound callback downloads stay on TCP; UDP-reask detach
                         // is driven only from the outbound download driver.
                         reask_register: None,

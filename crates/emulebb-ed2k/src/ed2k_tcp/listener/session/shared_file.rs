@@ -487,7 +487,7 @@ async fn source_exchange_peers_excluding(
             server_ip: 0,
             server_port: 0,
             user_hash: live.user_hash,
-            connect_options: 0,
+            connect_options: live.connect_options.unwrap_or(0),
         });
         if peers.len() >= MAX_SOURCE_EXCHANGE_ENTRIES {
             return Ok(peers);

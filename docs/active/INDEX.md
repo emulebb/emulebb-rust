@@ -101,6 +101,7 @@ items.
 | [RUST-BUG-087](items/RUST-BUG-087.md) | Minor | DONE | Dump outgoing secure-ident signatures |
 | [RUST-BUG-088](items/RUST-BUG-088.md) | Minor | DONE | Report direct-source crypt options in diagnostics |
 | [RUST-BUG-089](items/RUST-BUG-089.md) | Minor | DONE | Separate live-wire completed and partial byte counters |
+| [RUST-BUG-090](items/RUST-BUG-090.md) | Major | DONE | Preserve SX2 live-source connect options |
 
 ## Refactors (`REF`)
 
