@@ -147,9 +147,7 @@ impl DownloadSessionState {
         self.secure_ident_started
             && (self.peer_secure_ident.pending_signature
                 || (self.peer_secure_ident.requested_peer_key
-                    && self.peer_secure_ident.peer_public_key.is_none())
-                || (self.peer_secure_ident.challenge_for.is_some()
-                    && !self.peer_secure_ident.peer_signature_received))
+                    && self.peer_secure_ident.peer_public_key.is_none()))
     }
 }
 
@@ -158,12 +156,11 @@ mod tests {
     use super::DownloadSessionState;
 
     #[test]
-    fn secure_ident_wait_allows_peer_signature_without_peer_challenge() {
+    fn secure_ident_wait_does_not_block_on_peer_signature() {
         let mut state = DownloadSessionState::new(false, true, false, None);
         state.peer_secure_ident.requested_peer_key = true;
         state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
         state.peer_secure_ident.challenge_for = Some(1234);
-        state.peer_secure_ident.peer_signature_received = true;
 
         assert!(!state.waiting_for_peer_secure_ident());
     }
