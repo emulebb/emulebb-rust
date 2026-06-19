@@ -103,6 +103,7 @@ items.
 | [RUST-BUG-089](items/RUST-BUG-089.md) | Minor | DONE | Separate live-wire completed and partial byte counters |
 | [RUST-BUG-090](items/RUST-BUG-090.md) | Major | DONE | Preserve SX2 live-source connect options |
 | [RUST-BUG-091](items/RUST-BUG-091.md) | Major | DONE | Return EXT2 identifier answer for source-only multipackets |
+| [RUST-BUG-092](items/RUST-BUG-092.md) | Minor | DONE | Name server callback requests in diagnostics |
 
 ## Refactors (`REF`)
 
