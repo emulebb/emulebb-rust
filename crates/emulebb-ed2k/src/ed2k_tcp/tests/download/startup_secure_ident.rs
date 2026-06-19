@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn small_file_download_waits_for_peer_signature_before_start_upload() {
+async fn small_file_download_starts_after_local_secure_ident_signature() {
     let root = unique_test_dir("ed2k-small-file-capture");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; 2_409_452];
@@ -64,20 +64,6 @@ async fn small_file_download_waits_for_peer_signature_before_start_upload() {
         let signature = read_packet(&mut stream).await;
         assert_eq!(signature[0], OP_EMULEPROT);
         assert_eq!(signature[5], super::OP_SIGNATURE);
-
-        // Oracle-shaped sessions keep file startup traffic behind the full
-        // secure-ident roundtrip, so no filename/upload request should
-        // arrive before the peer signature closes the exchange.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), read_packet(&mut stream))
-                .await
-                .is_err(),
-            "startup requests must wait for peer OP_SIGNATURE"
-        );
-
-        let peer_signature =
-            encode_packet(OP_EMULEPROT, super::OP_SIGNATURE, &peer_signature_payload());
-        stream.write_all(&peer_signature).await.unwrap();
 
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(

@@ -568,10 +568,23 @@ pub(super) fn dump_ed2k_tcp_download_recv(
 
 #[cfg(test)]
 mod tests {
-    use super::ED2K_TCP_DUMP_FILE_PREFIX;
+    use super::{ED2K_TCP_DUMP_FILE_PREFIX, OP_EMULEPROT, OP_SIGNATURE, canonical_ed2k_send_phase};
 
     #[test]
     fn tcp_dump_prefix_uses_emulebb_rust_name() {
         assert_eq!(ED2K_TCP_DUMP_FILE_PREFIX, "emulebb-rust-ed2k-tcp-dump-");
+    }
+
+    #[test]
+    fn secure_ident_signature_send_phase_matches_mfc_oracle() {
+        assert_eq!(
+            canonical_ed2k_send_phase(
+                "native_download",
+                "fallback",
+                Some(OP_EMULEPROT),
+                Some(OP_SIGNATURE)
+            ),
+            "signature"
+        );
     }
 }

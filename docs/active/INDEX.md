@@ -98,6 +98,7 @@ items.
 | [RUST-BUG-084](items/RUST-BUG-084.md) | Major | DONE | Use MFC common-file SX2 reask timing |
 | [RUST-BUG-085](items/RUST-BUG-085.md) | Major | DONE | Apply MFC SX2 answer cooldown per file |
 | [RUST-BUG-086](items/RUST-BUG-086.md) | Major | DONE | Do not block download startup on peer secure-ident signature |
+| [RUST-BUG-087](items/RUST-BUG-087.md) | Minor | DONE | Dump outgoing secure-ident signatures |
 
 ## Refactors (`REF`)
 
