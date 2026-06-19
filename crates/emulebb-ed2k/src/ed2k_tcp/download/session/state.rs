@@ -145,39 +145,4 @@ impl DownloadSessionState {
             None
         }
     }
-
-    pub(super) fn waiting_for_peer_secure_ident(&self) -> bool {
-        self.secure_ident_started
-            && (self.peer_secure_ident.pending_signature
-                || (self.peer_secure_ident.requested_peer_key
-                    && self.peer_secure_ident.peer_public_key.is_none()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::DownloadSessionState;
-
-    #[test]
-    fn secure_ident_wait_does_not_block_on_peer_signature() {
-        let mut state = DownloadSessionState::new(false, true, false, None, None);
-        state.peer_secure_ident.requested_peer_key = true;
-        state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
-        state.peer_secure_ident.challenge_for = Some(1234);
-
-        assert!(!state.waiting_for_peer_secure_ident());
-    }
-
-    #[test]
-    fn secure_ident_wait_blocks_while_local_signature_is_pending() {
-        let mut state = DownloadSessionState::new(false, true, false, None, None);
-        state.peer_secure_ident.requested_peer_key = true;
-        state.peer_secure_ident.peer_public_key = Some(vec![1, 2, 3]);
-        state.peer_secure_ident.challenge_for = Some(1234);
-        state.peer_secure_ident.peer_signature_received = true;
-        state.peer_secure_ident.peer_challenge_from = Some(5678);
-        state.peer_secure_ident.pending_signature = true;
-
-        assert!(state.waiting_for_peer_secure_ident());
-    }
 }

@@ -38,35 +38,6 @@ async fn small_file_download_releases_piece_after_out_of_order_multi_range_respo
         stream.write_all(&hello_answer).await.unwrap();
 
         let _secure_ident_probe = read_packet(&mut stream).await;
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let _public_key = read_packet(&mut stream).await;
-        let peer_public_key = Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
-                .unwrap(),
-        );
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let _signature = read_packet(&mut stream).await;
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(

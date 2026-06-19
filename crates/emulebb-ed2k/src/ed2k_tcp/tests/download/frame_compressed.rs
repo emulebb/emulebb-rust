@@ -23,7 +23,7 @@ async fn small_file_download_accepts_split_compressed_part_frames() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
-        complete_plain_secure_ident_exchange(&mut stream, peer_addr, &peer_public_key).await;
+        start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
         answer_startup_metadata(
             &mut stream,
             &file_hash,
@@ -126,10 +126,6 @@ async fn small_file_download_accepts_obfuscated_packed_startup_and_compressed_pa
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let peer_user_hash = [0x42; 16];
-    let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
-    let peer_public_key_for_server = Arc::clone(&peer_public_key);
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -155,29 +151,6 @@ async fn small_file_download_accepts_obfuscated_packed_startup_and_compressed_pa
         let secure_ident_probe = transport.read_packet().await.unwrap().unwrap();
         assert_eq!(secure_ident_probe.protocol, OP_EMULEPROT);
         assert_eq!(secure_ident_probe.opcode, OP_SECIDENTSTATE);
-
-        let peer_challenge =
-            encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, 0x4436_EEAC);
-        transport.write_all(&peer_challenge).await.unwrap();
-
-        let public_key = transport.read_packet().await.unwrap().unwrap();
-        assert_eq!(public_key.protocol, OP_EMULEPROT);
-        assert_eq!(public_key.opcode, super::OP_PUBLICKEY);
-
-        let peer_public_key_packet = encode_packed_packet(
-            super::OP_PUBLICKEY,
-            &peer_public_key_for_server.public_key_payload().unwrap(),
-        )
-        .unwrap();
-        transport.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = transport.read_packet().await.unwrap().unwrap();
-        assert_eq!(signature.protocol, OP_EMULEPROT);
-        assert_eq!(signature.opcode, super::OP_SIGNATURE);
-
-        let peer_signature =
-            encode_packed_packet(super::OP_SIGNATURE, &peer_signature_payload()).unwrap();
-        transport.write_all(&peer_signature).await.unwrap();
 
         let startup_request = transport.read_packet().await.unwrap().unwrap();
         assert_startup_multipacket_ext2(

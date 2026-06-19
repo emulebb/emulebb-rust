@@ -16,7 +16,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
-        complete_plain_secure_ident_exchange(&mut stream, peer_addr, &peer_public_key).await;
+        start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
         answer_startup_metadata_with_expected_size(
             &mut stream,
             &file_hash,
@@ -130,7 +130,7 @@ async fn nofile_answer_for_requested_file_is_incomplete_not_error() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
-        complete_plain_secure_ident_exchange(&mut stream, peer_addr, &peer_public_key).await;
+        start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
         stream
             .write_all(&encode_packet(OP_EDONKEYPROT, OP_CHANGE_SLOT, &[]))
             .await
@@ -196,7 +196,6 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key = test_peer_secure_ident();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
@@ -211,37 +210,6 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
         let secure_ident_probe = read_packet(&mut stream).await;
         assert_eq!(secure_ident_probe[0], OP_EMULEPROT);
         assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[0], OP_EMULEPROT);
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_PUBLICKEY,
-                &peer_public_key.public_key_payload().unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[0], OP_EMULEPROT);
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut stream).await;
         assert_legacy_multipacket_omits_aich_request(&startup_request, &file_hash, file_size);

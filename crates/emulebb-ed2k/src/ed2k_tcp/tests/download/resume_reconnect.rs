@@ -22,11 +22,6 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
     let peer_addr = listener.local_addr().unwrap();
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
-        let peer_public_key = Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
-                .unwrap(),
-        );
-
         let (mut first_stream, _) = listener.accept().await.unwrap();
         let _hello = read_packet(&mut first_stream).await;
         let hello_answer = encode_hello_answer(Ed2kHelloIdentity {
@@ -42,34 +37,6 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
         first_stream.write_all(&hello_answer).await.unwrap();
 
         let _secure_ident_probe = read_packet(&mut first_stream).await;
-        first_stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let _public_key = read_packet(&mut first_stream).await;
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        first_stream
-            .write_all(&peer_public_key_packet)
-            .await
-            .unwrap();
-
-        let _signature = read_packet(&mut first_stream).await;
-        first_stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut first_stream).await;
         assert_startup_multipacket_ext2(
@@ -127,34 +94,6 @@ async fn small_file_download_resumes_partial_piece_after_reconnect() {
         resumed_stream.write_all(&hello_answer).await.unwrap();
 
         let _secure_ident_probe = read_packet(&mut resumed_stream).await;
-        resumed_stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let _public_key = read_packet(&mut resumed_stream).await;
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        resumed_stream
-            .write_all(&peer_public_key_packet)
-            .await
-            .unwrap();
-
-        let _signature = read_packet(&mut resumed_stream).await;
-        resumed_stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut resumed_stream).await;
         assert_startup_multipacket_ext2_with_source_exchange(
@@ -299,7 +238,7 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
             .await
             .unwrap();
         assert_eq!(first_transport.mode, Ed2kTransportMode::Obfuscated);
-        complete_obfuscated_secure_ident_exchange(
+        start_obfuscated_download_session(
             &mut first_transport,
             peer_addr,
             peer_user_hash,
@@ -338,7 +277,7 @@ async fn small_file_download_resumes_partial_piece_after_obfuscated_reconnect() 
             .await
             .unwrap();
         assert_eq!(resumed_transport.mode, Ed2kTransportMode::Obfuscated);
-        complete_obfuscated_secure_ident_exchange(
+        start_obfuscated_download_session(
             &mut resumed_transport,
             peer_addr,
             peer_user_hash,

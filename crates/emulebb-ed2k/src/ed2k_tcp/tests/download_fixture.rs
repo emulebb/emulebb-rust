@@ -27,10 +27,10 @@ pub(super) fn test_peer_hello_with_obfuscation(
     })
 }
 
-pub(super) async fn complete_plain_secure_ident_exchange(
+pub(super) async fn start_plain_download_session(
     stream: &mut TcpStream,
     peer_addr: SocketAddr,
-    peer_secure_ident: &Ed2kSecureIdent,
+    _peer_secure_ident: &Ed2kSecureIdent,
 ) {
     let hello = read_packet(stream).await;
     assert_eq!(hello[0], OP_EDONKEYPROT);
@@ -40,44 +40,13 @@ pub(super) async fn complete_plain_secure_ident_exchange(
     let secure_ident_probe = read_packet(stream).await;
     assert_eq!(secure_ident_probe[0], OP_EMULEPROT);
     assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
-    stream
-        .write_all(&encode_secident_state(
-            ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-            0x4436_EEAC,
-        ))
-        .await
-        .unwrap();
-
-    let public_key = read_packet(stream).await;
-    assert_eq!(public_key[0], OP_EMULEPROT);
-    assert_eq!(public_key[5], super::OP_PUBLICKEY);
-    stream
-        .write_all(&encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_secure_ident.public_key_payload().unwrap(),
-        ))
-        .await
-        .unwrap();
-
-    let signature = read_packet(stream).await;
-    assert_eq!(signature[0], OP_EMULEPROT);
-    assert_eq!(signature[5], super::OP_SIGNATURE);
-    stream
-        .write_all(&encode_packet(
-            OP_EMULEPROT,
-            super::OP_SIGNATURE,
-            &peer_signature_payload(),
-        ))
-        .await
-        .unwrap();
 }
 
-pub(super) async fn complete_obfuscated_secure_ident_exchange(
+pub(super) async fn start_obfuscated_download_session(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     peer_user_hash: [u8; 16],
-    peer_secure_ident: &Ed2kSecureIdent,
+    _peer_secure_ident: &Ed2kSecureIdent,
 ) {
     let hello = transport.read_packet().await.unwrap().unwrap();
     assert_eq!(hello.protocol, OP_EDONKEYPROT);
@@ -94,35 +63,6 @@ pub(super) async fn complete_obfuscated_secure_ident_exchange(
     let secure_ident_probe = transport.read_packet().await.unwrap().unwrap();
     assert_eq!(secure_ident_probe.protocol, OP_EMULEPROT);
     assert_eq!(secure_ident_probe.opcode, OP_SECIDENTSTATE);
-    transport
-        .write_all(&encode_secident_state(
-            ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-            0x4436_EEAC,
-        ))
-        .await
-        .unwrap();
-
-    let public_key = transport.read_packet().await.unwrap().unwrap();
-    assert_eq!(public_key.protocol, OP_EMULEPROT);
-    assert_eq!(public_key.opcode, super::OP_PUBLICKEY);
-    transport
-        .write_all(
-            &encode_packed_packet(
-                super::OP_PUBLICKEY,
-                &peer_secure_ident.public_key_payload().unwrap(),
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let signature = transport.read_packet().await.unwrap().unwrap();
-    assert_eq!(signature.protocol, OP_EMULEPROT);
-    assert_eq!(signature.opcode, super::OP_SIGNATURE);
-    transport
-        .write_all(&encode_packed_packet(super::OP_SIGNATURE, &peer_signature_payload()).unwrap())
-        .await
-        .unwrap();
 }
 
 pub(super) async fn answer_startup_metadata(

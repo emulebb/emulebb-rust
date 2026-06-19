@@ -45,8 +45,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         request_file_identifier,
         session_state,
     } = step;
-    let waiting_for_peer_secure_ident = session_state.waiting_for_peer_secure_ident();
-
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.secure_ident_started
@@ -69,7 +67,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.startup_file_requests_sent
-        && !waiting_for_peer_secure_ident
     {
         if session_state.remote_supports_file_identifiers {
             let source_exchange_request = source_exchange_request_for_peer(session_state);
@@ -151,7 +148,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.source_request_sent
-        && !waiting_for_peer_secure_ident
         && !session_state.remote_supports_file_identifiers
         && session_state.source_exchange_allowed
         && session_state.remote_supports_source_exchange2
@@ -173,7 +169,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
     if send_initial_requests
         && session_state.hello_complete
         && !session_state.aich_file_hash_requested
-        && !waiting_for_peer_secure_ident
         && !session_state.remote_supports_file_identifiers
         && session_state.remote_supports_aich
     {
@@ -196,7 +191,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         && manifest.file_size != 0
         && !manifest.md4_hashset_acquired
         && !session_state.hashset_requested
-        && !waiting_for_peer_secure_ident
         && session_state.startup_file_response_received
     {
         if manifest.file_size <= ED2K_PART_SIZE {
@@ -250,7 +244,6 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
         && manifest.file_size != 0
         && (manifest.md4_hashset_acquired || hashset_request_stalled)
         && !session_state.upload_requested
-        && !waiting_for_peer_secure_ident
         && session_state.startup_file_response_received
     {
         if hashset_request_stalled && !manifest.md4_hashset_acquired {

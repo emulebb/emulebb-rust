@@ -36,7 +36,7 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
-        complete_plain_secure_ident_exchange(&mut stream, peer_addr, &peer_public_key).await;
+        start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
         // Advertise the part as present (complete file status) so the downloader
         // both claims the part and is allowed to ask this peer for recovery.
         answer_startup_metadata(&mut stream, &file_hash, payload_len, "corrupt.bin", true).await;

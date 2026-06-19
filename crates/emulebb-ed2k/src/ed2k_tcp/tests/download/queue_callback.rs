@@ -44,40 +44,12 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
                 .unwrap();
         stream.write_all(&startup_answer).await.unwrap();
 
-        let public_key = tokio::time::timeout(Duration::from_secs(3), read_packet(&mut stream))
-            .await
-            .unwrap();
-        assert_eq!(public_key[0], OP_EMULEPROT);
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-
-        let peer_public_key = Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
-                .unwrap(),
-        );
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = tokio::time::timeout(Duration::from_secs(3), read_packet(&mut stream))
-            .await
-            .unwrap();
-        assert_eq!(signature[0], OP_EMULEPROT);
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
-
-        let start_upload = tokio::time::timeout(Duration::from_secs(3), read_packet(&mut stream))
-            .await
-            .unwrap();
+        let start_upload = tokio::time::timeout(
+            Duration::from_secs(3),
+            read_until_opcode(&mut stream, OP_EDONKEYPROT, super::OP_STARTUPLOADREQ),
+        )
+        .await
+        .unwrap();
         assert_eq!(start_upload[0], OP_EDONKEYPROT);
         assert_eq!(start_upload[5], super::OP_STARTUPLOADREQ);
         assert_eq!(&start_upload[6..22], &file_hash.0);

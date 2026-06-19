@@ -24,9 +24,6 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key_for_server = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -59,25 +56,6 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
             .await
             .unwrap();
 
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[0], OP_EMULEPROT);
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key_for_server.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[0], OP_EMULEPROT);
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-
-        let peer_signature =
-            encode_packet(OP_EMULEPROT, super::OP_SIGNATURE, &peer_signature_payload());
-        stream.write_all(&peer_signature).await.unwrap();
-
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(
             startup_request[0],
@@ -95,6 +73,10 @@ async fn large_file_download_falls_back_to_upload_request_when_hashset_stalls() 
             true,
         );
         stream.write_all(&startup_answer).await.unwrap();
+
+        let public_key = read_packet(&mut stream).await;
+        assert_eq!(public_key[0], OP_EMULEPROT);
+        assert_eq!(public_key[5], super::OP_PUBLICKEY);
 
         let hashset_request = read_packet(&mut stream).await;
         assert_eq!(hashset_request[0], OP_EMULEPROT);

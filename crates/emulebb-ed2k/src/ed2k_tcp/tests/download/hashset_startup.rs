@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn large_file_download_waits_for_secure_ident_before_hashset_and_upload() {
+async fn large_file_download_starts_hashset_flow_before_peer_secure_ident_key_arrives() {
     let root = unique_test_dir("ed2k-large-file-secure-ident-order");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; (ED2K_PART_SIZE as usize) + 32_768];
@@ -56,9 +56,6 @@ async fn large_file_download_waits_for_secure_ident_before_hashset_and_upload() 
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key_for_server = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -87,25 +84,6 @@ async fn large_file_download_waits_for_secure_ident_before_hashset_and_upload() 
             encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, 0x4436_EEAC);
         stream.write_all(&peer_challenge).await.unwrap();
 
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[0], OP_EMULEPROT);
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key_for_server.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[0], OP_EMULEPROT);
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-
-        let peer_signature =
-            encode_packet(OP_EMULEPROT, super::OP_SIGNATURE, &peer_signature_payload());
-        stream.write_all(&peer_signature).await.unwrap();
-
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(
             startup_request[0],
@@ -122,6 +100,10 @@ async fn large_file_download_waits_for_secure_ident_before_hashset_and_upload() 
             true,
         );
         stream.write_all(&startup_answer).await.unwrap();
+
+        let public_key = read_packet(&mut stream).await;
+        assert_eq!(public_key[0], OP_EMULEPROT);
+        assert_eq!(public_key[5], super::OP_PUBLICKEY);
 
         let hashset_request = read_packet(&mut stream).await;
         assert_eq!(hashset_request[0], OP_EMULEPROT);

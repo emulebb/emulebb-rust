@@ -42,39 +42,6 @@ async fn small_file_download_rejects_wrong_payload_and_keeps_manifest_incomplete
         let Ok(_secure_ident_probe) = try_read_packet(&mut stream).await else {
             return;
         };
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let Ok(_public_key) = try_read_packet(&mut stream).await else {
-            return;
-        };
-        let peer_public_key = Arc::new(
-            Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap())
-                .unwrap(),
-        );
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let Ok(_signature) = try_read_packet(&mut stream).await else {
-            return;
-        };
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
         let Ok(startup_request) = try_read_packet(&mut stream).await else {
             return;
         };

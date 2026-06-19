@@ -233,7 +233,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 && session_state.hashset_requested
                 && !manifest.md4_hashset_acquired
                 && !session_state.upload_requested
-                && !session_state.waiting_for_peer_secure_ident()
             {
                 session_state.hashset_requested_at.map(|requested_at| {
                     HASHSET_STALL_UPLOAD_FALLBACK.saturating_sub(requested_at.elapsed())

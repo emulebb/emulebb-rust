@@ -18,9 +18,6 @@ async fn queue_only_peer_is_accepted_without_counting_as_failure() {
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
@@ -41,25 +38,6 @@ async fn queue_only_peer_is_accepted_without_counting_as_failure() {
 
         let secure_ident_probe = read_packet(&mut stream).await;
         assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[5], super::OP_SIGNATURE);
         drop(stream);
     });
 
@@ -132,9 +110,6 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
@@ -155,35 +130,6 @@ async fn accepted_peer_without_claimable_blocks_is_cancelled_as_no_needed_parts(
 
         let secure_ident_probe = read_packet(&mut stream).await;
         assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_PUBLICKEY,
-                &peer_public_key.public_key_payload().unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(
@@ -267,9 +213,6 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
 
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
-    let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -291,33 +234,6 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
 
         let secure_ident_probe = read_packet(&mut stream).await;
         assert_eq!(secure_ident_probe[5], OP_SECIDENTSTATE);
-        stream
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let public_key = read_packet(&mut stream).await;
-        assert_eq!(public_key[5], super::OP_PUBLICKEY);
-        let peer_public_key_packet = encode_packet(
-            OP_EMULEPROT,
-            super::OP_PUBLICKEY,
-            &peer_public_key.public_key_payload().unwrap(),
-        );
-        stream.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = read_packet(&mut stream).await;
-        assert_eq!(signature[5], super::OP_SIGNATURE);
-        stream
-            .write_all(&encode_packet(
-                OP_EMULEPROT,
-                super::OP_SIGNATURE,
-                &peer_signature_payload(),
-            ))
-            .await
-            .unwrap();
 
         let startup_request = read_packet(&mut stream).await;
         assert_startup_multipacket_ext2(
@@ -438,10 +354,6 @@ async fn obfuscated_queued_peer_waits_for_late_accept_upload() {
     let listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
     let peer_addr = listener.local_addr().unwrap();
     let peer_user_hash = [0x52; 16];
-    let peer_public_key = Arc::new(
-        Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
-    );
-    let peer_public_key_for_server = Arc::clone(&peer_public_key);
     let payload_for_server = payload.clone();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -467,30 +379,6 @@ async fn obfuscated_queued_peer_waits_for_late_accept_upload() {
         let secure_ident_probe = transport.read_packet().await.unwrap().unwrap();
         assert_eq!(secure_ident_probe.protocol, OP_EMULEPROT);
         assert_eq!(secure_ident_probe.opcode, OP_SECIDENTSTATE);
-        transport
-            .write_all(&encode_secident_state(
-                ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED,
-                0x4436_EEAC,
-            ))
-            .await
-            .unwrap();
-
-        let public_key = transport.read_packet().await.unwrap().unwrap();
-        assert_eq!(public_key.protocol, OP_EMULEPROT);
-        assert_eq!(public_key.opcode, super::OP_PUBLICKEY);
-        let peer_public_key_packet = encode_packed_packet(
-            super::OP_PUBLICKEY,
-            &peer_public_key_for_server.public_key_payload().unwrap(),
-        )
-        .unwrap();
-        transport.write_all(&peer_public_key_packet).await.unwrap();
-
-        let signature = transport.read_packet().await.unwrap().unwrap();
-        assert_eq!(signature.protocol, OP_EMULEPROT);
-        assert_eq!(signature.opcode, super::OP_SIGNATURE);
-        let peer_signature =
-            encode_packed_packet(super::OP_SIGNATURE, &peer_signature_payload()).unwrap();
-        transport.write_all(&peer_signature).await.unwrap();
 
         let startup_request = transport.read_packet().await.unwrap().unwrap();
         assert_startup_multipacket_ext2(

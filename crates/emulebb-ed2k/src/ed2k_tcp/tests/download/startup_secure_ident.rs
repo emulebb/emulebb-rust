@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn small_file_download_starts_after_local_secure_ident_signature() {
+async fn small_file_download_starts_before_peer_secure_ident_key_arrives() {
     let root = unique_test_dir("ed2k-small-file-capture");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let payload = vec![0x5A; 2_409_452];
@@ -50,6 +50,16 @@ async fn small_file_download_starts_after_local_secure_ident_signature() {
             encode_secident_state(ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, 0x4436_EEAC);
         stream.write_all(&peer_challenge).await.unwrap();
 
+        let startup_request = read_packet(&mut stream).await;
+        assert_startup_multipacket_ext2(
+            startup_request[0],
+            startup_request[5],
+            &startup_request[6..],
+            &file_hash,
+            payload_for_server.len() as u64,
+            false,
+        );
+
         let public_key = read_packet(&mut stream).await;
         assert_eq!(public_key[0], OP_EMULEPROT);
         assert_eq!(public_key[5], super::OP_PUBLICKEY);
@@ -64,16 +74,6 @@ async fn small_file_download_starts_after_local_secure_ident_signature() {
         let signature = read_packet(&mut stream).await;
         assert_eq!(signature[0], OP_EMULEPROT);
         assert_eq!(signature[5], super::OP_SIGNATURE);
-
-        let startup_request = read_packet(&mut stream).await;
-        assert_startup_multipacket_ext2(
-            startup_request[0],
-            startup_request[5],
-            &startup_request[6..],
-            &file_hash,
-            payload_for_server.len() as u64,
-            false,
-        );
 
         let filename_answer = encode_startup_multipacket_ext2_answer(
             &file_hash,

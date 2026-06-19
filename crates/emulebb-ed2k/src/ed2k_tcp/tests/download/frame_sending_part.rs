@@ -23,7 +23,7 @@ async fn small_file_download_accepts_split_sending_part_frames() {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
-        complete_plain_secure_ident_exchange(&mut stream, peer_addr, &peer_public_key).await;
+        start_plain_download_session(&mut stream, peer_addr, &peer_public_key).await;
         answer_startup_metadata(
             &mut stream,
             &file_hash,

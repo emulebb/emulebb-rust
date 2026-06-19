@@ -26,17 +26,18 @@ blocked waiting for the peer's later signature verification packet.
 
 ## Acceptance
 
-- [x] Download startup waits while Rust still lacks the peer public key needed to
-      send our signature.
-- [x] Download startup waits while Rust still has a local signature pending.
+- [x] Superseded by `RUST-BUG-098`: download startup no longer waits for missing
+      peer public key or pending local signature state.
 - [x] Download startup no longer waits for the peer's `OP_SIGNATURE` after our
       side has enough state to continue.
 - [x] Peer signatures are still processed and verified when they arrive later.
 
 ## Implementation Notes
 
-- Reduced `DownloadSessionState::waiting_for_peer_secure_ident` to only block on
-  missing peer public key and pending local signature state.
+- `RUST-BUG-086` originally reduced the secure-ident startup wait to missing
+  peer public key and pending local signature state.
+- `RUST-BUG-098` later removed the remaining startup wait entirely, matching MFC
+  side-band secure-ident behavior.
 - Kept `OP_SIGNATURE` handling unchanged; late peer signatures still update the
   secure-ident verification diagnostics and credit binding path.
 
