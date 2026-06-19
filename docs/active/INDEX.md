@@ -102,6 +102,7 @@ items.
 | [RUST-BUG-088](items/RUST-BUG-088.md) | Minor | DONE | Report direct-source crypt options in diagnostics |
 | [RUST-BUG-089](items/RUST-BUG-089.md) | Minor | DONE | Separate live-wire completed and partial byte counters |
 | [RUST-BUG-090](items/RUST-BUG-090.md) | Major | DONE | Preserve SX2 live-source connect options |
+| [RUST-BUG-091](items/RUST-BUG-091.md) | Major | DONE | Return EXT2 identifier answer for source-only multipackets |
 
 ## Refactors (`REF`)
 

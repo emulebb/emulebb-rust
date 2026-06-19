@@ -95,20 +95,18 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
         }
     }
 
-    if include_filename || include_status {
-        let status_body = include_status.then(|| shared.encode_part_status_body());
-        let reply = encode_multipacket_ext2_answer(
-            &shared_identifier,
-            &shared.canonical_name,
-            include_filename,
-            status_body.as_deref(),
-        )?;
-        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_ext2_answer", &reply);
-        transport
-            .write_all(&reply)
-            .await
-            .with_context(|| format!("failed to send OP_MULTIPACKETANSWER_EXT2 to {peer_addr}"))?;
-    }
+    let status_body = include_status.then(|| shared.encode_part_status_body());
+    let reply = encode_multipacket_ext2_answer(
+        &shared_identifier,
+        &shared.canonical_name,
+        include_filename,
+        status_body.as_deref(),
+    )?;
+    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "multipacket_ext2_answer", &reply);
+    transport
+        .write_all(&reply)
+        .await
+        .with_context(|| format!("failed to send OP_MULTIPACKETANSWER_EXT2 to {peer_addr}"))?;
     Ok(Some(requested))
 }
 

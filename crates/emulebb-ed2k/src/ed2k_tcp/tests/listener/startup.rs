@@ -668,3 +668,78 @@ async fn listener_source_exchange_preserves_live_source_connect_options() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
+    let hello_identity = listener_hello_identity();
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-listener-ext2-source-only-ack",
+        hello_identity,
+        [0x3C; 16],
+        0x1122_3344,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file(
+            "source-only-ext2.txt",
+            b"source-only multipacket ext2 request".repeat(512),
+        )
+        .await;
+    let file_hash_hex = file.file_hash.to_string();
+    runtime
+        .transfer_runtime
+        .remember_source(
+            &file_hash_hex,
+            Ed2kSourceHint {
+                ip: "10.20.30.43".to_string(),
+                tcp_port: 4662,
+                user_hash: Some(hex::encode([0x64; 16])),
+            },
+        )
+        .await
+        .unwrap();
+
+    let server = runtime.spawn_listener_connections(1);
+    let mut stream =
+        connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
+    let manifest = runtime
+        .transfer_runtime
+        .manifest(&file_hash_hex)
+        .await
+        .unwrap();
+    let identifier = Ed2kFileIdentifier::from_manifest(&manifest).unwrap();
+    let mut payload = Vec::new();
+    identifier.encode_into(&mut payload);
+    payload.push(OP_REQUESTSOURCES2);
+    payload.extend_from_slice(&encode_request_sources2_subpayload());
+    stream
+        .write_all(&encode_packet(OP_EMULEPROT, OP_MULTIPACKET_EXT2, &payload))
+        .await
+        .unwrap();
+
+    let source_answer = read_until_opcode(&mut stream, OP_EMULEPROT, OP_ANSWERSOURCES2).await;
+    assert_eq!(&source_answer[7..23], &file.file_hash.0);
+    assert_eq!(
+        u16::from_le_bytes([source_answer[23], source_answer[24]]),
+        1
+    );
+    assert_eq!(&source_answer[25..29], &[43, 30, 20, 10]);
+
+    let ext2_answer = read_until_opcode(&mut stream, OP_EMULEPROT, OP_MULTIPACKETANSWER_EXT2).await;
+    let (returned_identifier, remaining) = Ed2kFileIdentifier::decode(&ext2_answer[6..]).unwrap();
+    assert_eq!(returned_identifier.file_hash, file.file_hash);
+    assert!(remaining.is_empty());
+
+    stream
+        .write_all(&super::encode_packet(
+            OP_EDONKEYPROT,
+            OP_END_OF_DOWNLOAD,
+            &file.file_hash.0,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
