@@ -93,6 +93,7 @@ items.
 | [RUST-BUG-079](items/RUST-BUG-079.md) | Minor | DONE | Do not report unknown ED2K TCP transport as plaintext |
 | [RUST-BUG-080](items/RUST-BUG-080.md) | Minor | DONE | Count embedded SX2 requests in Rust live-wire evidence |
 | [RUST-BUG-081](items/RUST-BUG-081.md) | Minor | DONE | Stop Rust live-wire downloads after first completion |
+| [RUST-BUG-082](items/RUST-BUG-082.md) | Minor | DONE | Report SX2 answer source counts in live-wire evidence |
 
 ## Refactors (`REF`)
 
