@@ -141,6 +141,8 @@ pub fn ed2k_part_count(file_size: u64) -> u16 {
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
 const PAYLOAD_FILE_NAME: &str = "pieces.bin";
 const SOURCE_EXCHANGE_REASK_INTERVAL: Duration = Duration::from_secs(40 * 60);
+const SOURCE_EXCHANGE_COMMON_REASK_INTERVAL: Duration = Duration::from_secs(160 * 60);
+const SOURCE_EXCHANGE_RARE_FILE: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SourceExchangeRequestKey {
@@ -510,19 +512,28 @@ impl Ed2kTransferRuntime {
         if !self.can_engage_file_source(current_source_count) {
             return false;
         }
+        let reask_interval = source_exchange_reask_interval(current_source_count);
         let key = SourceExchangeRequestKey {
             file_hash: file_hash.to_string(),
             peer_addr,
             user_hash,
         };
         let mut requests = self.source_exchange_requests.lock().await;
-        let allowed = requests.get(&key).is_none_or(|last_requested| {
-            now.duration_since(*last_requested) > SOURCE_EXCHANGE_REASK_INTERVAL
-        });
+        let allowed = requests
+            .get(&key)
+            .is_none_or(|last_requested| now.duration_since(*last_requested) > reask_interval);
         if allowed {
             requests.insert(key, now);
         }
         allowed
+    }
+}
+
+fn source_exchange_reask_interval(current_source_count: usize) -> Duration {
+    if current_source_count > SOURCE_EXCHANGE_RARE_FILE {
+        SOURCE_EXCHANGE_COMMON_REASK_INTERVAL
+    } else {
+        SOURCE_EXCHANGE_REASK_INTERVAL
     }
 }
 

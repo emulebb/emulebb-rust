@@ -57,6 +57,43 @@ async fn source_exchange_reask_throttles_same_peer_and_file() {
 }
 
 #[tokio::test]
+async fn source_exchange_common_files_use_common_reask_penalty() {
+    let root = unique_test_dir("ed2k-transfer-source-exchange-common-reask");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let now = Instant::now();
+    let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 5), 4662));
+    let user_hash = Some([0x52; 16]);
+
+    assert!(
+        runtime
+            .should_request_source_exchange("aa", peer_addr, user_hash, 51, now)
+            .await
+    );
+    assert!(
+        !runtime
+            .should_request_source_exchange(
+                "aa",
+                peer_addr,
+                user_hash,
+                51,
+                now + Duration::from_secs(40 * 60 + 1),
+            )
+            .await
+    );
+    assert!(
+        runtime
+            .should_request_source_exchange(
+                "aa",
+                peer_addr,
+                user_hash,
+                51,
+                now + Duration::from_secs(160 * 60 + 1),
+            )
+            .await
+    );
+}
+
+#[tokio::test]
 async fn source_exchange_respects_soft_source_cap() {
     let root = unique_test_dir("ed2k-transfer-source-exchange-soft-cap");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
