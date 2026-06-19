@@ -33,7 +33,7 @@ use tracing::trace;
 use emulebb_kad_proto::Ed2kHash as KadEd2kHash;
 
 use super::codec::{OP_REASKCALLBACKUDP, encode_reask_callback_udp};
-use super::outbound::build_reask_callback_udp_datagram;
+use super::outbound::{ClientUdpDatagram, build_reask_callback_udp_packet};
 use super::state::ReaskSource;
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
@@ -114,9 +114,9 @@ pub(super) fn build_downloader_callback_origination(
     our_part_status: Option<&[bool]>,
     complete_source_count: u16,
     our_udp_version: u8,
-) -> Option<(SocketAddr, Vec<u8>)> {
+) -> Option<(SocketAddr, ClientUdpDatagram)> {
     let ((buddy_ip, buddy_port), buddy_id) = source.buddy_reask_target()?;
-    let datagram = build_reask_callback_udp_datagram(
+    let datagram = build_reask_callback_udp_packet(
         &KadEd2kHash::from_bytes(buddy_id),
         &source.file_hash,
         our_part_status,

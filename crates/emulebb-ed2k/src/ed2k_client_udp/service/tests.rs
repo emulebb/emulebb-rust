@@ -54,9 +54,11 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
         *dest,
         SocketAddr::new(buddy_endpoint.0.into(), buddy_endpoint.1)
     );
-    assert_eq!(datagram[0], 0xC5);
-    assert_eq!(datagram[1], OP_REASKCALLBACKUDP);
-    let decoded = decode_reask_callback_udp(&datagram[2..], 4).unwrap();
+    assert_eq!(datagram.bytes[0], 0xC5);
+    assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
+    assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
+    assert!(!datagram.obfuscated);
+    let decoded = decode_reask_callback_udp(&datagram.payload, 4).unwrap();
     assert_eq!(decoded.buddy_id.0, buddy_id);
     assert_eq!(decoded.file_hash, file_hash());
 }

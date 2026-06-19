@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 
+use super::ClientUdpDatagram;
 use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use super::source_set::ReaskSourceSet;
 use super::state::{ReaskAction, ReaskReply, ReaskSource};
@@ -72,7 +73,7 @@ pub(crate) enum ReaskInboundOutcome {
 #[derive(Debug, Default)]
 pub(crate) struct ReaskTickOutput {
     /// `(destination, datagram)` reask pings to send via the shared socket.
-    pub send: Vec<(SocketAddr, Vec<u8>)>,
+    pub send: Vec<(SocketAddr, ClientUdpDatagram)>,
     /// Endpoints whose UDP reask timed out and the resulting action
     /// (`RetryUdp`/`RetryTcp`).
     pub timed_out: Vec<(SocketAddr, ReaskAction)>,

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::buddy_relay::build_downloader_callback_origination;
-use super::outbound::{OutboundReaskTarget, build_reask_file_ping_datagram};
+use super::outbound::{ClientUdpDatagram, OutboundReaskTarget, build_reask_file_ping_packet};
 use super::registry::ReaskPendingRegistry;
 use super::state::{ReaskAction, ReaskReply, ReaskSource, apply_reask_reply};
 
@@ -67,7 +67,7 @@ impl ReaskSourceSet {
         complete_source_count: u16,
         our_udp_version: u8,
         our_public_ip: [u8; 4],
-    ) -> Vec<(SocketAddr, Vec<u8>)> {
+    ) -> Vec<(SocketAddr, ClientUdpDatagram)> {
         let mut out = Vec::new();
         for (ip, udp_port) in self.due(now) {
             let Some(source) = self.sources.get(&(ip, udp_port)) else {
@@ -92,7 +92,7 @@ impl ReaskSourceSet {
                     // Only obfuscate when we actually hold the peer's key.
                     obfuscate: source.should_crypt && source.user_hash.is_some(),
                 };
-                let datagram = build_reask_file_ping_datagram(
+                let datagram = build_reask_file_ping_packet(
                     &source.file_hash,
                     our_part_status,
                     complete_source_count,
@@ -306,7 +306,7 @@ mod tests {
 
         // The built datagram is a valid OP_REASKFILEPING the peer (keying on its
         // own hash == peer_hash + our IP as the sender) can parse back.
-        let msg = parse_inbound_reask_datagram(&datagrams[0].1, our_ip, &peer_hash, 4)
+        let msg = parse_inbound_reask_datagram(&datagrams[0].1.bytes, our_ip, &peer_hash, 4)
             .expect("peer should parse our reask");
         match msg {
             InboundReaskMessage::FilePing(ping) => {
@@ -362,9 +362,11 @@ mod tests {
 
         // It is a plaintext OP_REASKCALLBACKUDP carrying [buddy_id][file_hash][tail].
         let datagram = &datagrams[0].1;
-        assert_eq!(datagram[0], 0xC5); // OP_EMULEPROT (never obfuscated)
-        assert_eq!(datagram[1], OP_REASKCALLBACKUDP);
-        let decoded = decode_reask_callback_udp(&datagram[2..], 4).unwrap();
+        assert_eq!(datagram.bytes[0], 0xC5); // OP_EMULEPROT (never obfuscated)
+        assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
+        assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
+        assert!(!datagram.obfuscated);
+        let decoded = decode_reask_callback_udp(&datagram.payload, 4).unwrap();
         assert_eq!(decoded.buddy_id.0, buddy_id);
         assert_eq!(decoded.file_hash, hash());
         assert_eq!(decoded.complete_source_count, Some(3));
@@ -386,7 +388,7 @@ mod tests {
             .iter()
             .find(|(dest, _)| *dest == SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1))
             .expect("LowID source without a buddy id reasks directly to its own endpoint");
-        assert_eq!(entry.1[1], super::super::codec::OP_REASKFILEPING);
+        assert_eq!(entry.1.opcode, super::super::codec::OP_REASKFILEPING);
     }
 
     #[test]

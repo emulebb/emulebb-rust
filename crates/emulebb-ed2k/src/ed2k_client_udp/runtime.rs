@@ -238,7 +238,7 @@ pub async fn run_ed2k_udp_reask_loop(
                 let Some((data, from)) = maybe else { break };
                 handle_inbound_datagram(
                     &mut service, &dht, &transfer_runtime, &events, &ip_filter,
-                    &buddy_registry, udp_version, public_ip.octets(), &data, from,
+                    &buddy_registry, user_hash, udp_version, public_ip.octets(), &data, from,
                 )
                 .await;
             }
@@ -309,6 +309,7 @@ async fn handle_inbound_datagram(
     events: &ReaskEventSender,
     ip_filter: &IpFilter,
     buddy_registry: &BuddySocketRegistry,
+    our_user_hash: [u8; 16],
     our_udp_version: u8,
     our_public_ip: [u8; 4],
     data: &[u8],
@@ -334,6 +335,7 @@ async fn handle_inbound_datagram(
         data.len(),
         hex_preview(data)
     );
+    super::dump::dump_client_udp_recv(from, &our_user_hash, our_public_ip, data);
     match service.handle_inbound(data, from, Instant::now()) {
         ReaskInboundOutcome::RoutedReply {
             file_hash,
@@ -499,12 +501,13 @@ async fn drive_reask_tick(
         },
     );
     for (addr, datagram) in out.send {
-        match dht.send_raw_datagram(addr, &datagram).await {
+        match dht.send_raw_datagram(addr, &datagram.bytes).await {
             Ok(()) => {
+                super::dump::dump_client_udp_send(addr, &datagram);
                 trace!(
                     "ed2k udp reask: PKT-OUT reask ping -> {addr} ({} bytes) hex={}",
-                    datagram.len(),
-                    hex_preview(&datagram),
+                    datagram.bytes.len(),
+                    hex_preview(&datagram.bytes),
                 );
                 // `reask_sent` (uniform-diagnostics-v2 schema §3.5): a UDP source
                 // reask actually went out on the wire to `addr`.

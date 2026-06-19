@@ -17,6 +17,18 @@ use crate::ed2k_client_udp_obfuscation::obfuscate_client_udp;
 /// The eD2k protocol marker that prefixes client UDP packets (`OP_EMULEPROT`).
 const OP_EMULEPROT: u8 = 0xC5;
 
+/// A built client-UDP datagram plus the plaintext frame metadata used by packet
+/// diagnostics. `bytes` is the exact on-wire datagram, which may be obfuscated;
+/// `payload` is the plaintext opcode body before optional obfuscation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClientUdpDatagram {
+    pub bytes: Vec<u8>,
+    pub protocol_marker: u8,
+    pub opcode: u8,
+    pub payload: Vec<u8>,
+    pub obfuscated: bool,
+}
+
 /// Where to send and whether to obfuscate. eMule obfuscates client UDP toward a
 /// peer when `ShouldReceiveCryptUDPPackets()` (keyed on the peer user hash);
 /// otherwise the packet is plaintext.
@@ -32,16 +44,27 @@ pub(crate) struct OutboundReaskTarget {
 
 /// Wrap an opcode body in the `[OP_EMULEPROT][opcode]` header, then obfuscate or
 /// leave plaintext per `target`.
-fn frame(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Vec<u8> {
+fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> ClientUdpDatagram {
     let mut plain = Vec::with_capacity(2 + body.len());
     plain.push(OP_EMULEPROT);
     plain.push(opcode);
     plain.extend_from_slice(body);
-    if target.obfuscate {
+    let bytes = if target.obfuscate {
         obfuscate_client_udp(&target.dest_user_hash, target.our_public_ip, &plain)
     } else {
         plain
+    };
+    ClientUdpDatagram {
+        bytes,
+        protocol_marker: OP_EMULEPROT,
+        opcode,
+        payload: body.to_vec(),
+        obfuscated: target.obfuscate,
     }
+}
+
+fn frame(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Vec<u8> {
+    frame_packet(opcode, body, target).bytes
 }
 
 /// Build an `OP_REASKFILEPING` datagram (downloader -> source).
@@ -52,13 +75,31 @@ pub(crate) fn build_reask_file_ping_datagram(
     our_udp_version: u8,
     target: &OutboundReaskTarget,
 ) -> Vec<u8> {
+    build_reask_file_ping_packet(
+        file_hash,
+        part_status,
+        complete_source_count,
+        our_udp_version,
+        target,
+    )
+    .bytes
+}
+
+/// Build an `OP_REASKFILEPING` datagram with packet-diagnostic metadata.
+pub(crate) fn build_reask_file_ping_packet(
+    file_hash: &Ed2kHash,
+    part_status: Option<&[bool]>,
+    complete_source_count: u16,
+    our_udp_version: u8,
+    target: &OutboundReaskTarget,
+) -> ClientUdpDatagram {
     let body = encode_reask_file_ping(
         file_hash,
         part_status,
         complete_source_count,
         our_udp_version,
     );
-    frame(OP_REASKFILEPING, &body, target)
+    frame_packet(OP_REASKFILEPING, &body, target)
 }
 
 /// Build an `OP_REASKACK` datagram (uploader -> downloader). `peer_udp_version`
@@ -93,6 +134,24 @@ pub(crate) fn build_reask_callback_udp_datagram(
     complete_source_count: u16,
     our_udp_version: u8,
 ) -> Vec<u8> {
+    build_reask_callback_udp_packet(
+        buddy_id,
+        file_hash,
+        part_status,
+        complete_source_count,
+        our_udp_version,
+    )
+    .bytes
+}
+
+/// Build a plaintext `OP_REASKCALLBACKUDP` datagram with packet-diagnostic metadata.
+pub(crate) fn build_reask_callback_udp_packet(
+    buddy_id: &Ed2kHash,
+    file_hash: &Ed2kHash,
+    part_status: Option<&[bool]>,
+    complete_source_count: u16,
+    our_udp_version: u8,
+) -> ClientUdpDatagram {
     let body = encode_reask_callback_udp(
         buddy_id,
         file_hash,
@@ -104,7 +163,13 @@ pub(crate) fn build_reask_callback_udp_datagram(
     datagram.push(OP_EMULEPROT);
     datagram.push(OP_REASKCALLBACKUDP);
     datagram.extend_from_slice(&body);
-    datagram
+    ClientUdpDatagram {
+        bytes: datagram,
+        protocol_marker: OP_EMULEPROT,
+        opcode: OP_REASKCALLBACKUDP,
+        payload: body,
+        obfuscated: false,
+    }
 }
 
 #[cfg(test)]

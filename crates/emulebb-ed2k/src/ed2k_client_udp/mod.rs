@@ -20,6 +20,7 @@
 pub(crate) mod buddy_relay;
 pub(crate) mod codec;
 pub(crate) mod dispatch;
+pub(crate) mod dump;
 pub(crate) mod outbound;
 pub(crate) mod reciprocity;
 pub(crate) mod registry;
@@ -35,8 +36,9 @@ pub(crate) use codec::{
 };
 pub(crate) use dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 pub(crate) use outbound::{
-    OutboundReaskTarget, build_file_not_found_datagram, build_queue_full_datagram,
-    build_reask_ack_datagram, build_reask_callback_udp_datagram, build_reask_file_ping_datagram,
+    ClientUdpDatagram, OutboundReaskTarget, build_file_not_found_datagram,
+    build_queue_full_datagram, build_reask_ack_datagram, build_reask_callback_udp_datagram,
+    build_reask_file_ping_datagram,
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};

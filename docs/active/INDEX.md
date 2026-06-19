@@ -104,6 +104,7 @@ items.
 | [RUST-BUG-090](items/RUST-BUG-090.md) | Major | DONE | Preserve SX2 live-source connect options |
 | [RUST-BUG-091](items/RUST-BUG-091.md) | Major | DONE | Return EXT2 identifier answer for source-only multipackets |
 | [RUST-BUG-092](items/RUST-BUG-092.md) | Minor | DONE | Name server callback requests in diagnostics |
+| [RUST-BUG-093](items/RUST-BUG-093.md) | Minor | DONE | Retain client UDP reask packet diagnostics |
 
 ## Refactors (`REF`)
 
