@@ -70,11 +70,14 @@ helper = "emulebb_ed2k::long_path::long_path"
 current_model_note = "incoming + category output boundaries documented; wired where the category path is consumed"
 
 # New `.rs` files must stay within `max_rs_lines` (600) / `max_test_rs_lines` (900).
-# The legacy files below are grandfathered, but their caps are FROZEN at the
-# current line count: caps are ratchet-down-only. Do not raise a cap to fit new
-# code -- put new functionality in a new module within budget, and lower a cap
-# whenever a split shrinks its file. The remaining splits are deferred to
-# post-parity, done opportunistically "as touched".
+# The legacy files below are grandfathered and remain refactor debt, but their
+# caps are engineering guardrails rather than mechanical split triggers. Prefer
+# extracting independent responsibilities into new modules within budget, and
+# lower a cap whenever a split shrinks its file. A cap may be raised only when
+# the touched behavior is one cohesive function or protocol decision surface and
+# splitting it would harm readability, invariants, or parity evidence; the
+# allowlist rationale must say why the code belongs together. The remaining
+# splits are deferred to post-parity, done opportunistically "as touched".
 [structure]
 max_rs_lines = 600
 max_test_rs_lines = 900
