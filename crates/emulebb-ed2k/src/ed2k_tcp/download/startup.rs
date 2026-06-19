@@ -78,14 +78,19 @@ pub async fn download_file_from_peer(
         .await?;
 
     let peer_addr = SocketAddr::new(IpAddr::V4(peer.ip), peer.tcp_port);
+    let crypt_options = peer
+        .obfuscation_options
+        .map(|options| format!("0x{options:02x}"))
+        .unwrap_or_else(|| "none".to_string());
     dump_ed2k_tcp_download_meta(
         peer_addr,
         None,
         "connect_start",
         format!(
-            "file_hash={file_hash_hex} file_size={file_size} client_id={} obfuscated={} has_user_hash={}",
+            "file_hash={file_hash_hex} file_size={file_size} client_id={} obfuscated={} crypt_options={} has_user_hash={}",
             peer.client_id,
             peer.obfuscated,
+            crypt_options,
             peer.user_hash.is_some()
         ),
     );

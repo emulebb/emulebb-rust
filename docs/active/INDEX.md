@@ -99,6 +99,7 @@ items.
 | [RUST-BUG-085](items/RUST-BUG-085.md) | Major | DONE | Apply MFC SX2 answer cooldown per file |
 | [RUST-BUG-086](items/RUST-BUG-086.md) | Major | DONE | Do not block download startup on peer secure-ident signature |
 | [RUST-BUG-087](items/RUST-BUG-087.md) | Minor | DONE | Dump outgoing secure-ident signatures |
+| [RUST-BUG-088](items/RUST-BUG-088.md) | Minor | DONE | Report direct-source crypt options in diagnostics |
 
 ## Refactors (`REF`)
 
