@@ -2791,6 +2791,14 @@ impl EmulebbCore {
             }
 
             if acquired_direct_source_count != 0 {
+                let source_exchange_source_count = {
+                    let mut state = self.state.lock().await;
+                    let now = Instant::now();
+                    state.download_source_registry.prune_stale_candidates(now);
+                    state
+                        .download_source_registry
+                        .candidate_count_for_file(now, &transfer.hash)
+                };
                 let leased_endpoints = direct_sources
                     .iter()
                     .map(source_endpoint_key)
@@ -2829,6 +2837,7 @@ impl EmulebbCore {
                                 transfer_runtime: transfer_runtime.as_ref(),
                                 canonical_name: file_name,
                                 file_size,
+                                current_source_count: source_exchange_source_count,
                                 timeout: connect_timeout,
                                 reask_register,
                             })

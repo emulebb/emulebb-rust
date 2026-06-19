@@ -263,6 +263,7 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
         transfer_runtime: &transfer_runtime,
         canonical_name: "queued.epub".to_string(),
         file_size: 32_768,
+        current_source_count: 0,
         timeout: Duration::from_secs(1),
         reask_register: Some(reask_handle),
     })

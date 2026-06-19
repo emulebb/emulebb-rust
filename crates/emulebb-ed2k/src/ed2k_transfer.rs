@@ -504,8 +504,12 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         peer_addr: SocketAddr,
         user_hash: Option<[u8; 16]>,
+        current_source_count: usize,
         now: Instant,
     ) -> bool {
+        if !self.can_engage_file_source(current_source_count) {
+            return false;
+        }
         let key = SourceExchangeRequestKey {
             file_hash: file_hash.to_string(),
             peer_addr,

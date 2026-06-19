@@ -40,6 +40,7 @@ pub struct Ed2kPeerDownloadOptions<'a> {
     pub transfer_runtime: &'a Ed2kTransferRuntime,
     pub canonical_name: String,
     pub file_size: u64,
+    pub current_source_count: usize,
     pub timeout: Duration,
     /// When set (UDP reask enabled), a queued + UDP-eligible source detaches onto
     /// UDP reask via this handle. `None` keeps the legacy TCP-only queued path.
@@ -57,6 +58,7 @@ pub async fn download_file_from_peer(
         transfer_runtime,
         canonical_name,
         file_size,
+        current_source_count,
         timeout,
         reask_register,
     } = options;
@@ -113,6 +115,7 @@ pub async fn download_file_from_peer(
                 &file_hash_hex,
                 peer_addr,
                 peer.user_hash,
+                current_source_count,
                 std::time::Instant::now(),
             )
             .await;

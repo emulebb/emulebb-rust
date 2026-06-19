@@ -117,6 +117,7 @@ macro_rules! download_file_from_peer_test {
             transfer_runtime: $transfer_runtime,
             canonical_name: $canonical_name,
             file_size: $file_size,
+            current_source_count: 0,
             timeout: $timeout,
             reask_register: None,
         })

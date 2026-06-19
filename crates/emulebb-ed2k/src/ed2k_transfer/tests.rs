@@ -24,6 +24,7 @@ mod inbound_admission;
 mod reask_reciprocity;
 mod salvage;
 mod shared_entry;
+mod source_exchange;
 mod source_hints;
 mod upload_queue;
 mod upload_queue_credit;
@@ -42,51 +43,6 @@ fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
     }
     let mut file = fs::File::create(path).unwrap();
     file.write_all(&payload).unwrap();
-}
-
-#[tokio::test]
-async fn source_exchange_reask_throttles_same_peer_and_file() {
-    let root = unique_test_dir("ed2k-transfer-source-exchange-reask");
-    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let now = Instant::now();
-    let peer_addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 3), 4662));
-    let user_hash = Some([0x51; 16]);
-
-    assert!(
-        runtime
-            .should_request_source_exchange("aa", peer_addr, user_hash, now)
-            .await
-    );
-    assert!(
-        !runtime
-            .should_request_source_exchange(
-                "aa",
-                peer_addr,
-                user_hash,
-                now + Duration::from_secs(60)
-            )
-            .await
-    );
-    assert!(
-        runtime
-            .should_request_source_exchange(
-                "aa",
-                peer_addr,
-                user_hash,
-                now + Duration::from_secs(40 * 60 + 1)
-            )
-            .await
-    );
-    assert!(
-        runtime
-            .should_request_source_exchange(
-                "bb",
-                peer_addr,
-                user_hash,
-                now + Duration::from_secs(60)
-            )
-            .await
-    );
 }
 
 #[tokio::test]
