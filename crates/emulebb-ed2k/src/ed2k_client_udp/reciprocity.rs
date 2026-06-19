@@ -108,6 +108,16 @@ pub(crate) fn build_reciprocity_reply(
     framing: &ReciprocityReplyFraming,
     our_public_ip: [u8; 4],
 ) -> Option<Vec<u8>> {
+    build_reciprocity_reply_packet(req, framing, our_public_ip).map(|packet| packet.bytes)
+}
+
+/// Build the ready-to-send uploader reply datagram with packet-diagnostic
+/// metadata preserved for the async transport layer.
+pub(crate) fn build_reciprocity_reply_packet(
+    req: &InboundReaskRequest,
+    framing: &ReciprocityReplyFraming,
+    our_public_ip: [u8; 4],
+) -> Option<super::outbound::ClientUdpDatagram> {
     let target = super::outbound::OutboundReaskTarget {
         dest_user_hash: framing.dest_user_hash,
         our_public_ip,
@@ -115,16 +125,16 @@ pub(crate) fn build_reciprocity_reply(
     };
     match answer_inbound_reask(req) {
         InboundReaskAnswer::Ack { queue_position } => {
-            Some(super::outbound::build_reask_ack_datagram(
+            Some(super::outbound::build_reask_ack_packet(
                 framing.our_part_status.as_deref(),
                 queue_position,
                 framing.peer_udp_version,
                 &target,
             ))
         }
-        InboundReaskAnswer::QueueFull => Some(super::outbound::build_queue_full_datagram(&target)),
+        InboundReaskAnswer::QueueFull => Some(super::outbound::build_queue_full_packet(&target)),
         InboundReaskAnswer::FileNotFound => {
-            Some(super::outbound::build_file_not_found_datagram(&target))
+            Some(super::outbound::build_file_not_found_packet(&target))
         }
         InboundReaskAnswer::Silent => None,
     }

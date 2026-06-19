@@ -63,10 +63,6 @@ fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Client
     }
 }
 
-fn frame(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Vec<u8> {
-    frame_packet(opcode, body, target).bytes
-}
-
 /// Build an `OP_REASKFILEPING` datagram (downloader -> source).
 pub(crate) fn build_reask_file_ping_datagram(
     file_hash: &Ed2kHash,
@@ -110,18 +106,38 @@ pub(crate) fn build_reask_ack_datagram(
     peer_udp_version: u8,
     target: &OutboundReaskTarget,
 ) -> Vec<u8> {
+    build_reask_ack_packet(part_status, queue_position, peer_udp_version, target).bytes
+}
+
+/// Build an `OP_REASKACK` datagram with packet-diagnostic metadata.
+pub(crate) fn build_reask_ack_packet(
+    part_status: Option<&[bool]>,
+    queue_position: u16,
+    peer_udp_version: u8,
+    target: &OutboundReaskTarget,
+) -> ClientUdpDatagram {
     let body = encode_reask_ack(part_status, queue_position, peer_udp_version);
-    frame(OP_REASKACK, &body, target)
+    frame_packet(OP_REASKACK, &body, target)
 }
 
 /// Build an empty-body `OP_QUEUEFULL` datagram (uploader -> downloader).
 pub(crate) fn build_queue_full_datagram(target: &OutboundReaskTarget) -> Vec<u8> {
-    frame(OP_QUEUEFULL, &[], target)
+    build_queue_full_packet(target).bytes
+}
+
+/// Build an empty-body `OP_QUEUEFULL` datagram with packet-diagnostic metadata.
+pub(crate) fn build_queue_full_packet(target: &OutboundReaskTarget) -> ClientUdpDatagram {
+    frame_packet(OP_QUEUEFULL, &[], target)
 }
 
 /// Build an empty-body `OP_FILENOTFOUND` datagram (uploader -> downloader).
 pub(crate) fn build_file_not_found_datagram(target: &OutboundReaskTarget) -> Vec<u8> {
-    frame(OP_FILENOTFOUND, &[], target)
+    build_file_not_found_packet(target).bytes
+}
+
+/// Build an empty-body `OP_FILENOTFOUND` datagram with packet-diagnostic metadata.
+pub(crate) fn build_file_not_found_packet(target: &OutboundReaskTarget) -> ClientUdpDatagram {
+    frame_packet(OP_FILENOTFOUND, &[], target)
 }
 
 /// Build an `OP_REASKCALLBACKUDP` datagram (downloader -> source's buddy). eMule

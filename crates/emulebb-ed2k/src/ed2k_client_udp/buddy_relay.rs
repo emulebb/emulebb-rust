@@ -189,9 +189,10 @@ pub(super) async fn answer_buddy_relayed_reask(
         .await
     {
         Some(reply) => {
-            if let Err(err) = dht.send_raw_datagram(dest, &reply).await {
+            if let Err(err) = dht.send_raw_datagram(dest, &reply.bytes).await {
                 trace!("ed2k udp reask: buddy-relayed reask answer to {dest} failed: {err}");
             } else {
+                super::dump::dump_client_udp_send(dest, &reply);
                 trace!(
                     "ed2k udp reask: answered buddy-relayed reask for {file_hash} over UDP to {dest}"
                 );

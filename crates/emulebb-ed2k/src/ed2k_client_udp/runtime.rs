@@ -362,8 +362,10 @@ async fn handle_inbound_datagram(
                 .await
             {
                 Some(reply) => {
-                    if let Err(err) = dht.send_raw_datagram(from, &reply).await {
+                    if let Err(err) = dht.send_raw_datagram(from, &reply.bytes).await {
                         trace!("ed2k udp reask: reciprocity reply to {from} failed: {err}");
+                    } else {
+                        super::dump::dump_client_udp_send(from, &reply);
                     }
                 }
                 // Deliberate silence (force TCP / file mismatch); nothing to send.

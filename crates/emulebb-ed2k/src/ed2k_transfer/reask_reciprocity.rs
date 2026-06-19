@@ -16,8 +16,9 @@ use std::time::Instant;
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::ed2k_client_udp::codec::ReaskFilePing;
+use crate::ed2k_client_udp::outbound::ClientUdpDatagram;
 use crate::ed2k_client_udp::reciprocity::{
-    InboundReaskRequest, ReciprocityReplyFraming, build_reciprocity_reply,
+    InboundReaskRequest, ReciprocityReplyFraming, build_reciprocity_reply_packet,
 };
 use crate::ed2k_client_udp::service::TransferReaskInfo;
 
@@ -35,7 +36,7 @@ impl Ed2kTransferRuntime {
         ping: &ReaskFilePing,
         from: SocketAddr,
         our_public_ip: [u8; 4],
-    ) -> Option<Vec<u8>> {
+    ) -> Option<ClientUdpDatagram> {
         // IPv4-only client: a non-V4 sender cannot be one of our queued peers.
         let SocketAddr::V4(v4) = from else {
             return None;
@@ -103,7 +104,7 @@ impl Ed2kTransferRuntime {
             our_part_status,
         };
 
-        build_reciprocity_reply(&req, &framing, our_public_ip)
+        build_reciprocity_reply_packet(&req, &framing, our_public_ip)
     }
 
     /// Our downloader-side reask facts for one file: the part-availability bitmap

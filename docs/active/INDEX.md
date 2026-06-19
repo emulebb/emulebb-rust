@@ -105,6 +105,7 @@ items.
 | [RUST-BUG-091](items/RUST-BUG-091.md) | Major | DONE | Return EXT2 identifier answer for source-only multipackets |
 | [RUST-BUG-092](items/RUST-BUG-092.md) | Minor | DONE | Name server callback requests in diagnostics |
 | [RUST-BUG-093](items/RUST-BUG-093.md) | Minor | DONE | Retain client UDP reask packet diagnostics |
+| [RUST-BUG-094](items/RUST-BUG-094.md) | Minor | DONE | Filter client UDP diagnostic noise and dump replies |
 
 ## Refactors (`REF`)
 

@@ -104,30 +104,11 @@ pub(super) fn dump_client_udp_recv(
     sender_ip: [u8; 4],
     datagram: &[u8],
 ) {
-    let decoded = decode_client_udp_for_dump(our_user_hash, sender_ip, datagram);
-    let (raw_hex, _) = capped_packet_hex(datagram);
-    let (protocol_marker, opcode, payload, transport_mode, note) = match decoded {
-        Some(decoded) => (
-            Some(decoded.protocol_marker),
-            Some(decoded.opcode),
-            Some(decoded.payload),
-            decoded.transport_mode,
-            None,
-        ),
-        None => (
-            datagram.first().copied(),
-            datagram.get(1).copied(),
-            datagram.get(2..).map(<[u8]>::to_vec),
-            "unknown",
-            Some("unrecognized client UDP datagram".to_string()),
-        ),
+    let Some(decoded) = decode_client_udp_for_dump(our_user_hash, sender_ip, datagram) else {
+        return;
     };
-    let (payload_hex, payload_hex_truncated) = payload
-        .as_deref()
-        .map(capped_packet_hex)
-        .map_or((None, None), |(hex, truncated)| {
-            (Some(hex), Some(truncated))
-        });
+    let (raw_hex, _) = capped_packet_hex(datagram);
+    let (payload_hex, payload_hex_truncated) = capped_packet_hex(&decoded.payload);
     dump_client_udp_record(&ClientUdpDumpRecord {
         schema: "ed2k_packet_v1",
         source: "emulebb-rust",
@@ -140,17 +121,17 @@ pub(super) fn dump_client_udp_recv(
         phase: "reask",
         direction: "recv",
         remote_addr: remote_addr.to_string(),
-        transport_mode,
-        protocol: protocol_marker.map(client_udp_protocol_name),
-        protocol_marker,
-        opcode,
-        opcode_name: opcode.map(client_udp_opcode_name),
+        transport_mode: decoded.transport_mode,
+        protocol: Some(client_udp_protocol_name(decoded.protocol_marker)),
+        protocol_marker: Some(decoded.protocol_marker),
+        opcode: Some(decoded.opcode),
+        opcode_name: Some(client_udp_opcode_name(decoded.opcode)),
         raw_len: datagram.len(),
         raw_hex,
-        payload_len: payload.as_ref().map(Vec::len),
-        payload_hex,
-        payload_hex_truncated,
-        note,
+        payload_len: Some(decoded.payload.len()),
+        payload_hex: Some(payload_hex),
+        payload_hex_truncated: Some(payload_hex_truncated),
+        note: None,
     });
 }
 
@@ -311,5 +292,11 @@ mod tests {
         assert_eq!(decoded.protocol_marker, 0xC5);
         assert_eq!(decoded.opcode, OP_REASKFILEPING);
         assert_eq!(decoded.transport_mode, "obfuscated");
+    }
+
+    #[test]
+    #[cfg(feature = "packet-diagnostics")]
+    fn client_udp_dump_rejects_non_client_foreign_datagrams() {
+        assert!(super::decode_client_udp_for_dump(&[0x21; 16], [203, 0, 113, 9], &[1]).is_none());
     }
 }

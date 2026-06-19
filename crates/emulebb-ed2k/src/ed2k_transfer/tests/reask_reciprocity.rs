@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use emulebb_kad_proto::Ed2kHash;
 
-use crate::ed2k_client_udp::codec::ReaskFilePing;
+use crate::ed2k_client_udp::codec::{OP_FILENOTFOUND, OP_REASKACK, ReaskFilePing};
 use crate::ed2k_client_udp::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use crate::ed2k_transfer::{Ed2kSharedEntry, Ed2kTransferRuntime, Ed2kUploadPeerIdentity};
 use crate::paths::unique_test_dir;
@@ -87,7 +87,13 @@ async fn reciprocity_acks_a_located_waiting_peer_with_its_rank() {
 
     // The peer parses the obfuscated ack keyed on its own hash + the IP it sees
     // us as (our public IP); it should read rank 1.
-    match parse_inbound_reask_datagram(&reply, OUR_PUBLIC_IP, &PEER_USER_HASH, PEER_UDP_VERSION) {
+    assert_eq!(reply.opcode, OP_REASKACK);
+    match parse_inbound_reask_datagram(
+        &reply.bytes,
+        OUR_PUBLIC_IP,
+        &PEER_USER_HASH,
+        PEER_UDP_VERSION,
+    ) {
         Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 1),
         other => panic!("expected obfuscated Ack, got {other:?}"),
     }
@@ -136,7 +142,13 @@ async fn reciprocity_acks_a_partfile_share_while_downloading() {
         .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
         .await
         .expect("an ack reply for a served partfile");
-    match parse_inbound_reask_datagram(&reply, OUR_PUBLIC_IP, &PEER_USER_HASH, PEER_UDP_VERSION) {
+    assert_eq!(reply.opcode, OP_REASKACK);
+    match parse_inbound_reask_datagram(
+        &reply.bytes,
+        OUR_PUBLIC_IP,
+        &PEER_USER_HASH,
+        PEER_UDP_VERSION,
+    ) {
         Some(InboundReaskMessage::Ack(ack)) => assert_eq!(ack.queue_position, 1),
         other => panic!("expected obfuscated Ack for a partfile, got {other:?}"),
     }
@@ -159,7 +171,8 @@ async fn reciprocity_replies_file_not_found_for_an_unshared_file() {
         .reask_reciprocity_reply(&ping, from, OUR_PUBLIC_IP)
         .await
         .expect("a file-not-found reply");
-    match parse_inbound_reask_datagram(&reply, OUR_PUBLIC_IP, &[0u8; 16], PEER_UDP_VERSION) {
+    assert_eq!(reply.opcode, OP_FILENOTFOUND);
+    match parse_inbound_reask_datagram(&reply.bytes, OUR_PUBLIC_IP, &[0u8; 16], PEER_UDP_VERSION) {
         Some(InboundReaskMessage::FileNotFound) => {}
         other => panic!("expected FileNotFound, got {other:?}"),
     }
