@@ -47,7 +47,11 @@ pub const SEARCHTOLERANCE: u32 = 0x0100_0000;
 pub mod opcode {
     pub const BOOTSTRAP_REQ: u8 = 0x01;
     pub const BOOTSTRAP_RES: u8 = 0x09;
+    /// Legacy pre-Kad2 hello request; named for diagnostics only.
+    pub const HELLO_REQ_DEPRECATED: u8 = 0x10;
     pub const HELLO_REQ: u8 = 0x11;
+    /// Legacy pre-Kad2 hello response; named for diagnostics only.
+    pub const HELLO_RES_DEPRECATED: u8 = 0x18;
     pub const HELLO_RES: u8 = 0x19;
     pub const HELLO_RES_ACK: u8 = 0x22;
     pub const REQ: u8 = 0x21;
@@ -131,7 +135,9 @@ mod tests {
         let oracle = [
             ("BOOTSTRAP_REQ", opcode::BOOTSTRAP_REQ, 0x01),
             ("BOOTSTRAP_RES", opcode::BOOTSTRAP_RES, 0x09),
+            ("HELLO_REQ_DEPRECATED", opcode::HELLO_REQ_DEPRECATED, 0x10),
             ("HELLO_REQ", opcode::HELLO_REQ, 0x11),
+            ("HELLO_RES_DEPRECATED", opcode::HELLO_RES_DEPRECATED, 0x18),
             ("HELLO_RES", opcode::HELLO_RES, 0x19),
             ("REQ", opcode::REQ, 0x21),
             ("HELLO_RES_ACK", opcode::HELLO_RES_ACK, 0x22),

@@ -164,7 +164,9 @@ pub(super) fn opcode_name(opcode_value: u8) -> &'static str {
     match opcode_value {
         opcode::BOOTSTRAP_REQ => "KADEMLIA2_BOOTSTRAP_REQ",
         opcode::BOOTSTRAP_RES => "KADEMLIA2_BOOTSTRAP_RES",
+        opcode::HELLO_REQ_DEPRECATED => "KADEMLIA_HELLO_REQ_DEPRECATED",
         opcode::HELLO_REQ => "KADEMLIA2_HELLO_REQ",
+        opcode::HELLO_RES_DEPRECATED => "KADEMLIA_HELLO_RES_DEPRECATED",
         opcode::HELLO_RES => "KADEMLIA2_HELLO_RES",
         opcode::HELLO_RES_ACK => "KADEMLIA2_HELLO_RES_ACK",
         opcode::REQ => "KADEMLIA2_REQ",
@@ -296,3 +298,21 @@ pub(super) fn tracked_request_opcode_for_response(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::opcode_name;
+    use emulebb_kad_proto::constants::opcode;
+
+    #[test]
+    fn deprecated_kad_hello_opcodes_are_named_for_diagnostics() {
+        assert_eq!(
+            opcode_name(opcode::HELLO_REQ_DEPRECATED),
+            "KADEMLIA_HELLO_REQ_DEPRECATED"
+        );
+        assert_eq!(
+            opcode_name(opcode::HELLO_RES_DEPRECATED),
+            "KADEMLIA_HELLO_RES_DEPRECATED"
+        );
+    }
+}
