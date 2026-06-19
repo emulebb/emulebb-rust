@@ -91,6 +91,7 @@ items.
 | [RUST-BUG-077](items/RUST-BUG-077.md) | Major | DONE | Persist accepted ED2K request blocks before bitmap recovery |
 | [RUST-BUG-078](items/RUST-BUG-078.md) | Major | DONE | Do not immediately downgrade failed obfuscated ED2K peers |
 | [RUST-BUG-079](items/RUST-BUG-079.md) | Minor | DONE | Do not report unknown ED2K TCP transport as plaintext |
+| [RUST-BUG-080](items/RUST-BUG-080.md) | Minor | DONE | Count embedded SX2 requests in Rust live-wire evidence |
 
 ## Refactors (`REF`)
 
