@@ -52,3 +52,7 @@ must be diagnosed and folded back into the standard gate.
 
 - Until fully folded back, the isolated step must stay visible and blocking so
   coverage is not lost; this item is its owner of record.
+- 2026-06-19 parity closure review: this is CI isolation debt, not a core
+  Rust-vs-MFC parity close blocker while the isolated `kad_swarm` step remains
+  visible and blocking. It still belongs in the Phase 0 cleanup lane before the
+  normal workspace matrix can be treated as fully rationalized.

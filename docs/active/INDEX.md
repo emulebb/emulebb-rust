@@ -7,12 +7,14 @@ headless client. It follows the eMuleBB backlog convention
 each item is `docs/active/items/<ID>.md` with the same front matter and section
 vocabulary.
 
-Active items are **GitHub-tracked** (`workflow: github`): issues live in
-`emulebb/emulebb-rust` and are aggregated on the org **eMuleBB Suite** board
-(`https://github.com/orgs/emulebb/projects/3`, `Product = emulebb-rust`,
+Most active product items are **GitHub-tracked** (`workflow: github`): issues
+live in `emulebb/emulebb-rust` and are aggregated on the org **eMuleBB Suite**
+board (`https://github.com/orgs/emulebb/projects/3`, `Product = emulebb-rust`,
 `Phase` field). GitHub owns workflow state (status, priority, placement); these
-Markdown files own the durable engineering spec. Parked ideas stay out of the
-tracker entirely (see the roadmap's Active vs Parked ledger).
+Markdown files own the durable engineering spec. Local-only backlog items record
+internal evidence gates, CI debt, or closure decisions that do not need public
+workflow state. Parked ideas stay out of the tracker entirely (see the roadmap's
+Active vs Parked ledger).
 
 ## Current Snapshot
 
@@ -44,6 +46,15 @@ emulebb-rust is the strategic forward eD2K/Kad core (eMuleBB MFC is frozen at
 Phase 0 scope. Cooperative-DHT / BEP-46 publishing and similar ideas are **parked**
 (see the roadmap's Active vs Parked ledger) and are intentionally **not** backlog
 items.
+
+## Core MFC Parity Closure
+
+Core MFC parity closure is narrower than full Phase 0. It covers core client
+behavior, REST contract parity, deterministic local cross-client interop, and an
+optional public hide.me smoke witness. It does not close the Phase 0 indexer,
+Arr/Torznab, Docker, SSE, or automated tunnel-down leak-test work. The closure
+gate and test-rationalization plan are tracked by
+[RUST-CI-002](items/RUST-CI-002.md).
 
 ## Features (`FEAT`)
 
@@ -122,4 +133,4 @@ items.
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| _none yet_ | | | |
+| [RUST-CI-002](items/RUST-CI-002.md) | Major | OPEN | Rationalize and close the core MFC parity evidence gate |

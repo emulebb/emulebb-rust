@@ -46,6 +46,10 @@ for calling rust "perfectly functional".
   leave the process.
 - Remaining work is live validation that fail-closed behavior holds when the
   tunnel is absent, plus UPnP/port-forwarding validation over the VPN interface.
+- Parity closure note 2026-06-19: static bind-index coverage and public
+  VPN-bound smoke evidence are sufficient for core MFC parity closure, but they
+  do not close the suite safety claim. The dynamic tunnel-down no-egress gate is
+  tracked by `RUST-FEAT-005` and remains release-blocking.
 
 ## Intended Shape
 
@@ -77,6 +81,8 @@ for calling rust "perfectly functional".
 - Unit/static: bind-policy assertions extend the existing VPN binding tests.
 - Local: verify connect uses the tunnel ifIndex; verify no egress when the tunnel
   is down.
+- Core parity close: keep the hide.me live-wire proof manual/nonblocking and
+  require `RUST-FEAT-005` before claiming automated no-leak safety.
 
 ## Notes
 

@@ -38,6 +38,9 @@ keeps it true over time.
   data packets).
 - Runs in CI as a blocking gate for emulebb-rust; respects the live-wire policy
   (no public-network contact — the test is local/deterministic).
+- Reuse the same leak assertion shape across networked products where possible
+  so emulebb-rust, qBittorrentBB, and later suite clients share one safety
+  vocabulary.
 
 ## Acceptance Criteria
 
@@ -49,6 +52,9 @@ keeps it true over time.
 
 - Pairs with RUST-FEAT-003 (eD2K TCP egress pin). Both are release-blockers per the
   WORKSPACE-POLICY Network Safety invariant. Cross-product sibling: QBBB-FEAT-004.
+- 2026-06-19 parity closure review: this item is not required to close **core
+  MFC parity**, but it remains the release-blocking gate for claiming automated
+  fail-closed anonymity/safety. Public live-wire proof is a smoke witness only.
 - 2026-06-17: Added a blocking static Python policy guard for the supported
   public P2P boundary files. The guard rejects regressions that use optional
   bind-ifIndex resolution or explicit no-index egress pinning on those paths.
