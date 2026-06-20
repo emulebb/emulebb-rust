@@ -40,8 +40,10 @@ allocating the next number.
 
 ## Phase 0 — "perfectly functional" gate
 
-emulebb-rust is the strategic forward eD2K/Kad core (eMuleBB MFC is frozen at
-`0.7.3`). "Perfectly functional" = client parity **plus** the indexer role, per
+emulebb-rust is the strategic forward eD2K/Kad core (the eMuleBB MFC `0.7.x`
+feature line closes at `0.7.3`; MFC then continues in the `0.8.x` modernization
+line, while emulebb-rust remains the forward core). "Perfectly functional" =
+client parity **plus** the indexer role, per
 `emulebb-tooling/docs/active/SUITE-JOINT-ROADMAP.md`. The FEAT items below are the
 Phase 0 scope. Cooperative-DHT / BEP-46 publishing and similar ideas are **parked**
 (see the roadmap's Active vs Parked ledger) and are intentionally **not** backlog
