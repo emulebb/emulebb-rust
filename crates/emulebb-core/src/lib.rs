@@ -81,6 +81,7 @@ mod core_state;
 mod delivery;
 mod diag_kad_event;
 mod diag_sched;
+mod disk_guard;
 mod download_source_registry;
 mod ed2k_buddy_reask;
 mod ed2k_direct_download_types;
@@ -98,6 +99,7 @@ mod kad_routing_maintenance;
 mod kad_snoop_entry;
 mod kad_tcp_firewall_check;
 mod kad_udp_firewall_check;
+mod lifecycle;
 mod local_search_response;
 mod network_binding;
 mod preferences;
@@ -296,6 +298,11 @@ pub struct EmulebbCore {
     /// (eMule global Incoming folder). Defaults next to the transfer root; the
     /// daemon overrides it from `incomingDir` config via [`with_incoming_dir`].
     incoming_dir: PathBuf,
+    /// Process lifecycle state surfaced by `GET /api/v1/app` (the `lifecycle`
+    /// module maps it to the REST token). Starts `running`; the daemon flips it
+    /// to `stopping` when graceful teardown begins so a polling controller sees
+    /// the shutdown instead of a hardcoded `running`.
+    lifecycle: Arc<std::sync::atomic::AtomicU8>,
     ed2k_network: Option<Ed2kNetworkConfig>,
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
@@ -405,6 +412,7 @@ impl EmulebbCore {
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
             incoming_dir,
+            lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             ed2k_network,
             kad_local_store,
             kad_snoop_queue,
@@ -427,7 +435,7 @@ impl EmulebbCore {
             version: self.version.clone(),
             api_version: "v1".to_string(),
             lifecycle: AppLifecycle {
-                state: "running".to_string(),
+                state: self.lifecycle_state_name().to_string(),
             },
             capabilities: vec![
                 "transfers".to_string(),
@@ -2621,6 +2629,20 @@ impl EmulebbCore {
         };
         if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
             return Ok(Some("queued"));
+        }
+        // Disk free-space floor: pause before engaging sources when the transfer
+        // volume cannot hold the remaining payload, instead of failing late
+        // mid-write and churn-retrying.
+        if self
+            .should_pause_download_for_disk_space(&transfer.hash)
+            .await
+        {
+            tracing::warn!(
+                "ED2K download paused: insufficient free space for {} on {}",
+                transfer.hash,
+                self.transfer_root.display()
+            );
+            return Ok(Some("paused"));
         }
         let file_hash: Ed2kHash = transfer
             .hash

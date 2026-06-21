@@ -431,6 +431,8 @@ async fn wait_for_shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
 /// state to lose.
 async fn graceful_teardown(core: &Arc<EmulebbCore>) {
     info!("running graceful network teardown");
+    // Surface the shutdown on GET /api/v1/app for any controller still polling.
+    core.begin_shutdown();
     match tokio::time::timeout(SHUTDOWN_TEARDOWN_TIMEOUT, core.disconnect_ed2k()).await {
         Ok(_status) => info!("graceful network teardown complete (NAT mappings released)"),
         Err(_) => tracing::warn!(

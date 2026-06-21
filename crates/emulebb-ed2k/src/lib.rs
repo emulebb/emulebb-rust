@@ -2,6 +2,7 @@ pub mod ban_store;
 pub mod buddy_socket;
 pub mod config;
 pub mod diag_event;
+pub mod disk_space;
 mod ed2k_client_udp;
 mod ed2k_client_udp_obfuscation;
 pub use ed2k_client_udp::{
