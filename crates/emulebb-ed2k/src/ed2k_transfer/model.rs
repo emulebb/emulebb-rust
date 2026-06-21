@@ -250,6 +250,13 @@ pub struct Ed2kResumeManifest {
     /// local payload or shared-file registration.
     #[serde(default)]
     pub transfer_row_removed: bool,
+    /// Absolute path the completed payload was materialized to by its canonical
+    /// name (under a category path or the global incoming dir). `None` until the
+    /// transfer is delivered; set once so finished-file delivery is idempotent
+    /// across restarts (oracle: eMule moves the finished `.part` file into the
+    /// Incoming/category folder by name).
+    #[serde(default)]
+    pub delivered_path: Option<String>,
 }
 
 impl Ed2kResumeManifest {
@@ -285,6 +292,7 @@ impl Ed2kResumeManifest {
             category_id: 0,
             control_state: None,
             transfer_row_removed: false,
+            delivered_path: None,
         }
     }
 

@@ -47,6 +47,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         category_id: 2,
         control_state: Some("paused".to_string()),
         transfer_row_removed: false,
+        delivered_path: Some("/incoming/Sample.Transfer.bin".to_string()),
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
@@ -88,6 +89,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivered_path: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
 
@@ -137,6 +139,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivered_path: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
     store

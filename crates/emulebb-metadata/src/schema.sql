@@ -232,6 +232,11 @@ CREATE TABLE transfers (
     priority TEXT NOT NULL DEFAULT 'normal',
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
+    -- Absolute path the completed payload was materialized to by its canonical
+    -- name (the operator-facing delivered file under a category path or the
+    -- global incoming dir). NULL until the transfer completes and is delivered;
+    -- set once and used to make delivery idempotent across restarts.
+    delivered_path TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     completed_at_ms INTEGER,

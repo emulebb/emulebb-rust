@@ -28,6 +28,10 @@ mod vpn_guard_monitor;
 #[serde(default, rename_all = "camelCase")]
 pub struct DaemonConfig {
     pub runtime_dir: PathBuf,
+    /// Global finished-file delivery directory (eMule Incoming folder). When a
+    /// completed transfer has no category path, its payload is materialized here
+    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
+    pub incoming_dir: Option<PathBuf>,
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
@@ -123,6 +127,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             runtime_dir: PathBuf::from("runtime"),
+            incoming_dir: None,
             p2p_bind_ip: None,
             p2p_bind_interface: None,
             ed2k_user_hash: None,
@@ -202,6 +207,14 @@ impl DaemonConfig {
 
     pub fn transfer_root(&self) -> PathBuf {
         self.runtime_dir.join("transfers")
+    }
+
+    /// Resolve the finished-file delivery directory: the configured
+    /// `incomingDir`, or `<runtimeDir>/incoming` by default.
+    pub fn incoming_dir(&self) -> PathBuf {
+        self.incoming_dir
+            .clone()
+            .unwrap_or_else(|| self.runtime_dir.join("incoming"))
     }
 
     pub fn ed2k_network_config(
@@ -436,12 +449,22 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let vpn_guard_monitor = ed2k_network
         .as_ref()
         .and_then(vpn_guard_monitor::monitor_config);
-    let core = Arc::new(EmulebbCore::new_with_network(
-        env!("CARGO_PKG_VERSION"),
-        index,
-        config.transfer_root(),
-        ed2k_network,
-    )?);
+    let incoming_dir = config.incoming_dir();
+    fs::create_dir_all(&incoming_dir)
+        .with_context(|| format!("failed to create incoming dir {}", incoming_dir.display()))?;
+    let core = Arc::new(
+        EmulebbCore::new_with_network(
+            env!("CARGO_PKG_VERSION"),
+            index,
+            config.transfer_root(),
+            ed2k_network,
+        )?
+        .with_incoming_dir(incoming_dir),
+    );
+    // Deliver any completed-but-undelivered transfers from a previous run (files
+    // that finished before this build, or a crash between completion and
+    // delivery) so a restart never leaves a finished file undelivered.
+    core.deliver_pending_completed_transfers().await;
     // Initial scan-on-demand pickup of the already-present shared files, then
     // start the live auto-pickup monitor so files added/removed while the daemon
     // runs are caught (eMule directory auto-monitor parity). The monitor is torn

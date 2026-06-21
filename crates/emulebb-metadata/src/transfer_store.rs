@@ -102,15 +102,16 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, control_state, priority,
-                category_id, payload_directory, created_at_ms, updated_at_ms, completed_at_ms,
-                removed_at_ms
+                category_id, payload_directory, delivered_path, created_at_ms, updated_at_ms,
+                completed_at_ms, removed_at_ms
             )
-            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?6, ?6, ?7, ?8)
+            VALUES (?1, ?2, ?3, 'normal', ?4, ?5, ?6, ?7, ?7, ?8, ?9)
             ON CONFLICT(known_file_id) DO UPDATE SET
                 visible_state = excluded.visible_state,
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
+                delivered_path = excluded.delivered_path,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms,
                 removed_at_ms = excluded.removed_at_ms
@@ -121,6 +122,7 @@ impl super::MetadataStore {
                 manifest.control_state,
                 (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
                 manifest.file_hash,
+                manifest.delivered_path,
                 now,
                 if manifest.completed { Some(now) } else { None },
                 if manifest.transfer_row_removed {
@@ -161,7 +163,8 @@ impl super::MetadataStore {
                        END,
                        known_files.upload_priority, known_files.auto_upload_priority,
                        known_files.comment, known_files.rating,
-                       transfers.category_id, transfers.control_state, transfers.removed_at_ms
+                       transfers.category_id, transfers.control_state, transfers.removed_at_ms,
+                       transfers.delivered_path
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
@@ -186,6 +189,7 @@ impl super::MetadataStore {
                         category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
                         control_state: row.get(15)?,
                         transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
+                        delivered_path: row.get(17)?,
                     })
                 },
             )
@@ -279,7 +283,8 @@ impl super::MetadataStore {
                    END,
                    known_files.upload_priority, known_files.auto_upload_priority,
                    known_files.comment, known_files.rating,
-                   transfers.category_id, transfers.control_state, transfers.removed_at_ms
+                   transfers.category_id, transfers.control_state, transfers.removed_at_ms,
+                   transfers.delivered_path
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             ORDER BY known_files.ed2k_hash
@@ -304,6 +309,7 @@ impl super::MetadataStore {
                 category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
                 control_state: row.get(15)?,
                 transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
+                delivered_path: row.get(17)?,
             })
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
@@ -342,6 +348,7 @@ struct TransferRow {
     category_id: u32,
     control_state: Option<String>,
     transfer_row_removed: bool,
+    delivered_path: Option<String>,
 }
 
 fn replace_transfer_children(
@@ -476,6 +483,7 @@ fn manifest_from_row(
         category_id: row.category_id,
         control_state: row.control_state,
         transfer_row_removed: row.transfer_row_removed,
+        delivered_path: row.delivered_path,
     })
 }
 

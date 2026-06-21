@@ -71,6 +71,7 @@ pub(crate) fn transfer_from_manifest(
         hash: manifest.file_hash.clone(),
         name: manifest.canonical_name.clone(),
         path: payload_path,
+        delivered_path: manifest.delivered_path.clone(),
         size_bytes: manifest.file_size,
         completed_bytes,
         state: emitted_state.to_string(),

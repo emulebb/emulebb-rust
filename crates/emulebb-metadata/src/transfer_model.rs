@@ -20,6 +20,10 @@ pub struct MetadataTransferManifest {
     pub category_id: u32,
     pub control_state: Option<String>,
     pub transfer_row_removed: bool,
+    /// Absolute path the completed payload was materialized to by its canonical
+    /// name, or `None` until the transfer is delivered. Persisted on the
+    /// `transfers` row to make finished-file delivery idempotent across restarts.
+    pub delivered_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

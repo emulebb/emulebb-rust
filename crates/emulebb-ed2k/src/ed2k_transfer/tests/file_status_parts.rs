@@ -65,6 +65,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         category_id: 0,
         control_state: None,
         transfer_row_removed: false,
+        delivered_path: None,
     }
 }
 

@@ -34,6 +34,7 @@ mod aich_trust;
 mod block_bitmap;
 mod callback;
 mod catalog;
+mod deliver;
 pub(crate) mod diag_sched;
 mod download_activity;
 mod download_coordinator;
@@ -57,6 +58,7 @@ mod upload;
 mod upload_queue;
 
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
+pub use deliver::Ed2kDeliveryOutcome;
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
 pub use download_coordinator::Ed2kDownloadCoordinatorConfig;

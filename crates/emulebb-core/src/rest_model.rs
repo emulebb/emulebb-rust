@@ -452,6 +452,10 @@ pub struct Transfer {
     pub hash: String,
     pub name: String,
     pub path: String,
+    /// Absolute path the completed payload was delivered to by its canonical
+    /// name (under a category path or the global incoming dir), or `None` until
+    /// the transfer completes and is delivered.
+    pub delivered_path: Option<String>,
     pub size_bytes: u64,
     pub completed_bytes: u64,
     pub state: String,

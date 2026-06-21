@@ -290,6 +290,7 @@ mod tests {
             hash: file_hash.to_string(),
             name: "Sample File.bin".to_string(),
             path: String::new(),
+            delivered_path: None,
             size_bytes,
             completed_bytes: 0,
             state: state.to_string(),

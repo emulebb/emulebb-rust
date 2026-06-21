@@ -78,6 +78,7 @@ use uuid::Uuid;
 mod categories;
 mod category_runtime;
 mod core_state;
+mod delivery;
 mod diag_kad_event;
 mod diag_sched;
 mod download_source_registry;
@@ -290,6 +291,11 @@ pub struct EmulebbCore {
     index: Arc<Mutex<FileIndex>>,
     ed2k_transfers: Arc<Ed2kTransferRuntime>,
     transfer_root: PathBuf,
+    /// Default destination for finished-file delivery: a completed transfer
+    /// without a category path is materialized by name into this directory
+    /// (eMule global Incoming folder). Defaults next to the transfer root; the
+    /// daemon overrides it from `incomingDir` config via [`with_incoming_dir`].
+    incoming_dir: PathBuf,
     ed2k_network: Option<Ed2kNetworkConfig>,
     kad_local_store: Option<Arc<Mutex<KadLocalStore>>>,
     kad_snoop_queue: Option<Arc<Mutex<SnoopQueue>>>,
@@ -384,6 +390,13 @@ impl EmulebbCore {
         let kad_snoop_queue = ed2k_network
             .as_ref()
             .map(|network| Arc::new(Mutex::new(SnoopQueue::new(network.kad_snoop_queue.clone()))));
+        // Default incoming directory: a sibling of the transfer root (i.e.
+        // `<runtime_dir>/incoming` when the transfer root is `<runtime_dir>/
+        // transfers`). The daemon overrides this from `incomingDir` config.
+        let incoming_dir = transfer_root
+            .parent()
+            .map(|parent| parent.join("incoming"))
+            .unwrap_or_else(|| transfer_root.join("incoming"));
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
@@ -391,6 +404,7 @@ impl EmulebbCore {
             index: Arc::new(Mutex::new(index)),
             ed2k_transfers: Arc::new(ed2k_transfers),
             transfer_root,
+            incoming_dir,
             ed2k_network,
             kad_local_store,
             kad_snoop_queue,
@@ -2155,6 +2169,11 @@ impl EmulebbCore {
                 // progress), re-engage the download so the demoted parts refetch.
                 if transfer.state == "downloading" {
                     self.queue_ed2k_download_attempt(transfer);
+                } else if transfer.state == "completed" {
+                    // A recheck that confirms a complete file delivers it by name
+                    // (covers a manually-rechecked transfer that was never driven
+                    // through the download-completion path).
+                    self.deliver_completed_transfer(hash).await;
                 }
                 Ok(Some(()))
             }
@@ -3312,6 +3331,12 @@ impl EmulebbCore {
         match result {
             Ok(Some(next_state)) => {
                 retry_downloading = next_state == "downloading";
+                // Materialize the finished file by name (eMule move-to-Incoming)
+                // BEFORE refreshing the in-memory transfer, so the refreshed view
+                // surfaces the deliveredPath in the same step.
+                if next_state == "completed" {
+                    core.deliver_completed_transfer(&hash).await;
+                }
                 if let Err(error) = core.refresh_transfer_from_manifest(&hash, next_state).await {
                     tracing::warn!(
                         "failed to refresh ED2K transfer {hash} after download attempt: {error}"
@@ -8101,6 +8126,7 @@ mod tests {
             hash: hash.to_string(),
             name: "file".to_string(),
             path: String::new(),
+            delivered_path: None,
             size_bytes: 1,
             completed_bytes: 0,
             state: state_name.to_string(),
