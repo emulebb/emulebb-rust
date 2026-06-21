@@ -95,6 +95,14 @@ reason = "newAutoDown is an eMule GUI default-priority convenience with no clean
 compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
 
 [[omissions]]
+id = "time-based-scheduler"
+area = "controller"
+stock_behavior = "eMuleBB's CScheduler (Scheduler.cpp) runs time-of-day / weekday automation: scheduled actions on daily/weekday timers change the upload/download speed limits (ACTION_SETUPL / ACTION_SETDOWNL), the per-file source limit (ACTION_SOURCESL), the connection-rate limits (ACTION_CON5SEC / ACTION_CONS), and stop/resume categories (ACTION_CATSTOP / ACTION_CATRESUME), plus timed connect/disconnect."
+rust_behavior = "The Rust client implements no in-process time-of-day scheduler. Every action the scheduler would automate is already a first-class /api/v1 REST operation (preferences PATCH for the speed/source/connection limits, the server/Kad connect+disconnect operations, and per-transfer/category pause+resume), so scheduling is delegated to the external controller (cron / systemd timer / the controller process) that drives the headless client."
+reason = "Deliberate divergence for the headless model: time-of-day automation is an external-orchestration concern, not a client-core one. An external scheduler driving the existing REST surface is strictly more flexible than an in-process daily/weekday timer, and avoids duplicating scheduling logic (and a wall-clock dependency) inside the core. The operator's excluded-surface list records the time-based scheduler as intentionally out of scope."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it is a local automation convenience with no protocol surface. Every scheduled effect remains reachable on demand over the REST contract."
+
+[[omissions]]
 id = "pref-download-auto-broadband-io"
 area = "preferences"
 stock_behavior = "Classic eMule's downloadAutoBroadbandIo enables an adaptive disk/broadband IO tuning mode in the GUI."

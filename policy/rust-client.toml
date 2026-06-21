@@ -32,6 +32,7 @@ excluded_surface_ids = [
     "legacy-html-webserver",
     "peer-chat-messaging",
     "ed2k-preview",
+    "time-based-scheduler",
     "pref-auto-connect",
     "pref-safe-server-connect",
     "pref-new-auto-up",
