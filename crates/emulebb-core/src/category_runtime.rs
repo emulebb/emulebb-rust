@@ -122,10 +122,17 @@ pub(crate) async fn delete_category(
                 continue;
             };
             transfer.category_id = new_category_id;
-            transfer.category_name = category_names
-                .get(&new_category_id)
-                .cloned()
-                .unwrap_or_else(|| default_name.clone());
+            // Resetting to the uncategorized pseudo-category (id 0) CLEARS the
+            // name (the transfer is no longer in a named category); a shift onto
+            // a surviving category keeps that category's name.
+            transfer.category_name = if new_category_id == 0 {
+                String::new()
+            } else {
+                category_names
+                    .get(&new_category_id)
+                    .cloned()
+                    .unwrap_or_else(|| default_name.clone())
+            };
             transfer_updates.push((transfer.hash.clone(), new_category_id));
         }
         (deleted, transfer_updates)

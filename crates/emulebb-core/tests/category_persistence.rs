@@ -90,7 +90,9 @@ async fn deleting_category_reindexes_later_transfer_categories() {
     );
     let deleted_transfer = core.transfer(deleted_hash).await.unwrap();
     assert_eq!(deleted_transfer.category_id, 0);
-    assert_eq!(deleted_transfer.category_name, "All");
+    // A transfer reset to uncategorized has its category name cleared (consistent
+    // with profile_persistence::delete_category_resets_referencing_transfers_to_uncategorized).
+    assert_eq!(deleted_transfer.category_name, "");
     let shifted_transfer = core.transfer(shifted_hash).await.unwrap();
     assert_eq!(shifted_transfer.category_id, deleted.id);
     assert_eq!(shifted_transfer.category_name, shifted.name);
