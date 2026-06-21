@@ -35,6 +35,46 @@ async fn test_unsolicited_request_broadcast() {
 }
 
 #[tokio::test]
+async fn test_unencrypted_packet_from_source_port_53_is_dropped() {
+    // DNS-confusion hardening (oracle KademliaUDPListener.cpp:250): a plaintext
+    // Kad datagram whose SOURCE UDP port is 53 must be dropped at ingress.
+    let transport = MockTransport::new(make_local_addr());
+    let inject_tx = transport.injector();
+    let rpc = make_rpc_with_transport(transport);
+    let mut subscriber = rpc.subscribe();
+    let _handle = rpc.start();
+
+    let dns_port_addr: std::net::SocketAddr = "203.0.113.7:53".parse().unwrap();
+    let normal_addr = make_peer_addr();
+    let hello = KadPacket::HelloReq(emulebb_kad_proto::HelloReq {
+        node_id: NodeId::from_bytes([0x44; 16]),
+        tcp_port: 4662,
+        version: 8,
+        tags: Vec::new(),
+    });
+    let encoded = hello.encode().unwrap();
+
+    // Inject the port-53 packet FIRST, then an identical control from a normal
+    // port. If the port-53 packet were not dropped it would be delivered first;
+    // because it is dropped, the control is the first (and only) one delivered.
+    inject_tx
+        .send((encoded.clone(), dns_port_addr))
+        .await
+        .unwrap();
+    inject_tx.send((encoded, normal_addr)).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(2), subscriber.recv())
+        .await
+        .expect("timed out")
+        .expect("subscriber closed");
+    assert_eq!(
+        received.from, normal_addr,
+        "the source-port-53 packet must be dropped before broadcast"
+    );
+    assert!(matches!(received.packet, KadPacket::HelloReq(_)));
+}
+
+#[tokio::test]
 async fn test_tracked_hello_response_is_broadcast_without_pending_request() {
     let transport = Arc::new(MockTransport::new(make_local_addr()));
     let inject_tx = transport.injector();

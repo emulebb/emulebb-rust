@@ -31,6 +31,16 @@ impl RpcManager {
                         } = inner.obfuscation.decrypt(from, &data);
                         debug!("packet from {} was_obfuscated={}", from, was_obfuscated);
 
+                        // DNS-confusion hardening (oracle KademliaUDPListener.cpp:250):
+                        // drop an unencrypted Kad datagram whose SOURCE UDP port is 53
+                        // and that carries no sender key. Such a packet is a
+                        // reflected/forged DNS response, never a real Kad message; an
+                        // obfuscated packet (or one proving a key) is exempt.
+                        if from.port() == 53 && !was_obfuscated && sender_verify_key.is_none() {
+                            debug!("kad recv drop reason=sender_port_53 from={from}");
+                            continue;
+                        }
+
                         let packet = match KadPacket::decode(&plain) {
                             Ok(p) => p,
                             Err(e) => {
