@@ -240,7 +240,9 @@ struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
     server_state: Arc<RwLock<Ed2kServerState>>,
     dht: DhtNode,
-    kad_bootstrap_configured: bool,
+    /// Shared Kad firewall verification state, read by `kad_status` to report the
+    /// real UDP-firewall verdict (oracle `CUDPFirewallTester::IsFirewalledUDP`).
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
     /// Trigger to run a Kad UDP firewall self-check round on demand. `None` when
@@ -806,12 +808,17 @@ impl EmulebbCore {
             network.kad_bind_addr.port(),
             Arc::clone(&shutdown),
         )));
-        if configured_bootstrap_nodes_text.is_some() {
-            tasks.push(tokio::spawn(run_configured_kad_bootstrap(
-                dht.clone(),
-                Arc::clone(&shutdown),
-            )));
-        }
+        // Always drive the bootstrap self-lookup, not only when explicit bootstrap
+        // nodes are configured: the routing table can be populated from an imported
+        // nodes.dat alone, and eMule (`CKademlia::Process`) bootstraps off the
+        // table itself. Gating this on configured nodes left a nodes.dat-only node
+        // permanently unbootstrapped, so every downstream loop (firewall check,
+        // routing maintenance, hello-intro, publish) stayed dormant behind their
+        // `is_bootstrapped()` guards and Kad never reached connected.
+        tasks.push(tokio::spawn(run_configured_kad_bootstrap(
+            dht.clone(),
+            Arc::clone(&shutdown),
+        )));
         if network.kad_publish_shared_files {
             tasks.push(tokio::spawn(run_kad_shared_file_publish_loop(
                 KadPublishLoopRuntime {
@@ -1054,7 +1061,7 @@ impl EmulebbCore {
             search_handle,
             server_state,
             dht,
-            kad_bootstrap_configured: configured_bootstrap_nodes_text.is_some(),
+            kad_firewall: Arc::clone(&kad_firewall),
             nat,
             shutdown,
             kad_firewall_recheck,
@@ -3873,13 +3880,20 @@ impl EmulebbCore {
             let runtime_guard = self.ed2k_runtime.lock().await;
             runtime_guard
                 .as_ref()
-                .map(|runtime| (runtime.dht.clone(), runtime.kad_bootstrap_configured))
+                .map(|runtime| (runtime.dht.clone(), Arc::clone(&runtime.kad_firewall)))
         };
-        let Some((dht, kad_bootstrap_configured)) = runtime_snapshot else {
+        let Some((dht, kad_firewall)) = runtime_snapshot else {
             return kad_status_from_running(manual_running);
         };
         let contact_count = dht.routing_table_size() as u32;
         let connected = dht.is_bootstrapped();
+        // Report the real UDP-firewall verdict (oracle
+        // `CUDPFirewallTester::IsFirewalledUDP`): unverified is treated as OPEN.
+        let firewalled = kad_firewall.lock().await.is_udp_firewalled();
+        // The bootstrap driver always runs while Kad is up, re-driving the
+        // self-lookup until connected, so we are "bootstrapping" whenever we have
+        // contacts to bootstrap from and are not yet connected.
+        let bootstrapping = !connected && contact_count > 0;
         // Local Kad index sizes (oracle m_uTotalIndexSource / m_uTotalIndexKeyword).
         let (indexed_sources, indexed_keywords) = match self.kad_local_store.as_ref() {
             Some(store) => {
@@ -3895,9 +3909,15 @@ impl EmulebbCore {
             running: true,
             connected,
             peer_count: contact_count,
-            firewalled: Some(false),
-            bootstrapping: Some(kad_bootstrap_configured && !connected),
-            bootstrap_progress: Some(if connected { 100 } else { 0 }),
+            firewalled: Some(firewalled),
+            bootstrapping: Some(bootstrapping),
+            bootstrap_progress: Some(if connected {
+                100
+            } else if bootstrapping {
+                50
+            } else {
+                0
+            }),
             contact_count: Some(contact_count),
             lan_mode: Some(false),
             users: connected.then_some(0),
@@ -3928,20 +3948,50 @@ impl fmt::Debug for EmulebbCore {
     }
 }
 
+/// Initial delay before the first bootstrap attempt, giving any nodes.dat import
+/// / configured seeds time to land in the routing table after start.
+const KAD_BOOTSTRAP_INITIAL_DELAY_SECS: u64 = 2;
+/// Retry cadence while Kad is not yet bootstrapped (oracle `CKademlia::Process`
+/// re-drives the bootstrap self-lookup until the node is connected). Gentle by
+/// design so a node sitting on a stale `nodes.dat` keeps trying without flooding.
+const KAD_BOOTSTRAP_RETRY_SECS: u64 = 30;
+
+/// Drive the Kad bootstrap self-lookup until the node reaches the bootstrapped
+/// (connected) state, then keep idling so a later table-collapse can re-trigger
+/// it. eMule promotes Kad to connected only after the bootstrap self-lookup
+/// against live peers succeeds; this loop is the rust analogue of
+/// `CKademlia::Process` re-running `m_pRoutingZone->Bootstrap()` while not yet
+/// connected. It seeds from configured `nodes_text`, the hardcoded fallback, and
+/// (critically) the live routing table, so a node restored from an imported
+/// `nodes.dat` alone — with no configured bootstrap nodes — still bootstraps.
 async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
-    if shutdown.load(Ordering::SeqCst) {
-        return;
-    }
-    match dht.bootstrap().await {
-        Ok(()) => tracing::info!(
-            "configured Kad bootstrap completed contacts={}",
-            dht.routing_table_size()
-        ),
-        Err(error) => {
-            if !shutdown.load(Ordering::SeqCst) {
-                tracing::warn!("configured Kad bootstrap failed: {error}");
+    tokio::time::sleep(Duration::from_secs(KAD_BOOTSTRAP_INITIAL_DELAY_SECS)).await;
+
+    while !shutdown.load(Ordering::SeqCst) {
+        if dht.is_bootstrapped() {
+            // Already connected: re-check on the retry cadence so a routing-table
+            // collapse (all contacts expired) re-drives the bootstrap.
+            tokio::time::sleep(Duration::from_secs(KAD_BOOTSTRAP_RETRY_SECS)).await;
+            continue;
+        }
+
+        match dht.bootstrap().await {
+            Ok(()) => tracing::info!(
+                "Kad bootstrap completed bootstrapped={} contacts={}",
+                dht.is_bootstrapped(),
+                dht.routing_table_size()
+            ),
+            Err(error) => {
+                if !shutdown.load(Ordering::SeqCst) {
+                    tracing::warn!("Kad bootstrap attempt failed (will retry): {error}");
+                }
             }
         }
+
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(KAD_BOOTSTRAP_RETRY_SECS)).await;
     }
 }
 
@@ -6287,7 +6337,7 @@ mod tests {
             search_handle,
             server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
             dht,
-            kad_bootstrap_configured: true,
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             nat: Arc::new(NatManager::default()),
             shutdown: Arc::clone(&shutdown),
             kad_firewall_recheck: None,
@@ -6300,7 +6350,11 @@ mod tests {
         assert!(status.kad.running);
         assert!(!status.kad.connected);
         assert_eq!(status.kad.contact_count, Some(0));
-        assert_eq!(status.kad.bootstrapping, Some(true));
+        // Empty routing table: not connected and nothing to bootstrap from, so
+        // we report not-bootstrapping (the always-running driver has no seeds).
+        assert_eq!(status.kad.bootstrapping, Some(false));
+        // Unverified firewall state is reported as open (oracle IsFirewalledUDP).
+        assert_eq!(status.kad.firewalled, Some(false));
         assert_eq!(status.kad.users, None);
         assert_eq!(status.kad.files, None);
         shutdown.store(true, Ordering::SeqCst);
