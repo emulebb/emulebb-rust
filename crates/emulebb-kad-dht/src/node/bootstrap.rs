@@ -19,7 +19,15 @@ impl DhtNode {
 
     /// Bootstrap from configured sources. Populates the routing table.
     pub async fn bootstrap_with_class(&self, work_class: RpcWorkClass) -> Result<(), DhtError> {
-        let contacts = self.load_bootstrap_contacts();
+        let mut contacts = self.load_bootstrap_contacts();
+
+        // eMule `CRoutingZone::Bootstrap` seeds the bootstrap self-lookup from the
+        // routing table itself, not only from a separate configured node list. A
+        // node restored from `nodes.dat` (contacts already in the table, no
+        // configured `nodes_text`) must therefore still bootstrap: fold the live
+        // routing-table contacts in as seeds so the self-lookup has live peers to
+        // probe. Configured/hardcoded seeds are tried first, table contacts after.
+        contacts.extend(self.routing_table_bootstrap_contacts().await);
 
         if contacts.is_empty() {
             return Err(DhtError::NoBootstrapNodes);
@@ -78,6 +86,30 @@ impl DhtNode {
         }
 
         contacts
+    }
+
+    /// Bootstrap seeds taken from the live routing table (oracle
+    /// `CRoutingZone::Bootstrap`, which walks the tree for bootstrap candidates).
+    /// These are the contacts restored from `nodes.dat` or learned at runtime;
+    /// folding them into the bootstrap seed set lets a node with a populated table
+    /// but no configured `nodes_text` still run the bootstrap self-lookup.
+    pub(crate) async fn routing_table_bootstrap_contacts(&self) -> Vec<BootstrapContact> {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .all_contacts()
+            .into_iter()
+            .filter(|c| c.udp_port != 0)
+            .map(|c| BootstrapContact {
+                node_id: c.id,
+                ip: c.ip,
+                udp_port: c.udp_port,
+                tcp_port: c.tcp_port,
+                version: c.kad_version,
+                udp_key: c.udp_key,
+            })
+            .collect()
     }
 
     async fn bootstrap_contact(&self, bc: &BootstrapContact, work_class: RpcWorkClass) -> bool {
@@ -183,4 +215,50 @@ fn bootstrap_contact_entry(entry: emulebb_kad_proto::packet::ContactEntry) -> Op
         entry.tcp_port,
         entry.version,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DhtConfig, DhtNode};
+    use emulebb_kad_proto::NodeId;
+    use emulebb_kad_routing::Contact;
+
+    async fn empty_node() -> DhtNode {
+        DhtNode::new(DhtConfig {
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A node restored from `nodes.dat` (contacts already in the routing table,
+    /// no configured `nodes_text`) must surface those contacts as bootstrap
+    /// seeds, so the bootstrap self-lookup has live peers to probe. Regression
+    /// guard for the dormant-bootstrap bug where a nodes.dat-only node never
+    /// bootstrapped because seeds were only drawn from the configured list.
+    #[tokio::test]
+    async fn routing_table_contacts_are_offered_as_bootstrap_seeds() {
+        let dht = empty_node().await;
+        assert!(dht.routing_table_bootstrap_contacts().await.is_empty());
+
+        let contact = Contact::new(
+            NodeId::from_bytes([0x33; 16]),
+            "203.0.113.10".parse().unwrap(),
+            4672,
+            4662,
+            10,
+        );
+        dht.add_contact(contact).await.unwrap();
+
+        let seeds = dht.routing_table_bootstrap_contacts().await;
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].ip, "203.0.113.10".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(seeds[0].udp_port, 4672);
+        assert_eq!(seeds[0].tcp_port, 4662);
+        assert_eq!(seeds[0].version, 10);
+    }
 }
