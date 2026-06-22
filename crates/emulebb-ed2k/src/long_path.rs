@@ -186,6 +186,33 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn unicode_brackets_and_nested_components_are_preserved_verbatim() {
+        // The shared-directory ingest boundary must build the verbatim path
+        // WITHOUT altering non-ASCII characters, brackets, or nested-folder
+        // components -- these are exactly the names that were being dropped.
+        // (`\u{00e0}` = a-grave, plus a CJK component.)
+        let out = long_path(Path::new(
+            "C:\\lib\\Studio\\La citt\u{00e0} [tt0000001]\\\u{6620}\u{753b}\\file.mkv",
+        ));
+        assert_eq!(
+            out,
+            PathBuf::from(
+                "\\\\?\\C:\\lib\\Studio\\La citt\u{00e0} [tt0000001]\\\u{6620}\u{753b}\\file.mkv"
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn already_verbatim_unicode_path_is_unchanged() {
+        // A walk that already produced a verbatim Unicode/bracketed path must
+        // pass through untouched (no double-prefix, no re-normalization).
+        let input = Path::new("\\\\?\\C:\\lib\\La citt\u{00e0} [tt0000001]\\(2001) sample.mkv");
+        assert_eq!(long_path(input), PathBuf::from(input));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn already_verbatim_drive_is_unchanged() {
         let input = Path::new("\\\\?\\C:\\already\\verbatim\\file");
         assert_eq!(long_path(input), PathBuf::from(input));

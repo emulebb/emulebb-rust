@@ -32,13 +32,21 @@ impl Ed2kTransferRuntime {
         // destination (`transfer_dir`/`pieces.bin`) below is deliberately left
         // short-path. (Operator-rule scope: shared-directory trees -- see
         // long_path.rs.)
+        //
+        // WHY (no canonicalize): we used to `canonicalize()` the verbatim path
+        // here, but that silently dropped shared files whose paths carry
+        // non-ASCII characters (accents/CJK), brackets, or live in subfolders.
+        // On Windows `canonicalize` resolves via `GetFinalPathNameByHandle` and
+        // returns an OS-re-normalized verbatim (`\\?\`) path; a verbatim path is
+        // NOT re-normalized by the OS on later access, so when the canonical
+        // Unicode form differs from the form the directory walk produced, the
+        // returned path no longer resolves and the subsequent stat fails
+        // ("failed to stat local ingest source"), skipping the file. The walk
+        // (`collect_shared_directory_files`) already hands us an absolute
+        // verbatim path read straight from the on-disk directory entries, so we
+        // stat/hash it directly and let the manifest record that same exact path
+        // for in-place upload serving -- no canonicalize round-trip is needed.
         let source_path = long_path(source_path);
-        let source_path = source_path.canonicalize().with_context(|| {
-            format!(
-                "failed to resolve local ingest source {}",
-                source_path.display()
-            )
-        })?;
         let metadata = tokio::fs::metadata(&source_path).await.with_context(|| {
             format!(
                 "failed to stat local ingest source {}",
