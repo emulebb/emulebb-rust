@@ -351,7 +351,16 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["roots"][0]["recursive"], true);
     assert_eq!(value["data"]["roots"][0]["accessible"], true);
-    assert_eq!(value["data"]["hashingCount"], 0);
+    // A PATCH now kicks a detached background scan + hash of the files already
+    // present under the new roots, so `hashingCount` reflects that queued work
+    // (it drains to 0 in the background; the two files are picked up below). It is
+    // a non-negative count, not necessarily 0 the instant the PATCH returns.
+    assert!(
+        value["data"]["hashingCount"]
+            .as_i64()
+            .expect("hashingCount is an integer")
+            >= 0
+    );
 
     let get_response = app
         .clone()
@@ -400,29 +409,42 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .unwrap();
     assert_eq!(shared_files_reload_response.status(), StatusCode::OK);
 
-    let list_response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list_response.status(), StatusCode::OK);
-    let body = to_bytes(list_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    let names = value["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["name"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert!(names.contains(&"Top.Level.bin"));
-    assert!(names.contains(&"Nested.bin"));
+    // The reload hashes the library on a detached background task (independent of
+    // the request), so the shared-files list fills in asynchronously. Poll until
+    // both files appear rather than expecting them synchronously after the POST.
+    let mut names: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/shared-files")
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        names = value["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        if names.iter().any(|name| name == "Top.Level.bin")
+            && names.iter().any(|name| name == "Nested.bin")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(names.iter().any(|name| name == "Top.Level.bin"));
+    assert!(names.iter().any(|name| name == "Nested.bin"));
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {

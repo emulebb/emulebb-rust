@@ -154,11 +154,137 @@ pub(crate) async fn scan_shared_directory_roots(
     .await?
 }
 
+// ---------------------------------------------------------------------------
+// Core orchestration (kept out of lib.rs to respect its frozen line budget).
+//
+// These free functions take `&EmulebbCore` and drive the full shared-directory
+// scan + MD4/ed2k hash. A child module may read its ancestor's private items, so
+// they touch the core's private `state` / `shared_hashing_count` fields directly
+// and reuse the public `share_local_file` ingest path so MD4/AICH/catalog stay
+// consistent. `lib.rs` keeps only thin entry methods that delegate here.
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use crate::{EmulebbCore, LocalShare, LocalShareCreate};
+
+/// Resets the live `hashingCount` to 0 on any exit path (success, hash error, or
+/// panic unwind) so a failed/aborted reload never leaves a stale non-zero count.
+struct HashingCountGuard(Arc<AtomicI64>);
+
+impl Drop for HashingCountGuard {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Live `hashingCount` snapshot for the REST surface: files still pending the
+/// initial hash in the background reload worker (0 when idle / fully indexed).
+pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
+    core.shared_hashing_count.load(Ordering::Relaxed).max(0)
+}
+
+/// Scan the configured shared roots and return the deduped, sorted file list.
+async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
+    let roots = core.state.lock().await.shared_directories.clone();
+    // The recursive directory walk is synchronous and may be large, so the helper
+    // runs it off the async executor via spawn_blocking to avoid stalling a tokio
+    // worker thread.
+    let mut file_paths = scan_shared_directory_roots(roots).await?;
+    file_paths.sort();
+    file_paths.dedup();
+    Ok(file_paths)
+}
+
+/// Synchronous core primitive: scan + hash + share the whole library, returning
+/// the full set of shares once it is fully indexed.
+///
+/// This drives the entire (potentially very large) MD4/ed2k hash to completion
+/// before it resolves, so it MUST NOT be awaited directly from a short-lived HTTP
+/// request: a client timeout that drops the request future would cancel the
+/// in-progress hash loop mid-library, leaving most files un-indexed. The REST
+/// surface instead uses [`reload_shared_directories_detached`], which runs the
+/// hash on a detached background task so it always runs to completion independent
+/// of the caller. The live `hashingCount` lets a controller watch progress: it is
+/// set to the file count up front and decremented per file as the hash completes,
+/// reaching 0 when the library is fully indexed.
+pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<LocalShare>> {
+    let file_paths = scan_shared_files(core).await?;
+    core.shared_hashing_count
+        .store(file_paths.len() as i64, Ordering::Relaxed);
+    let _guard = HashingCountGuard(core.shared_hashing_count.clone());
+
+    let mut shares = Vec::new();
+    for path in file_paths {
+        shares.push(
+            core.share_local_file(LocalShareCreate {
+                path: path.display().to_string(),
+                name: None,
+            })
+            .await?,
+        );
+        core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
+    }
+    Ok(shares)
+}
+
+/// Kick a full shared-directory scan + hash on a **detached** background task and
+/// return immediately, so the work runs to completion independent of the HTTP
+/// request/connection that triggered it.
+///
+/// The blocking issue this solves: hashing a large shared library (hundreds of
+/// GB) takes far longer than any reasonable HTTP timeout. Awaiting
+/// [`reload_shared_directories`] inside the request handler tied the hash to the
+/// request lifetime, so a client timeout cancelled the handler future and stopped
+/// hashing after only a handful of files. By spawning the hash on a detached
+/// `tokio` task (the core is `Clone` / `Arc`-backed), the request returns
+/// promptly while `hashingCount` climbs/drains in the background and
+/// `shared-files` fills in on its own.
+///
+/// Returns the number of files queued for hashing. The scan itself runs before
+/// returning, so the count and the initial `hashingCount` are accurate the
+/// instant the caller gets control back. Unlike the synchronous primitive, the
+/// background worker logs and skips a file that fails to hash and continues, so
+/// one bad file never aborts indexing of the rest of the library.
+pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
+    let file_paths = scan_shared_files(core).await?;
+    let queued = file_paths.len();
+    // Publish the pending count now so `hashingCount` is non-zero the instant the
+    // request returns, before the detached worker starts draining it.
+    core.shared_hashing_count
+        .store(queued as i64, Ordering::Relaxed);
+
+    let core = core.clone();
+    tokio::spawn(async move {
+        let _guard = HashingCountGuard(core.shared_hashing_count.clone());
+        for path in file_paths {
+            if let Err(error) = core
+                .share_local_file(LocalShareCreate {
+                    path: path.display().to_string(),
+                    name: None,
+                })
+                .await
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to hash/share file during background shared-directory reload (skipping)",
+                );
+            }
+            core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        tracing::info!("background shared-directory reload finished hashing the library");
+    });
+
+    Ok(queued)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     /// Allocate a unique scratch directory under the system temp root.
     fn scratch_dir(label: &str) -> PathBuf {

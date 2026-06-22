@@ -191,8 +191,8 @@ pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
 };
 use shared_directories::{
-    refresh_shared_directory_row, scan_shared_directory_roots, shared_directory_from_index,
-    shared_directory_to_index, shared_directory_update_parts,
+    refresh_shared_directory_row, shared_directory_from_index, shared_directory_to_index,
+    shared_directory_update_parts,
 };
 
 mod rest_model;
@@ -326,6 +326,10 @@ pub struct EmulebbCore {
     /// parity); rebuilt on reconfigure, torn down on `disconnect_ed2k`. See the
     /// `shared_dir_monitor` module. `std::sync::Mutex` so start/stop is await-free.
     shared_dir_monitor: Arc<std::sync::Mutex<Option<SharedDirMonitor>>>,
+    /// Files still pending the initial hash in the detached background reload
+    /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
+    /// atomic shared by the sync primitive and the worker (see `shared_directories`).
+    shared_hashing_count: Arc<std::sync::atomic::AtomicI64>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -421,6 +425,7 @@ impl EmulebbCore {
             ed2k_reachability: ExternalReachability::new(),
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
+            shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1666,7 +1671,8 @@ impl EmulebbCore {
             roots: roots.clone(),
             items: roots,
             monitor_owned: Vec::new(),
-            hashing_count: 0,
+            // Files still pending the initial hash in the background reload worker.
+            hashing_count: shared_directories::hashing_count_snapshot(self),
         }
     }
 
@@ -1709,30 +1715,24 @@ impl EmulebbCore {
         self.state.lock().await.shared_directories = roots;
         // Re-establish the live auto-pickup watch set for the new roots (it stops
         // the previous monitor first), matching eMule re-monitoring on reconfigure.
+        // The monitor only auto-picks-up *newly arriving* files; files already
+        // present under the new roots still need the initial hash, so kick a
+        // detached background scan + hash (progress in `hashingCount`).
         self.start_shared_directory_monitor().await;
+        self.reload_shared_directories_detached().await?;
         Ok(self.shared_directories().await)
     }
 
+    /// Synchronous core primitive: scan + hash + share the whole library, blocking
+    /// until fully indexed. Thin entry to `shared_directories`.
     pub async fn reload_shared_directories(&self) -> Result<Vec<LocalShare>> {
-        let roots = self.state.lock().await.shared_directories.clone();
-        // The recursive directory walk is synchronous and may be large, so the
-        // helper runs it off the async executor via spawn_blocking to avoid
-        // stalling a tokio worker thread.
-        let mut file_paths = scan_shared_directory_roots(roots).await?;
-        file_paths.sort();
-        file_paths.dedup();
+        shared_directories::reload_shared_directories(self).await
+    }
 
-        let mut shares = Vec::new();
-        for path in file_paths {
-            shares.push(
-                self.share_local_file(LocalShareCreate {
-                    path: path.display().to_string(),
-                    name: None,
-                })
-                .await?,
-            );
-        }
-        Ok(shares)
+    /// Kick the full scan + hash on a detached background task; returns the queued
+    /// file count immediately. Thin entry to `shared_directories`.
+    pub async fn reload_shared_directories_detached(&self) -> Result<usize> {
+        shared_directories::reload_shared_directories_detached(self).await
     }
 
     /// (Re)start the live shared-directory auto-pickup monitor (eMule directory

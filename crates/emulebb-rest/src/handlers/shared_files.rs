@@ -97,8 +97,16 @@ pub(crate) async fn update_shared_directories(
 }
 
 pub(crate) async fn reload_shared_directories(State(state): State<RestState>) -> impl IntoResponse {
-    match state.core.reload_shared_directories().await {
-        Ok(_shares) => api_ok(json!({ "ok": true })).into_response(),
+    // Hashing a large shared library takes far longer than any HTTP timeout, so
+    // the scan + MD4/ed2k hash runs on a detached background task: the request
+    // returns promptly with the queued count while hashing continues to
+    // completion independent of this connection. Progress is observable via
+    // `hashingCount` on `GET /api/v1/shared-directories` and the growing
+    // `GET /api/v1/shared-files` total.
+    match state.core.reload_shared_directories_detached().await {
+        Ok(queued) => {
+            api_ok(json!({ "ok": true, "started": true, "queued": queued })).into_response()
+        }
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
