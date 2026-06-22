@@ -171,8 +171,8 @@ rationale = "frozen legacy Kad traversal implementation; split lookup state, que
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-miniupnpc/src/lib.rs"
-hard_limit_lines = 768
-rationale = "frozen native miniupnpc adapter mirrors upstream ABI and platform setup; split safe API and FFI plumbing as touched"
+hard_limit_lines = 861
+rationale = "frozen native miniupnpc adapter mirrors upstream ABI and platform setup; split safe API and FFI plumbing as touched. Bumped (768 -> 861) to match eMuleBB MFC's CUPnPImplMiniLib::OpenPort AddPortMapping call shape so the mapping succeeds over restrictive IGDs (e.g. the hide.me VPN gateway): add_port_mapping now passes remoteHost=NULL (a real null pointer, not an empty CString) and leaseDuration=NULL for an indefinite/permanent lease when lease_duration_secs is None, and on failure returns the new AddPortMappingError carrying the raw IGD/SOAP result code + decoded description (725 OnlyPermanentLeasesSupported, 718 ConflictInMappingEntry, 606 not authorized, ...) instead of a generic 'failed to add', plus its is_only_permanent_leases_supported/is_conflict_in_mapping_entry predicates and a result-code decoding unit test. Split safe API and FFI plumbing as touched post-parity."
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-rest/src/lib.rs"

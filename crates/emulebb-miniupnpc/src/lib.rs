@@ -138,6 +138,61 @@ pub struct PortMappingEntry {
     pub lease_duration_secs: Option<u32>,
 }
 
+/// Error returned by [`Gateway::add_port_mapping`]. When the IGD rejects the
+/// mapping, `code` holds the raw miniupnpc/SOAP result code (e.g. `718`, `725`,
+/// `606`) and `description` its decoded text, so the real refusal reason is
+/// logged instead of a generic "failed to add" message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPortMappingError {
+    /// Raw miniupnpc/IGD result code, when the failure originated from the IGD.
+    pub code: Option<c_int>,
+    /// Decoded description of the failure.
+    pub description: String,
+}
+
+impl AddPortMappingError {
+    fn igd(status: c_int) -> Self {
+        Self {
+            code: Some(status),
+            description: upnp_error_string(status),
+        }
+    }
+
+    fn setup(error: anyhow::Error) -> Self {
+        Self {
+            code: None,
+            description: error.to_string(),
+        }
+    }
+
+    /// Returns true when the IGD reported `725 OnlyPermanentLeasesSupported`.
+    #[must_use]
+    pub fn is_only_permanent_leases_supported(&self) -> bool {
+        self.code == Some(725)
+    }
+
+    /// Returns true when the IGD reported `718 ConflictInMappingEntry`.
+    #[must_use]
+    pub fn is_conflict_in_mapping_entry(&self) -> bool {
+        self.code == Some(718)
+    }
+}
+
+impl std::fmt::Display for AddPortMappingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            Some(code) => write!(
+                f,
+                "UPNP_AddPortMapping failed: IGD result code {code} ({})",
+                self.description
+            ),
+            None => write!(f, "UPNP_AddPortMapping failed: {}", self.description),
+        }
+    }
+}
+
+impl std::error::Error for AddPortMappingError {}
+
 unsafe impl Send for Gateway {}
 
 impl std::fmt::Debug for Gateway {
@@ -194,6 +249,13 @@ impl Gateway {
         external_ip_from_raw(&self.urls, &self.data)
     }
 
+    /// Adds (or replaces) an IGD port mapping, mirroring eMuleBB MFC's
+    /// `CUPnPImplMiniLib::OpenPort` call shape: `remoteHost` is always `NULL`
+    /// (not an empty string) and `leaseDuration` is `NULL` when
+    /// `lease_duration_secs` is `None` (indefinite/permanent lease). Restrictive
+    /// IGDs (e.g. the hide.me VPN gateway) reject finite leases with `725`, so
+    /// MFC-parity callers pass `None`. On failure the [`AddPortMappingError`]
+    /// carries the raw IGD result code and description.
     pub fn add_port_mapping(
         &self,
         external_port: u16,
@@ -201,18 +263,23 @@ impl Gateway {
         internal_ip: &str,
         description: &str,
         protocol: &str,
-        lease_duration_secs: u32,
-    ) -> Result<()> {
-        let _winsock = WinsockGuard::init()?;
-        let control_url = c_string(&self.summary.control_url, "control_url")?;
-        let service_type = c_string(&self.summary.service_type, "service_type")?;
+        lease_duration_secs: Option<u32>,
+    ) -> Result<(), AddPortMappingError> {
+        let _winsock = WinsockGuard::init().map_err(AddPortMappingError::setup)?;
+        let control_url =
+            c_string(&self.summary.control_url, "control_url").map_err(AddPortMappingError::setup)?;
+        let service_type = c_string(&self.summary.service_type, "service_type")
+            .map_err(AddPortMappingError::setup)?;
         let external_port = CString::new(external_port.to_string()).unwrap();
         let internal_port = CString::new(internal_port.to_string()).unwrap();
-        let internal_ip = c_string(internal_ip, "internal_ip")?;
-        let description = c_string(description, "description")?;
-        let protocol = c_string(protocol, "protocol")?;
-        let remote_host = CString::new("").unwrap();
-        let lease_duration = CString::new(lease_duration_secs.to_string()).unwrap();
+        let internal_ip =
+            c_string(internal_ip, "internal_ip").map_err(AddPortMappingError::setup)?;
+        let description =
+            c_string(description, "description").map_err(AddPortMappingError::setup)?;
+        let protocol = c_string(protocol, "protocol").map_err(AddPortMappingError::setup)?;
+        // MFC passes remoteHost=NULL and leaseDuration=NULL (indefinite). Mirror
+        // that exactly: a real null pointer, never an empty CString.
+        let lease_duration = lease_duration_secs.map(|secs| CString::new(secs.to_string()).unwrap());
 
         let status = unsafe {
             sys::UPNP_AddPortMapping(
@@ -223,11 +290,16 @@ impl Gateway {
                 internal_ip.as_ptr(),
                 description.as_ptr(),
                 protocol.as_ptr(),
-                remote_host.as_ptr(),
-                lease_duration.as_ptr(),
+                ptr::null(),
+                lease_duration
+                    .as_ref()
+                    .map_or(ptr::null(), |value| value.as_ptr()),
             )
         };
-        ensure_command_success("UPNP_AddPortMapping", status)
+        if status == sys::UPNPCOMMAND_SUCCESS {
+            return Ok(());
+        }
+        Err(AddPortMappingError::igd(status))
     }
 
     pub fn delete_port_mapping(&self, external_port: u16, protocol: &str) -> Result<()> {
@@ -728,8 +800,29 @@ impl Drop for UpnpDevList {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceSearchTarget, GatewayStatus, buffer_to_string, default_search_targets, host_from_url,
+        AddPortMappingError, DeviceSearchTarget, GatewayStatus, buffer_to_string,
+        default_search_targets, host_from_url,
     };
+
+    #[test]
+    fn add_port_mapping_error_decodes_known_igd_codes() {
+        let only_permanent = AddPortMappingError::igd(725);
+        assert!(only_permanent.is_only_permanent_leases_supported());
+        assert!(!only_permanent.is_conflict_in_mapping_entry());
+        assert!(
+            only_permanent
+                .description
+                .contains("OnlyPermanentLeasesSupported")
+        );
+        assert!(only_permanent.to_string().contains("725"));
+
+        let conflict = AddPortMappingError::igd(718);
+        assert!(conflict.is_conflict_in_mapping_entry());
+        assert!(conflict.description.contains("ConflictInMappingEntry"));
+
+        let not_authorized = AddPortMappingError::igd(606);
+        assert!(not_authorized.description.contains("not authorized"));
+    }
 
     #[test]
     fn default_search_targets_include_igd_and_rootdevice() {
