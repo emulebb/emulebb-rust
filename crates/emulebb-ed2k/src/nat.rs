@@ -463,11 +463,11 @@ async fn run_manager_loop(
             Err(error) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 if consecutive_failures == 1 {
-                    warn!("nat mapping reconcile failed: {error}");
+                    warn!("nat mapping reconcile failed: {error:#}");
                 } else {
                     debug!(
                         "nat mapping reconcile failed ({consecutive_failures} consecutive), \
-                         next retry in {}s: {error}",
+                         next retry in {}s: {error:#}",
                         failure_backoff.as_secs()
                     );
                 }

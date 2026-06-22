@@ -186,23 +186,38 @@ fn reconcile_blocking(
                 );
             }
         }
-        if let Err(error) = gateway
-            .add_port_mapping(
-                external_port,
-                spec.local_addr.port(),
-                &internal_ip,
-                &spec.name,
+        // Match eMuleBB MFC's OpenPort call shape exactly: indefinite lease
+        // (NULL leaseDuration) and NULL remoteHost. Restrictive IGDs such as the
+        // hide.me VPN gateway reject finite leases with 725
+        // OnlyPermanentLeasesSupported, leaving eD2K stuck at LowID; an indefinite
+        // lease is the proven shape that succeeds.
+        if let Err(add_error) = gateway.add_port_mapping(
+            external_port,
+            spec.local_addr.port(),
+            &internal_ip,
+            &spec.name,
+            spec.protocol.as_upnp_token(),
+            None,
+        ) {
+            // Log the real IGD result code (e.g. 718/725/606), not a generic
+            // "failed to add" message, so the rejection reason is diagnosable.
+            warn!(
+                "UPnP backend {} add {} mapping {} external_port={} internal={}:{} rejected by gateway {}: {}",
+                backend_name,
+                spec.name,
                 spec.protocol.as_upnp_token(),
-                config.lease_duration_secs,
-            )
-            .with_context(|| {
-                format!(
-                    "gateway {} failed to add {} mapping",
-                    gateway.control_url(),
-                    spec.name
-                )
-            })
-        {
+                external_port,
+                internal_ip,
+                spec.local_addr.port(),
+                gateway.control_url(),
+                add_error
+            );
+            let error = anyhow!(
+                "gateway {} failed to add {} mapping: {}",
+                gateway.control_url(),
+                spec.name,
+                add_error
+            );
             if !mapping_matches_existing_entry(
                 &gateway,
                 external_port,
