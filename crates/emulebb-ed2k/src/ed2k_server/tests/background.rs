@@ -341,7 +341,7 @@ fn server_status_mismatched_challenge_is_discarded() {
 
 #[tokio::test]
 async fn server_obfuscation_handshake_encrypts_login_request() {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
     let endpoint = listener.local_addr().unwrap();
     let hello_identity = Ed2kHelloIdentity {
         user_hash: [0x11; 16],

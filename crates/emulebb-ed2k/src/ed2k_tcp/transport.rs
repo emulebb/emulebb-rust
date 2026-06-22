@@ -265,7 +265,7 @@ mod tests {
     /// read). The TcpStream is a parked loopback connection used purely to
     /// satisfy the struct field; its contents are never read in these cases.
     async fn transport_with_prefetched(prefetched: Vec<u8>) -> (Ed2kTransport, TcpStream) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
         let (server, _) = listener.accept().await.unwrap();

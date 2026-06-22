@@ -421,7 +421,7 @@ mod tests {
     /// `sizeof GlobalReadBuffer`), preventing an OOM denial of service.
     #[tokio::test]
     async fn server_read_rejects_oversized_declared_length() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let writer = tokio::spawn(async move {
             let mut peer = TcpStream::connect(addr).await.unwrap();

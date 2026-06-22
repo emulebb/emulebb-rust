@@ -1,10 +1,7 @@
 use super::*;
 
 pub(super) fn test_bind_ip() -> Ipv4Addr {
-    let raw = std::env::var("X_LOCAL_IP")
-        .expect("X_LOCAL_IP must be set for ED2K TCP tests in the operator LAN harness");
-    raw.parse()
-        .expect("X_LOCAL_IP must be an IPv4 address for ED2K TCP tests")
+    crate::test_bind_ip()
 }
 
 pub(super) fn test_bind_addr() -> SocketAddr {
