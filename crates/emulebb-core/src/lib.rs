@@ -229,6 +229,12 @@ const ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS: u64 = 50;
 const KAD_REQ_MAX_TYPE: u8 = 2;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
+/// Upper bound on awaiting the initial UPnP reconcile before the first eD2k server
+/// login (connection ordering: bind -> VPN guard -> UPnP await -> connect). Covers
+/// SSDP discovery + AddPortMapping for both eD2k TCP and Kad UDP with headroom over
+/// the 5s default discovery timeout, while bounding startup if the gateway is slow
+/// or absent — on timeout we connect best-effort with internal ports.
+const ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
@@ -742,6 +748,46 @@ impl EmulebbCore {
                 .build(),
         );
         nat.start().await?;
+        // Connection ordering (bind -> VPN guard -> UPnP await -> connect): the eD2k
+        // server login must announce an already-forwarded listen port to win HighID
+        // on the FIRST connect. The bind happened above (eD2k TCP listener + Kad UDP
+        // socket, egress-pinned to the VPN), the VPN guard was checked at the top of
+        // this fn, and `nat.start()` only *spawns* the periodic reconcile loop — so
+        // the server login below would race the async forward and announce the
+        // internal (unmapped) port, yielding LowID. AWAIT one reconcile now (bounded)
+        // and copy the gateway-granted external ports into reachability so the very
+        // first login reads the forwarded port. Best-effort: a reconcile failure /
+        // timeout (point-to-point VPN without an IGD) must not block connect — we log
+        // and proceed; the periodic sync still upgrades the port reactively later.
+        if network.nat_config.enabled {
+            match tokio::time::timeout(ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT, nat.reconcile_now())
+                .await
+            {
+                Ok(Ok(())) => {
+                    let status = nat.status().await;
+                    crate::ed2k_net_drivers::sync_advertised_ports_from_nat(
+                        &status,
+                        &self.ed2k_reachability,
+                        network.listen_port,
+                        network.kad_bind_addr.port(),
+                    );
+                    tracing::info!(
+                        "UPnP initial reconcile complete before ED2K login: advertised_tcp_port={} advertised_udp_port={}",
+                        self.ed2k_reachability
+                            .advertised_tcp_port(network.listen_port),
+                        self.ed2k_reachability
+                            .advertised_udp_port(network.kad_bind_addr.port()),
+                    );
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    "UPnP initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds): {error:#}"
+                ),
+                Err(_) => tracing::warn!(
+                    "UPnP initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds)",
+                    ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs(),
+                ),
+            }
+        }
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
         // "Reconnect now" signal: the advertised-ports sync fires it when the

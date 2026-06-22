@@ -142,6 +142,45 @@ pub(crate) async fn run_ed2k_nat_type_probe(bind_ip: Ipv4Addr, shutdown: Arc<Ato
 /// incoming TCP connections + HighID callback on the advertised tcp_port. Polling
 /// the NAT status reflects a mapping that appears after startup — or is remapped on
 /// lease renewal — into subsequent hellos.
+/// Finds the gateway-granted external port for one internal listener in a NAT
+/// status snapshot. Matches on protocol + the internal port and ignores a zero
+/// external port (an unmapped/placeholder entry). Pure so both the connect-time
+/// await-once sync and the periodic poll share one matcher (no drift).
+fn external_port_for(
+    mappings: &[MappedEndpoint],
+    proto: TransportProtocol,
+    internal: u16,
+) -> Option<u16> {
+    mappings.iter().find_map(|mapping| {
+        (mapping.protocol == proto
+            && mapping.local_addr.port() == internal
+            && mapping.external_addr.port() != 0)
+            .then(|| mapping.external_addr.port())
+    })
+}
+
+/// Pushes the gateway-granted external eD2k TCP + UDP ports from a NAT status
+/// snapshot into reachability. Returned by [`run_advertised_ports_sync`]'s poll
+/// and called once at connect time (after the awaited initial reconcile) so the
+/// very first server login already announces the forwarded HighID callback port.
+pub(crate) fn sync_advertised_ports_from_nat(
+    status: &emulebb_ed2k::NatStatus,
+    reachability: &ExternalReachability,
+    internal_tcp_port: u16,
+    internal_udp_port: u16,
+) {
+    if let Some(external) =
+        external_port_for(&status.mappings, TransportProtocol::Tcp, internal_tcp_port)
+    {
+        reachability.set_external_tcp_port(external);
+    }
+    if let Some(external) =
+        external_port_for(&status.mappings, TransportProtocol::Udp, internal_udp_port)
+    {
+        reachability.set_external_udp_port(external);
+    }
+}
+
 pub(crate) async fn run_advertised_ports_sync(
     nat: Arc<NatManager>,
     reachability: ExternalReachability,
@@ -150,27 +189,19 @@ pub(crate) async fn run_advertised_ports_sync(
     internal_udp_port: u16,
     shutdown: Arc<AtomicBool>,
 ) {
-    // Baseline = the internal port the first login used before UPnP was ready; a
-    // later external port (or a remap) is a change worth re-logging for to refresh
-    // HighID, rate-limited so a flapping mapping cannot spam server reconnects.
-    let mut last_advertised_tcp = internal_tcp_port;
+    // Baseline = the external port already mapped by the awaited initial reconcile
+    // (the port the first login announced); only a *later* remap is a change worth
+    // re-logging for, rate-limited so a flapping mapping cannot spam reconnects.
+    let mut last_advertised_tcp = reachability.advertised_tcp_port(internal_tcp_port);
     let mut last_relogin: Option<std::time::Instant> = None;
     while !shutdown.load(Ordering::Relaxed) {
         let status = nat.status().await;
-        let external_for = |proto: TransportProtocol, internal: u16| -> Option<u16> {
-            status.mappings.iter().find_map(|mapping: &MappedEndpoint| {
-                (mapping.protocol == proto
-                    && mapping.local_addr.port() == internal
-                    && mapping.external_addr.port() != 0)
-                    .then(|| mapping.external_addr.port())
-            })
-        };
-        if let Some(external) = external_for(TransportProtocol::Tcp, internal_tcp_port) {
-            reachability.set_external_tcp_port(external);
-        }
-        if let Some(external) = external_for(TransportProtocol::Udp, internal_udp_port) {
-            reachability.set_external_udp_port(external);
-        }
+        sync_advertised_ports_from_nat(
+            &status,
+            &reachability,
+            internal_tcp_port,
+            internal_udp_port,
+        );
         // Reactive re-login: if the advertised TCP port (the HighID callback port)
         // changed and the rate limit allows, signal the server loop to reconnect.
         let advertised_tcp = reachability.advertised_tcp_port(internal_tcp_port);
@@ -390,6 +421,56 @@ pub(crate) fn ed2k_nat_mappings(network: &Ed2kNetworkConfig) -> Vec<MappingSpec>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mapped(
+        name: &str,
+        proto: TransportProtocol,
+        internal: u16,
+        external: u16,
+    ) -> MappedEndpoint {
+        MappedEndpoint {
+            name: name.to_string(),
+            protocol: proto,
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), internal),
+            external_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), external),
+            lease_expires_in_secs: 0,
+            backend: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn sync_advertised_ports_copies_gateway_granted_external_ports() {
+        // The connect-time await-once sync must announce the gateway-granted external
+        // ports (the HighID callback port), not the internal listener ports.
+        let status = emulebb_ed2k::NatStatus {
+            mappings: vec![
+                mapped("ed2k_tcp", TransportProtocol::Tcp, 4662, 49662),
+                mapped("kad_udp", TransportProtocol::Udp, 4672, 49672),
+            ],
+            ..Default::default()
+        };
+        let reachability = ExternalReachability::new();
+        sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
+        assert_eq!(reachability.advertised_tcp_port(4662), 49662);
+        assert_eq!(reachability.advertised_udp_port(4672), 49672);
+    }
+
+    #[test]
+    fn sync_advertised_ports_ignores_nonmatching_internal_and_zero_external() {
+        // A mapping for a different internal port, or a zero/placeholder external
+        // port, must not overwrite the advertised port (it falls back to internal).
+        let status = emulebb_ed2k::NatStatus {
+            mappings: vec![
+                mapped("ed2k_tcp", TransportProtocol::Tcp, 9999, 49662),
+                mapped("kad_udp", TransportProtocol::Udp, 4672, 0),
+            ],
+            ..Default::default()
+        };
+        let reachability = ExternalReachability::new();
+        sync_advertised_ports_from_nat(&status, &reachability, 4662, 4672);
+        assert_eq!(reachability.advertised_tcp_port(4662), 4662);
+        assert_eq!(reachability.advertised_udp_port(4672), 4672);
+    }
 
     #[test]
     fn direct_callback_target_rejects_invalid_endpoints() {
