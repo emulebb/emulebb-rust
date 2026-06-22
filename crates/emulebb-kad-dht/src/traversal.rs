@@ -195,6 +195,9 @@ struct LookupPhaseResult {
 const SEARCH_JUMPSTART_TICK: Duration = Duration::from_secs(1);
 /// eMule only jump-starts once the last lookup response is at least 3 seconds old.
 const SEARCH_JUMPSTART_IDLE_GRACE: Duration = Duration::from_secs(3);
+/// Margin the first jump-start emit is backed off to so it still fires before
+/// the phase-2 deadline check ends the loop (closest-contact 0x33 starvation).
+const JUMPSTART_DEADLINE_MARGIN: Duration = Duration::from_millis(50);
 
 /// Run one oracle-shaped Kad traversal from `REQ` fanout through optional search phase 2.
 pub async fn run_traversal(
@@ -654,6 +657,7 @@ async fn run_search_phase(
         last_lookup_response_at,
         Instant::now(),
         jumpstart_idle_grace,
+        phase_deadline,
     );
 
     loop {
@@ -753,17 +757,28 @@ fn search_phase_packet(kind: &TraversalKind, target: NodeId) -> KadPacket {
     }
 }
 
-/// Compute when the next phase-2 search packet is allowed to be emitted.
+/// Compute when the first phase-2 search packet is allowed to be emitted.
+///
+/// The jump-start idle grace (`CSearch::JumpStart`) is a stall detector and must
+/// never suppress the first `SEARCH_KEY_REQ`. When phase 1 ate almost the whole
+/// shared `SEARCH_TIMEOUT` (slow rate-limited 0x21 walk), the unclamped grace
+/// pushed the first emit to/past `phase_deadline`, so the loop broke having sent
+/// zero 0x33 — the live "0 results, no 0x33 on the wire" bug. Clamp the first
+/// emit before the deadline so the closest responders are always queried.
 fn compute_initial_jumpstart_emit_at(
     last_lookup_response_at: Option<Instant>,
     now: Instant,
     jumpstart_idle_grace: Duration,
+    phase_deadline: Instant,
 ) -> Instant {
     let Some(last_lookup_response_at) = last_lookup_response_at else {
         return now;
     };
-    let stalled_at = last_lookup_response_at + jumpstart_idle_grace;
-    stalled_at.max(now)
+    let stalled_at = (last_lookup_response_at + jumpstart_idle_grace).max(now);
+    match phase_deadline.checked_sub(JUMPSTART_DEADLINE_MARGIN) {
+        Some(slot) => stalled_at.min(slot).max(now),
+        None => now,
+    }
 }
 
 struct SearchResultDrain<'a> {

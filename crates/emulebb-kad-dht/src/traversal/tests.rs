@@ -921,3 +921,67 @@ async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
     assert_eq!(result.closest.len(), 1);
     assert_eq!(result.closest[0].id, contact.id);
 }
+
+/// Regression for the live "Kad keyword search returns 0 results, zero
+/// KADEMLIA2_SEARCH_KEY_REQ (0x33) on the wire" bug. When phase 1 consumes
+/// nearly the whole shared search budget (a slow, rate-limited 0x21 walk can
+/// eat almost all of `SEARCH_TIMEOUT`), the lookup's last response is recent
+/// when phase 2 starts but only a sliver of the deadline remains. The
+/// unclamped 3s jump-start idle grace then pushed the first emit to/past the
+/// phase deadline, so the drain loop reached the deadline and broke having sent
+/// nothing. The closest contact must still be queried with one SEARCH_KEY_REQ
+/// while any budget remains (eMule `CSearch::JumpStart`/`SendFindValue`).
+#[tokio::test]
+async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budget() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x66; 16]);
+    let contact = TraversalContact {
+        id: NodeId::from_bytes([0x21; 16]),
+        addr: "192.168.1.31:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+
+    let _ = run_search_phase(
+        &rpc,
+        SearchPhaseConfig {
+            responded: std::slice::from_ref(&contact),
+            kind: TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            target,
+            query_timeout: Duration::from_millis(200),
+            // Only ~300ms of budget remains, far shorter than the 3s idle grace.
+            deadline: Instant::now() + Duration::from_millis(300),
+            phase2_fanout: 10,
+            // Lookup just responded -> grace would defer the first emit by 3s.
+            last_lookup_response_at: Some(Instant::now()),
+            jumpstart_idle_grace: Duration::from_secs(3),
+            jumpstart_tick: Duration::from_secs(1),
+            work_class: RpcWorkClass::Interactive,
+            cancel: &CancellationToken::new(),
+            result_tx: None,
+        },
+    )
+    .await;
+
+    let outgoing = transport.drain_outgoing();
+    assert!(
+        outgoing.iter().any(|(_, bytes)| KadPacket::decode(bytes)
+            .map(|p| matches!(p, KadPacket::SearchKeyReq(_)))
+            .unwrap_or(false)),
+        "phase-2 must send at least one SEARCH_KEY_REQ even under a tight deadline; sent {} packets",
+        outgoing.len()
+    );
+}
