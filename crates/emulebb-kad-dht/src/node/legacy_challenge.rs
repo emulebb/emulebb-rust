@@ -272,13 +272,18 @@ mod tests {
         use emulebb_kad_routing::Contact;
 
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
         .unwrap();
         let node_id = id(0x42);
-        let contact_ip = Ipv4Addr::LOCALHOST;
+        // Fake peer at our LAN IP (never loopback; the send below must reach a
+        // bindable/reachable address on the VPN split tunnel).
+        let contact_ip = crate::test_bind_ip();
         // A pre-v7 contact already in the routing table, not yet verified.
         dht.add_contact(Contact::new(node_id, contact_ip, 42007, 42008, 6))
             .await
@@ -324,13 +329,18 @@ mod tests {
         use emulebb_kad_routing::Contact;
 
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
         .unwrap();
         let node_id = id(0x43);
-        let contact_ip = Ipv4Addr::LOCALHOST;
+        // Fake peer at our LAN IP (never loopback; the send below must reach a
+        // bindable/reachable address on the VPN split tunnel).
+        let contact_ip = crate::test_bind_ip();
         dht.add_contact(Contact::new(node_id, contact_ip, 5000, 5001, 6))
             .await
             .unwrap();

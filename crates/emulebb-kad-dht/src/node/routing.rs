@@ -328,7 +328,10 @@ mod tests {
     #[tokio::test]
     async fn hello_contact_uses_advertised_source_udp_port_and_metadata() {
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
@@ -366,7 +369,10 @@ mod tests {
     #[tokio::test]
     async fn hello_skips_udp_firewalled_contact_but_returns_metadata() {
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
@@ -392,7 +398,10 @@ mod tests {
     #[tokio::test]
     async fn verify_contact_flips_verified_only_on_matching_ip() {
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
@@ -419,7 +428,10 @@ mod tests {
     #[tokio::test]
     async fn firewall_check_helpers_filter_to_supported_open_contacts() {
         let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some("127.0.0.1:0".parse().unwrap()),
+            bind_addr: Some(std::net::SocketAddr::new(
+                std::net::IpAddr::V4(crate::test_bind_ip()),
+                0,
+            )),
             ..DhtConfig::default()
         })
         .await
