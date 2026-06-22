@@ -48,6 +48,7 @@ mod metadata;
 mod model;
 mod piece_store;
 mod reask_reciprocity;
+mod reload_index;
 mod requested_block;
 mod salvage;
 mod shared_catalog;
@@ -76,8 +77,8 @@ pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;
 pub(crate) use model::{Ed2kAichHashset, Ed2kClaimedPart, PieceWriteOutcome};
 pub use model::{
-    Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kSourceHint,
-    Ed2kTransferJob, Ed2kTransferState,
+    Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
+    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
 use source_exchange::SourceExchangeState;
 use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;

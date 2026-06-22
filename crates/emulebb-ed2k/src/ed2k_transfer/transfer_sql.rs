@@ -56,6 +56,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         transfer_row_removed: manifest.transfer_row_removed,
         delivered_path: manifest.delivered_path.clone(),
         source_path: manifest.source_path.clone(),
+        source_mtime_ms: manifest.source_mtime_ms,
     }
 }
 
@@ -122,6 +123,7 @@ pub(super) fn manifest_from_metadata(
         transfer_row_removed: manifest.transfer_row_removed,
         delivered_path: manifest.delivered_path,
         source_path: manifest.source_path,
+        source_mtime_ms: manifest.source_mtime_ms,
     })
 }
 
@@ -183,6 +185,7 @@ mod tests {
             transfer_row_removed: false,
             delivered_path: None,
             source_path: None,
+            source_mtime_ms: None,
         }
     }
 

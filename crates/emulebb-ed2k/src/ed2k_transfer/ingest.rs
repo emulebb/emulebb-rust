@@ -1,6 +1,8 @@
 //! Local payload ingest into the ED2K transfer store.
 
+use std::fs::Metadata;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 
@@ -82,6 +84,12 @@ impl Ed2kTransferRuntime {
         let aich_hashset = build_aich_hashset_from_payload(&source_path, metadata.len())?;
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.display().to_string());
+        // Record the source file's last-modified time so the incremental
+        // shared-directory reload can compare it against the on-disk mtime and
+        // skip re-hashing an unchanged file. A platform that cannot report mtime
+        // simply leaves this `None`, which the reload treats as a miss (re-hash
+        // once), so correctness never depends on mtime being available.
+        manifest.source_mtime_ms = source_mtime_ms(&metadata);
         manifest.completed = true;
         manifest.md4_hashset_acquired = true;
         manifest.md4_hashset = md4_hashset.iter().map(hex::encode).collect();
@@ -114,4 +122,26 @@ impl Ed2kTransferRuntime {
             transfer_dir: transfer_dir.display().to_string(),
         })
     }
+}
+
+/// Convert a file's last-modified time to Unix milliseconds for the
+/// share-in-place reload comparison, or `None` when the platform/filesystem does
+/// not report it or the timestamp predates the Unix epoch. Truncating to whole
+/// milliseconds keeps the value stable across the round-trip through the
+/// `INTEGER` metadata column, so the same unchanged file compares equal on a
+/// later reload.
+pub(crate) fn source_mtime_ms(metadata: &Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    let millis = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    i64::try_from(millis).ok()
+}
+
+/// Stat a resolved long-path source for the incremental reload, returning
+/// `(file_size, mtime_ms)`. `None` when the file is missing/unreadable (treated
+/// as a miss, so it is (re)hashed). The size pairs with the persisted manifest
+/// `file_size` and the mtime with `source_mtime_ms` so a match on all three
+/// (plus the path key) lets the reload skip re-hashing.
+pub(crate) fn stat_source_identity(source_path: &Path) -> Option<(u64, Option<i64>)> {
+    let metadata = std::fs::metadata(source_path).ok()?;
+    Some((metadata.len(), source_mtime_ms(&metadata)))
 }

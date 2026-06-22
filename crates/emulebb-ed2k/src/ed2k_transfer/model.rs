@@ -179,6 +179,21 @@ pub struct Ed2kLocalIngestSummary {
     pub transfer_dir: String,
 }
 
+/// One persisted share-in-place entry used by the incremental shared-directory
+/// reload to decide whether a scanned file can be reused without re-hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ed2kReloadIndexEntry {
+    /// ED2K file hash of the persisted share (lowercase hex), used to resolve the
+    /// reused `LocalShare` without re-hashing the payload.
+    pub file_hash: String,
+    /// File size recorded in the persisted manifest, compared against the on-disk
+    /// size to detect a changed file.
+    pub file_size: u64,
+    /// Source last-modified time (Unix ms) recorded at ingest, compared against
+    /// the on-disk mtime. `None` for a pre-v9 row (always a reload miss).
+    pub source_mtime_ms: Option<i64>,
+}
+
 /// One pending LowID callback download intent remembered until a peer calls back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kCallbackIntent {
@@ -265,6 +280,15 @@ pub struct Ed2kResumeManifest {
     /// `None` for a real download whose payload lives in the piece store.
     #[serde(default)]
     pub source_path: Option<String>,
+    /// Last-modified time (Unix milliseconds) of the share-in-place source file
+    /// captured at ingest. The incremental shared-directory reload compares this
+    /// (plus `source_path` and `file_size`) against the on-disk `fs::metadata`
+    /// and reuses this manifest instead of re-hashing when all three match.
+    /// `None` for a real download or a share-in-place manifest written before
+    /// this field existed (treated as a reload miss, so the file is re-hashed
+    /// once and the mtime is then recorded).
+    #[serde(default)]
+    pub source_mtime_ms: Option<i64>,
 }
 
 impl Ed2kResumeManifest {
@@ -302,6 +326,7 @@ impl Ed2kResumeManifest {
             transfer_row_removed: false,
             delivered_path: None,
             source_path: None,
+            source_mtime_ms: None,
         }
     }
 
