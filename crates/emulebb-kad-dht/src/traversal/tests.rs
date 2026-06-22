@@ -443,6 +443,83 @@ fn test_select_phase2_contacts_respects_fanout_ceiling() {
     assert_eq!(selected.len(), 3);
 }
 
+/// Regression for the Kad keyword search returning 0 results on the live wire:
+/// phase 2 must keep collecting SEARCH_RES for the full traversal `deadline`,
+/// not just for one per-node `query_timeout` window. Here a SEARCH_RES arrives
+/// well after `query_timeout` has elapsed but comfortably before `deadline`;
+/// the previous code capped the phase at `query_timeout` and dropped it.
+#[tokio::test]
+async fn test_run_search_phase_collects_results_after_query_timeout_until_deadline() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let injector = transport.injector();
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x55; 16]);
+    let contact = TraversalContact {
+        id: NodeId::from_bytes([0x66; 16]),
+        addr: "192.168.1.30:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    let (result_tx, mut result_rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        // Deliver the only SEARCH_RES *after* the old per-node query window
+        // (40ms) would have closed the phase, but before the deadline (400ms).
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let res = KadPacket::SearchRes(SearchRes {
+            sender_id: contact.id,
+            target,
+            results: vec![emulebb_kad_proto::packet::SearchResultEntry {
+                entry_id: Ed2kHash::from_bytes([0x77; 16]),
+                tags: vec![],
+            }],
+        });
+        injector
+            .send((res.encode().unwrap(), contact.addr))
+            .await
+            .unwrap();
+    });
+
+    let _ = run_search_phase(
+        &rpc,
+        SearchPhaseConfig {
+            responded: std::slice::from_ref(&contact),
+            kind: TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            target,
+            // Short per-node window: with the old `qt = query_timeout` cap the
+            // phase would end at ~40ms and never see the 120ms response.
+            query_timeout: Duration::from_millis(40),
+            deadline: Instant::now() + Duration::from_millis(400),
+            phase2_fanout: 1,
+            last_lookup_response_at: None,
+            jumpstart_idle_grace: Duration::ZERO,
+            jumpstart_tick: Duration::from_millis(10),
+            work_class: RpcWorkClass::Interactive,
+            cancel: &CancellationToken::new(),
+            result_tx: Some(result_tx),
+        },
+    )
+    .await;
+
+    let streamed = result_rx
+        .recv()
+        .await
+        .expect("result collected after query_timeout");
+    assert_eq!(streamed.0, Ed2kHash::from_bytes([0x77; 16]));
+}
+
 #[tokio::test]
 async fn test_run_search_phase_collects_multiple_search_res_packets() {
     let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));

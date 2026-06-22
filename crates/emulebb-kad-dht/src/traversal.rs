@@ -623,9 +623,18 @@ async fn run_search_phase(
     if now >= deadline {
         return vec![];
     }
-    let remaining = deadline - now;
-    let qt = query_timeout.min(remaining);
-    let phase_deadline = Instant::now() + qt;
+    // Phase 2 must keep collecting SEARCH_RES for the FULL remaining search
+    // budget, not just one per-node query window. `query_timeout` bounds an
+    // individual lookup REQ/RES round-trip in phase 1; reusing it as the whole
+    // phase-2 deadline starved result collection, because the jump-start walk
+    // only emits one SEARCH_KEY_REQ per `jumpstart_tick` after a multi-second
+    // idle grace — with a ~10s cap the furthest closest-set nodes were never
+    // queried and the late ones had no window to answer, so every keyword
+    // collected 0 entries even when results exist. eMule keeps a Kad search
+    // alive for its whole lifetime (SEARCH_LIFETIME), walking and collecting in
+    // parallel; mirror that by running until the traversal `deadline`.
+    let phase_deadline = deadline;
+    let qt = phase_deadline.saturating_duration_since(now);
 
     let send_to = select_phase2_contacts(responded, target, phase2_fanout);
 
@@ -656,7 +665,11 @@ async fn run_search_phase(
             break;
         }
         let receive_until = if pending_contacts.is_empty() {
-            phase_deadline
+            // All closest nodes have been walked: keep draining until the full
+            // phase deadline, but wake at least every `query_timeout` so the
+            // cancel/deadline checks stay responsive instead of parking on one
+            // long blocking receive.
+            (now + query_timeout).min(phase_deadline)
         } else {
             next_emit_at.min(phase_deadline)
         };
