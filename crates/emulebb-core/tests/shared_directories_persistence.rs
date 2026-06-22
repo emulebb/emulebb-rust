@@ -124,8 +124,11 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         .unwrap();
         let shares = core.reload_shared_directories().await.unwrap();
         let first_share = require_share_by_name(&shares, "Persisted Unicode äöü.bin");
+        // Share-in-place: the file is seeded directly from its original on-disk
+        // path and must NOT be copied into the internal piece store.
+        assert_no_piece_store_copy(&first_share);
         assert_eq!(
-            fs::read(share_payload_path(&first_share)).unwrap(),
+            fs::read(nested_root.join("Persisted Unicode äöü.bin")).unwrap(),
             first_payload
         );
         first_share.hash
@@ -147,8 +150,9 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     let existing_first_share = require_share_by_name(&existing_shares, "Persisted Unicode äöü.bin");
     assert_eq!(existing_first_share.hash, first_hash);
     assert!(PathBuf::from(&existing_first_share.transfer_dir).is_dir());
+    assert_no_piece_store_copy(&existing_first_share);
     assert_eq!(
-        fs::read(share_payload_path(&existing_first_share)).unwrap(),
+        fs::read(nested_root.join("Persisted Unicode äöü.bin")).unwrap(),
         first_payload
     );
 
@@ -157,12 +161,10 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         shared_file_names(reloaded_shares.clone()),
         vec!["Persisted Unicode äöü.bin", "Reloaded Tree Payload.bin"]
     );
+    let second_share = require_share_by_name(&reloaded_shares, "Reloaded Tree Payload.bin");
+    assert_no_piece_store_copy(&second_share);
     assert_eq!(
-        fs::read(share_payload_path(&require_share_by_name(
-            &reloaded_shares,
-            "Reloaded Tree Payload.bin"
-        )))
-        .unwrap(),
+        fs::read(shared_root.join("Reloaded Tree Payload.bin")).unwrap(),
         second_payload
     );
 }
@@ -247,6 +249,90 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     assert_eq!(core.shared_directories().await.hashing_count, 0);
 }
 
+/// Sharing a directory of already-complete files must NOT run any file through
+/// the download-completion delivery path: nothing may be copied into the
+/// incoming dir, and nothing may be copied into the internal piece store. This
+/// is the regression guard for the bug where each shared complete file was
+/// treated as a "completed transfer" and duplicated into incoming + transfers.
+#[tokio::test]
+async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() {
+    let runtime_dir = unique_test_dir("share-no-delivery");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let shared_root = runtime_dir.join("library");
+    let incoming_dir = runtime_dir.join("incoming");
+    fs::create_dir_all(&shared_root).unwrap();
+
+    let payloads = [
+        (
+            "Complete.Movie.One.bin",
+            &b"complete shared payload one xxxx"[..],
+        ),
+        (
+            "Complete.Movie.Two.bin",
+            &b"complete shared payload two yyyy"[..],
+        ),
+        (
+            "Complete.Movie.Three.bin",
+            &b"complete shared payload three z"[..],
+        ),
+    ];
+    for (name, payload) in payloads {
+        fs::write(shared_root.join(name), payload).unwrap();
+    }
+
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap()
+    .with_incoming_dir(incoming_dir.clone());
+
+    core.set_shared_directories(SharedDirectoriesUpdate {
+        roots: vec![SharedDirectoryRootUpdate::Object {
+            path: shared_root.display().to_string(),
+            recursive: true,
+        }],
+        confirm_replace_roots: true,
+    })
+    .await
+    .unwrap();
+
+    let shares = core.reload_shared_directories().await.unwrap();
+    assert_eq!(shares.len(), payloads.len(), "every file must be shared");
+
+    // The startup delivery sweep (run by the daemon on boot) must treat these
+    // shared complete files as share-in-place and deliver NOTHING.
+    core.deliver_pending_completed_transfers().await;
+
+    // (1) The incoming dir was never created / never received a copy.
+    if incoming_dir.exists() {
+        let entries: Vec<_> = fs::read_dir(&incoming_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "no shared complete file may be delivered to incoming, found: {entries:?}",
+        );
+    }
+
+    // (2) No shared file was copied into the internal piece store, and the
+    // original files are untouched.
+    for share in &shares {
+        assert_no_piece_store_copy(share);
+    }
+    for (name, payload) in payloads {
+        assert_eq!(
+            fs::read(shared_root.join(name)).unwrap(),
+            payload,
+            "the operator's original {name} must be untouched",
+        );
+    }
+}
+
 /// Poll until the live `hashingCount` reaches 0 (the background reload worker has
 /// finished the whole library), or panic after a generous timeout.
 async fn wait_for_hashing_idle(core: &EmulebbCore) {
@@ -276,10 +362,19 @@ fn require_share_by_name(shares: &[LocalShare], name: &str) -> LocalShare {
         .unwrap_or_else(|| panic!("shared directory reload did not publish {name}"))
 }
 
-fn share_payload_path(share: &LocalShare) -> PathBuf {
-    let path = PathBuf::from(&share.transfer_dir);
-    assert!(path.is_dir());
-    path.join("pieces.bin")
+/// A shared, already-complete file is seeded IN PLACE: the daemon must never
+/// copy its payload into the internal piece store (`transfer_dir/pieces.bin`).
+/// The transfer dir still exists (it holds the resume manifest), but the bulky
+/// payload bytes are never duplicated there.
+fn assert_no_piece_store_copy(share: &LocalShare) {
+    let transfer_dir = PathBuf::from(&share.transfer_dir);
+    assert!(transfer_dir.is_dir(), "transfer dir must hold the manifest");
+    let piece_store = transfer_dir.join("pieces.bin");
+    assert!(
+        !piece_store.exists(),
+        "shared complete file must NOT be copied into the piece store ({})",
+        piece_store.display(),
+    );
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {

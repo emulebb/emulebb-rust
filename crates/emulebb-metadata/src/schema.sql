@@ -237,6 +237,12 @@ CREATE TABLE transfers (
     -- global incoming dir). NULL until the transfer completes and is delivered;
     -- set once and used to make delivery idempotent across restarts.
     delivered_path TEXT,
+    -- Original on-disk path of a shared, already-complete file that is seeded
+    -- IN PLACE (added via a shared directory, never downloaded). NON-NULL marks
+    -- the transfer as a share-in-place: its payload is read directly from this
+    -- path for upload serving, it is NEVER copied into the internal piece store,
+    -- and it is NEVER delivered to the incoming dir. NULL for a real download.
+    source_path TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     completed_at_ms INTEGER,

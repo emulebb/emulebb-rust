@@ -6,28 +6,41 @@
 use std::{fs, path::Path};
 
 use emulebb_kad_proto::Ed2kHash;
+use md4::{Digest, Md4};
 
 use super::super::{ED2K_PART_SIZE, Ed2kDeliveryOutcome, Ed2kTransferRuntime, new_transfer_job};
-use super::write_repeating_pattern_file;
 use crate::long_path::long_path;
 use crate::paths::unique_test_dir;
 
-/// Ingest a local payload (a fully verified, completed transfer with a real
-/// piece store) so the delivery tests have a finished file to materialize.
+/// Build a fully verified, completed DOWNLOAD transfer with a real internal
+/// piece store (the bytes live in `transfer_dir/pieces.bin`, `source_path` is
+/// `None`) so the delivery tests have a finished downloaded file to materialize.
+/// Delivery is download-only, so the fixture must be a download, not a
+/// share-in-place ingest.
 async fn ingest_completed(
     runtime: &Ed2kTransferRuntime,
-    root: &Path,
+    _root: &Path,
     canonical_name: &str,
 ) -> String {
-    let source_dir = root.join("source");
-    fs::create_dir_all(&source_dir).unwrap();
-    let source_path = source_dir.join("payload.bin");
-    write_repeating_pattern_file(&source_path, 1_048_576, b"emulebb-delivery-payload");
+    // A single-part payload (< one ED2K part) so one verified piece completes it.
+    let mut payload = Vec::with_capacity(1_048_576);
+    while payload.len() < 1_048_576 {
+        payload.extend_from_slice(b"emulebb-delivery-payload");
+    }
+    payload.truncate(1_048_576);
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let file_hash_hex = file_hash.to_string();
+    let job = new_transfer_job(file_hash, canonical_name.to_string(), payload.len() as u64);
+    runtime.ensure_job(&job).await.unwrap();
     runtime
-        .ingest_local_file(&source_path, canonical_name)
+        .store_md4_hashset(&file_hash_hex, Vec::new())
         .await
-        .unwrap()
-        .file_hash
+        .unwrap();
+    runtime
+        .store_piece_data(&file_hash_hex, 0, &payload)
+        .await
+        .unwrap();
+    file_hash_hex
 }
 
 #[tokio::test]

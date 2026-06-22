@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 use tracing::debug;
 
+use crate::long_path::long_path;
+
 use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
@@ -482,7 +484,13 @@ impl Ed2kTransferRuntime {
             {
                 return Ok(None);
             }
-            self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME)
+            // Share-in-place: serve upload bytes straight from the original
+            // on-disk file (never copied into the piece store). A real download
+            // reads from the internal piece store.
+            match manifest.source_path.as_deref() {
+                Some(source_path) => long_path(std::path::Path::new(source_path)),
+                None => self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
+            }
         };
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)

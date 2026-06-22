@@ -468,10 +468,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     // delivery) so a restart never leaves a finished file undelivered.
     core.deliver_pending_completed_transfers().await;
     // Initial scan-on-demand pickup of the already-present shared files, then
-    // start the live auto-pickup monitor so files added/removed while the daemon
-    // runs are caught (eMule directory auto-monitor parity). The monitor is torn
-    // down by the graceful teardown's disconnect_ed2k.
-    if let Err(error) = core.reload_shared_directories().await {
+    // start the live auto-pickup monitor (eMule directory auto-monitor parity);
+    // the monitor is torn down by the graceful teardown's disconnect_ed2k. Use
+    // the DETACHED variant so REST readiness is never blocked on hashing the
+    // shared library (a large library hashes far longer than any client timeout):
+    // the scan returns once files are enumerated and hashes in the background
+    // (`hashingCount` tracks progress); shares are seeded in place, not copied.
+    if let Err(error) = core.reload_shared_directories_detached().await {
         tracing::warn!(%error, "initial shared-directory scan failed; continuing");
     }
     core.start_shared_directory_monitor().await;

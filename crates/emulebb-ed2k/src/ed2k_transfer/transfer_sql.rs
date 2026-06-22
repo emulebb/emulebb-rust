@@ -55,6 +55,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         control_state: manifest.control_state.clone(),
         transfer_row_removed: manifest.transfer_row_removed,
         delivered_path: manifest.delivered_path.clone(),
+        source_path: manifest.source_path.clone(),
     }
 }
 
@@ -120,6 +121,7 @@ pub(super) fn manifest_from_metadata(
         control_state: manifest.control_state,
         transfer_row_removed: manifest.transfer_row_removed,
         delivered_path: manifest.delivered_path,
+        source_path: manifest.source_path,
     })
 }
 
@@ -180,6 +182,7 @@ mod tests {
             control_state: None,
             transfer_row_removed: false,
             delivered_path: None,
+            source_path: None,
         }
     }
 

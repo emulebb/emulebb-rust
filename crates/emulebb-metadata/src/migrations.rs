@@ -27,11 +27,15 @@
 //!   `peers.secure_ident_pubkey_len INTEGER NOT NULL DEFAULT 0`.
 //! - v6 -> v7: `transfers.delivered_path TEXT` (nullable) — the absolute path a
 //!   completed payload was materialized to by its canonical name.
+//! - v7 -> v8: `transfers.source_path TEXT` (nullable) — the original on-disk
+//!   path of a shared, already-complete file seeded in place (added via a shared
+//!   directory, never downloaded). NON-NULL marks a share-in-place transfer that
+//!   is served directly from this path and never copied/delivered.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
 //! applying it to any real older DB (whatever intermediate shape it is in)
-//! converges on the v7 shape without ever dropping user data. Each step runs in
+//! converges on the v8 shape without ever dropping user data. Each step runs in
 //! its own transaction and bumps the stored marker only after the change
 //! commits, so an interrupted upgrade resumes cleanly from the last good
 //! version.
@@ -123,6 +127,9 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
         }
         // v6 -> v7: absolute path a completed payload was delivered to by name.
         7 => add_column_if_missing(tx, "transfers", "delivered_path", "TEXT"),
+        // v7 -> v8: original on-disk path of a shared, complete file seeded in
+        // place (never copied/delivered). NULL for a real download.
+        8 => add_column_if_missing(tx, "transfers", "source_path", "TEXT"),
         other => bail!("no metadata migration defined for schema version v{other}"),
     }
 }
@@ -284,6 +291,7 @@ mod tests {
             ("peers", "secure_ident_pubkey"),
             ("peers", "secure_ident_pubkey_len"),
             ("transfers", "delivered_path"),
+            ("transfers", "source_path"),
         ] {
             let tx = conn.transaction().unwrap();
             assert!(

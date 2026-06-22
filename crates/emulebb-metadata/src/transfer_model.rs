@@ -24,6 +24,12 @@ pub struct MetadataTransferManifest {
     /// name, or `None` until the transfer is delivered. Persisted on the
     /// `transfers` row to make finished-file delivery idempotent across restarts.
     pub delivered_path: Option<String>,
+    /// Original on-disk path of a shared, already-complete file seeded IN PLACE
+    /// (added via a shared directory, never downloaded). `Some` marks a
+    /// share-in-place transfer: its payload is read directly from this path for
+    /// upload serving, it is never copied into the internal piece store, and it
+    /// is never delivered to the incoming dir. `None` for a real download.
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

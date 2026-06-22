@@ -24,6 +24,7 @@ mod file_status_parts;
 mod inbound_admission;
 mod reask_reciprocity;
 mod salvage;
+mod share_in_place;
 mod shared_entry;
 mod source_exchange;
 mod source_hints;

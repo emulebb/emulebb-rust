@@ -2289,13 +2289,17 @@ impl EmulebbCore {
 
     fn transfer_from_manifest(&self, manifest: &Ed2kResumeManifest, state_name: &str) -> Transfer {
         let parts_total = manifest.pieces.len() as u32;
+        // A share-in-place file lives at (and is served from) its original path;
+        // a real download reports its internal piece-store payload path.
         let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
-            self.ed2k_transfers
-                .payload_path(&manifest.file_hash)
-                .display()
-                .to_string(),
+            manifest.source_path.clone().unwrap_or_else(|| {
+                self.ed2k_transfers
+                    .payload_path(&manifest.file_hash)
+                    .display()
+                    .to_string()
+            }),
             self.ed2k_transfers
                 .download_speed_bytes_per_sec(&manifest.file_hash),
             self.ed2k_transfers

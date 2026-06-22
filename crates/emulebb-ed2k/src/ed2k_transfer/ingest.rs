@@ -10,7 +10,7 @@ use super::hashset::{build_aich_hashset_from_payload, build_md4_hashset_from_pay
 use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::{
     Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kTransferRuntime,
-    Ed2kTransferState, PAYLOAD_FILE_NAME, expected_piece_length, new_transfer_job,
+    Ed2kTransferState, expected_piece_length, new_transfer_job,
 };
 
 impl Ed2kTransferRuntime {
@@ -62,23 +62,18 @@ impl Ed2kTransferRuntime {
                     transfer_dir.display()
                 )
             })?;
-        let payload_path = transfer_dir.join(PAYLOAD_FILE_NAME);
-        let source_matches_payload = payload_path.exists()
-            && payload_path.canonicalize().ok().as_deref() == Some(source_path.as_path());
-        if !source_matches_payload {
-            tokio::fs::copy(&source_path, &payload_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to copy local ingest payload {} -> {}",
-                        source_path.display(),
-                        payload_path.display()
-                    )
-                })?;
-        }
-
-        let aich_hashset = build_aich_hashset_from_payload(&payload_path, metadata.len())?;
+        // Seed the shared, already-complete file IN PLACE: it is served for
+        // upload directly from its original on-disk path. We deliberately do NOT
+        // copy it into the internal piece store (`transfer_dir/pieces.bin`),
+        // which would duplicate the whole (potentially hundreds-of-GB) library
+        // on disk, and the manifest records `source_path` so the upload-serving
+        // read path resolves to the original file and finished-file delivery
+        // skips it (delivery is download-only). The transfer dir still exists to
+        // hold the resume manifest; only the payload bytes are never duplicated.
+        // AICH/MD4 are computed straight from the original file.
+        let aich_hashset = build_aich_hashset_from_payload(&source_path, metadata.len())?;
         let mut manifest = Ed2kResumeManifest::new(&job);
+        manifest.source_path = Some(source_path.display().to_string());
         manifest.completed = true;
         manifest.md4_hashset_acquired = true;
         manifest.md4_hashset = md4_hashset.iter().map(hex::encode).collect();

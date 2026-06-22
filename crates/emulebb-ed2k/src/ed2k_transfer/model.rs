@@ -257,6 +257,14 @@ pub struct Ed2kResumeManifest {
     /// Incoming/category folder by name).
     #[serde(default)]
     pub delivered_path: Option<String>,
+    /// Original on-disk path of a shared, already-complete file seeded IN PLACE
+    /// (added via a shared directory, never downloaded). `Some` marks a
+    /// share-in-place transfer: its payload is served directly from this path,
+    /// never copied into the internal piece store (`transfer_dir/pieces.bin`),
+    /// and never delivered to the incoming dir (delivery is download-only).
+    /// `None` for a real download whose payload lives in the piece store.
+    #[serde(default)]
+    pub source_path: Option<String>,
 }
 
 impl Ed2kResumeManifest {
@@ -293,6 +301,7 @@ impl Ed2kResumeManifest {
             control_state: None,
             transfer_row_removed: false,
             delivered_path: None,
+            source_path: None,
         }
     }
 

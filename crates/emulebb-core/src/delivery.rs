@@ -62,6 +62,12 @@ impl EmulebbCore {
         if !manifest.completed {
             return;
         }
+        // A shared, already-complete file is seeded IN PLACE from its original
+        // on-disk path; it was never downloaded, so it must NEVER be delivered
+        // (copied) into the incoming dir. Delivery is download-only.
+        if manifest.source_path.is_some() {
+            return;
+        }
         let dest_dir = self.delivery_destination_dir(&manifest).await;
         match self
             .ed2k_transfers
@@ -90,7 +96,12 @@ impl EmulebbCore {
             }
         };
         for manifest in manifests {
-            if manifest.completed && manifest.delivered_path.is_none() {
+            // Skip share-in-place files (seeded from their original path, never
+            // downloaded): they are not delivery candidates.
+            if manifest.completed
+                && manifest.delivered_path.is_none()
+                && manifest.source_path.is_none()
+            {
                 self.deliver_completed_transfer(&manifest.file_hash).await;
             }
         }
