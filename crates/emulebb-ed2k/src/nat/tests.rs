@@ -220,6 +220,82 @@ async fn stop_releases_selected_backend_before_fallback_backends() {
 }
 
 #[tokio::test]
+async fn reconcile_now_awaits_mapping_before_returning() {
+    // Connection ordering: reconcile_now must run the reconcile synchronously so a
+    // caller can await the forwarded port BEFORE sending the eD2k login (HighID on
+    // first connect). On return the mapped external port is already in status.
+    let provider = Arc::new(FakeProvider {
+        name: UPNP_MINIUPNPC_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: true,
+        backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
+        bind_ip: Some("192.0.2.10".to_string()),
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider.clone())
+    .build();
+
+    manager.reconcile_now().await.unwrap();
+
+    assert_eq!(provider.reconcile_calls.load(Ordering::SeqCst), 1);
+    let status = manager.status().await;
+    assert_eq!(status.mappings.len(), 1);
+    assert_eq!(status.backend.as_deref(), Some(UPNP_MINIUPNPC_BACKEND));
+}
+
+#[tokio::test]
+async fn reconcile_now_is_noop_when_disabled() {
+    // NAT disabled / no mappings is "definitively unavailable": reconcile_now
+    // returns Ok immediately so connect proceeds without waiting and never calls a
+    // backend.
+    let provider = Arc::new(FakeProvider {
+        name: UPNP_MINIUPNPC_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: false,
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider.clone())
+    .build();
+
+    manager.reconcile_now().await.unwrap();
+
+    assert_eq!(provider.reconcile_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reconcile_now_propagates_backend_failure() {
+    // Every backend failing surfaces as Err so the caller can log it and connect
+    // best-effort with internal ports instead of blocking startup.
+    let provider = Arc::new(FakeProvider {
+        name: UPNP_MINIUPNPC_BACKEND,
+        failures_before_success: AtomicUsize::new(1),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let manager = NatManagerBuilder::new(NatConfig {
+        enabled: true,
+        backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
+        ..NatConfig::default()
+    })
+    .with_mappings(vec![sample_mapping()])
+    .with_provider(provider.clone())
+    .build();
+
+    assert!(manager.reconcile_now().await.is_err());
+    assert_eq!(provider.reconcile_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn status_snapshot_detaches_current_state() {
     let mut status = NatStatus {
         enabled: true,

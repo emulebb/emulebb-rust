@@ -364,6 +364,33 @@ impl NatManager {
         Ok(())
     }
 
+    /// Runs a single reconcile pass synchronously and returns once the port
+    /// mappings are confirmed complete (or definitively unavailable).
+    ///
+    /// Connection ordering (bind -> VPN guard -> UPnP await -> connect): the eD2k
+    /// server login must announce an already-forwarded listen port to win HighID on
+    /// the first connect. The background [`start`] loop only *spawns* the reconcile,
+    /// so a login sent right after `start` races the async forward and announces the
+    /// internal (unmapped) port, yielding LowID. Callers await this before sending
+    /// the login so the mapped external port is in [`status`] first.
+    ///
+    /// Returns `Ok(())` when a reconcile succeeded *or* when NAT is disabled / has no
+    /// mappings (definitively unavailable — nothing to wait for). Returns `Err` when
+    /// every backend failed, so the caller can proceed to connect anyway (best
+    /// effort) after logging the reason.
+    pub async fn reconcile_now(&self) -> Result<()> {
+        if !self.config.enabled || self.mappings.is_empty() {
+            return Ok(());
+        }
+        reconcile_once(
+            &self.config,
+            &self.mappings,
+            &self.providers,
+            Arc::clone(&self.status),
+        )
+        .await
+    }
+
     /// Stops NAT reconciliation and asks providers to release active mappings.
     pub async fn stop(&self) -> Result<()> {
         self.shutdown.store(true, Ordering::SeqCst);
