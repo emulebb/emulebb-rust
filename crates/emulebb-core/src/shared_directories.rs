@@ -167,6 +167,8 @@ pub(crate) async fn scan_shared_directory_roots(
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
+
 use crate::{EmulebbCore, LocalShare, LocalShareCreate};
 
 /// Resets the live `hashingCount` to 0 on any exit path (success, hash error, or
@@ -197,6 +199,94 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
     Ok(file_paths)
 }
 
+/// Outcome of partitioning a freshly scanned shared-file list against the
+/// persisted share-in-place index: the files that still need (re)hashing plus a
+/// count of unchanged files skipped (for logging / the live `hashingCount`).
+struct ReloadHashTarget {
+    /// The scanned file to (re)hash via `share_local_file`.
+    path: PathBuf,
+    /// When this file was already in the persisted index under a DIFFERENT
+    /// identity (its size/mtime changed), the hash of that now-stale manifest.
+    /// If re-hashing yields a different hash, the stale manifest is removed so a
+    /// changed file does not leave a duplicate share for the same source path.
+    stale_hash: Option<String>,
+}
+
+struct ReloadPlan {
+    /// Files that are new, changed (size/mtime), or whose persisted manifest has
+    /// no recorded mtime yet -- each gets hashed via `share_local_file`.
+    to_hash: Vec<ReloadHashTarget>,
+    /// File hashes of scanned files reused from the persisted index without
+    /// rehashing. Used to resolve their `Localshare`s for the reload result so an
+    /// unchanged file still appears in the returned set.
+    reused_hashes: Vec<String>,
+}
+
+/// Decide which scanned files actually need (re)hashing on this reload.
+///
+/// This is the incremental skip: a scanned file whose long-path-normalized path
+/// is already in the persisted share-in-place index with a matching on-disk
+/// `(file_size, mtime)` is reused as-is (its complete manifest, hash, catalog and
+/// index entry already persist), so the (potentially hundreds-of-GB) payload is
+/// never re-read. A file that is new, resized, re-timestamped, or whose persisted
+/// manifest predates the recorded-mtime column (mtime `None`) falls through to
+/// `to_hash` and is hashed exactly as before.
+///
+/// The stat work runs on the blocking pool: statting every file in a large
+/// library is cheap relative to hashing but still touches the filesystem, so it
+/// must not run on a tokio worker thread.
+async fn plan_incremental_reload(
+    core: &EmulebbCore,
+    file_paths: Vec<PathBuf>,
+) -> Result<ReloadPlan> {
+    let index = core.ed2k_transfers.share_in_place_reload_index().await?;
+    tokio::task::spawn_blocking(move || {
+        let mut to_hash = Vec::new();
+        let mut reused_hashes = Vec::new();
+        for path in file_paths {
+            // Stat the scanned file with the same long-path normalization the
+            // persisted index keys use. A file that cannot be stat-ed is treated
+            // as needing a hash (the ingest path will surface the real error).
+            match Ed2kTransferRuntime::scanned_source_identity(&path) {
+                Some((key, size, mtime_ms)) => match index.get(&key) {
+                    // Reuse only on an exact size + mtime match, and only when the
+                    // persisted manifest actually recorded an mtime (pre-v9 rows
+                    // store `None`, so they are rehashed once to backfill it).
+                    Some(entry)
+                        if entry.file_size == size
+                            && entry.source_mtime_ms.is_some()
+                            && entry.source_mtime_ms == mtime_ms =>
+                    {
+                        reused_hashes.push(entry.file_hash.clone());
+                    }
+                    // Known path whose identity changed: re-hash and remember the
+                    // now-stale hash so a content change does not leave a duplicate
+                    // share for the same source path.
+                    Some(entry) => to_hash.push(ReloadHashTarget {
+                        path,
+                        stale_hash: Some(entry.file_hash.clone()),
+                    }),
+                    // Brand-new path: hash it, nothing stale to clean up.
+                    None => to_hash.push(ReloadHashTarget {
+                        path,
+                        stale_hash: None,
+                    }),
+                },
+                None => to_hash.push(ReloadHashTarget {
+                    path,
+                    stale_hash: None,
+                }),
+            }
+        }
+        ReloadPlan {
+            to_hash,
+            reused_hashes,
+        }
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Synchronous core primitive: scan + hash + share the whole library, returning
 /// the full set of shares once it is fully indexed.
 ///
@@ -211,22 +301,56 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
 /// reaching 0 when the library is fully indexed.
 pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<LocalShare>> {
     let file_paths = scan_shared_files(core).await?;
+    // Incremental skip: only (re)hash files that are new or whose size/mtime
+    // changed since the last index; unchanged files keep their persisted shares.
+    let plan = plan_incremental_reload(core, file_paths).await?;
+    // `hashingCount` reflects only the files actually being hashed, so an
+    // unchanged library reports ~0 and REST stays responsive.
     core.shared_hashing_count
-        .store(file_paths.len() as i64, Ordering::Relaxed);
+        .store(plan.to_hash.len() as i64, Ordering::Relaxed);
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
 
     let mut shares = Vec::new();
-    for path in file_paths {
-        shares.push(
-            core.share_local_file(LocalShareCreate {
-                path: path.display().to_string(),
+    // Unchanged files were not re-hashed but are still shared, so resolve their
+    // already-persisted shares so the returned set reflects the whole library.
+    for hash in &plan.reused_hashes {
+        if let Some(share) = core.share(hash).await {
+            shares.push(share);
+        }
+    }
+    for target in plan.to_hash {
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: target.path.display().to_string(),
                 name: None,
             })
-            .await?,
-        );
+            .await?;
+        forget_stale_share(core, target.stale_hash.as_deref(), &share.hash).await;
+        shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
     Ok(shares)
+}
+
+/// After re-hashing a changed share-in-place file, drop the manifest of the
+/// file's PREVIOUS identity (a different hash for the same source path) so a
+/// content change does not leave a duplicate, unreachable share. A no-op when the
+/// hash is unchanged (same content, only mtime moved) or there was no prior
+/// entry.
+async fn forget_stale_share(core: &EmulebbCore, stale_hash: Option<&str>, new_hash: &str) {
+    let Some(stale_hash) = stale_hash else {
+        return;
+    };
+    if stale_hash.eq_ignore_ascii_case(new_hash) {
+        return;
+    }
+    if let Err(error) = core.ed2k_transfers.delete_transfer_files(stale_hash).await {
+        tracing::warn!(
+            stale_hash,
+            error = %error,
+            "failed to remove the stale manifest of a changed shared file",
+        );
+    }
 }
 
 /// Kick a full shared-directory scan + hash on a **detached** background task and
@@ -249,28 +373,47 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
 /// one bad file never aborts indexing of the rest of the library.
 pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
     let file_paths = scan_shared_files(core).await?;
-    let queued = file_paths.len();
+    let scanned = file_paths.len();
+    // Incremental skip: an unchanged file (same path + size + mtime as its
+    // persisted manifest) is NOT re-hashed, so a restart over an unchanged
+    // library finishes near-instantly and `hashingCount` stays ~0.
+    let plan = plan_incremental_reload(core, file_paths).await?;
+    let queued = plan.to_hash.len();
+    let reused = plan.reused_hashes.len();
     // Publish the pending count now so `hashingCount` is non-zero the instant the
-    // request returns, before the detached worker starts draining it.
+    // request returns, before the detached worker starts draining it. It counts
+    // only the files actually being hashed, so an unchanged library reports ~0.
     core.shared_hashing_count
         .store(queued as i64, Ordering::Relaxed);
+    tracing::info!(
+        scanned,
+        to_hash = queued,
+        reused_unchanged = reused,
+        "shared-directory reload planned (incremental skip of unchanged files)"
+    );
 
+    let to_hash = plan.to_hash;
     let core = core.clone();
     tokio::spawn(async move {
         let _guard = HashingCountGuard(core.shared_hashing_count.clone());
-        for path in file_paths {
-            if let Err(error) = core
+        for target in to_hash {
+            match core
                 .share_local_file(LocalShareCreate {
-                    path: path.display().to_string(),
+                    path: target.path.display().to_string(),
                     name: None,
                 })
                 .await
             {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "failed to hash/share file during background shared-directory reload (skipping)",
-                );
+                Ok(share) => {
+                    forget_stale_share(&core, target.stale_hash.as_deref(), &share.hash).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %target.path.display(),
+                        error = %error,
+                        "failed to hash/share file during background shared-directory reload (skipping)",
+                    );
+                }
             }
             core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
         }

@@ -221,16 +221,10 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     .await
     .unwrap();
 
-    // Drain anything `set_shared_directories` kicked, so the assertion is about a
-    // clean, explicit detached reload.
+    // `set_shared_directories` already kicked the initial detached reload, which
+    // hashes the whole fresh library. Wait for that to complete and confirm the
+    // entire library is shared WITHOUT the caller driving the hash path.
     wait_for_hashing_idle(&core).await;
-
-    // Single detached kick. The caller never touches the hash path again.
-    let queued = core.reload_shared_directories_detached().await.unwrap();
-    assert_eq!(queued, FILE_COUNT, "scan should queue every file up front");
-
-    // The background worker hashes the whole library on its own; poll until the
-    // shared-file total reaches every file WITHOUT the caller driving it.
     let mut shared_names = Vec::new();
     for _ in 0..600 {
         shared_names = shared_file_names(core.shares().await);
@@ -243,10 +237,28 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
         shared_names, expected_names,
         "detached reload must hash and share the entire library on its own",
     );
-
-    // And `hashingCount` must drain back to 0 once the library is fully indexed.
     wait_for_hashing_idle(&core).await;
     assert_eq!(core.shared_directories().await.hashing_count, 0);
+
+    // Incremental skip: a SECOND detached reload over the now-indexed, unchanged
+    // library must NOT re-queue any file for hashing (every file matches its
+    // persisted path + size + mtime), yet the whole library stays shared. This is
+    // the regression guard for the wasteful full re-hash on every reload.
+    let requeued = core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(
+        requeued, 0,
+        "an unchanged library must re-hash nothing on reload",
+    );
+    assert_eq!(
+        core.shared_directories().await.hashing_count,
+        0,
+        "hashingCount must stay 0 when nothing needs re-hashing",
+    );
+    assert_eq!(
+        shared_file_names(core.shares().await),
+        expected_names,
+        "unchanged files must remain shared after an incremental reload",
+    );
 }
 
 /// Sharing a directory of already-complete files must NOT run any file through
@@ -331,6 +343,118 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
             "the operator's original {name} must be untouched",
         );
     }
+}
+
+/// Incremental reload: once a shared library is hashed and persisted, a later
+/// reload must SKIP re-hashing every file whose on-disk identity (path + size +
+/// mtime) is unchanged, re-hash only a file whose size/mtime changed, and hash a
+/// newly added file. This is the regression guard for the wasteful full re-hash
+/// of the entire library on every daemon startup / reload.
+///
+/// The `queued` count returned by `reload_shared_directories_detached` is exactly
+/// the number of files handed to the hasher, so it is the direct, byte-free proof
+/// that an unchanged file is not re-read: an unchanged library queues 0.
+#[tokio::test]
+async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
+    let runtime_dir = unique_test_dir("shared-directory-incremental");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let shared_root = runtime_dir.join("library");
+    fs::create_dir_all(&shared_root).unwrap();
+
+    // Three distinct files seed the initial library.
+    fs::write(
+        shared_root.join("keep-unchanged.bin"),
+        b"unchanged payload one",
+    )
+    .unwrap();
+    fs::write(
+        shared_root.join("change-mtime.bin"),
+        b"mtime payload two!!!!",
+    )
+    .unwrap();
+    fs::write(shared_root.join("change-size.bin"), b"size payload three").unwrap();
+
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    // `set_shared_directories` kicks the initial detached reload; let it finish.
+    core.set_shared_directories(SharedDirectoriesUpdate {
+        roots: vec![SharedDirectoryRootUpdate::Object {
+            path: shared_root.display().to_string(),
+            recursive: true,
+        }],
+        confirm_replace_roots: true,
+    })
+    .await
+    .unwrap();
+    wait_for_hashing_idle(&core).await;
+    assert_eq!(
+        shared_file_names(core.shares().await),
+        vec![
+            "change-mtime.bin".to_string(),
+            "change-size.bin".to_string(),
+            "keep-unchanged.bin".to_string(),
+        ],
+        "initial reload must share every seeded file",
+    );
+
+    // (1) A reload over the fully-unchanged library re-hashes NOTHING.
+    let queued = core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(
+        queued, 0,
+        "unchanged library must queue no file for hashing"
+    );
+    wait_for_hashing_idle(&core).await;
+
+    // Mutate two files: one keeps its size but gets a new mtime, the other grows.
+    // `keep-unchanged.bin` is left exactly as is.
+    let mtime_target = shared_root.join("change-mtime.bin");
+    let bumped = SystemTime::now() + std::time::Duration::from_secs(120);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&mtime_target)
+        .unwrap()
+        .set_modified(bumped)
+        .unwrap();
+    fs::write(
+        shared_root.join("change-size.bin"),
+        b"size payload three -- now noticeably longer than before",
+    )
+    .unwrap();
+
+    // (2)+(3) Exactly the two mutated files are re-queued; the unchanged file is
+    // skipped. (A changed mtime and a changed size are both detected.)
+    let queued = core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(
+        queued, 2,
+        "only the mtime-changed and size-changed files must be re-hashed",
+    );
+    wait_for_hashing_idle(&core).await;
+
+    // Add a brand-new file: a follow-up reload queues exactly that one file.
+    fs::write(shared_root.join("brand-new.bin"), b"freshly added payload").unwrap();
+    let queued = core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(queued, 1, "a newly added file must be hashed");
+    wait_for_hashing_idle(&core).await;
+
+    // The library now lists all four files, and a final unchanged reload is a
+    // pure no-op again (the re-hashed/added files recorded their new mtimes).
+    assert_eq!(
+        shared_file_names(core.shares().await),
+        vec![
+            "brand-new.bin".to_string(),
+            "change-mtime.bin".to_string(),
+            "change-size.bin".to_string(),
+            "keep-unchanged.bin".to_string(),
+        ],
+        "every file must be shared after the incremental reloads",
+    );
+    let queued = core.reload_shared_directories_detached().await.unwrap();
+    assert_eq!(queued, 0, "a settled library must re-hash nothing");
 }
 
 /// Poll until the live `hashingCount` reaches 0 (the background reload worker has
