@@ -145,6 +145,11 @@ hard_limit_lines = 668
 rationale = "MetadataStore open/schema-lifecycle orchestrator plus the file-index/shared-root store methods and their inline #[cfg(test)] suite. Allowlisted just over the 600 budget for the round-10 transfer_sources startup prune: a TRANSFER_SOURCE_TTL_MS cap (30 days), the prune_transfer_sources method (gated on the table existing so in-place-migrated older DBs are tolerated; drops sources of removed transfers and rows past the TTL), its ensure_schema wiring, and the prune_transfer_sources_drops_removed_transfer_and_stale_rows test. The prune method belongs here because it uses the store's private connection()/table_exists()/unix_ms(); it cannot move to a module without exposing those internals."
 
 [[structure.large_file_allowlist]]
+path = "crates/emulebb-metadata/src/transfer_store.rs"
+hard_limit_lines = 610
+rationale = "transfer/resume-manifest SQL store (upsert_transfer_manifest + transfer_manifest_by_hash/transfer_manifests reads + the children replace/read helpers + the TransferRow row mapping). Allowlisted just over the 600 budget (606) for the incremental shared-directory reload: the transfers row gains a nullable source_mtime_ms column (schema v9) so an unchanged share-in-place file (same source_path + size + mtime) is reused on reload instead of re-hashing the whole library; the +6 lines are the column in the upsert INSERT/SET, its bound param, the two SELECT projections (by-hash + all), the matching TransferRow.source_mtime_ms field, and its read in manifest_from_row. The mapping belongs here because it uses the store's private connection() and the SQL column layout; it cannot move to a module without exposing those internals."
+
+[[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/nat/rupnp.rs"
 hard_limit_lines = 907
 rationale = "frozen legacy rupnp backend adapter; split discovery, mapping, and status conversion as touched"
