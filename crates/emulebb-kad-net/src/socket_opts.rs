@@ -81,11 +81,20 @@ pub fn apply_p2p_socket_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::UdpSocket;
+    use std::net::{Ipv4Addr, UdpSocket};
+
+    // LAN test binds use X_LOCAL_IP, never loopback (the VPN split tunnel breaks
+    // 127.0.0.1 -> os error 10049). CI exports X_LOCAL_IP=127.0.0.1.
+    fn test_bind_ip() -> Ipv4Addr {
+        std::env::var("X_LOCAL_IP")
+            .expect("X_LOCAL_IP must be set for socket-binding tests (loopback is broken here)")
+            .parse()
+            .expect("X_LOCAL_IP must be an IPv4 address")
+    }
 
     #[test]
     fn udp_options_enlarge_recv_buffer_and_no_pin_is_noop() {
-        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind loopback udp");
+        let sock = UdpSocket::bind((test_bind_ip(), 0)).expect("bind udp");
         let sref = SockRef::from(&sock);
         // None index => egress pinning is a no-op (plain bind), still Ok.
         apply_p2p_socket_options(sref, None, true).expect("apply udp options");
@@ -101,7 +110,7 @@ mod tests {
 
     #[test]
     fn pin_to_zero_or_none_index_is_noop() {
-        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind loopback udp");
+        let sock = UdpSocket::bind((test_bind_ip(), 0)).expect("bind udp");
         pin_egress_to_interface(SockRef::from(&sock), None).expect("none is noop");
         pin_egress_to_interface(SockRef::from(&sock), Some(0)).expect("zero is noop");
     }
