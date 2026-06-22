@@ -21,10 +21,101 @@
 use std::net::SocketAddr;
 
 use emulebb_ed2k::diag_event::emit;
-use emulebb_kad_dht::KadRoutingSummaryCounts;
+use emulebb_kad_dht::{KadRoutingSummaryCounts, PublishAttemptStats};
 use serde_json::json;
 
 const FAMILY: &str = "kad_event";
+
+/// Which outbound Kad publish kind a milestone describes. Carried in
+/// `body.publishKind` so a live harness can split keyword vs source vs notes
+/// store rounds; the `event` value stays the coarse milestone bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KadPublishKind {
+    Keyword,
+    Source,
+    Notes,
+}
+
+impl KadPublishKind {
+    fn publish_kind(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Source => "source",
+            Self::Notes => "notes",
+        }
+    }
+
+    fn event(self) -> &'static str {
+        match self {
+            Self::Keyword => "kad_keyword_publish",
+            Self::Source => "kad_source_publish",
+            Self::Notes => "kad_notes_publish",
+        }
+    }
+
+    fn milestone(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword_published",
+            Self::Source => "source_published",
+            Self::Notes => "notes_published",
+        }
+    }
+}
+
+/// Outbound-publish milestone (uniform-diagnostics-v2 §3.3): we STORE one shared
+/// file's keywords/sources/notes to Kad. Emitted once per file per publish round
+/// on a successful store fanout, mirroring the inbound `indexedKeywords/Sources`
+/// gauges so a live run shows "we published N files' keywords/sources to Kad".
+///
+/// `keys.fileHash` is the published file's eD2k hash. The body carries the store
+/// outcome counts so the harness can see reach (target node count) and ack/fail.
+pub(crate) fn publish(kind: KadPublishKind, file_hash: &str, stats: PublishAttemptStats) {
+    let body = json!({
+        "milestone": kind.milestone(),
+        "action": "publish",
+        "publishKind": kind.publish_kind(),
+        "closestContactsConsidered": stats.closest_contacts_considered,
+        "attemptedContacts": stats.attempted_contacts,
+        "ackedContacts": stats.acked_contacts,
+        "timedOutContacts": stats.timed_out_contacts,
+        "failedContacts": stats.failed_contacts(),
+    });
+    emit(
+        FAMILY,
+        kind.event(),
+        "info",
+        json!({ "fileHash": file_hash }),
+        body,
+    );
+}
+
+/// Per-round rollup (uniform-diagnostics-v2 §3.3): one publish cycle finished and
+/// stored at least one file. Surfaces how many files' keywords/sources/notes were
+/// published this round (vs the total publishable item count), so a live run has
+/// a single line summarizing outbound Kad publish reach.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_round(
+    item_count: usize,
+    keyword_published: usize,
+    keyword_acked: u32,
+    source_published: usize,
+    source_acked: u32,
+    notes_published: usize,
+    notes_acked: u32,
+) {
+    let body = json!({
+        "milestone": "publish_round",
+        "action": "observe",
+        "itemCount": item_count,
+        "keywordPublished": keyword_published,
+        "keywordAckedContacts": keyword_acked,
+        "sourcePublished": source_published,
+        "sourceAckedContacts": source_acked,
+        "notesPublished": notes_published,
+        "notesAckedContacts": notes_acked,
+    });
+    emit(FAMILY, "kad_publish_round", "info", json!({}), body);
+}
 
 /// `firewall` milestone (schema §3.3): the Kad UDP firewall self-check resolved.
 /// `firewalled=false` -> milestone `open`; `firewalled=true` -> `firewalled`,
@@ -132,5 +223,26 @@ mod tests {
                 with_udp_key: 6,
             },
         );
+        let stats = PublishAttemptStats {
+            closest_contacts_considered: 10,
+            attempted_contacts: 8,
+            acked_contacts: 5,
+            timed_out_contacts: 3,
+        };
+        publish(KadPublishKind::Keyword, "abc123", stats);
+        publish(KadPublishKind::Source, "abc123", stats);
+        publish(KadPublishKind::Notes, "abc123", stats);
+        publish_round(4, 2, 9, 1, 4, 1, 2);
+    }
+
+    #[test]
+    fn publish_kind_event_and_milestone_names_are_stable() {
+        assert_eq!(KadPublishKind::Keyword.event(), "kad_keyword_publish");
+        assert_eq!(KadPublishKind::Source.event(), "kad_source_publish");
+        assert_eq!(KadPublishKind::Notes.event(), "kad_notes_publish");
+        assert_eq!(KadPublishKind::Keyword.publish_kind(), "keyword");
+        assert_eq!(KadPublishKind::Source.publish_kind(), "source");
+        assert_eq!(KadPublishKind::Notes.publish_kind(), "notes");
+        assert_eq!(KadPublishKind::Keyword.milestone(), "keyword_published");
     }
 }

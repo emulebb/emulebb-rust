@@ -4220,6 +4220,14 @@ async fn publish_kad_due_shared_files(
             {
                 Ok(stats) => {
                     accumulate_publish_stats(&mut keyword_totals, stats);
+                    // Outbound-publish observability: record that we STORED this
+                    // file's keywords to Kad (mirrors the inbound indexedKeywords
+                    // gauge). No-op unless EMULEBB_RUST_LOG_DIR is set.
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Keyword,
+                        &manifest.file_hash,
+                        stats,
+                    );
                     // Mark published only on a successful attempt, mirroring the
                     // master setting the next-publish time when the store search
                     // was actually started.
@@ -4252,6 +4260,11 @@ async fn publish_kad_due_shared_files(
             {
                 Ok(stats) => {
                     accumulate_publish_stats(&mut source_totals, stats);
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Source,
+                        &manifest.file_hash,
+                        stats,
+                    );
                     schedule.mark_source_published(&manifest.file_hash, now);
                     source_published += 1;
                 }
@@ -4301,6 +4314,11 @@ async fn publish_kad_due_shared_files(
             {
                 Ok(stats) => {
                     accumulate_publish_stats(&mut notes_totals, stats);
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Notes,
+                        &manifest.file_hash,
+                        stats,
+                    );
                     schedule.mark_notes_published(&manifest.file_hash, now);
                     notes_published += 1;
                 }
@@ -4318,6 +4336,18 @@ async fn publish_kad_due_shared_files(
     if keyword_published > 0 || source_published > 0 || notes_published > 0 {
         tracing::info!(
             "Kad shared-file publish cycle items={} keyword_published={} keyword_acked={} source_published={} source_acked={} notes_published={} notes_acked={}",
+            item_count,
+            keyword_published,
+            keyword_totals.acked_contacts,
+            source_published,
+            source_totals.acked_contacts,
+            notes_published,
+            notes_totals.acked_contacts,
+        );
+        // Per-round outbound-publish rollup milestone (no-op without
+        // EMULEBB_RUST_LOG_DIR): one diag line summarizing how many files'
+        // keywords/sources/notes we stored to Kad this cycle.
+        diag_kad_event::publish_round(
             item_count,
             keyword_published,
             keyword_totals.acked_contacts,
