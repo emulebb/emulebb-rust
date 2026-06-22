@@ -49,6 +49,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         transfer_row_removed: false,
         delivered_path: Some("/incoming/Sample.Transfer.bin".to_string()),
         source_path: Some("/library/Sample.Transfer.bin".to_string()),
+        source_mtime_ms: Some(1_700_000_000_000),
     };
 
     store.upsert_transfer_manifest(&manifest).unwrap();
@@ -92,6 +93,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
         transfer_row_removed: false,
         delivered_path: None,
         source_path: None,
+        source_mtime_ms: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
 
@@ -143,6 +145,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
         transfer_row_removed: false,
         delivered_path: None,
         source_path: None,
+        source_mtime_ms: None,
     };
     store.upsert_transfer_manifest(&manifest).unwrap();
     store

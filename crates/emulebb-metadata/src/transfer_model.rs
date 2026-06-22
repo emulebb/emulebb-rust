@@ -30,6 +30,12 @@ pub struct MetadataTransferManifest {
     /// upload serving, it is never copied into the internal piece store, and it
     /// is never delivered to the incoming dir. `None` for a real download.
     pub source_path: Option<String>,
+    /// Last-modified time (Unix milliseconds) of the share-in-place source file
+    /// captured at ingest. Compared against the on-disk mtime on reload so an
+    /// unchanged shared file (same `source_path` + `file_size` + mtime) is reused
+    /// instead of being re-hashed. `None` for a real download or a share-in-place
+    /// row written before this field existed.
+    pub source_mtime_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

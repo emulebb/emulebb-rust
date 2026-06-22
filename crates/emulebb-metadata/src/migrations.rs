@@ -31,6 +31,10 @@
 //!   path of a shared, already-complete file seeded in place (added via a shared
 //!   directory, never downloaded). NON-NULL marks a share-in-place transfer that
 //!   is served directly from this path and never copied/delivered.
+//! - v8 -> v9: `transfers.source_mtime_ms INTEGER` (nullable) — the last-modified
+//!   time (Unix ms) of the share-in-place source captured at ingest, used to skip
+//!   re-hashing an unchanged shared file (same source_path + size + mtime) on
+//!   reload. NULL for a real download or a pre-v9 share-in-place row.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -130,6 +134,9 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
         // v7 -> v8: original on-disk path of a shared, complete file seeded in
         // place (never copied/delivered). NULL for a real download.
         8 => add_column_if_missing(tx, "transfers", "source_path", "TEXT"),
+        // v8 -> v9: last-modified time (ms) of the share-in-place source, used to
+        // skip re-hashing an unchanged shared file on reload. NULL pre-v9.
+        9 => add_column_if_missing(tx, "transfers", "source_mtime_ms", "INTEGER"),
         other => bail!("no metadata migration defined for schema version v{other}"),
     }
 }
@@ -292,6 +299,7 @@ mod tests {
             ("peers", "secure_ident_pubkey_len"),
             ("transfers", "delivered_path"),
             ("transfers", "source_path"),
+            ("transfers", "source_mtime_ms"),
         ] {
             let tx = conn.transaction().unwrap();
             assert!(

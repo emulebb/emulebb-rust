@@ -243,6 +243,13 @@ CREATE TABLE transfers (
     -- path for upload serving, it is NEVER copied into the internal piece store,
     -- and it is NEVER delivered to the incoming dir. NULL for a real download.
     source_path TEXT,
+    -- Last-modified time (Unix milliseconds) of the share-in-place source file
+    -- captured at ingest. Compared against the on-disk mtime on every reload so
+    -- an unchanged shared file (same source_path + size_bytes + mtime) is reused
+    -- from this row instead of being re-hashed. NULL for a real download or a
+    -- share-in-place row written before this column existed (treated as a miss,
+    -- so the file is re-hashed once and the mtime is then recorded).
+    source_mtime_ms INTEGER,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     completed_at_ms INTEGER,

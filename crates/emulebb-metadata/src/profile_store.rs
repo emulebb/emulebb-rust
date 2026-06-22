@@ -407,6 +407,7 @@ mod tests {
                 transfer_row_removed: false,
                 delivered_path: None,
                 source_path: None,
+                source_mtime_ms: None,
                 pieces: Vec::new(),
                 sources: Vec::new(),
             })
