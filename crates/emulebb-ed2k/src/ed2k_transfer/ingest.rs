@@ -59,9 +59,19 @@ impl Ed2kTransferRuntime {
             anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
         }
 
-        let _guard = self.manifest_io.lock().await;
+        // Hash OFF the `manifest_io` lock AND off the async runtime. MD4/AICH read
+        // and hash the whole (potentially many-GB) file with blocking `std::fs`,
+        // which on a slow disk takes far longer than any HTTP timeout. Holding
+        // `manifest_io` across that froze every REST read (they all funnel through
+        // `manifests()`), and running the blocking hash inline starved a tokio
+        // worker. We therefore compute both hashsets under `spawn_blocking` with no
+        // lock held, and only take `manifest_io` for the short manifest write below.
+        let md4_len = metadata.len();
+        let md4_path = source_path.clone();
         let (file_hash, md4_hashset) =
-            build_md4_hashset_from_payload(&source_path, metadata.len())?;
+            tokio::task::spawn_blocking(move || build_md4_hashset_from_payload(&md4_path, md4_len))
+                .await
+                .context("MD4 hashing task panicked")??;
         let job = new_transfer_job(file_hash, canonical_name.to_string(), metadata.len());
         let transfer_dir = self.transfer_dir(&job.file_hash);
         tokio::fs::create_dir_all(&transfer_dir)
@@ -81,7 +91,13 @@ impl Ed2kTransferRuntime {
         // skips it (delivery is download-only). The transfer dir still exists to
         // hold the resume manifest; only the payload bytes are never duplicated.
         // AICH/MD4 are computed straight from the original file.
-        let aich_hashset = build_aich_hashset_from_payload(&source_path, metadata.len())?;
+        let aich_len = metadata.len();
+        let aich_path = source_path.clone();
+        let aich_hashset = tokio::task::spawn_blocking(move || {
+            build_aich_hashset_from_payload(&aich_path, aich_len)
+        })
+        .await
+        .context("AICH hashing task panicked")??;
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.display().to_string());
         // Record the source file's last-modified time so the incremental
@@ -109,8 +125,12 @@ impl Ed2kTransferRuntime {
             })
             .collect();
         rebuild_verified_ranges(&mut manifest);
+        // Only the manifest write needs `manifest_io`; held briefly (no hashing
+        // under it), so concurrent REST reads of `manifests()` are not starved.
+        let _guard = self.manifest_io.lock().await;
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;
+        drop(_guard);
 
         Ok(Ed2kLocalIngestSummary {
             file_hash: manifest.file_hash,
