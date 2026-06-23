@@ -26,7 +26,7 @@ use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, SearchCriteria,
         ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
@@ -179,7 +179,7 @@ use preferences::{
 };
 use search_query::{
     SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
-    search_result_from_ed2k, search_result_from_indexed,
+    search_criteria_from_request, search_result_from_ed2k, search_result_from_indexed,
 };
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
@@ -2620,9 +2620,16 @@ impl EmulebbCore {
         if let Some(handle) = self.connected_ed2k_search_handle().await {
             let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
             let timeout = connected_server_keyword_search_timeout(&config);
+            let criteria = search_criteria_from_request(request);
             let mut files = Vec::new();
-            match search_keyword_via_background_session(&handle, &request.query, timeout, &cancel)
-                .await
+            match search_keyword_via_background_session(
+                &handle,
+                &request.query,
+                criteria,
+                timeout,
+                &cancel,
+            )
+            .await
             {
                 Ok(background_files) => {
                     if background_files.is_empty() {
@@ -3469,7 +3476,15 @@ impl EmulebbCore {
         // server path; do not create extra one-shot TCP logins when the stock
         // client would use the connected server and then fall back to Kad data.
         if let Some(handle) = background_search {
-            match search_keyword_via_background_session(&handle, &query, timeout, &cancel).await {
+            match search_keyword_via_background_session(
+                &handle,
+                &query,
+                SearchCriteria::default(),
+                timeout,
+                &cancel,
+            )
+            .await
+            {
                 Ok(results) => {
                     if let Some(candidate) = select_ed2k_keyword_metadata(&results, file_hash) {
                         learned.merge_missing_from(candidate);

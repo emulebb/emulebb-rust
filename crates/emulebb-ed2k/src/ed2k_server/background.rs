@@ -18,7 +18,8 @@ use super::{
     Ed2kFoundSource, Ed2kSearchFile, Ed2kServerState, OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES,
     OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, ResolvedServerEntry, ServerSession,
     ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
-    decode_udp_search_result_pages, encode_search_request, encode_source_request,
+    SearchCriteria, decode_udp_search_result_pages,
+    encode_search_request_with_criteria, encode_source_request,
     merge_found_sources, send_offer_files_advertisement, source_request_opcode,
     validate_found_sources, wait_for_offer_files_settle,
 };
@@ -45,6 +46,7 @@ pub struct Ed2kServerSearchInbox {
 pub(super) enum BackgroundServerSearchRequest {
     Keyword {
         query: String,
+        criteria: SearchCriteria,
         timeout: Duration,
         response: oneshot::Sender<BackgroundKeywordSearchResponse>,
     },
@@ -108,6 +110,7 @@ pub fn new_ed2k_server_search_channel(
 pub async fn search_keyword_via_background_session(
     handle: &Ed2kServerSearchHandle,
     query: &str,
+    criteria: SearchCriteria,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Vec<Ed2kSearchFile>> {
@@ -116,6 +119,7 @@ pub async fn search_keyword_via_background_session(
         .sender
         .send(BackgroundServerSearchRequest::Keyword {
             query: query.to_string(),
+            criteria,
             timeout,
             response,
         })
@@ -404,10 +408,11 @@ pub(super) async fn start_background_server_search(
     match request {
         BackgroundServerSearchRequest::Keyword {
             query,
+            criteria,
             timeout,
             response,
         } => {
-            let search_payload = encode_search_request(&query)?;
+            let search_payload = encode_search_request_with_criteria(&query, &criteria)?;
             if search_payload.is_empty() {
                 let _ = response.send(Ok(Vec::new()));
                 anyhow::bail!("ED2K background keyword search payload was unexpectedly empty");

@@ -1,10 +1,48 @@
 //! Search-result construction and request-side filtering for the `/api/v1/searches` surface.
 
-use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+use emulebb_ed2k::ed2k_server::{Ed2kSearchFile, SearchCriteria};
 use emulebb_index::IndexedFile;
 use emulebb_kad_dht::SearchResult as KadSearchResult;
 
 use crate::{SearchCreate, SearchResult};
+
+/// Build the server-side eD2k metatag search criteria from a `/api/v1/searches`
+/// request, so the constraints (type/size/extension/availability) are folded
+/// into the OP_SEARCHREQUEST tree (eMule `GetSearchPacket`) instead of only
+/// post-filtered. Empty/unset fields are omitted. `apply_search_filters` still
+/// runs as a defensive client-side pass.
+pub(crate) fn search_criteria_from_request(request: &SearchCreate) -> SearchCriteria {
+    let non_empty = |value: &str| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    SearchCriteria {
+        file_type: ed2k_wire_file_type(&request.r#type),
+        extension: non_empty(&request.extension),
+        min_size: request.min_size_bytes.filter(|&v| v > 0),
+        max_size: request.max_size_bytes.filter(|&v| v > 0),
+        min_availability: request.min_availability.filter(|&v| v > 0),
+        min_complete_sources: None,
+    }
+}
+
+/// Map the lowercase `/api/v1/searches` `type` token (validated set: arc, audio,
+/// iso, image, pro, video, doc, emulecollection) to the canonical eD2k
+/// FT_FILETYPE wire string (ED2KFTSTR_*). "arc"/"iso" fold to "Pro" exactly as
+/// eMule's GetSearchPacket does. Empty/unknown -> None (no type constraint).
+fn ed2k_wire_file_type(token: &str) -> Option<String> {
+    let wire = match token.trim().to_ascii_lowercase().as_str() {
+        "" => return None,
+        "audio" => "Audio",
+        "video" => "Video",
+        "image" => "Image",
+        "doc" => "Doc",
+        "pro" | "arc" | "iso" => "Pro",
+        "emulecollection" => "EmuleCollection",
+        _ => return None,
+    };
+    Some(wire.to_string())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchNetworkMethod {

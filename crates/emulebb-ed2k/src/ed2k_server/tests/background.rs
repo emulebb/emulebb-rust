@@ -29,6 +29,7 @@ async fn background_search_channel_round_trips_results() {
     let results = search_keyword_via_background_session(
         &handle,
         "ubuntu linux",
+        Default::default(),
         Duration::from_secs(1),
         &cancel,
     )
