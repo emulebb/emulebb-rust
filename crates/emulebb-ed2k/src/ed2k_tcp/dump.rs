@@ -284,6 +284,35 @@ pub(super) fn canonical_ed2k_recv_phase<'a>(
     Cow::Borrowed(fallback)
 }
 
+/// Whether to SKIP dumping this packet because it is a high-volume bulk file-data
+/// packet (OP_SENDINGPART / OP_COMPRESSEDPART, 32- and 64-bit) past its sample.
+///
+/// At download/upload throughput these data packets arrive thousands per second;
+/// each dumped line ALSO emits a converged `diag_event`, so an unsampled dump
+/// reaches tens of GB in a long soak. The control-plane packets (HELLO, SUI,
+/// REQUESTPARTS, MULTIPACKET, ...) carry the parity signal and are never skipped;
+/// for the bulk data opcodes we keep the first `HEAD` of each (coverage + sample
+/// structure) then 1-in-`EVERY` for long-soak liveness. Returns false for any
+/// non-bulk packet (never skipped).
+#[cfg(feature = "packet-diagnostics")]
+fn should_skip_bulk_packet(protocol: u8, opcode: u8) -> bool {
+    static SENDINGPART: AtomicU64 = AtomicU64::new(0);
+    static COMPRESSEDPART: AtomicU64 = AtomicU64::new(0);
+    static SENDINGPART_I64: AtomicU64 = AtomicU64::new(0);
+    static COMPRESSEDPART_I64: AtomicU64 = AtomicU64::new(0);
+    const HEAD: u64 = 64;
+    const EVERY: u64 = 8192;
+    let counter = match (protocol, opcode) {
+        (OP_EDONKEYPROT, OP_SENDINGPART) => &SENDINGPART,
+        (OP_EMULEPROT, OP_COMPRESSEDPART) => &COMPRESSEDPART,
+        (OP_EMULEPROT, OP_SENDINGPART_I64) => &SENDINGPART_I64,
+        (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => &COMPRESSEDPART_I64,
+        _ => return false,
+    };
+    let n = counter.fetch_add(1, Ordering::Relaxed);
+    !(n < HEAD || n % EVERY == 0)
+}
+
 fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     if let Ok(line) = serde_json::to_string(record)
         && let Ok(mut guard) = ed2k_tcp_dump_file().lock()
@@ -346,6 +375,11 @@ fn dump_ed2k_tcp_send(
 ) {
     let protocol = bytes.first().copied();
     let opcode = bytes.get(5).copied();
+    if let (Some(p), Some(o)) = (protocol, opcode)
+        && should_skip_bulk_packet(p, o)
+    {
+        return;
+    }
     let payload = if bytes.len() > TCP_PACKET_HEADER_LEN {
         Some(&bytes[TCP_PACKET_HEADER_LEN..])
     } else {
@@ -395,6 +429,9 @@ fn dump_ed2k_tcp_recv(
     phase: &str,
     packet: &EmuleTcpPacket,
 ) {
+    if should_skip_bulk_packet(packet.protocol, packet.opcode) {
+        return;
+    }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
     let (raw_hex, _) = capped_packet_hex(&encode_packet(
         packet.protocol,
