@@ -312,6 +312,7 @@ mod tests {
             parts_progress_text: "0".to_string(),
             parts_available: 0,
             auto_priority: false,
+            in_incoming: false,
         }
     }
 }

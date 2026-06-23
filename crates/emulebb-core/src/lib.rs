@@ -2369,6 +2369,16 @@ impl EmulebbCore {
             transfer.added_at = Some(created_ms);
             transfer.completed_at = completed_ms;
         }
+        // Classify "completed download" vs "shared-only file" by directory (eMule
+        // semantics, unlike qBittorrent where every complete torrent is also a
+        // share). A transfer is a download if it is still downloading, was
+        // delivered to an incoming/category dir (`delivered_path` set), or its
+        // file resides in the global incoming dir -- which may itself double as a
+        // configured shared dir (e.g. the eMule Incoming folder). A file that is
+        // only shared from a shared dir (and never downloaded) stays false.
+        transfer.in_incoming = !manifest.completed
+            || manifest.delivered_path.is_some()
+            || path_is_within(&transfer.path, &self.incoming_dir);
         transfer
     }
 
@@ -5829,6 +5839,26 @@ fn parse_ed2k_link(link: &str) -> Result<(String, String, u64)> {
     ))
 }
 
+/// Case-insensitive check that `path` resides within `dir`, tolerating the
+/// `\\?\` verbatim long-path prefix and `/` vs `\` separators that share/ingest
+/// paths carry on Windows. Used to classify a transfer as a download (its file
+/// is in the incoming dir) vs a pure share.
+fn path_is_within(path: &str, dir: &std::path::Path) -> bool {
+    fn norm(s: &str) -> String {
+        s.strip_prefix(r"\\?\")
+            .unwrap_or(s)
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    }
+    let base = norm(&dir.display().to_string());
+    if base.is_empty() {
+        return false;
+    }
+    let candidate = norm(path);
+    candidate == base || candidate.starts_with(&format!("{base}\\"))
+}
+
 fn apply_persisted_transfer_category(
     transfer: &mut Transfer,
     manifest: &Ed2kResumeManifest,
@@ -5884,6 +5914,21 @@ mod tests {
     use emulebb_kad_proto::{NodeId, Tag, TagValue};
 
     use super::*;
+
+    #[test]
+    fn path_is_within_classifies_incoming_vs_shared_dirs() {
+        use std::path::Path;
+        let incoming = Path::new(r"C:\Downloads\Incoming");
+        // A downloaded file living in the incoming dir (verbatim long path, mixed
+        // case, forward slashes) is recognized as in-incoming.
+        assert!(path_is_within(r"\\?\C:\Downloads\Incoming\example.iso", incoming));
+        assert!(path_is_within(r"c:/downloads/incoming/sub/file.bin", incoming));
+        // A file shared only from a separate shared dir is NOT in-incoming.
+        assert!(!path_is_within(r"D:\Library\Media\sample.mkv", incoming));
+        // A sibling dir sharing a name prefix must not count as inside.
+        assert!(!path_is_within(r"C:\Downloads\IncomingOther\x", incoming));
+        assert!(!path_is_within("anything", Path::new("")));
+    }
 
     #[test]
     fn connected_server_keyword_search_timeout_matches_mfc_floor() {
@@ -8320,6 +8365,7 @@ mod tests {
             parts_progress_text: "0".to_string(),
             parts_available: 0,
             auto_priority: false,
+            in_incoming: false,
         }
     }
 

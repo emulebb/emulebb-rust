@@ -490,6 +490,12 @@ pub struct Transfer {
     pub parts_available: u32,
     /// Whether download priority is auto-managed (not modeled yet -> false).
     pub auto_priority: bool,
+    /// Whether this transfer's file lives in an incoming/download directory (so
+    /// it is a file WE downloaded), as opposed to a file that is only shared from
+    /// a configured shared directory. Lets a UI separate "completed downloads"
+    /// from the static shared library even when a shared dir doubles as the
+    /// incoming dir. Incomplete (still downloading) transfers are always true.
+    pub in_incoming: bool,
 }
 
 /// One remembered ED2K peer source for a transfer.

@@ -92,6 +92,10 @@ pub(crate) fn transfer_from_manifest(
         parts_progress_text,
         parts_available,
         auto_priority: false,
+        // Classified by the caller (EmulebbCore::transfer_from_manifest), which
+        // knows the configured incoming/category directories; this pure builder
+        // has no directory context, so it defaults to false here.
+        in_incoming: false,
     }
 }
 
