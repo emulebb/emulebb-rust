@@ -294,22 +294,28 @@ pub(super) fn canonical_ed2k_recv_phase<'a>(
 /// for the bulk data opcodes we keep the first `HEAD` of each (coverage + sample
 /// structure) then 1-in-`EVERY` for long-soak liveness. Returns false for any
 /// non-bulk packet (never skipped).
+///
+/// Counters are kept PER DIRECTION (`from_recv`): a transfer both serves and
+/// pulls bulk parts, and a shared counter lets one direction consume the whole
+/// HEAD budget and starve the other's coverage entirely (e.g. SENDINGPART would
+/// show up only on `send`, falsely reading as a `recv` gap in a rust-vs-MFC diff).
 #[cfg(feature = "packet-diagnostics")]
-fn should_skip_bulk_packet(protocol: u8, opcode: u8) -> bool {
-    static SENDINGPART: AtomicU64 = AtomicU64::new(0);
-    static COMPRESSEDPART: AtomicU64 = AtomicU64::new(0);
-    static SENDINGPART_I64: AtomicU64 = AtomicU64::new(0);
-    static COMPRESSEDPART_I64: AtomicU64 = AtomicU64::new(0);
+fn should_skip_bulk_packet(protocol: u8, opcode: u8, from_recv: bool) -> bool {
+    // Index [send, recv] per opcode so each direction keeps its own HEAD sample.
+    static SENDINGPART: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static COMPRESSEDPART: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static SENDINGPART_I64: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static COMPRESSEDPART_I64: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
     const HEAD: u64 = 64;
     const EVERY: u64 = 8192;
-    let counter = match (protocol, opcode) {
+    let counters = match (protocol, opcode) {
         (OP_EDONKEYPROT, OP_SENDINGPART) => &SENDINGPART,
         (OP_EMULEPROT, OP_COMPRESSEDPART) => &COMPRESSEDPART,
         (OP_EMULEPROT, OP_SENDINGPART_I64) => &SENDINGPART_I64,
         (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => &COMPRESSEDPART_I64,
         _ => return false,
     };
-    let n = counter.fetch_add(1, Ordering::Relaxed);
+    let n = counters[usize::from(from_recv)].fetch_add(1, Ordering::Relaxed);
     !(n < HEAD || n % EVERY == 0)
 }
 
@@ -376,7 +382,7 @@ fn dump_ed2k_tcp_send(
     let protocol = bytes.first().copied();
     let opcode = bytes.get(5).copied();
     if let (Some(p), Some(o)) = (protocol, opcode)
-        && should_skip_bulk_packet(p, o)
+        && should_skip_bulk_packet(p, o, false)
     {
         return;
     }
@@ -429,7 +435,7 @@ fn dump_ed2k_tcp_recv(
     phase: &str,
     packet: &EmuleTcpPacket,
 ) {
-    if should_skip_bulk_packet(packet.protocol, packet.opcode) {
+    if should_skip_bulk_packet(packet.protocol, packet.opcode, true) {
         return;
     }
     let canonical_phase = canonical_ed2k_recv_phase(flow, phase, packet.protocol, packet.opcode);
