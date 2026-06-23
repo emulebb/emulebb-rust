@@ -6,7 +6,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
@@ -19,6 +19,10 @@ const EMULEBB_WORKSPACE_OUTPUT_ROOT_ENV: &str = "EMULEBB_WORKSPACE_OUTPUT_ROOT";
 const DEFAULT_WORKSPACE_TMP_DIR_NAME: &str = "emulebb-rust";
 const DUMP_FILE_PREFIX: &str = "emulebb-rust-kad-udp-dump-";
 const DUMP_FILE_SUFFIX: &str = ".jsonl";
+/// Buffer the dump writer generously so packets batch into few large writes.
+const DUMP_WRITER_BUF_BYTES: usize = 256 * 1024;
+/// Flush the buffered dump once per this many records instead of per packet.
+const DUMP_FLUSH_EVERY: u64 = 512;
 
 static UDP_DUMP_WRITER: OnceLock<Option<UdpDumpWriter>> = OnceLock::new();
 
@@ -249,13 +253,13 @@ pub fn dump_kad_udp_packet(
         return;
     }
 
-    if let Err(error) = guard.flush() {
-        warn!(
-            "failed to flush Kad UDP dump writer at {}: {}",
-            writer.path.display(),
-            error
-        );
-    }
+    // Flush periodically, NOT per packet. A forced flush() on every inbound
+    // datagram is a blocking write() syscall on the Kad receive loop's runtime
+    // worker; under an inbound packet flood that starved the REST/control plane.
+    // The BufWriter batches (and flushes when full); we additionally flush every
+    // DUMP_FLUSH_EVERY records so a tailing reader sees data and crash loss is
+    // bounded. Full coverage (including dropped/flood packets) is preserved.
+    maybe_periodic_flush(&mut guard, &writer.path);
     drop(guard);
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `kad_udp`
@@ -383,6 +387,24 @@ fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
     UDP_DUMP_WRITER.get_or_init(init_udp_dump_writer).as_ref()
 }
 
+/// Flush a buffered JSONL dump writer once per `DUMP_FLUSH_EVERY` records (and on
+/// the very first record) instead of on every packet, so the per-packet write()
+/// syscall can no longer block the Kad receive loop under an inbound flood.
+fn maybe_periodic_flush(guard: &mut BufWriter<File>, path: &Path) {
+    static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
+    if SINCE_FLUSH
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(DUMP_FLUSH_EVERY)
+        && let Err(error) = guard.flush()
+    {
+        warn!(
+            "failed to flush Kad UDP dump writer at {}: {}",
+            path.display(),
+            error
+        );
+    }
+}
+
 fn init_udp_dump_writer() -> Option<UdpDumpWriter> {
     let log_dir = workspace_log_dir();
     if let Err(error) = fs::create_dir_all(&log_dir) {
@@ -415,7 +437,7 @@ fn init_udp_dump_writer() -> Option<UdpDumpWriter> {
 
     Some(UdpDumpWriter {
         path,
-        writer: Mutex::new(BufWriter::new(file)),
+        writer: Mutex::new(BufWriter::with_capacity(DUMP_WRITER_BUF_BYTES, file)),
     })
 }
 

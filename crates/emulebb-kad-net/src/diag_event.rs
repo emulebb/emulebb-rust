@@ -28,6 +28,9 @@ use tracing::warn;
 
 const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
 const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
+/// Flush the buffered diag-event writer once per this many records instead of per
+/// event (emit() runs per inbound Kad packet, i.e. on the flood path).
+const DIAG_FLUSH_EVERY: u64 = 256;
 
 static DIAG_EVENT_WRITER: OnceLock<Option<DiagEventWriter>> = OnceLock::new();
 
@@ -94,7 +97,19 @@ pub fn emit(
         );
         return;
     }
-    let _ = guard.flush();
+    // Flush periodically, not per event: a per-event flush() is a blocking write()
+    // syscall, and emit() runs per inbound Kad packet (the flood path that starved
+    // the control plane). The BufWriter still flushes when full (always complete
+    // lines, since we only write_all whole lines); the small default buffer keeps
+    // each flush a single append-atomic write to this shared file, so the kad/ed2k
+    // shims never interleave a partial line.
+    static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
+    if SINCE_FLUSH
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(DIAG_FLUSH_EVERY)
+    {
+        let _ = guard.flush();
+    }
 }
 
 fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
