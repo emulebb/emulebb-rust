@@ -164,11 +164,14 @@ pub(crate) async fn scan_shared_directory_roots(
 // consistent. `lib.rs` keeps only thin entry methods that delegate here.
 // ---------------------------------------------------------------------------
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
+use tokio::task::JoinSet;
 
+use crate::physical_disk::physical_disk_key;
 use crate::{EmulebbCore, LocalShare, LocalShareCreate};
 
 /// Resets the live `hashingCount` to 0 on any exit path (success, hash error, or
@@ -396,31 +399,70 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
     let core = core.clone();
     tokio::spawn(async move {
         let _guard = HashingCountGuard(core.shared_hashing_count.clone());
+        // Group the to-hash set by physical disk and hash one file at a time per
+        // spindle, with distinct disks running in parallel. Concurrent reads on a
+        // single HDD seek-thrash (slower than serial), so per-disk concurrency is
+        // 1; the speed-up comes from fanning out across disks. The hash itself
+        // already runs off the manifest lock and on a blocking thread (see
+        // `ingest_local_file`), so N disks means N files in flight without
+        // freezing the REST/control plane.
+        let mut by_disk: HashMap<String, Vec<ReloadHashTarget>> = HashMap::new();
         for target in to_hash {
-            match core
-                .share_local_file(LocalShareCreate {
-                    path: target.path.display().to_string(),
-                    name: None,
-                })
-                .await
-            {
-                Ok(share) => {
-                    forget_stale_share(&core, target.stale_hash.as_deref(), &share.hash).await;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        path = %target.path.display(),
-                        error = %error,
-                        "failed to hash/share file during background shared-directory reload (skipping)",
-                    );
-                }
-            }
-            core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
+            by_disk
+                .entry(physical_disk_key(&target.path))
+                .or_default()
+                .push(target);
         }
+        let disk_count = by_disk.len();
+        tracing::info!(
+            disks = disk_count,
+            "background shared-directory reload hashing across physical disks"
+        );
+        let mut workers = JoinSet::new();
+        for (disk, targets) in by_disk {
+            let core = core.clone();
+            workers.spawn(async move {
+                let files = targets.len();
+                for target in targets {
+                    hash_one_reload_target(&core, target).await;
+                }
+                tracing::debug!(
+                    disk = %disk,
+                    files,
+                    "per-disk shared-directory hashing worker finished"
+                );
+            });
+        }
+        while workers.join_next().await.is_some() {}
         tracing::info!("background shared-directory reload finished hashing the library");
     });
 
     Ok(queued)
+}
+
+/// Hash and share one reloaded file, then prune a now-stale duplicate manifest
+/// and decrement the live `hashingCount`. A file that fails to hash is logged and
+/// skipped so one bad file never aborts indexing of the rest of the library.
+async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
+    match core
+        .share_local_file(LocalShareCreate {
+            path: target.path.display().to_string(),
+            name: None,
+        })
+        .await
+    {
+        Ok(share) => {
+            forget_stale_share(core, target.stale_hash.as_deref(), &share.hash).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %target.path.display(),
+                error = %error,
+                "failed to hash/share file during background shared-directory reload (skipping)",
+            );
+        }
+    }
+    core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]

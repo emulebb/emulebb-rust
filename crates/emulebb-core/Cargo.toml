@@ -33,6 +33,18 @@ tracing.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Resolve a path's volume to its physical disk number (per-disk hashing pool) via
+# IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS. Same windows-sys 0.59 as the rest of the
+# workspace; raw FFI mirrors crates/emulebb-kad-net/src/socket_opts.rs.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+] }
+
 [dev-dependencies]
 emulebb-kad-routing = { path = "../emulebb-kad-routing" }
 serde_json.workspace = true

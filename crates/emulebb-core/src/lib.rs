@@ -102,6 +102,7 @@ mod kad_udp_firewall_check;
 mod lifecycle;
 mod local_search_response;
 mod network_binding;
+mod physical_disk;
 mod preferences;
 mod profile_state;
 mod search_query;
