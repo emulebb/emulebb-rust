@@ -23,6 +23,7 @@ How the 13 workspace crates depend on each other (edges = a `[dependencies]`
 entry in that crate's `Cargo.toml`).
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 55, 'rankSpacing': 70}}}%%
 graph TD
     daemon[emulebb-daemon<br/>bin: emulebb-rust] --> core[emulebb-core]
     daemon --> rest[emulebb-rest]
@@ -83,38 +84,38 @@ network subsystems. Node names match the `EmulebbCore` struct
 (`:239`).
 
 ```mermaid
-graph TD
-    subgraph proc[emulebb-rust process]
-        cfg[DaemonConfig<br/>emulebb-rust.toml] --> boot[daemon::run]
-        boot --> sqlite[(SQLite<br/>MetadataStore)]
-        boot --> idx[FileIndex]
-        boot --> coreobj[EmulebbCore]
-        boot --> router[axum Router<br/>/api/v1/*]
-        boot --> vpn[VpnGuardMonitor]
-
-        router -->|controller HTTP| coreobj
-
-        subgraph coreobj_sub[EmulebbCore state]
-            coreobj --> tr[Ed2kTransferRuntime<br/>downloads + upload queue]
-            coreobj --> rt[Ed2kRuntime<br/>live session]
-            coreobj --> kls[KadLocalStore]
-            coreobj --> snoop[SnoopQueue]
-            coreobj --> sdm[SharedDirMonitor]
-            coreobj --> reach[ExternalReachability]
-        end
-
-        rt --> search[Ed2kServerSearchHandle]
-        rt --> srv[Ed2kServerState]
-        rt --> dht[DhtNode]
-        rt --> fw[KadFirewallState]
-        rt --> nat[NatManager]
-    end
-
+%%{init: {'flowchart': {'nodeSpacing': 45, 'rankSpacing': 80}}}%%
+graph TB
+    cfg[DaemonConfig<br/>emulebb-rust.toml] --> boot[daemon::run]
     ctrl[External controller<br/>TrackMuleBB / scripts] -->|REST| router
-    srv <-->|TCP/UDP| eserver[(eD2k server)]
-    rt <-->|UDP| kadnet[(Kad network)]
-    tr <-->|TCP| peers[(eD2k peers)]
-    nat <-->|UPnP/STUN| gw[(NAT gateway)]
+
+    boot --> coreobj[EmulebbCore]
+    boot --> router[axum Router<br/>/api/v1/*]
+    router -->|invokes| coreobj
+
+    subgraph stores[boot opens / builds]
+        direction LR
+        sqlite[(SQLite<br/>MetadataStore)] ~~~ idx[FileIndex] ~~~ vpn[VpnGuardMonitor]
+    end
+    boot --> stores
+
+    subgraph state[EmulebbCore state]
+        direction LR
+        tr[Ed2kTransferRuntime] ~~~ rt[Ed2kRuntime] ~~~ kls[KadLocalStore] ~~~ snoop[SnoopQueue] ~~~ sdm[SharedDirMonitor] ~~~ reach[ExternalReachability]
+    end
+    coreobj --> state
+
+    subgraph live[Ed2kRuntime — live handles]
+        direction LR
+        srv[Ed2kServerState] ~~~ dht[DhtNode] ~~~ nat[NatManager] ~~~ search[SearchHandle] ~~~ fw[KadFirewallState]
+    end
+    state --> live
+
+    subgraph net[external network]
+        direction LR
+        eserver[(eD2k server)] ~~~ kadnet[(Kad network)] ~~~ peers[(eD2k peers)] ~~~ gw[(NAT gateway)]
+    end
+    live -->|TCP / UDP · UPnP / STUN| net
 ```
 
 **Legend**
@@ -144,56 +145,37 @@ local transfer engine, the UDP source-reask client, and the NAT/reachability
 stack. Module groups map to directories under `crates/emulebb-ed2k/src/`.
 
 ```mermaid
-graph TD
+%%{init: {'flowchart': {'nodeSpacing': 40, 'rankSpacing': 70}}}%%
+graph TB
     subgraph server[ed2k_server — server session]
-        s_sess[session / session_driver]
-        s_pkt[packet_codec / packet_handler]
-        s_search[active_keyword / active_source / active_callback]
-        s_udp[udp_runtime]
-        s_met[server_met / server_list]
+        direction LR
+        s_sess[session / driver] ~~~ s_pkt[packet codec / handler] ~~~ s_search[keyword / source / callback search] ~~~ s_udp[udp_runtime] ~~~ s_met[server_met / list]
     end
 
     subgraph tcp[ed2k_tcp — peer protocol]
-        t_hello[hello / hello_gpl / identity<br/>secure ident]
-        t_dl[download/session<br/>blocks · window · aich_request]
-        t_listen[listener/session<br/>upload_queue · upload_payload]
-        t_codec[codec: file_desc · hashset · source_exchange · upload]
-        t_obf[obfuscation]
-        t_transport[transport]
+        direction LR
+        t_hello[hello / identity<br/>secure ident] ~~~ t_dl[download session<br/>blocks · window · aich_req] ~~~ t_listen[listener session<br/>upload_queue · payload] ~~~ t_codec[codecs<br/>file_desc · hashset · src_exchange] ~~~ t_tx[transport · obfuscation]
     end
 
     subgraph transfer[ed2k_transfer — local engine]
-        x_coord[download_coordinator<br/>download_pick · throttle]
-        x_uq[upload_queue<br/>admission · score · credit]
-        x_store[piece_store · block_bitmap · store]
-        x_aich[aich_tree · aich_recovery · aich_trust]
-        x_hash[hashset · manifest]
-        x_deliver[deliver — finished-file move]
-        x_ban[ban_store · ipfilter]
+        direction LR
+        x_coord[download_coordinator<br/>pick · throttle] ~~~ x_uq[upload_queue<br/>admission · score · credit] ~~~ x_store[piece_store · block_bitmap] ~~~ x_aich[aich<br/>tree · recovery · trust] ~~~ x_deliver[deliver · ban_store · ipfilter]
     end
 
     subgraph udpreask[ed2k_client_udp — UDP source reask]
-        u_rt[runtime / service]
-        u_reg[registry · source_set · state]
-        u_buddy[buddy_relay]
+        direction LR
+        u_rt[runtime / service] ~~~ u_reg[registry · source_set · state] ~~~ u_buddy[buddy_relay]
     end
 
     subgraph natstack[NAT / reachability]
-        n_nat[nat: igd · miniupnpc · rupnp]
-        n_stun[stun]
-        n_reach[reachability]
-        n_kfw[kad_firewall]
+        direction LR
+        n_nat[nat<br/>igd · miniupnpc · rupnp] ~~~ n_stun[stun] ~~~ n_reach[reachability] ~~~ n_kfw[kad_firewall]
     end
 
-    s_search --> x_coord
-    t_dl --> x_coord
-    t_listen --> x_uq
-    x_coord --> t_dl
-    x_uq --> t_listen
-    u_reg --> x_coord
-    t_transport --- t_obf
-    n_nat --> n_reach
-    n_stun --> n_reach
+    natstack --> tcp
+    server --> transfer
+    tcp --> transfer
+    udpreask --> transfer
 ```
 
 **Legend**
@@ -223,48 +205,38 @@ The Kademlia implementation is split across four crates by concern, with the
 local index crate consuming and feeding it.
 
 ```mermaid
-graph TD
+%%{init: {'flowchart': {'nodeSpacing': 40, 'rankSpacing': 75}}}%%
+graph TB
     subgraph proto[emulebb-kad-proto — wire types]
-        p_pkt[packet codec/types]
-        p_id[node_id · hash · tag]
+        direction LR
+        p_pkt[packet codec / types] ~~~ p_id[node_id · hash · tag]
     end
 
     subgraph routing[emulebb-kad-routing]
-        r_table[table · zone · contact]
-        r_maint[maintenance]
+        direction LR
+        r_table[table · zone · contact] ~~~ r_maint[maintenance]
     end
 
     subgraph net[emulebb-kad-net — UDP transport]
-        n_rpc[rpc: receive_loop · outbound · peer_state]
-        n_obf[obfuscation]
-        n_rate[rate_limit]
-        n_tx[transport · socket_opts]
-        n_track[tracker]
+        direction LR
+        n_rpc[rpc<br/>receive_loop · outbound · peer_state] ~~~ n_obf[obfuscation] ~~~ n_rate[rate_limit] ~~~ n_tx[transport · socket_opts] ~~~ n_track[tracker]
     end
 
     subgraph dht[emulebb-kad-dht — DhtNode]
-        d_boot[bootstrap]
-        d_search[search · traversal]
-        d_pub[publish]
-        d_route[node/routing · concurrency · legacy_challenge]
+        direction LR
+        d_boot[bootstrap] ~~~ d_search[search · traversal] ~~~ d_pub[publish] ~~~ d_route[routing · concurrency · legacy_challenge]
     end
 
     subgraph idx[emulebb-index — local Kad index]
-        i_store[kad_store: keyword · source · notes · size_tags]
-        i_snoop[snoop_queue]
-        i_expr[kad_search_expr · kad_publish_snapshot]
+        direction LR
+        i_store[kad_store<br/>keyword · source · notes · size_tags] ~~~ i_snoop[snoop_queue] ~~~ i_expr[kad_search_expr · publish_snapshot]
     end
 
     proto --> routing
     proto --> net
     routing --> dht
     net --> dht
-    d_route --> r_table
-    d_search --> n_rpc
-    d_pub --> n_rpc
-    d_pub --> i_store
-    d_search --> i_store
-    i_snoop --> i_store
+    dht --> idx
 ```
 
 **Legend**
@@ -290,6 +262,7 @@ All durable state lives in a single SQLite database fronted by `MetadataStore`,
 with typed sub-stores. The runtime objects are hydrated from these on boot.
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 50, 'rankSpacing': 70}}}%%
 graph TD
     db[(SQLite DB<br/>migrations · schema)] --> store[MetadataStore]
     store --> id[identity_store]
