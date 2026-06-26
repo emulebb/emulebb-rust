@@ -35,7 +35,7 @@ Item IDs carry a **product prefix** so they never collide across the suite repos
 emulebb-rust uses `RUST-<CLASS>-<NNN>` with classes `BUG`, `FEAT`, `REF`, `CI`
 (e.g. `RUST-FEAT-002`). Other products use `QBBB-`, `GOED2K-`, `AMUT-`; the frozen
 MFC app keeps its legacy unprefixed IDs. IDs are allocated per class and never
-reused. Scan `docs/active/items` (and `docs/history/items` once it exists) before
+reused. Scan both `docs/active/items` and `docs/history/items` before
 allocating the next number.
 
 ## Phase 0 — "perfectly functional" gate
@@ -58,81 +58,39 @@ Arr/Torznab, Docker, SSE, or automated tunnel-down leak-test work. The closure
 gate and test-rationalization plan are tracked by
 [RUST-CI-002](items/RUST-CI-002.md).
 
-## Features (`FEAT`)
+## Active Backlog
+
+Only **in-progress / open** items live in `items/`. Items move to
+[`../history/items/`](../history/items/) when they reach `DONE`, so these tables
+stay active-only; see [Closed Items](#closed-items-archive) for the archive.
+
+### Features (`FEAT`)
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
 | [RUST-FEAT-001](items/RUST-FEAT-001.md) | Major | IN_PROGRESS | eD2K — Implement client UDP source reask and queue-slot persistence |
 | [RUST-FEAT-002](items/RUST-FEAT-002.md) | Major | OPEN | Indexer — autonomous Kad/eD2K snooping index with Torznab surface |
-| [RUST-FEAT-003](items/RUST-FEAT-003.md) | Major | DONE | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
 | [RUST-FEAT-004](items/RUST-FEAT-004.md) | Major | OPEN | Arr integration — Torznab indexer + qBittorrent-emulating download client |
 | [RUST-FEAT-005](items/RUST-FEAT-005.md) | Critical | OPEN | Automated VPN leak-test — assert no data egress off the tunnel (release-blocking) |
 | [RUST-FEAT-006](items/RUST-FEAT-006.md) | Major | OPEN | Docker — publish a linuxserver-style GHCR image (suite bundle prerequisite) |
 | [RUST-FEAT-007](items/RUST-FEAT-007.md) | Minor | OPEN | REST push — SSE stream for live transfer updates (+ transfers.sse capability) |
 
-## Bugs (`BUG`)
+### Bugs (`BUG`)
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
 | [RUST-BUG-001](items/RUST-BUG-001.md) | Minor | IN_PROGRESS | kad_swarm multi-node transfer tests are isolated in CI |
-| [RUST-BUG-051](items/RUST-BUG-051.md) | Major | DONE | Route public searches through the selected ED2K or Kad network |
-| [RUST-BUG-052](items/RUST-BUG-052.md) | Major | DONE | Persist transfer category assignments across restart |
-| [RUST-BUG-053](items/RUST-BUG-053.md) | Major | DONE | Reindex transfer categories after category deletion |
-| [RUST-BUG-054](items/RUST-BUG-054.md) | Major | DONE | Delay server endpoint advertisement until ED2K login is accepted |
-| [RUST-BUG-055](items/RUST-BUG-055.md) | Major | DONE | Match MFC obfuscated server login for metadata-poor ED2K servers |
-| [RUST-BUG-056](items/RUST-BUG-056.md) | Major | DONE | Ignore malformed ED2K UDP global-search replies |
-| [RUST-BUG-057](items/RUST-BUG-057.md) | Major | DONE | Match MFC connected-server keyword search timeout |
-| [RUST-BUG-058](items/RUST-BUG-058.md) | Major | DONE | Decode ED2K UDP search-result entries without TCP count prefix |
-| [RUST-BUG-059](items/RUST-BUG-059.md) | Major | DONE | Collect multiple ED2K UDP keyword replies per server |
-| [RUST-BUG-060](items/RUST-BUG-060.md) | Major | DONE | Accept ED2K UDP search replies from any requested server |
-| [RUST-BUG-061](items/RUST-BUG-061.md) | Major | DONE | Supplement scarce connected-server sources with global UDP source search |
-| [RUST-BUG-062](items/RUST-BUG-062.md) | Major | DONE | Batch ED2K global UDP source requests like MFC |
-| [RUST-BUG-063](items/RUST-BUG-063.md) | Major | DONE | Do not serialize ED2K UDP source-batch sends behind per-server waits |
-| [RUST-BUG-064](items/RUST-BUG-064.md) | Major | DONE | Cover all effective servers in ED2K UDP source batches |
-| [RUST-BUG-065](items/RUST-BUG-065.md) | Major | DONE | Deduplicate remembered ED2K sources across plaintext fallback |
-| [RUST-BUG-066](items/RUST-BUG-066.md) | Major | DONE | Pace connected-server source refreshes across retry attempts |
-| [RUST-BUG-067](items/RUST-BUG-067.md) | Major | DONE | Reuse remembered ED2K sources alongside fresh lookups |
-| [RUST-BUG-068](items/RUST-BUG-068.md) | Major | DONE | Keep active ED2K downloads retrying after exhausted direct peers |
-| [RUST-BUG-069](items/RUST-BUG-069.md) | Major | DONE | Pace failed direct source retries per endpoint |
-| [RUST-BUG-070](items/RUST-BUG-070.md) | Major | DONE | Pace Kad source refreshes across retry attempts |
-| [RUST-BUG-071](items/RUST-BUG-071.md) | Major | DONE | Wait until direct source retry cooldown before reattempting |
-| [RUST-BUG-072](items/RUST-BUG-072.md) | Major | DONE | Do not expire queued connected-server source requests before dispatch |
-| [RUST-BUG-073](items/RUST-BUG-073.md) | Major | DONE | Preserve MFC queued-source UDP reask cadence |
-| [RUST-BUG-074](items/RUST-BUG-074.md) | Minor | DONE | Include reaskCount in Rust UDP reask diagnostics |
-| [RUST-BUG-075](items/RUST-BUG-075.md) | Major | DONE | Preserve out-of-order requested ED2K blocks |
-| [RUST-BUG-076](items/RUST-BUG-076.md) | Major | DONE | Keep diag_event JSONL records line-atomic across shims |
-| [RUST-BUG-077](items/RUST-BUG-077.md) | Major | DONE | Persist accepted ED2K request blocks before bitmap recovery |
-| [RUST-BUG-078](items/RUST-BUG-078.md) | Major | DONE | Do not immediately downgrade failed obfuscated ED2K peers |
-| [RUST-BUG-079](items/RUST-BUG-079.md) | Minor | DONE | Do not report unknown ED2K TCP transport as plaintext |
-| [RUST-BUG-080](items/RUST-BUG-080.md) | Minor | DONE | Count embedded SX2 requests in Rust live-wire evidence |
-| [RUST-BUG-081](items/RUST-BUG-081.md) | Minor | DONE | Stop Rust live-wire downloads after first completion |
-| [RUST-BUG-082](items/RUST-BUG-082.md) | Minor | DONE | Report SX2 answer source counts in live-wire evidence |
-| [RUST-BUG-083](items/RUST-BUG-083.md) | Major | DONE | Gate SX2 requests on the MFC soft source cap |
-| [RUST-BUG-084](items/RUST-BUG-084.md) | Major | DONE | Use MFC common-file SX2 reask timing |
-| [RUST-BUG-085](items/RUST-BUG-085.md) | Major | DONE | Apply MFC SX2 answer cooldown per file |
-| [RUST-BUG-086](items/RUST-BUG-086.md) | Major | DONE | Do not block download startup on peer secure-ident signature |
-| [RUST-BUG-087](items/RUST-BUG-087.md) | Minor | DONE | Dump outgoing secure-ident signatures |
-| [RUST-BUG-088](items/RUST-BUG-088.md) | Minor | DONE | Report direct-source crypt options in diagnostics |
-| [RUST-BUG-089](items/RUST-BUG-089.md) | Minor | DONE | Separate live-wire completed and partial byte counters |
-| [RUST-BUG-090](items/RUST-BUG-090.md) | Major | DONE | Preserve SX2 live-source connect options |
-| [RUST-BUG-091](items/RUST-BUG-091.md) | Major | DONE | Return EXT2 identifier answer for source-only multipackets |
-| [RUST-BUG-092](items/RUST-BUG-092.md) | Minor | DONE | Name server callback requests in diagnostics |
-| [RUST-BUG-093](items/RUST-BUG-093.md) | Minor | DONE | Retain client UDP reask packet diagnostics |
-| [RUST-BUG-094](items/RUST-BUG-094.md) | Minor | DONE | Filter client UDP diagnostic noise and dump replies |
-| [RUST-BUG-095](items/RUST-BUG-095.md) | Major | DONE | Skip incomplete LowID UDP reasks |
-| [RUST-BUG-096](items/RUST-BUG-096.md) | Major | DONE | Keep unroutable LowID queue sources on TCP retry |
-| [RUST-BUG-097](items/RUST-BUG-097.md) | Major | DONE | Cancel accepted slots when no block is claimable |
-| [RUST-BUG-098](items/RUST-BUG-098.md) | Major | DONE | Do not gate download startup on pending secure-ident keys |
-| [RUST-BUG-099](items/RUST-BUG-099.md) | Minor | DONE | Name deprecated Kad hello packets in diagnostics |
 
-## Refactors (`REF`)
-
-| ID | Priority | Status | Title |
-|----|----------|--------|-------|
-| [RUST-CI-001](items/RUST-CI-001.md) | Major | DONE | Capture ED2K global UDP packets in diagnostics |
-
-## CI / Tooling (`CI`)
+### CI / Tooling (`CI`)
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
 | [RUST-CI-002](items/RUST-CI-002.md) | Major | OPEN | Rationalize and close the core MFC parity evidence gate |
+
+## Closed Items (archive)
+
+Closed items keep their full engineering record under
+[`../history/items/`](../history/items/). As of 2026-06-26 the archive holds the
+DONE set: `RUST-FEAT-003`, `RUST-REF-001`, `RUST-CI-001`, and the
+`RUST-BUG-002`…`RUST-BUG-099` parity wave. Browse that directory for the
+per-item detail; this index intentionally does not re-list closed items.
