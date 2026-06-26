@@ -329,6 +329,23 @@ fn release_blocking(config: &NatConfig, mappings: &[MappedEndpoint]) -> Result<(
     Ok(())
 }
 
+/// Builds SSDP discovery options from NAT config.
+///
+/// The multicast interface is pinned to `nat.bind_ip` so UPnP/IGD discovery
+/// egresses over the same VPN tunnel as the eD2K/Kad data plane. The VPN guard
+/// allows UPnP over the tunnel ([[vpn-guard-allows-upnp-over-vpn]]); discovery
+/// must never silently fall back to the unbound default route, which would put
+/// SSDP on the clearnet interface even while the data plane is tunnel-pinned.
+fn discovery_options(config: &NatConfig) -> DiscoveryOptions {
+    DiscoveryOptions {
+        timeout: Duration::from_secs(config.discovery_timeout_secs.max(1)),
+        multicast_interface: config.bind_ip.clone(),
+        minissdpd_socket: config.minissdpd_socket.as_ref().map(PathBuf::from),
+        local_port: config.ssdp_local_port,
+        ..DiscoveryOptions::default()
+    }
+}
+
 fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
     info!(
         "UPnP backend {} discovery starting: bind_ip={} igd_ip={}",
@@ -349,13 +366,7 @@ fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
         return Err(anyhow!("no matching IGD found for configured nat.igd_ip"));
     }
 
-    let (discovery, gateway) = emulebb_miniupnpc::discover(&DiscoveryOptions {
-        timeout: Duration::from_secs(config.discovery_timeout_secs.max(1)),
-        multicast_interface: config.bind_ip.clone(),
-        minissdpd_socket: config.minissdpd_socket.as_ref().map(PathBuf::from),
-        local_port: config.ssdp_local_port,
-        ..DiscoveryOptions::default()
-    })?;
+    let (discovery, gateway) = emulebb_miniupnpc::discover(&discovery_options(config))?;
 
     info!(
         "UPnP backend {} discovery found {} device(s); gateway discovered={}",
@@ -495,9 +506,72 @@ fn option_display<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use emulebb_miniupnpc::PortMappingEntry;
 
-    use super::existing_mapping_matches;
+    use super::super::{MappingExposure, MappingSpec, NatConfig, TransportProtocol};
+    use super::{discovery_options, existing_mapping_matches, mapping_internal_ip};
+
+    fn vpn_mapping_spec(local_addr: &str) -> MappingSpec {
+        MappingSpec {
+            name: "ed2k-tcp".to_string(),
+            local_addr: local_addr.parse().unwrap(),
+            protocol: TransportProtocol::Tcp,
+            exposure: MappingExposure::Required,
+            preferred_external_port: None,
+        }
+    }
+
+    // RUST-FEAT-003: UPnP/IGD discovery must egress over the configured VPN
+    // interface, never the unbound default route, so SSDP never lands on the
+    // clearnet interface while the data plane is tunnel-pinned.
+    #[test]
+    fn discovery_pins_multicast_to_configured_vpn_interface() {
+        let config = NatConfig {
+            bind_ip: Some("192.0.2.34".to_string()),
+            ssdp_local_port: Some(45_000),
+            ..NatConfig::default()
+        };
+        let options = discovery_options(&config);
+        assert_eq!(options.multicast_interface.as_deref(), Some("192.0.2.34"));
+        assert_eq!(options.local_port, Some(45_000));
+    }
+
+    #[test]
+    fn discovery_without_bind_ip_leaves_multicast_unset() {
+        assert_eq!(discovery_options(&NatConfig::default()).multicast_interface, None);
+    }
+
+    // RUST-FEAT-003: a wildcard listener forwards to the VPN-side address, so the
+    // gateway-reported LAN IP must not win over the configured VPN bind IP.
+    #[test]
+    fn unspecified_mapping_forwards_to_configured_vpn_bind_ip() {
+        let config = NatConfig {
+            bind_ip: Some("192.0.2.34".to_string()),
+            ..NatConfig::default()
+        };
+        let internal = mapping_internal_ip(
+            &config,
+            &vpn_mapping_spec("0.0.0.0:4662"),
+            &Ipv4Addr::new(198, 51, 100, 50),
+        );
+        assert_eq!(internal, Ipv4Addr::new(192, 0, 2, 34));
+    }
+
+    #[test]
+    fn explicit_mapping_ip_is_preserved_over_bind_ip_and_gateway() {
+        let config = NatConfig {
+            bind_ip: Some("192.0.2.34".to_string()),
+            ..NatConfig::default()
+        };
+        let internal = mapping_internal_ip(
+            &config,
+            &vpn_mapping_spec("192.0.2.99:4662"),
+            &Ipv4Addr::new(198, 51, 100, 50),
+        );
+        assert_eq!(internal, Ipv4Addr::new(192, 0, 2, 99));
+    }
 
     #[test]
     fn existing_mapping_match_requires_same_ip_and_port() {

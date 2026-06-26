@@ -3,7 +3,7 @@ id: RUST-FEAT-003
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/3
 title: VPN — pin eD2K TCP egress to the tunnel interface (fail-closed)
-status: IN_PROGRESS
+status: DONE
 priority: Major
 category: feature
 labels: [vpn, ed2k, tcp, anonymity, binding]
@@ -44,8 +44,17 @@ for calling rust "perfectly functional".
 - Kad UDP startup, legacy Kad TCP firewall probes, and accepted eD2K TCP sockets
   now use the same fail-closed bind-index rule before public P2P payloads can
   leave the process.
+- UPnP/IGD discovery and port-forwarding are pinned to the VPN interface: SSDP
+  discovery binds its multicast egress to `nat.bind_ip` and the forwarded
+  internal target resolves to the VPN bind IP (the gateway-reported LAN IP never
+  overrides it). UPnP intentionally sits outside the eD2K/Kad egress pins because
+  UPnP-over-VPN is allowed ([[vpn-guard-allows-upnp-over-vpn]]); it must not fall
+  back to the unbound default route. Static bind-policy coverage lives in
+  `emulebb_ed2k::nat::miniupnpc::tests` (`discovery_pins_multicast_to_configured_vpn_interface`,
+  `unspecified_mapping_forwards_to_configured_vpn_bind_ip`), complementing the
+  existing live hide.me evidence (the indefinite-lease 725 workaround).
 - Remaining work is live validation that fail-closed behavior holds when the
-  tunnel is absent, plus UPnP/port-forwarding validation over the VPN interface.
+  tunnel is absent (tracked by `RUST-FEAT-005`).
 - Parity closure note 2026-06-19: static bind-index coverage and public
   VPN-bound smoke evidence are sufficient for core MFC parity closure, but they
   do not close the suite safety claim. The dynamic tunnel-down no-egress gate is
@@ -69,7 +78,9 @@ for calling rust "perfectly functional".
 - [x] eD2K TCP outbound connects are proven pinned to the tunnel ifIndex (fail-closed:
       no tunnel → no eD2K TCP egress).
 - [x] eD2K TCP listener bound consistently with the VPN binding model.
-- [ ] UPnP/port-forwarding over the VPN interface still works.
+- [x] UPnP/port-forwarding over the VPN interface still works (discovery +
+      forward target pinned to `nat.bind_ip`; static bind-policy tests in
+      `nat::miniupnpc::tests` plus live hide.me evidence).
 - [x] A static/bind-policy test asserts eD2K TCP egress is tunnel-pinned.
 - [x] Static bind-index coverage proves unassigned bind IPs fail closed before
       public eD2K TCP/UDP egress pinning.

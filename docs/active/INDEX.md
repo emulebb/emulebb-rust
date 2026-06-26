@@ -64,7 +64,7 @@ gate and test-rationalization plan are tracked by
 |----|----------|--------|-------|
 | [RUST-FEAT-001](items/RUST-FEAT-001.md) | Major | IN_PROGRESS | eD2K — Implement client UDP source reask and queue-slot persistence |
 | [RUST-FEAT-002](items/RUST-FEAT-002.md) | Major | OPEN | Indexer — autonomous Kad/eD2K snooping index with Torznab surface |
-| [RUST-FEAT-003](items/RUST-FEAT-003.md) | Major | IN_PROGRESS | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
+| [RUST-FEAT-003](items/RUST-FEAT-003.md) | Major | DONE | VPN — pin eD2K TCP egress to the tunnel interface (fail-closed) |
 | [RUST-FEAT-004](items/RUST-FEAT-004.md) | Major | OPEN | Arr integration — Torznab indexer + qBittorrent-emulating download client |
 | [RUST-FEAT-005](items/RUST-FEAT-005.md) | Critical | OPEN | Automated VPN leak-test — assert no data egress off the tunnel (release-blocking) |
 | [RUST-FEAT-006](items/RUST-FEAT-006.md) | Major | OPEN | Docker — publish a linuxserver-style GHCR image (suite bundle prerequisite) |
