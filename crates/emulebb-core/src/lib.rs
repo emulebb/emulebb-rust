@@ -43,6 +43,7 @@ use emulebb_ed2k::{
         Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
+    long_path::long_path,
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
 };
@@ -2264,6 +2265,7 @@ impl EmulebbCore {
             let state_name = manifest_default_state_name(&manifest);
             self.transfer_from_manifest(&manifest, state_name)
         };
+        self.delete_delivered_transfer_file(hash, &transfer).await?;
         if !self.ed2k_transfers.delete_transfer_files(hash).await? {
             return Ok(None);
         }
@@ -2277,6 +2279,34 @@ impl EmulebbCore {
         state.transfers.remove(hash);
         state.unshared_hashes.remove(hash);
         Ok(Some(transfer))
+    }
+
+    async fn delete_delivered_transfer_file(&self, hash: &str, transfer: &Transfer) -> Result<()> {
+        let delivered_path = match self.ed2k_transfers.manifest(hash).await {
+            Ok(manifest) => {
+                if manifest.source_path.is_some() {
+                    None
+                } else {
+                    manifest.delivered_path
+                }
+            }
+            Err(_) => transfer.delivered_path.clone(),
+        };
+        let Some(path) = delivered_path.as_deref() else {
+            return Ok(());
+        };
+        let path = Path::new(path);
+        let long = long_path(path);
+        match tokio::fs::remove_file(&long).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to delete delivered transfer file {}",
+                    path.display()
+                )
+            }),
+        }
     }
 
     pub async fn delete_completed_transfer_row(&self, hash: &str) -> Result<Option<Transfer>> {
@@ -5912,6 +5942,7 @@ mod tests {
     use emulebb_ed2k::{NatConfig, ipfilter::IpFilter};
     use emulebb_index::IndexedFile;
     use emulebb_kad_proto::{NodeId, Tag, TagValue};
+    use md4::{Digest, Md4};
 
     use super::*;
 
@@ -5921,8 +5952,14 @@ mod tests {
         let incoming = Path::new(r"C:\Downloads\Incoming");
         // A downloaded file living in the incoming dir (verbatim long path, mixed
         // case, forward slashes) is recognized as in-incoming.
-        assert!(path_is_within(r"\\?\C:\Downloads\Incoming\example.iso", incoming));
-        assert!(path_is_within(r"c:/downloads/incoming/sub/file.bin", incoming));
+        assert!(path_is_within(
+            r"\\?\C:\Downloads\Incoming\example.iso",
+            incoming
+        ));
+        assert!(path_is_within(
+            r"c:/downloads/incoming/sub/file.bin",
+            incoming
+        ));
         // A file shared only from a separate shared dir is NOT in-incoming.
         assert!(!path_is_within(r"D:\Library\Media\sample.mkv", incoming));
         // A sibling dir sharing a name prefix must not count as inside.
@@ -7436,6 +7473,75 @@ mod tests {
         assert_eq!(deleted.hash, transfer.hash);
         assert!(!transfer_dir.exists());
         assert!(core.transfer(&transfer.hash).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_transfer_files_removes_delivered_completed_download() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-delete-delivered-transfer");
+        let transfer_root = runtime_dir.join("transfers");
+        let incoming_dir = runtime_dir.join("incoming");
+        let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root)
+            .unwrap()
+            .with_incoming_dir(incoming_dir.clone());
+        let payload = b"completed delivered download payload".repeat(64);
+        let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into()).to_string();
+        let transfer = core
+            .create_transfer(TransferCreate {
+                link: Some(format!(
+                    "ed2k://|file|Delivered.Delete.bin|{}|{}|/",
+                    payload.len(),
+                    file_hash
+                )),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: Some(true),
+            })
+            .await
+            .unwrap();
+
+        core.ed2k_transfers
+            .store_md4_hashset(&file_hash, Vec::new())
+            .await
+            .unwrap();
+        core.ed2k_transfers
+            .store_piece_data(&file_hash, 0, &payload)
+            .await
+            .unwrap();
+        let completed = core
+            .refresh_transfer_from_manifest_default(&file_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.state, "completed");
+        core.deliver_completed_transfer(&file_hash).await;
+        let delivered_manifest = core.ed2k_transfers.manifest(&file_hash).await.unwrap();
+        let delivered_path = PathBuf::from(delivered_manifest.delivered_path.as_deref().unwrap());
+        assert_eq!(std::fs::read(&delivered_path).unwrap(), payload);
+
+        let row_only = core
+            .delete_completed_transfer_row(&file_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row_only.hash, transfer.hash);
+        assert!(
+            delivered_path.exists(),
+            "row-only completed transfer removal must preserve the delivered file"
+        );
+
+        let deleted = core
+            .delete_transfer_files(&file_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.hash, transfer.hash);
+        assert!(
+            !delivered_path.exists(),
+            "destructive transfer delete must remove the delivered completed file"
+        );
+        assert!(!transfer_root.join(&file_hash).exists());
+        assert!(core.transfer(&file_hash).await.is_none());
     }
 
     #[tokio::test]
