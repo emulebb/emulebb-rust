@@ -11,6 +11,14 @@
 # (cargo-deny's `unmaintained` takes all/workspace/transitive/none, not a severity.)
 yanked = "deny"
 unmaintained = "all"
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack" RSA timing side-channel in the `rsa`
+    # crate. Pulled in transitively; upstream has no fixed release yet, so it
+    # cannot be resolved by a version bump. The attack requires precise local
+    # timing measurements against an attacker-chosen ciphertext oracle, which our
+    # usage does not expose. Revisit and drop this ignore once `rsa` ships a fix.
+    "RUSTSEC-2023-0071",
+]
 
 [bans]
 multiple-versions = "warn"
