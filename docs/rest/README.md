@@ -17,8 +17,8 @@ fewer capabilities.
   with no per-client branching.
 - Change the spec **in the same change** as the implementation; an OpenAPI
   conformance/drift check (validating live responses against this document, per
-  advertised capability) belongs in this repo's CI. (TODO: wire the conformance
-  check.)
+  advertised capability) belongs in this repo's CI, tracked by
+  [RUST-CI-003](../active/items/RUST-CI-003.md).
 - Adapter surfaces (`/api/v2` qBit-compat, Torznab) must not broaden or weaken
   the native contract.
 

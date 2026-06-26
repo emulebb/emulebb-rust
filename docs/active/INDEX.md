@@ -86,6 +86,7 @@ stay active-only; see [Closed Items](#closed-items-archive) for the archive.
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
 | [RUST-CI-002](items/RUST-CI-002.md) | Major | OPEN | Rationalize and close the core MFC parity evidence gate |
+| [RUST-CI-003](items/RUST-CI-003.md) | Minor | OPEN | Wire the /api/v1 OpenAPI conformance/drift check into CI |
 
 ## Closed Items (archive)
 
