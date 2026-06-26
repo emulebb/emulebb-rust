@@ -9,6 +9,20 @@ description = "Headless emulebb-rust daemon"
 name = "emulebb-rust"
 path = "src/bin/emulebb-rust.rs"
 
+# Diagnostics flavor: the SAME binary built under a distinct name so it is never
+# confused with the plain release exe (mirrors the MFC emulebb.exe vs
+# emulebb-diagnostics.exe split). The target points at a thin shim that
+# `include!`s `emulebb-rust.rs`; pointing two [[bin]] targets at one source file
+# directly trips cargo's "present in multiple build targets" warning, so the shim
+# gives this target its own source path. `required-features` ties the name to the
+# packet-diagnostics feature, so `cargo build --bin emulebb-rust-diagnostics
+# --features packet-diagnostics` emits `emulebb-rust-diagnostics.exe` directly, and
+# a plain `cargo build` simply skips this target (feature off).
+[[bin]]
+name = "emulebb-rust-diagnostics"
+path = "src/bin/emulebb-rust-diagnostics.rs"
+required-features = ["packet-diagnostics"]
+
 [features]
 # Build the daemon with `--features packet-diagnostics` to compile in the
 # ed2k_packet_v1 packet dump (diagnostic/live-wire builds); off by default.
