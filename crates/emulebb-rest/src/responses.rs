@@ -59,10 +59,12 @@ pub(crate) fn stats_response(
     status: &Status,
     upload_policy: &UploadPolicyMetrics,
     throughput: &TransferThroughputStats,
+    shared_hashing_count: i64,
 ) -> Value {
     let ed2k_connected = status.ed2k.connected;
     let kad_connected = status.kad.connected;
     let ed2k_high_id = ed2k_connected && !status.ed2k.firewalled.unwrap_or(false);
+    let shared_hashing_active = shared_hashing_count > 0;
     json!({
         "connected": ed2k_connected || kad_connected,
         "downloadSpeedKiBps": throughput.download_rate_bytes_per_sec as f64 / 1024.0,
@@ -73,9 +75,9 @@ pub(crate) fn stats_response(
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
         "downloadCount": status.transfers.total,
-        "sharedHashingActive": false,
-        "sharedHashingCount": 0,
-        "sharedFilesReady": status.lifecycle.state == "running",
+        "sharedHashingActive": shared_hashing_active,
+        "sharedHashingCount": shared_hashing_count,
+        "sharedFilesReady": status.lifecycle.state == "running" && !shared_hashing_active,
         "ed2kConnected": ed2k_connected,
         "ed2kHighId": ed2k_high_id,
         "kadRunning": status.kad.running,
@@ -90,17 +92,19 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let network = state.core.network_binding_status();
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
+    let shared_hashing_count = state.core.shared_directories().await.hashing_count;
+    let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shares().await.len();
     let download_file_count = status.transfers.total;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
-        "stats": stats_response(&status, &upload_policy, &throughput),
+        "stats": stats_response(&status, &upload_policy, &throughput, shared_hashing_count),
         "servers": server_status_response(state).await,
         "kad": kad_response(&status.kad, network.as_ref(), &guard),
         "network": network_response(network.as_ref(), &guard),
         "sharedStartupCache": {
             "available": false,
-            "ready": true,
+            "ready": status.lifecycle.state == "running" && !shared_hashing_active,
             "filePresent": false,
             "loaded": false,
             "rejected": false,
@@ -108,15 +112,15 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "rejectCode": null,
             "recordsLoaded": 0,
             "volumesLoaded": 0,
-            "hashingCount": 0,
-            "deferredHashingActive": false,
+            "hashingCount": shared_hashing_count,
+            "deferredHashingActive": shared_hashing_active,
             "interruptedHashingInvalidatedCache": false
         },
         "runtimeDiagnostics": {
             "processId": std::process::id(),
             "knownFileCount": shared_file_count,
             "sharedFileCount": shared_file_count,
-            "sharedHashingCount": 0,
+            "sharedHashingCount": shared_hashing_count,
             "downloadFileCount": download_file_count,
             "activeUploads": upload_policy.active_sessions,
             "waitingUploads": upload_policy.waiting_sessions,
@@ -513,14 +517,32 @@ mod tests {
             session_downloaded_bytes: 1_048_576,
             session_uploaded_bytes: 524_288,
         };
-        let value = stats_response(&status, &upload_policy, &throughput);
+        let value = stats_response(&status, &upload_policy, &throughput, 0);
         assert_eq!(value["downloadSpeedKiBps"], 4.0);
         assert_eq!(value["sessionDownloadedBytes"], 1_048_576);
         assert_eq!(value["sessionUploadedBytes"], 524_288);
+        assert_eq!(value["sharedHashingActive"], false);
+        assert_eq!(value["sharedHashingCount"], 0);
+        assert_eq!(value["sharedFilesReady"], true);
         // Lifetime totals are optional in the contract and eMuleBB omits them; we
         // omit rather than emit a misleading 0 (no lifetime persistence).
         assert!(value.get("totalDownloadedBytes").is_none());
         assert!(value.get("totalUploadedBytes").is_none());
+    }
+
+    #[tokio::test]
+    async fn stats_response_reports_active_shared_hashing() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let status = core.status().await;
+        let upload_policy = core.upload_policy_metrics().await;
+        let throughput = TransferThroughputStats::default();
+
+        let value = stats_response(&status, &upload_policy, &throughput, 3);
+
+        assert_eq!(value["sharedHashingActive"], true);
+        assert_eq!(value["sharedHashingCount"], 3);
+        assert_eq!(value["sharedFilesReady"], false);
     }
 
     #[tokio::test]
@@ -533,7 +555,7 @@ mod tests {
         let upload_policy = core.upload_policy_metrics().await;
         let throughput = TransferThroughputStats::default();
 
-        let value = stats_response(&status, &upload_policy, &throughput);
+        let value = stats_response(&status, &upload_policy, &throughput, 0);
 
         assert_eq!(value["ed2kConnected"], true);
         assert_eq!(value["ed2kHighId"], false);

@@ -172,6 +172,9 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["activeDownloads"], 1);
     assert_eq!(value["data"]["downloadCount"], 2);
+    assert_eq!(value["data"]["sharedHashingActive"], false);
+    assert_eq!(value["data"]["sharedHashingCount"], 0);
+    assert_eq!(value["data"]["sharedFilesReady"], true);
 
     let status = router
         .oneshot(
@@ -187,4 +190,10 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
     let body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["runtimeDiagnostics"]["downloadFileCount"], 2);
+    assert_eq!(value["data"]["sharedStartupCache"]["hashingCount"], 0);
+    assert_eq!(
+        value["data"]["sharedStartupCache"]["deferredHashingActive"],
+        false
+    );
+    assert_eq!(value["data"]["runtimeDiagnostics"]["sharedHashingCount"], 0);
 }

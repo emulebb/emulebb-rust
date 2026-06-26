@@ -121,7 +121,13 @@ pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
-    api_ok(stats_response(&status, &upload_policy, &throughput))
+    let shared_hashing_count = state.core.shared_directories().await.hashing_count;
+    api_ok(stats_response(
+        &status,
+        &upload_policy,
+        &throughput,
+        shared_hashing_count,
+    ))
 }
 
 pub(crate) async fn snapshot(
