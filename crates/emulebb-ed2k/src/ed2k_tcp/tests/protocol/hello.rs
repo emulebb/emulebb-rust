@@ -170,8 +170,8 @@ fn hello_decode_preserves_multipacket_capabilities() {
     assert!(profile.supports_secure_ident);
     assert!(profile.supports_multipacket);
     assert!(profile.supports_ext_multipacket);
-    assert_eq!(profile.source_exchange_version, 4);
-    assert!(profile.supports_source_exchange);
+    assert_eq!(profile.source_exchange_version, 0);
+    assert!(!profile.supports_source_exchange);
     assert!(profile.supports_source_exchange2);
     assert!(profile.supports_file_identifiers);
     // The peer's eD2k UDP port is recovered from CT_EMULE_UDPPORTS (low 16 bits)
@@ -226,8 +226,8 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
     assert_eq!((misc_options1 >> 29) & 0x7, 1, "AICH is implemented");
     assert_eq!(
         (misc_options1 >> 12) & 0x0F,
-        4,
-        "source exchange is implemented"
+        0,
+        "deprecated source exchange 1 is not advertised"
     );
     assert_eq!(
         (misc_options1 >> 4) & 0x0F,
@@ -264,7 +264,7 @@ fn hello_answer_matches_truthful_plaintext_profile() {
     });
 
     let expected = decode(
-            "e3520000004c73bec566140e7e6083c450c9af026f8395581b524fb60600000015010001654d756c65030100113c000000030100f951b651b6030100fa16421334030100fe3a240000030100fb00200100b07b02ef8810",
+            "e3520000004c73bec566140e7e6083c450c9af026f8395581b524fb60600000015010001654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a240000030100fb00200100b07b02ef8810",
         )
         .unwrap();
 

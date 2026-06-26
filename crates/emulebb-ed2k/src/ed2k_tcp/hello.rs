@@ -82,7 +82,8 @@ pub(super) fn emule_misc_options1() -> u32 {
     let udp_version = 4u32;
     let data_compression_version = 1u32;
     let secure_ident_version = EMULE_SECURE_IDENT_VERSION;
-    let source_exchange_version = 4u32;
+    // Runtime source exchange is SX2-only; avoid advertising deprecated SX1.
+    let source_exchange_version = 0u32;
     let extended_requests_version = 2u32;
     // Stock v0.72a advertises comment/rating acceptance (we decode OP_FILEDESC).
     let comments_version = 1u32;
