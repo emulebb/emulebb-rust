@@ -1606,6 +1606,10 @@ impl EmulebbCore {
             .ed2k_transfers
             .ingest_local_file(source_path, &canonical_name)
             .await?;
+        self.ed2k_transfers
+            .remove_completed_transfer_row(&summary.file_hash)
+            .await?;
+        self.state.lock().await.transfers.remove(&summary.file_hash);
         self.metadata_store
             .unmark_unshared_file(&summary.file_hash)?;
         self.state
@@ -1622,8 +1626,6 @@ impl EmulebbCore {
                 .to_string(),
             availability_score: 1,
         })?;
-        self.refresh_transfer_from_manifest(&summary.file_hash, "completed")
-            .await?;
         if let Err(error) = self.publish_ed2k_shared_catalog().await {
             tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
         }
@@ -2516,7 +2518,12 @@ impl EmulebbCore {
                 .set_category_id(&manifest.file_hash, *category_id)
                 .await?;
         }
-        let mut transfer = self.transfer_from_manifest(&manifest, state_name);
+        let effective_state_name = if manifest.completed {
+            manifest_default_state_name(&manifest)
+        } else {
+            state_name
+        };
+        let mut transfer = self.transfer_from_manifest(&manifest, effective_state_name);
         let mut state = self.state.lock().await;
         apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
         if let Some(existing) = state.transfers.get(&transfer.hash) {
@@ -2532,7 +2539,7 @@ impl EmulebbCore {
         drop(state);
         // Non-paused downloads start immediately: kick the download driver so
         // ED2K source acquisition begins without requiring an explicit resume.
-        if !matches!(state_name, "paused" | "stopped") {
+        if !manifest.completed && !matches!(effective_state_name, "paused" | "stopped") {
             self.queue_ed2k_download_attempt(transfer.clone());
         }
         Ok(transfer)
@@ -7577,6 +7584,20 @@ mod tests {
             .unwrap();
         let transfer_dir = std::path::Path::new(&share.transfer_dir);
         assert!(transfer_dir.is_dir());
+        assert!(core.transfer(&share.hash).await.is_none());
+        assert!(core.transfers().await.is_empty());
+
+        let restored = core
+            .create_transfer(TransferCreate {
+                link: Some(share.ed2k_link.clone()),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(restored.hash, share.hash);
         assert!(core.transfer(&share.hash).await.is_some());
 
         let deleted = core
@@ -7732,7 +7753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfers_reload_from_persisted_manifests() {
+    async fn shared_files_stay_out_of_transfer_queue_until_link_is_added() {
         let runtime_dir = unique_runtime_dir("emulebb-core-persisted-manifests");
         let transfer_root = runtime_dir.join("transfers");
         let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -7759,15 +7780,31 @@ mod tests {
             &transfer_root,
         )
         .unwrap();
-        let transfers = reloaded.transfers().await;
+        assert!(reloaded.transfers().await.is_empty());
+        assert!(
+            reloaded
+                .shares()
+                .await
+                .iter()
+                .any(|entry| entry.hash == share.hash)
+        );
 
-        assert_eq!(transfers.len(), 1);
-        assert_eq!(transfers[0].hash, share.hash);
-        assert_eq!(transfers[0].state, "completed");
-        assert_eq!(transfers[0].completed_bytes, payload.len() as u64);
-        assert_eq!(transfers[0].progress, 1.0);
-        assert!(!transfers[0].path.is_empty());
-        assert_eq!(std::fs::read(&transfers[0].path).unwrap(), payload);
+        let restored = reloaded
+            .create_transfer(TransferCreate {
+                link: Some(share.ed2k_link.clone()),
+                links: None,
+                category_id: None,
+                category_name: None,
+                paused: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(restored.hash, share.hash);
+        assert_eq!(restored.state, "completed");
+        assert_eq!(restored.completed_bytes, payload.len() as u64);
+        assert_eq!(restored.progress, 1.0);
+        assert!(!restored.path.is_empty());
+        assert_eq!(std::fs::read(&restored.path).unwrap(), payload);
     }
 
     async fn completed_ed2k_transfer_runtime(
