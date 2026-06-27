@@ -109,7 +109,14 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             }
 
             if !shutdown.load(Ordering::Relaxed) {
-                tokio::time::sleep(reconnect_delay).await;
+                tokio::select! {
+                    () = tokio::time::sleep(reconnect_delay) => {}
+                    () = session_context.reconnect_signal.notified() => {
+                        info!(
+                            "ED2K server reconnect delay interrupted by explicit reconnect request"
+                        );
+                    }
+                }
             }
         }
 

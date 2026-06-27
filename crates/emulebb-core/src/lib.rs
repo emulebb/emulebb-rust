@@ -247,6 +247,7 @@ struct Ed2kRuntime {
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     nat: Arc<NatManager>,
     shutdown: Arc<AtomicBool>,
+    server_reconnect_signal: Arc<tokio::sync::Notify>,
     /// Trigger to run a Kad UDP firewall self-check round on demand. `None` when
     /// the firewall check is disabled in config.
     kad_firewall_recheck: Option<Arc<tokio::sync::Notify>>,
@@ -693,7 +694,15 @@ impl EmulebbCore {
         }
 
         let mut runtime_guard = self.ed2k_runtime.lock().await;
-        if runtime_guard.is_some() {
+        if let Some(runtime) = runtime_guard.as_ref() {
+            let server_state = runtime.server_state.read().await;
+            if !server_state.connected && !server_state.connecting {
+                // WHY: REST connect must behave like eMule's explicit connect button.
+                // A disconnected background session can otherwise sit in its normal
+                // reconnect backoff while the controller observes a no-op response.
+                runtime.server_reconnect_signal.notify_one();
+            }
+            drop(server_state);
             drop(runtime_guard);
             return Ok(self.ed2k_status().await);
         }
@@ -954,7 +963,7 @@ impl EmulebbCore {
             kad_firewall: Arc::clone(&kad_firewall),
             shutdown: Arc::clone(&shutdown),
             public_ip: ed2k_public_ip.clone(),
-            reconnect_signal: server_reconnect_signal,
+            reconnect_signal: Arc::clone(&server_reconnect_signal),
             server_list_events: Some(server_list_events_tx),
         })));
         tasks.push(tokio::spawn(run_ed2k_server_list_events(
@@ -1066,6 +1075,7 @@ impl EmulebbCore {
             kad_firewall: Arc::clone(&kad_firewall),
             nat,
             shutdown,
+            server_reconnect_signal,
             kad_firewall_recheck,
             tasks,
             download_tasks: Arc::clone(&self.ed2k_download_tasks),
@@ -6468,6 +6478,7 @@ mod tests {
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             nat: Arc::new(NatManager::default()),
             shutdown: Arc::clone(&shutdown),
+            server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
             kad_firewall_recheck: None,
             tasks: vec![dht_task],
             download_tasks: Arc::clone(&core.ed2k_download_tasks),
