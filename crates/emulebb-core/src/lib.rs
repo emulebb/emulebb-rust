@@ -4371,12 +4371,14 @@ const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 2;
 /// need several rounds to drain; this keeps each async loop slice bounded while
 /// the rotating cursor prevents first-file starvation.
 const KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET: usize = 256;
-/// Per-kind publish caps per 2s round, matching the MFC Kad store cadence shape
-/// (key/source/notes caps are independent instead of one coarse file budget).
-const KAD_KEYWORD_PUBLISH_BUDGET: usize = 3;
+/// Per-kind new publish starts per 2s round. MFC active store caps are 3/4/1,
+/// but each `CSharedFileList::Publish()` tick starts at most one keyword target,
+/// one source file, and one notes file. Keep Rust's start cadence the same so a
+/// large library does not burst-fill the shared DHT search pool.
+const KAD_KEYWORD_PUBLISH_BUDGET: usize = 1;
 /// Master caps one STOREKEYWORD request to 150 file IDs for the selected keyword.
 const KAD_KEYWORD_PUBLISH_FILE_LIMIT: usize = 150;
-const KAD_SOURCE_PUBLISH_BUDGET: usize = 4;
+const KAD_SOURCE_PUBLISH_BUDGET: usize = 1;
 const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KadSharedPublishKind {
