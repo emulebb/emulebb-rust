@@ -551,11 +551,15 @@ impl EmulebbCore {
     }
 
     pub async fn status(&self) -> Status {
-        let transfer_counts = self.ed2k_transfers.transfer_counts();
+        let transfer_counts = self.ed2k_transfers.try_transfer_counts();
         let state = self.state.lock().await;
         let kad_running = state.kad_running;
         let transfer_counts = transfer_counts.unwrap_or_else(|error| {
             tracing::warn!("failed to read persisted ED2K transfer counts: {error}");
+            None
+        });
+        let transfer_counts = transfer_counts.unwrap_or_else(|| {
+            tracing::debug!("metadata transfer counts are busy; using in-memory status counts");
             let total = state.transfers.len();
             let mut active = 0;
             let mut completed = 0;

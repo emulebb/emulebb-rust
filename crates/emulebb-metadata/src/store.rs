@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -61,6 +61,16 @@ impl MetadataStore {
         self.conn
             .lock()
             .map_err(|_| anyhow::anyhow!("metadata database mutex poisoned"))
+    }
+
+    pub(crate) fn try_connection(&self) -> Result<Option<MutexGuard<'_, Connection>>> {
+        match self.conn.try_lock() {
+            Ok(conn) => Ok(Some(conn)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Poisoned(_)) => {
+                Err(anyhow::anyhow!("metadata database mutex poisoned"))
+            }
+        }
     }
 
     /// Bring the on-disk schema to the current version WITHOUT destroying user

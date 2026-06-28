@@ -361,30 +361,14 @@ impl super::MetadataStore {
 
     pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
         let conn = self.connection()?;
-        conn.query_row(
-            r#"
-            SELECT count(*),
-                   coalesce(sum(CASE
-                       WHEN known_files.completed = 0
-                            AND transfers.control_state IS NULL
-                            AND transfers.visible_state IN ('downloading', 'queued')
-                       THEN 1 ELSE 0 END), 0),
-                   coalesce(sum(CASE
-                       WHEN known_files.completed != 0 THEN 1 ELSE 0 END), 0)
-            FROM transfers
-            JOIN known_files ON known_files.id = transfers.known_file_id
-            WHERE transfers.removed_at_ms IS NULL
-            "#,
-            [],
-            |row| {
-                Ok(MetadataTransferCounts {
-                    total: row.get::<_, i64>(0)? as usize,
-                    active: row.get::<_, i64>(1)? as usize,
-                    completed: row.get::<_, i64>(2)? as usize,
-                })
-            },
-        )
-        .map_err(Into::into)
+        transfer_counts_from_connection(&conn)
+    }
+
+    pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
+        let Some(conn) = self.try_connection()? else {
+            return Ok(None);
+        };
+        transfer_counts_from_connection(&conn).map(Some)
     }
 
     pub fn completed_transfer_publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
@@ -632,6 +616,33 @@ fn manifest_from_row(
         source_path: row.source_path,
         source_mtime_ms: row.source_mtime_ms,
     })
+}
+
+fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<MetadataTransferCounts> {
+    conn.query_row(
+        r#"
+        SELECT count(*),
+               coalesce(sum(CASE
+                   WHEN known_files.completed = 0
+                        AND transfers.control_state IS NULL
+                        AND transfers.visible_state IN ('downloading', 'queued')
+                   THEN 1 ELSE 0 END), 0),
+               coalesce(sum(CASE
+                   WHEN known_files.completed != 0 THEN 1 ELSE 0 END), 0)
+        FROM transfers
+        JOIN known_files ON known_files.id = transfers.known_file_id
+        WHERE transfers.removed_at_ms IS NULL
+        "#,
+        [],
+        |row| {
+            Ok(MetadataTransferCounts {
+                total: row.get::<_, i64>(0)? as usize,
+                active: row.get::<_, i64>(1)? as usize,
+                completed: row.get::<_, i64>(2)? as usize,
+            })
+        },
+    )
+    .map_err(Into::into)
 }
 
 fn read_hex_list(conn: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<String>> {

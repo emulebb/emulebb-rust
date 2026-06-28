@@ -24,6 +24,11 @@ impl Ed2kTransferRuntime {
         self.metadata.transfer_counts()
     }
 
+    /// Return persisted transfer counts if the metadata connection is free.
+    pub fn try_transfer_counts(&self) -> Result<Option<MetadataTransferCounts>> {
+        self.metadata.try_transfer_counts()
+    }
+
     /// Return Kad publish inputs without hydrating every persisted manifest.
     pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
         let metadata = self.metadata.clone();
