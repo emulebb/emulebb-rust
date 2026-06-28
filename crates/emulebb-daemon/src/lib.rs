@@ -156,9 +156,9 @@ impl Default for KadListenerConfig {
             // KademliaUDPListener.cpp:1349. Keyword/notes keep 24h.
             local_store_source_ttl_secs: 18_000,
             local_store_notes_ttl_secs: 86_400,
-            local_store_keyword_capacity: 20_000,
-            local_store_source_capacity: 20_000,
-            local_store_notes_capacity: 5_000,
+            local_store_keyword_capacity: KadLocalStoreConfig::default().keyword_capacity,
+            local_store_source_capacity: KadLocalStoreConfig::default().source_capacity,
+            local_store_notes_capacity: KadLocalStoreConfig::default().notes_capacity,
             // Stock per-file caps (Opcodes.h KADEMLIAMAXSOURCEPERFILE /
             // KADEMLIAMAXNOTESPERFILE), well below the global caps above.
             local_store_source_per_file_capacity: 1_000,

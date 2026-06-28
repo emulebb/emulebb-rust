@@ -277,6 +277,24 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
 }
 
 #[test]
+fn kad_local_store_defaults_follow_index_defaults() {
+    let defaults = KadLocalStoreConfig::default();
+    let config = KadListenerConfig::default().local_store_config();
+
+    assert_eq!(config.keyword_capacity, defaults.keyword_capacity);
+    assert_eq!(config.source_capacity, defaults.source_capacity);
+    assert_eq!(config.notes_capacity, defaults.notes_capacity);
+    assert_eq!(
+        config.source_per_file_capacity,
+        defaults.source_per_file_capacity
+    );
+    assert_eq!(
+        config.notes_per_file_capacity,
+        defaults.notes_per_file_capacity
+    );
+}
+
+#[test]
 fn kad_snoop_queue_config_is_config_driven_and_clamped() {
     let config = DaemonConfig {
         kad: KadListenerConfig {
