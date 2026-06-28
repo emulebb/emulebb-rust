@@ -4563,7 +4563,23 @@ async fn publish_kad_due_shared_files(
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
 ) -> Result<usize> {
-    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
+    let Some(shared_files) = kad_publishable_shared_files(&runtime.transfer_runtime).await? else {
+        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+            diagnostics.phase = "metadataBusy".to_string();
+            diagnostics.running = true;
+            diagnostics.bootstrapped = true;
+            diagnostics.gate_allowed = false;
+            diagnostics.gate_block_reason = "metadataBusy".to_string();
+            diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
+            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
+        });
+        return Ok(0);
+    };
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
@@ -5198,11 +5214,11 @@ fn record_kad_publish_failure(
 
 async fn kad_publishable_shared_files(
     runtime: &Ed2kTransferRuntime,
-) -> Result<Vec<MetadataTransferPublishEntry>> {
+) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
     runtime
-        .publish_entries()
+        .try_publish_entries()
         .await
-        .map(kad_publishable_shared_file_entries)
+        .map(|entries| entries.map(kad_publishable_shared_file_entries))
 }
 
 fn kad_publishable_shared_file_entries(

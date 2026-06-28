@@ -429,6 +429,46 @@ impl super::MetadataStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn try_completed_transfer_publish_entries(
+        &self,
+    ) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
+        let Some(conn) = self.try_connection()? else {
+            return Ok(None);
+        };
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                   known_files.size_bytes,
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END,
+                   known_files.comment, known_files.rating
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataTransferPublishEntry {
+                file_hash: row.get(0)?,
+                canonical_name: row.get(1)?,
+                file_size: row.get::<_, i64>(2)? as u64,
+                aich_root: row.get(3)?,
+                comment: row.get(4)?,
+                rating: row.get::<_, i64>(5)? as u8,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map(Some)
+            .map_err(Into::into)
+    }
+
     pub fn completed_transfer_share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(

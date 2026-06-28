@@ -37,6 +37,14 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
+    /// Return Kad publish inputs if the metadata connection is immediately free.
+    pub async fn try_publish_entries(&self) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.try_completed_transfer_publish_entries())
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
     /// Return REST shared-file summaries without hydrating every manifest.
     pub async fn share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
         let metadata = self.metadata.clone();
