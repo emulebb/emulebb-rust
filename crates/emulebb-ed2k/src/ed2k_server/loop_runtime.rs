@@ -61,6 +61,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         );
         return;
     }
+    let reconnect_enabled = config.reconnect_enabled;
 
     while !shutdown.load(Ordering::Relaxed) {
         let mut attempted_any = false;
@@ -108,7 +109,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 }
             }
 
-            if !shutdown.load(Ordering::Relaxed) {
+            if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
                 tokio::select! {
                     () = tokio::time::sleep(reconnect_delay) => {}
                     () = session_context.reconnect_signal.notified() => {
@@ -118,6 +119,12 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                     }
                 }
             }
+        }
+        if !reconnect_enabled {
+            info!(
+                "ED2K server reconnect disabled by preferences; leaving background session stopped"
+            );
+            return;
         }
 
         if !attempted_any && !shutdown.load(Ordering::Relaxed) {

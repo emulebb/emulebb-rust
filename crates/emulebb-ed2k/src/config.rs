@@ -29,6 +29,9 @@ pub struct Ed2kConfig {
     pub callback_timeout_secs: u64,
     /// Delay before retrying the next ED2K server endpoint.
     pub reconnect_interval_secs: u64,
+    /// Whether the background ED2K server session should reconnect after the
+    /// initial configured-server pass. Mirrors eMule's `Reconnect` preference.
+    pub reconnect_enabled: bool,
     /// Idle interval before the client refreshes the ED2K server session.
     pub keepalive_secs: u64,
     /// Maximum lifetime of one ED2K server session before rotating endpoints.
@@ -138,6 +141,7 @@ impl Default for Ed2kConfig {
             // (incl. a LowID callback wait) at SEC2MS(45).
             callback_timeout_secs: 45,
             reconnect_interval_secs: 30,
+            reconnect_enabled: true,
             keepalive_secs: 60,
             session_rotation_secs: 0,
             // eMule GetRecommendedMaxConnections default ceiling (500) /

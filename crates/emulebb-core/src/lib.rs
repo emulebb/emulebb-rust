@@ -6237,6 +6237,18 @@ mod tests {
         assert_eq!(prefs.max_upload_slots, 12);
         assert_eq!(prefs.upload_slot_elastic_percent, 80);
         assert_eq!(prefs.queue_size, 10000);
+        assert!(!prefs.auto_connect);
+        assert!(prefs.reconnect);
+    }
+
+    #[test]
+    fn preferences_json_without_reconnect_defaults_to_enabled() {
+        let mut value = serde_json::to_value(default_preferences()).unwrap();
+        value.as_object_mut().unwrap().remove("reconnect");
+
+        let preferences: Preferences = serde_json::from_value(value).unwrap();
+
+        assert!(preferences.reconnect);
     }
 
     #[tokio::test]
@@ -7126,6 +7138,24 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint == "203.0.113.20:4661")
         );
+    }
+
+    #[tokio::test]
+    async fn effective_ed2k_config_honors_reconnect_preference() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.update_preferences(PreferencesUpdate {
+            reconnect: Some(false),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+
+        let config = core
+            .effective_ed2k_config(&Ed2kConfig::default(), None)
+            .await
+            .unwrap();
+
+        assert!(!config.reconnect_enabled);
     }
 
     #[tokio::test]

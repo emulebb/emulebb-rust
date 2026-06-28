@@ -35,6 +35,7 @@ pub(crate) fn default_preferences() -> Preferences {
         upload_slot_elastic_percent: 80,
         queue_size: 10000,
         auto_connect: false,
+        reconnect: true,
         new_auto_up: true,
         new_auto_down: true,
         credit_system: true,
@@ -56,6 +57,7 @@ pub(crate) fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
         && update.upload_slot_elastic_percent.is_none()
         && update.queue_size.is_none()
         && update.auto_connect.is_none()
+        && update.reconnect.is_none()
         && update.new_auto_up.is_none()
         && update.new_auto_down.is_none()
         && update.credit_system.is_none()
@@ -120,6 +122,9 @@ pub(crate) fn apply_preferences_update(
     }
     if let Some(value) = update.auto_connect {
         preferences.auto_connect = value;
+    }
+    if let Some(value) = update.reconnect {
+        preferences.reconnect = value;
     }
     if let Some(value) = update.new_auto_up {
         preferences.new_auto_up = value;

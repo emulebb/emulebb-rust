@@ -283,6 +283,7 @@ async fn preferences_patch_body_uses_mfc_validation() {
             r#"{"queueSize":1999}"#,
             "queueSize must be an unsigned number in the range 2000..10000",
         ),
+        (r#"{"reconnect":1}"#, "reconnect must be a boolean"),
         (
             r#"{"networkEd2k":"false"}"#,
             "networkEd2k must be a boolean",

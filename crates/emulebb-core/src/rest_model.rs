@@ -47,6 +47,8 @@ pub struct Preferences {
     pub upload_slot_elastic_percent: u32,
     pub queue_size: u32,
     pub auto_connect: bool,
+    #[serde(default = "default_reconnect")]
+    pub reconnect: bool,
     pub new_auto_up: bool,
     pub new_auto_down: bool,
     pub credit_system: bool,
@@ -80,6 +82,8 @@ pub struct PreferencesUpdate {
     #[serde(default)]
     pub auto_connect: Option<bool>,
     #[serde(default)]
+    pub reconnect: Option<bool>,
+    #[serde(default)]
     pub new_auto_up: Option<bool>,
     #[serde(default)]
     pub new_auto_down: Option<bool>,
@@ -93,6 +97,10 @@ pub struct PreferencesUpdate {
     pub network_ed2k: Option<bool>,
     #[serde(default)]
     pub download_auto_broadband_io: Option<bool>,
+}
+
+fn default_reconnect() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,6 +21,7 @@ async fn profile_state_survives_core_restart() {
         let core = open_core(&metadata_path, &transfer_root);
         core.update_preferences(PreferencesUpdate {
             download_limit_ki_bps: Some(2048),
+            reconnect: Some(false),
             network_kademlia: Some(false),
             ..PreferencesUpdate::default()
         })
@@ -58,6 +59,7 @@ async fn profile_state_survives_core_restart() {
     let reloaded = open_core(&metadata_path, &transfer_root);
     let preferences = reloaded.preferences().await;
     assert_eq!(preferences.download_limit_ki_bps, 2048);
+    assert!(!preferences.reconnect);
     assert!(!preferences.network_kademlia);
 
     let categories = reloaded.categories().await;

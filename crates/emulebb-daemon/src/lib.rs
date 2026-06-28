@@ -448,7 +448,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let index = FileIndex::open(config.metadata_path())?;
     let metadata_store = index.metadata_store();
     let ed2k_network = config.ed2k_network_config(&metadata_store)?;
-    let auto_connect_ed2k = ed2k_network.is_some();
+    let ed2k_network_configured = ed2k_network.is_some();
     let vpn_guard_monitor = ed2k_network
         .as_ref()
         .and_then(vpn_guard_monitor::monitor_config);
@@ -468,7 +468,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     // that finished before this build, or a crash between completion and
     // delivery) so a restart never leaves a finished file undelivered.
     core.deliver_pending_completed_transfers().await;
-    if auto_connect_ed2k {
+    let startup_preferences = core.preferences().await;
+    if ed2k_network_configured && startup_preferences.auto_connect {
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
             match connect_core.connect_ed2k().await {

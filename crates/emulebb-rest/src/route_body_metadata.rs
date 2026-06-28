@@ -179,6 +179,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "uploadSlotElasticPercent",
         "queueSize",
         "autoConnect",
+        "reconnect",
         "newAutoUp",
         "newAutoDown",
         "creditSystem",

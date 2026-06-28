@@ -140,6 +140,7 @@ async fn preferences_use_canonical_get_and_patch_route() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     // Master-aligned default (Preferences.cpp kDefaultConfiguredUploadLimitKiB).
     assert_eq!(value["data"]["uploadLimitKiBps"], 6200);
+    assert_eq!(value["data"]["reconnect"], true);
     assert_eq!(value["data"]["downloadAutoBroadbandIo"], true);
 
     let update = app
@@ -151,7 +152,7 @@ async fn preferences_use_canonical_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"networkEd2k":false,"downloadAutoBroadbandIo":false}"#,
+                    r#"{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false,"downloadAutoBroadbandIo":false}"#,
                 ))
                 .unwrap(),
         )
@@ -164,6 +165,7 @@ async fn preferences_use_canonical_get_and_patch_route() {
     assert_eq!(value["data"]["uploadClientDataRate"], 64);
     assert_eq!(value["data"]["maxUploadSlots"], 4);
     assert_eq!(value["data"]["queueSize"], 3000);
+    assert_eq!(value["data"]["reconnect"], false);
     assert_eq!(value["data"]["networkEd2k"], false);
     assert_eq!(value["data"]["downloadAutoBroadbandIo"], false);
 
