@@ -55,7 +55,8 @@ use emulebb_index::{
 #[cfg(test)]
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
 use emulebb_kad_dht::{
-    DhtConfig, DhtError, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass,
+    DhtConfig, DhtError, DhtNode, KeywordPublishEntry, PublishAttemptStats, ReceivedKadPacket,
+    RpcWorkClass,
 };
 #[cfg(test)]
 use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
@@ -4373,6 +4374,8 @@ const KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET: usize = 256;
 /// Per-kind publish caps per 2s round, matching the MFC Kad store cadence shape
 /// (key/source/notes caps are independent instead of one coarse file budget).
 const KAD_KEYWORD_PUBLISH_BUDGET: usize = 3;
+/// Master caps one STOREKEYWORD request to 150 file IDs for the selected keyword.
+const KAD_KEYWORD_PUBLISH_FILE_LIMIT: usize = 150;
 const KAD_SOURCE_PUBLISH_BUDGET: usize = 4;
 const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4395,7 +4398,7 @@ impl KadSharedPublishKind {
 #[derive(Debug)]
 struct KadSharedPublishOutcome {
     kind: KadSharedPublishKind,
-    file_hash: String,
+    file_hashes: Vec<String>,
     keyword: Option<String>,
     started_at: Instant,
     result: Result<PublishAttemptStats, KadSharedPublishError>,
@@ -4724,6 +4727,7 @@ async fn publish_kad_due_shared_files(
     let mut keyword_skipped_by_budget = 0usize;
     let mut source_skipped_by_budget = 0usize;
     let mut notes_skipped_by_budget = 0usize;
+    let mut attempted_keywords_this_cycle = HashSet::new();
     // Our Kad node id is the notes publisher identity (master STORENOTES writes
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
@@ -4737,9 +4741,10 @@ async fn publish_kad_due_shared_files(
         let now = Instant::now();
         let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
         schedule.retain_keywords(&entry.file_hash, keyword_terms.iter().map(String::as_str));
-        let due_keyword = keyword_terms
-            .iter()
-            .find(|keyword| schedule.keyword_due(&entry.file_hash, keyword, now));
+        let due_keyword = keyword_terms.iter().find(|keyword| {
+            schedule.keyword_due(&entry.file_hash, keyword, now)
+                && !attempted_keywords_this_cycle.contains(keyword.as_str())
+        });
         let due_keyword = due_keyword.cloned();
         let keyword_due = due_keyword.is_some();
         let source_due = schedule.source_due(&entry.file_hash, now);
@@ -4772,50 +4777,55 @@ async fn publish_kad_due_shared_files(
             {
                 keyword_skipped_by_budget += 1;
             } else {
-                keyword_attempted += 1;
-                attempted_this_file = true;
                 let keyword_hash = keyword_target(keyword);
                 let keyword = keyword.to_string();
-                let mut keyword_tags = vec![
-                    Tag::filename(entry.canonical_name.clone()),
-                    Tag::filesize(entry.file_size),
-                    Tag::sources(1),
-                ];
-                if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
-                    keyword_tags.push(Tag::filetype(file_type));
+                let keyword_entries = kad_keyword_publish_entries_for_keyword(
+                    &shared_files,
+                    &keyword,
+                    KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+                );
+                if keyword_entries.is_empty() {
+                    keyword_skipped_by_budget += 1;
+                } else {
+                    keyword_attempted += 1;
+                    attempted_keywords_this_cycle.insert(keyword.clone());
+                    attempted_this_file = true;
+                    let keyword_file_hashes = keyword_entries
+                        .iter()
+                        .map(|(file_hash, _)| file_hash.clone())
+                        .collect();
+                    let keyword_entries = keyword_entries
+                        .into_iter()
+                        .map(|(_, publish_entry)| publish_entry)
+                        .collect();
+                    let dht = runtime.dht.clone();
+                    let fanout = network.kad_publish_contact_fanout;
+                    let started_at = now;
+                    publish_tasks.spawn(async move {
+                        let result = dht
+                            .publish_keyword_entries_with_class_and_fanout(
+                                keyword_hash,
+                                keyword_entries,
+                                RpcWorkClass::Publish,
+                                fanout,
+                            )
+                            .await;
+                        KadSharedPublishOutcome {
+                            kind: KadSharedPublishKind::Keyword,
+                            file_hashes: keyword_file_hashes,
+                            keyword: Some(keyword),
+                            started_at,
+                            result: match result {
+                                Ok(stats) => Ok(stats),
+                                Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
+                                Err(DhtError::SearchTimeout) => {
+                                    Err(KadSharedPublishError::TimedOut)
+                                }
+                                Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
+                            },
+                        }
+                    });
                 }
-                let aich_hash = entry
-                    .aich_root
-                    .as_deref()
-                    .and_then(decode_aich_root_hex_for_publish);
-                let dht = runtime.dht.clone();
-                let file_hash_text = entry.file_hash.clone();
-                let fanout = network.kad_publish_contact_fanout;
-                let started_at = now;
-                publish_tasks.spawn(async move {
-                    let result = dht
-                        .publish_keyword_with_class_and_fanout(
-                            keyword_hash,
-                            file_hash,
-                            keyword_tags,
-                            aich_hash,
-                            RpcWorkClass::Publish,
-                            fanout,
-                        )
-                        .await;
-                    KadSharedPublishOutcome {
-                        kind: KadSharedPublishKind::Keyword,
-                        file_hash: file_hash_text,
-                        keyword: Some(keyword),
-                        started_at,
-                        result: match result {
-                            Ok(stats) => Ok(stats),
-                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
-                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
-                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
-                        },
-                    }
-                });
             }
         }
 
@@ -4845,7 +4855,7 @@ async fn publish_kad_due_shared_files(
                         .await;
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Source,
-                        file_hash: file_hash_text,
+                        file_hashes: vec![file_hash_text],
                         keyword: None,
                         started_at,
                         result: match result {
@@ -4903,7 +4913,7 @@ async fn publish_kad_due_shared_files(
                         .await;
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Notes,
-                        file_hash: file_hash_text,
+                        file_hashes: vec![file_hash_text],
                         keyword: None,
                         started_at,
                         result: match result {
@@ -5050,45 +5060,45 @@ async fn drain_completed_kad_publish_tasks(
             }
         };
         let elapsed_ms = outcome.started_at.elapsed().as_millis() as u64;
+        let primary_file_hash = outcome.file_hashes.first().cloned().unwrap_or_default();
         match outcome.result {
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
                     record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(keyword_totals, stats);
                     let keyword = outcome.keyword.as_deref().unwrap_or_default();
-                    schedule.mark_keyword_published(
-                        &outcome.file_hash,
-                        keyword,
-                        outcome.started_at,
-                    );
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &outcome.file_hash,
-                        MetadataKadOutboundPublishKind::Keyword,
-                        keyword,
-                        Utc::now().timestamp_millis(),
-                    );
+                    let published_at_ms = Utc::now().timestamp_millis();
+                    for file_hash in &outcome.file_hashes {
+                        schedule.mark_keyword_published(file_hash, keyword, outcome.started_at);
+                        persist_kad_outbound_publish(
+                            &runtime.metadata_store,
+                            file_hash,
+                            MetadataKadOutboundPublishKind::Keyword,
+                            keyword,
+                            published_at_ms,
+                        );
+                    }
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Keyword,
-                        &outcome.file_hash,
+                        &primary_file_hash,
                         stats,
                     );
-                    *keyword_published += 1;
+                    *keyword_published += outcome.file_hashes.len();
                 }
                 KadSharedPublishKind::Source => {
                     record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(source_totals, stats);
-                    schedule.mark_source_published(&outcome.file_hash, outcome.started_at);
+                    schedule.mark_source_published(&primary_file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
                         &runtime.metadata_store,
-                        &outcome.file_hash,
+                        &primary_file_hash,
                         MetadataKadOutboundPublishKind::Source,
                         "",
                         Utc::now().timestamp_millis(),
                     );
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Source,
-                        &outcome.file_hash,
+                        &primary_file_hash,
                         stats,
                     );
                     *source_published += 1;
@@ -5096,17 +5106,17 @@ async fn drain_completed_kad_publish_tasks(
                 KadSharedPublishKind::Notes => {
                     record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(notes_totals, stats);
-                    schedule.mark_notes_published(&outcome.file_hash, outcome.started_at);
+                    schedule.mark_notes_published(&primary_file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
                         &runtime.metadata_store,
-                        &outcome.file_hash,
+                        &primary_file_hash,
                         MetadataKadOutboundPublishKind::Notes,
                         "",
                         Utc::now().timestamp_millis(),
                     );
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Notes,
-                        &outcome.file_hash,
+                        &primary_file_hash,
                         stats,
                     );
                     *notes_published += 1;
@@ -5115,7 +5125,7 @@ async fn drain_completed_kad_publish_tasks(
             Err(KadSharedPublishError::Busy) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Busy);
                 tracing::debug!(
-                    file_hash = %outcome.file_hash,
+                    file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
                     elapsed_ms,
                     "Kad shared-file publish skipped: DHT search capacity busy"
@@ -5124,7 +5134,7 @@ async fn drain_completed_kad_publish_tasks(
             Err(KadSharedPublishError::TimedOut) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::TimedOut);
                 tracing::debug!(
-                    file_hash = %outcome.file_hash,
+                    file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
                     elapsed_ms,
                     "Kad shared-file publish attempt timed out"
@@ -5133,7 +5143,7 @@ async fn drain_completed_kad_publish_tasks(
             Err(KadSharedPublishError::Failed(error)) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Other);
                 tracing::debug!(
-                    file_hash = %outcome.file_hash,
+                    file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
                     elapsed_ms,
                     "Kad shared-file publish attempt failed: {error}"
@@ -5198,6 +5208,56 @@ async fn kad_publishable_shared_files(
 fn kad_publishable_shared_file_entries(
     entries: Vec<MetadataTransferPublishEntry>,
 ) -> Vec<MetadataTransferPublishEntry> {
+    entries
+}
+
+fn kad_keyword_publish_entries_for_keyword(
+    shared_files: &[MetadataTransferPublishEntry],
+    keyword: &str,
+    limit: usize,
+) -> Vec<(String, KeywordPublishEntry)> {
+    let mut entries = Vec::new();
+    for entry in shared_files {
+        if entries.len() >= limit {
+            break;
+        }
+        if !significant_keyword_words_unique(&entry.canonical_name)
+            .iter()
+            .any(|term| term == keyword)
+        {
+            continue;
+        }
+        let file_hash = match entry.file_hash.parse() {
+            Ok(file_hash) => file_hash,
+            Err(error) => {
+                tracing::warn!(
+                    file_hash = %entry.file_hash,
+                    error = %error,
+                    "skipping invalid shared-file hash during Kad keyword batch build"
+                );
+                continue;
+            }
+        };
+        let mut tags = vec![
+            Tag::filename(entry.canonical_name.clone()),
+            Tag::filesize(entry.file_size),
+            Tag::sources(1),
+        ];
+        if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
+            tags.push(Tag::filetype(file_type));
+        }
+        entries.push((
+            entry.file_hash.clone(),
+            KeywordPublishEntry {
+                file_hash,
+                tags,
+                aich_hash: entry
+                    .aich_root
+                    .as_deref()
+                    .and_then(decode_aich_root_hex_for_publish),
+            },
+        ));
+    }
     entries
 }
 
@@ -8110,6 +8170,43 @@ mod tests {
                 "apache".to_string(),
                 "camel".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn keyword_publish_entries_batch_matching_files_up_to_stock_limit() {
+        let mut shared_files = (0..160)
+            .map(|index| MetadataTransferPublishEntry {
+                file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
+                canonical_name: format!("Ubuntu Python Sample {index}.iso"),
+                file_size: 1000 + index,
+                aich_root: None,
+                comment: String::new(),
+                rating: 0,
+            })
+            .collect::<Vec<_>>();
+        shared_files.push(MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0xFE; 16]).to_string(),
+            canonical_name: "Apache Camel Sample.iso".to_string(),
+            file_size: 1,
+            aich_root: None,
+            comment: String::new(),
+            rating: 0,
+        });
+
+        let entries = kad_keyword_publish_entries_for_keyword(
+            &shared_files,
+            "ubuntu",
+            KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+        );
+
+        assert_eq!(entries.len(), KAD_KEYWORD_PUBLISH_FILE_LIMIT);
+        assert_eq!(entries[0].1.file_hash, Ed2kHash::from_bytes([0_u8; 16]));
+        assert_eq!(entries[149].1.file_hash, Ed2kHash::from_bytes([149_u8; 16]));
+        assert!(
+            entries
+                .iter()
+                .all(|(_, entry)| entry.tags.iter().any(|tag| tag == &Tag::sources(1)))
         );
     }
 

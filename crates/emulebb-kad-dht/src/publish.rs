@@ -55,11 +55,17 @@ struct PublishAttempt {
 #[derive(Debug, Clone)]
 pub struct KeywordPublishRequest {
     pub keyword_hash: NodeId,
+    pub entries: Vec<KeywordPublishEntry>,
+    pub publish_contact_fanout: usize,
+    pub work_class: RpcWorkClass,
+}
+
+/// One file entry inside a stock Kad keyword publish request.
+#[derive(Debug, Clone)]
+pub struct KeywordPublishEntry {
     pub file_hash: Ed2kHash,
     pub tags: Vec<Tag>,
     pub aich_hash: Option<[u8; 20]>,
-    pub publish_contact_fanout: usize,
-    pub work_class: RpcWorkClass,
 }
 
 /// Send the publish RPC to all selected contacts concurrently so the live wire
@@ -340,12 +346,13 @@ pub async fn publish_keyword(
 ) -> Result<PublishAttemptStats, DhtError> {
     let KeywordPublishRequest {
         keyword_hash,
-        file_hash,
-        tags,
-        aich_hash,
+        entries,
         publish_contact_fanout,
         work_class,
     } = request;
+    if entries.is_empty() {
+        return Err(DhtError::PublishFailed);
+    }
     let target = keyword_hash;
     let (publish_contacts, mut stats) = resolve_publish_contacts(
         rpc,
@@ -359,19 +366,20 @@ pub async fn publish_keyword(
     .await?;
     for (index, contact) in publish_contacts.iter().enumerate() {
         tracing::debug!(
-            "kad publish contact family=keyword step=send rank={}/{} contact_addr={} contact_id={} contact_version={} target={} file_hash={}",
+            "kad publish contact family=keyword step=send rank={}/{} contact_addr={} contact_id={} contact_version={} target={} entry_count={} first_file_hash={}",
             index + 1,
             stats.attempted_contacts,
             contact.addr,
             contact.id,
             contact.version,
             target,
-            file_hash,
+            entries.len(),
+            entries[0].file_hash,
         );
     }
     let results =
         execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
-            build_keyword_publish_packet(target, file_hash, &tags, aich_hash, contact.version)
+            build_keyword_publish_packet(target, &entries, contact.version)
         })
         .await;
     record_publish_results(&mut stats, "keyword", "publish_keyword", true, results);
@@ -385,25 +393,26 @@ pub async fn publish_keyword(
 /// fanout cannot reuse a single keyword packet body across the whole contact set.
 fn build_keyword_publish_packet(
     target: NodeId,
-    file_hash: Ed2kHash,
-    base_tags: &[Tag],
-    aich_hash: Option<[u8; 20]>,
+    entries: &[KeywordPublishEntry],
     contact_version: u8,
 ) -> KadPacket {
-    let mut tags = base_tags.to_vec();
-    if contact_version >= KAD_VERSION_AICH_KEYWORD_PUBLISH
-        && let Some(aich_hash) = aich_hash
-    {
-        tags.push(Tag::kad_aich_hash_pub(aich_hash));
-    }
-
-    let entry = PublishEntry {
-        hash: file_hash,
-        tags,
-    };
     KadPacket::PublishKeyReq(PublishKeyReq {
         target,
-        entries: vec![entry],
+        entries: entries
+            .iter()
+            .map(|entry| {
+                let mut tags = entry.tags.clone();
+                if contact_version >= KAD_VERSION_AICH_KEYWORD_PUBLISH
+                    && let Some(aich_hash) = entry.aich_hash
+                {
+                    tags.push(Tag::kad_aich_hash_pub(aich_hash));
+                }
+                PublishEntry {
+                    hash: entry.file_hash,
+                    tags,
+                }
+            })
+            .collect(),
     })
 }
 

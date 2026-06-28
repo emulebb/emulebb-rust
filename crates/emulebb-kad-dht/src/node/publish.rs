@@ -1,6 +1,7 @@
 use super::DhtNode;
 use crate::error::DhtError;
 use crate::node::concurrency::SearchAcquireError;
+use crate::publish::KeywordPublishEntry;
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag};
 use tokio::time;
@@ -35,6 +36,27 @@ impl DhtNode {
         work_class: RpcWorkClass,
         publish_contact_fanout: usize,
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        self.publish_keyword_entries_with_class_and_fanout(
+            keyword_hash,
+            vec![KeywordPublishEntry {
+                file_hash,
+                tags,
+                aich_hash,
+            }],
+            work_class,
+            publish_contact_fanout,
+        )
+        .await
+    }
+
+    /// Publish one keyword target with one or more stock file entries.
+    pub async fn publish_keyword_entries_with_class_and_fanout(
+        &self,
+        keyword_hash: NodeId,
+        entries: Vec<KeywordPublishEntry>,
+        work_class: RpcWorkClass,
+        publish_contact_fanout: usize,
+    ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         // Oracle CSearchManager: a keyword store traversal for an already in-flight
         // target is dropped, and concurrent traversals are capped. Held to return.
         let _permit = self
@@ -45,9 +67,7 @@ impl DhtNode {
             &self.inner.routing_table,
             crate::publish::KeywordPublishRequest {
                 keyword_hash,
-                file_hash,
-                tags,
-                aich_hash,
+                entries,
                 publish_contact_fanout,
                 work_class,
             },

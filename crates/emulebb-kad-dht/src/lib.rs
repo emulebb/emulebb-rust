@@ -12,7 +12,7 @@ pub use emulebb_kad_net::{
 };
 pub use error::DhtError;
 pub use node::{DhtConfig, DhtNode, KadRoutingSummaryCounts};
-pub use publish::PublishAttemptStats;
+pub use publish::{KeywordPublishEntry, PublishAttemptStats};
 pub use types::{FirewallCheckHelper, NoteResult, SearchResult, SourceResult};
 
 /// LAN bind IP for tests that open a real socket — always `X_LOCAL_IP`, never a

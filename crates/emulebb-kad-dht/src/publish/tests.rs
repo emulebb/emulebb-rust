@@ -1,5 +1,6 @@
 use super::{
-    build_keyword_publish_packet, publish_target_is_within_tolerance, select_publish_contacts,
+    KeywordPublishEntry, build_keyword_publish_packet, publish_target_is_within_tolerance,
+    select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
 use emulebb_kad_proto::{Ed2kHash, KadPacket, NodeId, Tag, TagName, TagValue, tag_name};
@@ -98,9 +99,11 @@ fn publish_tolerance_accepts_exact_harness_keyword_target() {
 fn build_keyword_publish_packet_skips_aich_for_v8_contacts() {
     let packet = build_keyword_publish_packet(
         NodeId::from_bytes([1; 16]),
-        Ed2kHash::from_bytes([2; 16]),
-        &[Tag::filename("ubuntu.iso")],
-        Some([3; 20]),
+        &[KeywordPublishEntry {
+            file_hash: Ed2kHash::from_bytes([2; 16]),
+            tags: vec![Tag::filename("ubuntu.iso")],
+            aich_hash: Some([3; 20]),
+        }],
         8,
     );
 
@@ -114,9 +117,11 @@ fn build_keyword_publish_packet_skips_aich_for_v8_contacts() {
 fn build_keyword_publish_packet_adds_aich_bsob_for_v9_contacts() {
     let packet = build_keyword_publish_packet(
         NodeId::from_bytes([1; 16]),
-        Ed2kHash::from_bytes([2; 16]),
-        &[Tag::filename("ubuntu.iso")],
-        Some([3; 20]),
+        &[KeywordPublishEntry {
+            file_hash: Ed2kHash::from_bytes([2; 16]),
+            tags: vec![Tag::filename("ubuntu.iso")],
+            aich_hash: Some([3; 20]),
+        }],
         9,
     );
 
@@ -129,4 +134,43 @@ fn build_keyword_publish_packet_adds_aich_bsob_for_v9_contacts() {
         .find(|tag| tag.name == TagName::Short(tag_name::KADAICHHASHPUB))
         .expect("missing aich tag");
     assert_eq!(aich_tag.value, TagValue::SmallBlob(vec![3; 20]));
+}
+
+#[test]
+fn build_keyword_publish_packet_preserves_multi_file_entries() {
+    let packet = build_keyword_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        &[
+            KeywordPublishEntry {
+                file_hash: Ed2kHash::from_bytes([2; 16]),
+                tags: vec![Tag::filename("ubuntu.iso")],
+                aich_hash: Some([3; 20]),
+            },
+            KeywordPublishEntry {
+                file_hash: Ed2kHash::from_bytes([4; 16]),
+                tags: vec![Tag::filename("python.iso")],
+                aich_hash: Some([5; 20]),
+            },
+        ],
+        9,
+    );
+
+    let KadPacket::PublishKeyReq(request) = packet else {
+        panic!("expected publish key packet");
+    };
+    assert_eq!(request.entries.len(), 2);
+    assert_eq!(request.entries[0].hash, Ed2kHash::from_bytes([2; 16]));
+    assert_eq!(request.entries[1].hash, Ed2kHash::from_bytes([4; 16]));
+    assert!(
+        request.entries[0]
+            .tags
+            .iter()
+            .any(|tag| tag.value == TagValue::SmallBlob(vec![3; 20]))
+    );
+    assert!(
+        request.entries[1]
+            .tags
+            .iter()
+            .any(|tag| tag.value == TagValue::SmallBlob(vec![5; 20]))
+    );
 }
