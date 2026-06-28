@@ -17,8 +17,8 @@ use super::{
     decode_search_result_page, encode_login_request, encode_packet, fail_background_search_request,
     fail_pending_background_search, format_connect_options, handle_background_udp_packet,
     handle_server_packet, log_search_result_page, login_identity_for_server_transport,
-    send_offer_files_advertisement, server_udp_endpoint, should_use_server_obfuscation,
-    start_background_server_search, validate_found_sources,
+    server_udp_endpoint, should_use_server_obfuscation, start_background_server_search,
+    validate_found_sources,
 };
 
 #[allow(clippy::cognitive_complexity)]
@@ -414,17 +414,13 @@ pub(super) async fn run_one_server_session(
             }
             _ = tokio::time::sleep(context.keepalive_interval) => {
                 if session.last_tx.elapsed() >= context.keepalive_interval {
-                    send_offer_files_advertisement(
-                        &mut session,
-                        &context.shared_catalog,
-                        context.bind_ip,
-                        context.hello_identity.tcp_port,
-                    )
-                    .await?;
-                    if session.last_tx.elapsed() >= context.keepalive_interval {
-                        session.send_packet(OP_OFFERFILES, &0u32.to_le_bytes()).await?;
-                        debug!("sent ED2K server keepalive to {}", server.base_endpoint());
-                    }
+                    // Keepalive traffic must not advance the large-library
+                    // offer cursor. Full OP_OFFERFILES refreshes are driven by
+                    // startup and the core's rate-limited shared-catalog
+                    // publisher; the idle server session uses the stock empty
+                    // keepalive packet.
+                    session.send_packet(OP_OFFERFILES, &0u32.to_le_bytes()).await?;
+                    debug!("sent ED2K server keepalive to {}", server.base_endpoint());
                 }
                 // The UDP global-server-status ping is GATED on its own 4.5h
                 // cadence and decoupled from the keepalive tick above: pinging on
