@@ -343,11 +343,17 @@ pub struct EmulebbCore {
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
     shared_hashing_count: Arc<std::sync::atomic::AtomicI64>,
+    /// Serializes detached shared-directory reloads. A controller may request
+    /// reload while a prior scan/hash job is still pruning stale shares; coalesce
+    /// such requests and run one follow-up pass instead of overlapping jobs.
+    shared_reload_running: Arc<AtomicBool>,
+    shared_reload_pending: Arc<AtomicBool>,
     /// Coalesces ED2K server shared-catalog refreshes caused by share/hash
     /// completion. Large startup reloads can complete many files quickly; waiting
     /// for a server publish per file would serialize hashing behind network I/O.
     shared_catalog_publish_dirty: Arc<AtomicBool>,
     shared_catalog_publish_worker: Arc<AtomicBool>,
+    shared_catalog_publish_last: Arc<Mutex<Option<Instant>>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -444,8 +450,11 @@ impl EmulebbCore {
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            shared_reload_running: Arc::new(AtomicBool::new(false)),
+            shared_reload_pending: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
+            shared_catalog_publish_last: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1748,6 +1757,9 @@ impl EmulebbCore {
         self.ed2k_transfers
             .remove_completed_transfer_row(&share.hash)
             .await?;
+        self.ed2k_transfers
+            .remove_verified_catalog_entry(&share.hash)
+            .await;
         ensure!(
             self.metadata_store
                 .mark_unshared_file(&share.hash, "manual")?,
@@ -1756,6 +1768,7 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         state.transfers.remove(&share.hash);
         state.unshared_hashes.insert(share.hash.clone());
+        self.queue_ed2k_shared_catalog_publish();
         Ok(Some(share))
     }
 
@@ -3882,16 +3895,17 @@ impl EmulebbCore {
         state.connected.then_some(state.endpoint).flatten()
     }
 
-    async fn publish_ed2k_shared_catalog(&self) -> Result<()> {
+    async fn publish_ed2k_shared_catalog(&self) -> Result<bool> {
         let Some(network) = self.ed2k_network.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(handle) = self.connected_ed2k_search_handle().await else {
-            return Ok(());
+            return Ok(false);
         };
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         publish_shared_catalog_via_background_session(&handle, timeout, &CancellationToken::new())
-            .await
+            .await?;
+        Ok(true)
     }
 
     fn queue_ed2k_shared_catalog_publish(&self) {
@@ -3911,13 +3925,30 @@ impl EmulebbCore {
 
     async fn run_queued_ed2k_shared_catalog_publisher(self) {
         const ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE: Duration = Duration::from_secs(2);
+        const ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
         loop {
             tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
+            let wait = {
+                let last = self.shared_catalog_publish_last.lock().await;
+                last.and_then(|last| {
+                    ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL.checked_sub(last.elapsed())
+                })
+            };
+            if let Some(wait) = wait {
+                tokio::time::sleep(wait).await;
+            }
             self.shared_catalog_publish_dirty
                 .store(false, Ordering::Release);
-            if let Err(error) = self.publish_ed2k_shared_catalog().await {
-                tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
+            match self.publish_ed2k_shared_catalog().await {
+                Ok(true) => {
+                    *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                    tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
+                }
             }
             if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
                 self.shared_catalog_publish_worker
@@ -7716,6 +7747,32 @@ mod tests {
         );
         assert!(!transfer_root.join(&file_hash).exists());
         assert!(core.transfer(&file_hash).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unshare_file_removes_live_shared_catalog_entry() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-unshare-shared-catalog");
+        let transfer_root = runtime_dir.join("transfers");
+        let shared_path = runtime_dir.join("shared.bin");
+        fs::write(&shared_path, b"shared catalog removal payload").unwrap();
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: shared_path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(core.shares().await.len(), 1);
+        assert_eq!(core.shared_catalog_count().await, 1);
+
+        let removed = core.unshare_file(&share.hash).await.unwrap().unwrap();
+
+        assert_eq!(removed.hash, share.hash);
+        assert!(core.shares().await.is_empty());
+        assert_eq!(core.shared_catalog_count().await, 0);
     }
 
     #[tokio::test]

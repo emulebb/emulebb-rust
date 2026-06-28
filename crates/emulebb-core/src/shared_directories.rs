@@ -208,21 +208,28 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
 struct ReloadHashTarget {
     /// The scanned file to (re)hash via `share_local_file`.
     path: PathBuf,
-    /// When this file was already in the persisted index under a DIFFERENT
-    /// identity (its size/mtime changed), the hash of that now-stale manifest.
-    /// If re-hashing yields a different hash, the stale manifest is removed so a
-    /// changed file does not leave a duplicate share for the same source path.
-    stale_hash: Option<String>,
+    /// Existing hashes for the same source path. Once the current identity is
+    /// known, every different hash here is removed so a changed file does not
+    /// leave duplicate shares for the same source path.
+    stale_hashes: Vec<String>,
+}
+
+struct ReusedReloadShare {
+    /// File hash reused from the persisted index because path, size, and mtime
+    /// still match the scanned file.
+    file_hash: String,
+    /// Older duplicate hashes for the same source path, if any.
+    stale_hashes: Vec<String>,
 }
 
 struct ReloadPlan {
     /// Files that are new, changed (size/mtime), or whose persisted manifest has
     /// no recorded mtime yet -- each gets hashed via `share_local_file`.
     to_hash: Vec<ReloadHashTarget>,
-    /// File hashes of scanned files reused from the persisted index without
-    /// rehashing. Used to resolve their `Localshare`s for the reload result so an
-    /// unchanged file still appears in the returned set.
-    reused_hashes: Vec<String>,
+    /// Scanned files reused from the persisted index without rehashing. Used to
+    /// resolve their `Localshare`s for the reload result so an unchanged file
+    /// still appears in the returned set.
+    reused_shares: Vec<ReusedReloadShare>,
 }
 
 /// Decide which scanned files actually need (re)hashing on this reload.
@@ -245,7 +252,7 @@ async fn plan_incremental_reload(
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     tokio::task::spawn_blocking(move || {
         let mut to_hash = Vec::new();
-        let mut reused_hashes = Vec::new();
+        let mut reused_shares = Vec::new();
         for path in file_paths {
             // Stat the scanned file with the same long-path normalization the
             // persisted index keys use. A file that cannot be stat-ed is treated
@@ -255,35 +262,45 @@ async fn plan_incremental_reload(
                     // Reuse only on an exact size + mtime match, and only when the
                     // persisted manifest actually recorded an mtime (pre-v9 rows
                     // store `None`, so they are rehashed once to backfill it).
-                    Some(entry)
-                        if entry.file_size == size
-                            && entry.source_mtime_ms.is_some()
-                            && entry.source_mtime_ms == mtime_ms =>
-                    {
-                        reused_hashes.push(entry.file_hash.clone());
+                    Some(entries) => {
+                        if let Some(entry) = entries.iter().find(|entry| {
+                            entry.file_size == size
+                                && entry.source_mtime_ms.is_some()
+                                && entry.source_mtime_ms == mtime_ms
+                        }) {
+                            reused_shares.push(ReusedReloadShare {
+                                file_hash: entry.file_hash.clone(),
+                                stale_hashes: entries
+                                    .iter()
+                                    .filter(|stale| stale.file_hash != entry.file_hash)
+                                    .map(|stale| stale.file_hash.clone())
+                                    .collect(),
+                            });
+                        } else {
+                            to_hash.push(ReloadHashTarget {
+                                path,
+                                stale_hashes: entries
+                                    .iter()
+                                    .map(|entry| entry.file_hash.clone())
+                                    .collect(),
+                            });
+                        }
                     }
-                    // Known path whose identity changed: re-hash and remember the
-                    // now-stale hash so a content change does not leave a duplicate
-                    // share for the same source path.
-                    Some(entry) => to_hash.push(ReloadHashTarget {
-                        path,
-                        stale_hash: Some(entry.file_hash.clone()),
-                    }),
                     // Brand-new path: hash it, nothing stale to clean up.
                     None => to_hash.push(ReloadHashTarget {
                         path,
-                        stale_hash: None,
+                        stale_hashes: Vec::new(),
                     }),
                 },
                 None => to_hash.push(ReloadHashTarget {
                     path,
-                    stale_hash: None,
+                    stale_hashes: Vec::new(),
                 }),
             }
         }
         ReloadPlan {
             to_hash,
-            reused_hashes,
+            reused_shares,
         }
     })
     .await
@@ -316,10 +333,11 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     let mut shares = Vec::new();
     // Unchanged files were not re-hashed but are still shared, so resolve their
     // already-persisted shares so the returned set reflects the whole library.
-    for hash in &plan.reused_hashes {
-        if let Some(share) = core.share(hash).await {
+    for reused in &plan.reused_shares {
+        if let Some(share) = core.share(&reused.file_hash).await {
             shares.push(share);
         }
+        forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
     for target in plan.to_hash {
         let share = core
@@ -328,31 +346,32 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
                 name: None,
             })
             .await?;
-        forget_stale_share(core, target.stale_hash.as_deref(), &share.hash).await;
+        forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
     Ok(shares)
 }
 
-/// After re-hashing a changed share-in-place file, drop the manifest of the
-/// file's PREVIOUS identity (a different hash for the same source path) so a
-/// content change does not leave a duplicate, unreachable share. A no-op when the
-/// hash is unchanged (same content, only mtime moved) or there was no prior
-/// entry.
-async fn forget_stale_share(core: &EmulebbCore, stale_hash: Option<&str>, new_hash: &str) {
-    let Some(stale_hash) = stale_hash else {
-        return;
-    };
-    if stale_hash.eq_ignore_ascii_case(new_hash) {
-        return;
-    }
-    if let Err(error) = core.ed2k_transfers.delete_transfer_files(stale_hash).await {
-        tracing::warn!(
-            stale_hash,
-            error = %error,
-            "failed to remove the stale manifest of a changed shared file",
-        );
+/// Drop previous identities for the same share-in-place source path so modified
+/// files do not leave duplicate, unreachable shares. A no-op for the current
+/// hash, which covers timestamp-only changes that hash to the same content.
+async fn forget_stale_shares(core: &EmulebbCore, stale_hashes: &[String], new_hash: &str) {
+    for stale_hash in stale_hashes {
+        if stale_hash.eq_ignore_ascii_case(new_hash) {
+            continue;
+        }
+        match core.ed2k_transfers.delete_transfer_files(stale_hash).await {
+            Ok(true) => core.queue_ed2k_shared_catalog_publish(),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    stale_hash,
+                    error = %error,
+                    "failed to remove the stale manifest of a changed shared file",
+                );
+            }
+        }
     }
 }
 
@@ -376,10 +395,26 @@ async fn forget_stale_share(core: &EmulebbCore, stale_hash: Option<&str>, new_ha
 /// to hash and continues, so one bad file never aborts indexing of the rest of
 /// the library.
 pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
+    core.shared_reload_pending.store(true, Ordering::Release);
+    if core.shared_reload_running.swap(true, Ordering::AcqRel) {
+        return Ok(0);
+    }
     let core = core.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_shared_directories_reload_job(core).await {
-            tracing::warn!(%error, "background shared-directory reload failed");
+        loop {
+            core.shared_reload_pending.store(false, Ordering::Release);
+            if let Err(error) = run_shared_directories_reload_job(core.clone()).await {
+                tracing::warn!(%error, "background shared-directory reload failed");
+            }
+            if !core.shared_reload_pending.load(Ordering::Acquire) {
+                core.shared_reload_running.store(false, Ordering::Release);
+                if !core.shared_reload_pending.load(Ordering::Acquire) {
+                    break;
+                }
+                if core.shared_reload_running.swap(true, Ordering::AcqRel) {
+                    break;
+                }
+            }
         }
     });
     Ok(0)
@@ -393,7 +428,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     // library finishes near-instantly and `hashingCount` stays ~0.
     let plan = plan_incremental_reload(&core, file_paths).await?;
     let queued = plan.to_hash.len();
-    let reused = plan.reused_hashes.len();
+    let reused = plan.reused_shares.len();
     // Publish the pending count after scan/planning. It counts only the files
     // actually being hashed, so an unchanged library reports ~0.
     core.shared_hashing_count
@@ -404,6 +439,10 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         reused_unchanged = reused,
         "shared-directory reload planned (incremental skip of unchanged files)"
     );
+
+    for reused in &plan.reused_shares {
+        forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
+    }
 
     let to_hash = plan.to_hash;
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
@@ -459,7 +498,7 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
         .await
     {
         Ok(share) => {
-            forget_stale_share(core, target.stale_hash.as_deref(), &share.hash).await;
+            forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         }
         Err(error) => {
             tracing::warn!(

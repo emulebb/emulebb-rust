@@ -17,8 +17,8 @@ use super::{Ed2kReloadIndexEntry, Ed2kTransferRuntime};
 impl Ed2kTransferRuntime {
     /// Build the share-in-place reload index: a map from each persisted
     /// share-in-place source path (normalized to its long-path form, the same
-    /// form the directory walk produces) to its recorded identity
-    /// ([`Ed2kReloadIndexEntry`]: file hash, size, and source mtime).
+    /// form the directory walk produces) to all recorded identities for that
+    /// path ([`Ed2kReloadIndexEntry`]: file hash, size, and source mtime).
     ///
     /// The incremental shared-directory reload stats each scanned file and, when
     /// the path is present here with a matching size and mtime, skips re-hashing
@@ -29,7 +29,7 @@ impl Ed2kTransferRuntime {
     /// file is re-hashed once and its mtime recorded.
     pub async fn share_in_place_reload_index(
         &self,
-    ) -> Result<HashMap<String, Ed2kReloadIndexEntry>> {
+    ) -> Result<HashMap<String, Vec<Ed2kReloadIndexEntry>>> {
         let metadata = self.metadata.clone();
         let entries = tokio::task::spawn_blocking(move || metadata.share_in_place_reload_entries())
             .await
@@ -39,14 +39,14 @@ impl Ed2kTransferRuntime {
             let key = crate::long_path::long_path(Path::new(&entry.source_path))
                 .display()
                 .to_string();
-            index.insert(
-                key,
-                Ed2kReloadIndexEntry {
+            index
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .push(Ed2kReloadIndexEntry {
                     file_hash: entry.file_hash,
                     file_size: entry.file_size,
                     source_mtime_ms: entry.source_mtime_ms,
-                },
-            );
+                });
         }
         Ok(index)
     }

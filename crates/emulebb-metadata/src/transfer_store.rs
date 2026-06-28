@@ -369,7 +369,6 @@ impl super::MetadataStore {
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.completed != 0
               AND transfers.source_path IS NOT NULL
-              AND transfers.removed_at_ms IS NULL
             ORDER BY transfers.source_path
             "#,
         )?;

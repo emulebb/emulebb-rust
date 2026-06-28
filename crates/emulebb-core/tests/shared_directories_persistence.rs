@@ -486,14 +486,18 @@ async fn wait_for_shared_file_count(core: &EmulebbCore, count: usize) {
 }
 
 async fn wait_for_shared_file_names(core: &EmulebbCore, expected: Vec<String>) {
+    let mut last_seen = Vec::new();
     for _ in 0..600 {
         let names = shared_file_names(core.shares().await);
         if names == expected {
             return;
         }
+        last_seen = names;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("shared file names did not settle to expected set");
+    panic!(
+        "shared file names did not settle to expected set: expected {expected:?}, last seen {last_seen:?}"
+    );
 }
 
 fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {

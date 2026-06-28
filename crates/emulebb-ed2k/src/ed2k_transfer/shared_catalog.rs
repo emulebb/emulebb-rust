@@ -45,6 +45,15 @@ impl Ed2kTransferRuntime {
         }
         *entries = dedupe_entries(entries.clone());
     }
+
+    /// Remove a locally verified file from the live serving/advertisement
+    /// catalog while preserving compatibility hints for the same hash.
+    pub async fn remove_verified_catalog_entry(&self, file_hash: &str) {
+        let mut entries = self.shared_catalog.write().await;
+        entries.retain(|entry| {
+            !entry.file_hash.eq_ignore_ascii_case(file_hash) || entry.compatibility_hint
+        });
+    }
 }
 
 fn dedupe_entries(entries: Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry> {
