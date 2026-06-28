@@ -260,6 +260,13 @@ struct Ed2kRuntime {
     download_tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Ed2kSharedCatalogPublishOutcome {
+    Published,
+    NoNetwork,
+    NotConnected,
+}
+
 /// RAII guard that removes a transfer hash from `active_download_attempts` (and
 /// its `download_cancels` entry) on drop, so the dedup slot and the per-hash
 /// cancel signal are freed on every exit path of a background download attempt —
@@ -1121,6 +1128,7 @@ impl EmulebbCore {
             download_tasks: Arc::clone(&self.ed2k_download_tasks),
         });
         drop(runtime_guard);
+        self.queue_ed2k_shared_catalog_publish();
         Ok(self.ed2k_status().await)
     }
 
@@ -3907,17 +3915,27 @@ impl EmulebbCore {
         state.connected.then_some(state.endpoint).flatten()
     }
 
-    async fn publish_ed2k_shared_catalog(&self) -> Result<bool> {
+    async fn publish_ed2k_shared_catalog(&self) -> Result<Ed2kSharedCatalogPublishOutcome> {
         let Some(network) = self.ed2k_network.as_ref() else {
-            return Ok(false);
+            return Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork);
         };
-        let Some(handle) = self.connected_ed2k_search_handle().await else {
-            return Ok(false);
+        let (handle, server_state) = {
+            let runtime_guard = self.ed2k_runtime.lock().await;
+            let Some(runtime) = runtime_guard.as_ref() else {
+                return Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork);
+            };
+            (
+                runtime.search_handle.clone(),
+                Arc::clone(&runtime.server_state),
+            )
         };
+        if !server_state.read().await.connected {
+            return Ok(Ed2kSharedCatalogPublishOutcome::NotConnected);
+        }
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         publish_shared_catalog_via_background_session(&handle, timeout, &CancellationToken::new())
             .await?;
-        Ok(true)
+        Ok(Ed2kSharedCatalogPublishOutcome::Published)
     }
 
     fn queue_ed2k_shared_catalog_publish(&self) {
@@ -3938,6 +3956,7 @@ impl EmulebbCore {
     async fn run_queued_ed2k_shared_catalog_publisher(self) {
         const ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE: Duration = Duration::from_secs(2);
         const ED2K_SHARED_CATALOG_PUBLISH_MIN_INTERVAL: Duration = Duration::from_secs(60);
+        const ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY: Duration = Duration::from_secs(10);
 
         loop {
             tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
@@ -3950,14 +3969,23 @@ impl EmulebbCore {
             if let Some(wait) = wait {
                 tokio::time::sleep(wait).await;
             }
-            self.shared_catalog_publish_dirty
-                .store(false, Ordering::Release);
             match self.publish_ed2k_shared_catalog().await {
-                Ok(true) => {
+                Ok(Ed2kSharedCatalogPublishOutcome::Published) => {
+                    self.shared_catalog_publish_dirty
+                        .store(false, Ordering::Release);
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
                 }
-                Ok(false) => {}
+                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {
+                    self.shared_catalog_publish_dirty
+                        .store(false, Ordering::Release);
+                }
+                Ok(Ed2kSharedCatalogPublishOutcome::NotConnected) => {
+                    tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY).await;
+                    continue;
+                }
                 Err(error) => {
+                    self.shared_catalog_publish_dirty
+                        .store(false, Ordering::Release);
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
                     tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
                 }
@@ -6699,6 +6727,51 @@ mod tests {
         assert_eq!(status.kad.firewalled, Some(false));
         assert_eq!(status.kad.users, None);
         assert_eq!(status.kad.files, None);
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = core.disconnect_ed2k().await;
+    }
+
+    #[tokio::test]
+    async fn ed2k_shared_catalog_publish_waits_for_connected_server() {
+        let transfer_root = unique_runtime_dir("emulebb-core-shared-publish-disconnected");
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &transfer_root,
+            Some(test_network_config_with_store(
+                &transfer_root,
+                KadLocalStoreConfig::default(),
+                SnoopQueueConfig::default(),
+            )),
+        )
+        .unwrap();
+        let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dht_task = dht.start();
+
+        *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+            search_handle,
+            server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+            dht,
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            nat: Arc::new(NatManager::default()),
+            shutdown: Arc::clone(&shutdown),
+            server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+            kad_firewall_recheck: None,
+            tasks: vec![dht_task],
+            download_tasks: Arc::clone(&core.ed2k_download_tasks),
+        });
+
+        assert_eq!(
+            core.publish_ed2k_shared_catalog().await.unwrap(),
+            Ed2kSharedCatalogPublishOutcome::NotConnected
+        );
         shutdown.store(true, Ordering::SeqCst);
         let _ = core.disconnect_ed2k().await;
     }
