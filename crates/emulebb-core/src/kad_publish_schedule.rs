@@ -79,7 +79,6 @@ pub(crate) fn file_has_publishable_note(comment: &str, rating: u8) -> bool {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct FilePublishState {
-    last_keyword: Option<Instant>,
     last_source: Option<Instant>,
     last_notes: Option<Instant>,
 }
@@ -89,6 +88,7 @@ struct FilePublishState {
 #[derive(Debug, Default)]
 pub(crate) struct KadPublishSchedule {
     files: HashMap<String, FilePublishState>,
+    keywords: HashMap<(String, String), Instant>,
     next_cursor: usize,
 }
 
@@ -99,8 +99,12 @@ impl KadPublishSchedule {
 
     /// Whether the file's keyword publish is due (never published, or the 24h
     /// keyword interval has elapsed since the last keyword publish).
-    pub(crate) fn keyword_due(&self, file_hash: &str, now: Instant) -> bool {
-        match self.files.get(file_hash).and_then(|s| s.last_keyword) {
+    pub(crate) fn keyword_due(&self, file_hash: &str, keyword: &str, now: Instant) -> bool {
+        match self
+            .keywords
+            .get(&(file_hash.to_string(), keyword.to_string()))
+            .copied()
+        {
             None => true,
             Some(last) => now.duration_since(last) >= KAD_KEYWORD_REPUBLISH_INTERVAL,
         }
@@ -116,11 +120,10 @@ impl KadPublishSchedule {
     }
 
     /// Record that the file's keyword was (re)published at `now`.
-    pub(crate) fn mark_keyword_published(&mut self, file_hash: &str, now: Instant) {
-        self.files
-            .entry(file_hash.to_string())
-            .or_default()
-            .last_keyword = Some(now);
+    pub(crate) fn mark_keyword_published(&mut self, file_hash: &str, keyword: &str, now: Instant) {
+        self.files.entry(file_hash.to_string()).or_default();
+        self.keywords
+            .insert((file_hash.to_string(), keyword.to_string()), now);
     }
 
     /// Record that the file's source was (re)published at `now`.
@@ -156,6 +159,21 @@ impl KadPublishSchedule {
     pub(crate) fn retain_only<'a>(&mut self, keep: impl IntoIterator<Item = &'a str>) {
         let keep: std::collections::HashSet<&str> = keep.into_iter().collect();
         self.files.retain(|hash, _| keep.contains(hash.as_str()));
+        self.keywords
+            .retain(|(hash, _), _| keep.contains(hash.as_str()));
+    }
+
+    /// Drop keyword bookkeeping for terms no longer derived from this file's
+    /// current filename. This bounds per-file keyword state when metadata changes.
+    pub(crate) fn retain_keywords<'a>(
+        &mut self,
+        file_hash: &str,
+        keep_keywords: impl IntoIterator<Item = &'a str>,
+    ) {
+        let keep_keywords: std::collections::HashSet<&str> = keep_keywords.into_iter().collect();
+        self.keywords.retain(|(hash, keyword), _| {
+            hash != file_hash || keep_keywords.contains(keyword.as_str())
+        });
     }
 
     /// Rotating scan cursor for budgeted publish rounds. The publish loop uses
@@ -186,6 +204,7 @@ mod tests {
     use super::*;
 
     const HASH: &str = "abc123";
+    const KEYWORD: &str = "ubuntu";
 
     fn gate(
         kad_connected: bool,
@@ -234,7 +253,7 @@ mod tests {
     fn never_published_is_due_for_both_kinds() {
         let sched = KadPublishSchedule::new();
         let now = Instant::now();
-        assert!(sched.keyword_due(HASH, now));
+        assert!(sched.keyword_due(HASH, KEYWORD, now));
         assert!(sched.source_due(HASH, now));
     }
 
@@ -242,15 +261,15 @@ mod tests {
     fn keyword_gated_by_24h_interval() {
         let mut sched = KadPublishSchedule::new();
         let t0 = Instant::now();
-        sched.mark_keyword_published(HASH, t0);
+        sched.mark_keyword_published(HASH, KEYWORD, t0);
 
         // Just before the 24h interval: not due.
         let almost = t0 + KAD_KEYWORD_REPUBLISH_INTERVAL - Duration::from_secs(1);
-        assert!(!sched.keyword_due(HASH, almost));
+        assert!(!sched.keyword_due(HASH, KEYWORD, almost));
 
         // At exactly the interval: due.
         let due = t0 + KAD_KEYWORD_REPUBLISH_INTERVAL;
-        assert!(sched.keyword_due(HASH, due));
+        assert!(sched.keyword_due(HASH, KEYWORD, due));
     }
 
     #[test]
@@ -271,18 +290,18 @@ mod tests {
         // A source republish (5h) must not reset the keyword's 24h timer.
         let mut sched = KadPublishSchedule::new();
         let t0 = Instant::now();
-        sched.mark_keyword_published(HASH, t0);
+        sched.mark_keyword_published(HASH, KEYWORD, t0);
         sched.mark_source_published(HASH, t0);
 
         // After 5h: source due again, keyword still gated.
         let t5h = t0 + KAD_SOURCE_REPUBLISH_INTERVAL;
         assert!(sched.source_due(HASH, t5h));
-        assert!(!sched.keyword_due(HASH, t5h));
+        assert!(!sched.keyword_due(HASH, KEYWORD, t5h));
 
         sched.mark_source_published(HASH, t5h);
         // Keyword remains gated until 24h from its own publish.
         let t10h = t0 + 2 * KAD_SOURCE_REPUBLISH_INTERVAL;
-        assert!(!sched.keyword_due(HASH, t10h));
+        assert!(!sched.keyword_due(HASH, KEYWORD, t10h));
     }
 
     #[test]
@@ -300,7 +319,7 @@ mod tests {
 
         // Notes track independently of keyword/source: a keyword publish does not
         // reset the notes timer.
-        sched.mark_keyword_published(HASH, almost);
+        sched.mark_keyword_published(HASH, KEYWORD, almost);
         assert!(!sched.notes_due(HASH, almost));
     }
 
@@ -319,14 +338,37 @@ mod tests {
     fn retain_only_drops_unshared_files() {
         let mut sched = KadPublishSchedule::new();
         let now = Instant::now();
-        sched.mark_keyword_published("keep", now);
-        sched.mark_keyword_published("drop", now);
+        sched.mark_keyword_published("keep", KEYWORD, now);
+        sched.mark_keyword_published("drop", KEYWORD, now);
 
         sched.retain_only(["keep"]);
         // "keep" still has state (not due right after publishing).
-        assert!(!sched.keyword_due("keep", now));
+        assert!(!sched.keyword_due("keep", KEYWORD, now));
         // "drop" was forgotten, so it reads as due (never published).
-        assert!(sched.keyword_due("drop", now));
+        assert!(sched.keyword_due("drop", KEYWORD, now));
+    }
+
+    #[test]
+    fn keyword_terms_track_independently() {
+        let mut sched = KadPublishSchedule::new();
+        let now = Instant::now();
+        sched.mark_keyword_published(HASH, "ubuntu", now);
+
+        assert!(!sched.keyword_due(HASH, "ubuntu", now));
+        assert!(sched.keyword_due(HASH, "python", now));
+    }
+
+    #[test]
+    fn retain_keywords_drops_stale_filename_terms() {
+        let mut sched = KadPublishSchedule::new();
+        let now = Instant::now();
+        sched.mark_keyword_published(HASH, "ubuntu", now);
+        sched.mark_keyword_published(HASH, "python", now);
+
+        sched.retain_keywords(HASH, ["python"]);
+
+        assert!(sched.keyword_due(HASH, "ubuntu", now));
+        assert!(!sched.keyword_due(HASH, "python", now));
     }
 
     #[test]

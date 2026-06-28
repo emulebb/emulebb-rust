@@ -214,6 +214,14 @@ pub(crate) fn significant_keyword_words(query: &str) -> Vec<String> {
     }
 }
 
+pub(crate) fn significant_keyword_words_unique(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    significant_keyword_words(query)
+        .into_iter()
+        .filter(|word| seen.insert(word.clone()))
+        .collect()
+}
+
 pub(crate) fn keyword_target(query: &str) -> NodeId {
     let first_word = exact_ed2k_hash_query_token(query).unwrap_or_else(|| {
         significant_keyword_words(query)

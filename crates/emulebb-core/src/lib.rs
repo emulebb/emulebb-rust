@@ -141,7 +141,7 @@ use ed2k_sources::{
     select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
     should_query_kad_source_supplement, should_query_server_udp_source_supplement,
     should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    sort_download_sources, source_endpoint_key, source_key,
+    significant_keyword_words_unique, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -4432,7 +4432,13 @@ async fn publish_kad_due_shared_files(
     for offset in 0..item_count {
         let entry = &shared_files[(start + offset) % item_count];
         let now = Instant::now();
-        let keyword_due = schedule.keyword_due(&entry.file_hash, now);
+        let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
+        schedule.retain_keywords(&entry.file_hash, keyword_terms.iter().map(String::as_str));
+        let due_keyword = keyword_terms
+            .iter()
+            .find(|keyword| schedule.keyword_due(&entry.file_hash, keyword, now));
+        let due_keyword = due_keyword.cloned();
+        let keyword_due = due_keyword.is_some();
         let source_due = schedule.source_due(&entry.file_hash, now);
         let notes_due =
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
@@ -4458,8 +4464,8 @@ async fn publish_kad_due_shared_files(
             }
         };
 
-        if keyword_due {
-            let keyword_hash = keyword_target(&entry.canonical_name);
+        if let Some(keyword) = due_keyword.as_deref() {
+            let keyword_hash = keyword_target(keyword);
             let mut keyword_tags = vec![
                 Tag::filename(entry.canonical_name.clone()),
                 Tag::filesize(entry.file_size),
@@ -4497,7 +4503,7 @@ async fn publish_kad_due_shared_files(
                     // Mark published only on a successful attempt, mirroring the
                     // master setting the next-publish time when the store search
                     // was actually started.
-                    schedule.mark_keyword_published(&entry.file_hash, now);
+                    schedule.mark_keyword_published(&entry.file_hash, keyword, now);
                     keyword_published += 1;
                 }
                 Err(error) => {
@@ -7538,6 +7544,20 @@ mod tests {
         assert_eq!(
             significant_keyword_words("A torino x train"),
             vec!["torino".to_string(), "train".to_string()]
+        );
+    }
+
+    #[test]
+    fn significant_words_unique_preserve_first_occurrence_order() {
+        assert_eq!(
+            significant_keyword_words_unique("Ubuntu Python ubuntu programming Apache Camel"),
+            vec![
+                "ubuntu".to_string(),
+                "python".to_string(),
+                "programming".to_string(),
+                "apache".to_string(),
+                "camel".to_string(),
+            ]
         );
     }
 
