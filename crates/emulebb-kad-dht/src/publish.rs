@@ -22,7 +22,9 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-const PUBLISH_TIMEOUT: Duration = Duration::from_secs(STORE_TIMEOUT_SECS);
+const STORE_STOP_GRACE_SECS: u64 = 20;
+const PUBLISH_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(STORE_TIMEOUT_SECS - STORE_STOP_GRACE_SECS);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -139,7 +141,7 @@ async fn resolve_publish_contacts(
         TraversalConfig {
             target,
             search_kind: TraversalKind::Store,
-            timeout: PUBLISH_TIMEOUT,
+            timeout: PUBLISH_LOOKUP_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: publish_contact_fanout.max(K),
             cancel: CancellationToken::new(),
