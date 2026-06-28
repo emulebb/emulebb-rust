@@ -173,6 +173,11 @@ impl DhtNode {
         self.inner.own_id
     }
 
+    /// Maximum number of concurrent search/publish traversals this node runs.
+    pub fn max_concurrent_searches(&self) -> usize {
+        self.inner.search_concurrency.max_concurrent()
+    }
+
     /// Our UDP anti-spoofing key.
     pub fn udp_key(&self) -> u32 {
         self.inner.config.udp_key

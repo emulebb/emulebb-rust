@@ -4373,10 +4373,6 @@ const KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET: usize = 256;
 const KAD_KEYWORD_PUBLISH_BUDGET: usize = 3;
 const KAD_SOURCE_PUBLISH_BUDGET: usize = 4;
 const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
-/// Cap detached shared-file publish traversals so a slow public Kad round cannot
-/// accumulate unbounded background work.
-const KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET: usize = 512;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KadSharedPublishKind {
     Keyword,
@@ -4407,6 +4403,10 @@ enum KadSharedPublishError {
     Failed(String),
 }
 
+fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> usize {
+    runtime.dht.max_concurrent_searches().max(1)
+}
+
 async fn run_kad_shared_file_publish_loop(
     runtime: KadPublishLoopRuntime,
     shutdown: Arc<AtomicBool>,
@@ -4416,6 +4416,7 @@ async fn run_kad_shared_file_publish_loop(
     let mut publish_tasks = JoinSet::new();
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
+            let in_flight_budget = kad_shared_file_publish_in_flight_budget(&runtime);
             kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
                 diagnostics.phase = "waitingBootstrap".to_string();
                 diagnostics.running = true;
@@ -4425,7 +4426,7 @@ async fn run_kad_shared_file_publish_loop(
                 diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
                 diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
                 diagnostics.in_flight_count = publish_tasks.len();
-                diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+                diagnostics.in_flight_budget = in_flight_budget;
                 diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
                 diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
                 diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4555,6 +4556,7 @@ async fn publish_kad_due_shared_files(
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
 ) -> Result<usize> {
     let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
+    let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
         diagnostics.running = true;
@@ -4562,7 +4564,7 @@ async fn publish_kad_due_shared_files(
         diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
         diagnostics.in_flight_count = publish_tasks.len();
-        diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+        diagnostics.in_flight_budget = in_flight_budget;
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4583,7 +4585,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
-            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+            diagnostics.in_flight_budget = in_flight_budget;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4629,7 +4631,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
-            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+            diagnostics.in_flight_budget = in_flight_budget;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4670,7 +4672,7 @@ async fn publish_kad_due_shared_files(
         &mut notes_published,
     )
     .await;
-    if publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET {
+    if publish_tasks.len() >= in_flight_budget {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "publishing".to_string();
             diagnostics.running = true;
@@ -4682,7 +4684,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
-            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+            diagnostics.in_flight_budget = in_flight_budget;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4759,7 +4761,7 @@ async fn publish_kad_due_shared_files(
 
         if let Some(keyword) = due_keyword.as_deref() {
             if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET
-                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+                || publish_tasks.len() >= in_flight_budget
             {
                 keyword_skipped_by_budget += 1;
             } else {
@@ -4817,7 +4819,7 @@ async fn publish_kad_due_shared_files(
 
         if source_due {
             if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
-                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+                || publish_tasks.len() >= in_flight_budget
             {
                 source_skipped_by_budget += 1;
             } else {
@@ -4866,7 +4868,7 @@ async fn publish_kad_due_shared_files(
         // and source so an un-annotated file never emits a notes publish.
         if notes_due {
             if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET
-                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+                || publish_tasks.len() >= in_flight_budget
             {
                 notes_skipped_by_budget += 1;
             } else {
@@ -4929,7 +4931,7 @@ async fn publish_kad_due_shared_files(
     schedule.advance_cursor(start, inspected, item_count);
     let budget_exhausted = (inspected >= KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET
         && inspected < item_count)
-        || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+        || publish_tasks.len() >= in_flight_budget
         || keyword_skipped_by_budget > 0
         || source_skipped_by_budget > 0
         || notes_skipped_by_budget > 0;
@@ -4945,7 +4947,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.attempted_files = attempted_files;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
-            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+            diagnostics.in_flight_budget = in_flight_budget;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4978,7 +4980,7 @@ async fn publish_kad_due_shared_files(
         diagnostics.attempted_files = attempted_files;
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
         diagnostics.in_flight_count = publish_tasks.len();
-        diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+        diagnostics.in_flight_budget = in_flight_budget;
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;

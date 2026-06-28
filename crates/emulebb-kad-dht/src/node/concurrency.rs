@@ -29,6 +29,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(crate) struct SearchConcurrency {
     semaphore: Arc<Semaphore>,
     in_flight: Arc<Mutex<HashSet<NodeId>>>,
+    max_concurrent: usize,
 }
 
 impl SearchConcurrency {
@@ -36,10 +37,16 @@ impl SearchConcurrency {
     /// traversals. `max_concurrent` is clamped to at least 1 so the node can
     /// always make progress even if mis-configured to 0.
     pub(crate) fn new(max_concurrent: usize) -> Self {
+        let max_concurrent = max_concurrent.max(1);
         Self {
-            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            max_concurrent,
         }
+    }
+
+    pub(crate) fn max_concurrent(&self) -> usize {
+        self.max_concurrent
     }
 
     /// Acquire a permit for `target`.
