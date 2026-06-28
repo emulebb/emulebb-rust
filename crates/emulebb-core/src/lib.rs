@@ -3969,23 +3969,23 @@ impl EmulebbCore {
             if let Some(wait) = wait {
                 tokio::time::sleep(wait).await;
             }
+            // Clear before the network publish. If hashing completes another
+            // shared file while the advertisement is in flight, queueing sets
+            // dirty again and this loop performs a follow-up publish.
+            self.shared_catalog_publish_dirty
+                .store(false, Ordering::Release);
             match self.publish_ed2k_shared_catalog().await {
                 Ok(Ed2kSharedCatalogPublishOutcome::Published) => {
-                    self.shared_catalog_publish_dirty
-                        .store(false, Ordering::Release);
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
                 }
-                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {
-                    self.shared_catalog_publish_dirty
-                        .store(false, Ordering::Release);
-                }
+                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {}
                 Ok(Ed2kSharedCatalogPublishOutcome::NotConnected) => {
+                    self.shared_catalog_publish_dirty
+                        .store(true, Ordering::Release);
                     tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY).await;
                     continue;
                 }
                 Err(error) => {
-                    self.shared_catalog_publish_dirty
-                        .store(false, Ordering::Release);
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
                     tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
                 }
