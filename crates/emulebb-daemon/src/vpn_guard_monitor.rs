@@ -9,7 +9,7 @@ use std::{
 
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, vpn_guard::binding_confirmed};
 use emulebb_ed2k::detect_interfaces;
-use tokio::{sync::watch, time::MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 
 const VPN_GUARD_RUNTIME_MONITOR_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -34,11 +34,7 @@ pub(crate) fn monitor_config(network: &Ed2kNetworkConfig) -> Option<VpnGuardRunt
         })
 }
 
-pub(crate) async fn run(
-    core: Arc<EmulebbCore>,
-    shutdown_tx: watch::Sender<bool>,
-    monitor: VpnGuardRuntimeMonitor,
-) {
+pub(crate) async fn run(core: Arc<EmulebbCore>, monitor: VpnGuardRuntimeMonitor) {
     let mut interval = tokio::time::interval(VPN_GUARD_RUNTIME_MONITOR_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -65,11 +61,10 @@ pub(crate) async fn run(
 
         tracing::error!(
             reason = %guard.startup_block_reason,
-            "VPN Guard runtime monitor stopped public P2P"
+            "VPN Guard runtime monitor stopped public P2P; REST remains available"
         );
         core.set_kad_running(false).await;
         let _ = core.disconnect_ed2k().await;
-        let _ = shutdown_tx.send(true);
         return;
     }
 }

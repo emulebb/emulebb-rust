@@ -1152,9 +1152,6 @@ impl EmulebbCore {
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
-        // Stop the live shared-directory monitor as part of graceful teardown
-        // (R11-2) so its watcher thread + consumer task do not leak. Idempotent.
-        self.stop_shared_directory_monitor();
         // Drop the reask detach handle so post-disconnect downloads stay on TCP
         // and the closed command channel lets the (aborted) loop wind down.
         *self.ed2k_reask_handle.lock().unwrap() = None;
