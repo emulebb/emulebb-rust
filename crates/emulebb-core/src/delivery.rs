@@ -88,22 +88,20 @@ impl EmulebbCore {
     /// transfers that completed before this build added delivery, and the
     /// crash-after-complete-before-deliver window. Best-effort per transfer.
     pub async fn deliver_pending_completed_transfers(&self) {
-        let manifests = match self.ed2k_transfers.manifests().await {
-            Ok(manifests) => manifests,
+        let hashes = match self
+            .ed2k_transfers
+            .pending_completed_delivery_hashes()
+            .await
+        {
+            Ok(hashes) => hashes,
             Err(error) => {
-                tracing::warn!(%error, "startup delivery sweep skipped: failed to list transfers");
+                tracing::warn!(%error, "startup delivery sweep skipped: failed to list candidates");
                 return;
             }
         };
-        for manifest in manifests {
-            // Skip share-in-place files (seeded from their original path, never
-            // downloaded): they are not delivery candidates.
-            if manifest.completed
-                && manifest.delivered_path.is_none()
-                && manifest.source_path.is_none()
-            {
-                self.deliver_completed_transfer(&manifest.file_hash).await;
-            }
+        for hash in hashes {
+            self.deliver_completed_transfer(&hash).await;
+            tokio::task::yield_now().await;
         }
     }
 }

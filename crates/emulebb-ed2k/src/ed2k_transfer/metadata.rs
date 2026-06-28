@@ -59,6 +59,14 @@ impl Ed2kTransferRuntime {
         .map_err(anyhow::Error::from)?
     }
 
+    /// Return completed download hashes that still need incoming delivery.
+    pub async fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.pending_completed_delivery_hashes())
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
         let _guard = self.manifest_io.lock().await;

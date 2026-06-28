@@ -501,6 +501,25 @@ impl super::MetadataStore {
         Ok((entries, total))
     }
 
+    pub fn pending_completed_delivery_hashes(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash))
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND transfers.delivered_path IS NULL
+              AND transfers.source_path IS NULL
+              AND transfers.removed_at_ms IS NULL
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
