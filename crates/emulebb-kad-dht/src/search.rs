@@ -1,4 +1,4 @@
-use crate::node::concurrency::SearchConcurrency;
+use crate::node::concurrency::{SearchAcquireError, SearchConcurrency};
 use crate::traversal::{
     KadIpFilter, KadResContactSink, TraversalConfig, TraversalContact, TraversalKind, run_traversal,
 };
@@ -36,14 +36,14 @@ enum AcquireOutcome {
 /// Acquire a per-target concurrency permit for a streaming search, when a guard
 /// is present. Returns [`AcquireOutcome::Duplicate`] for an in-flight target so
 /// the caller drops the stream (oracle `CSearchManager::AlreadySearchingFor`).
-async fn acquire_search_permit(
-    concurrency: Option<SearchConcurrency>,
-    target: NodeId,
-) -> AcquireOutcome {
+fn acquire_search_permit(concurrency: Option<SearchConcurrency>, target: NodeId) -> AcquireOutcome {
     match concurrency {
-        Some(guard) => match guard.acquire(target).await {
-            Some(permit) => AcquireOutcome::Permit(Some(permit)),
-            None => AcquireOutcome::Duplicate,
+        Some(guard) => match guard.try_acquire(target) {
+            Ok(permit) => AcquireOutcome::Permit(Some(permit)),
+            Err(SearchAcquireError::Duplicate | SearchAcquireError::Busy) => {
+                AcquireOutcome::Duplicate
+            }
+            Err(SearchAcquireError::Closed) => AcquireOutcome::Duplicate,
         },
         None => AcquireOutcome::Unbounded,
     }
@@ -88,7 +88,7 @@ pub(crate) fn search_keywords_by_request(
     tokio::spawn(async move {
         // Oracle CSearchManager: drop a duplicate same-target keyword search and
         // cap concurrent traversals. Held for the lifetime of this stream task.
-        let _permit = match acquire_search_permit(concurrency, request_target).await {
+        let _permit = match acquire_search_permit(concurrency, request_target) {
             AcquireOutcome::Permit(permit) => permit,
             AcquireOutcome::Duplicate => return,
             AcquireOutcome::Unbounded => None,
@@ -207,7 +207,7 @@ pub(crate) fn search_sources_by_request(
 
     tokio::spawn(async move {
         // Oracle CSearchManager: dedup the source search by target + cap concurrency.
-        let _permit = match acquire_search_permit(concurrency, target).await {
+        let _permit = match acquire_search_permit(concurrency, target) {
             AcquireOutcome::Permit(permit) => permit,
             AcquireOutcome::Duplicate => return,
             AcquireOutcome::Unbounded => None,
@@ -282,7 +282,7 @@ pub(crate) fn search_notes(
 
     tokio::spawn(async move {
         // Oracle CSearchManager: dedup the notes search by target + cap concurrency.
-        let _permit = match acquire_search_permit(concurrency, target).await {
+        let _permit = match acquire_search_permit(concurrency, target) {
             AcquireOutcome::Permit(permit) => permit,
             AcquireOutcome::Duplicate => return,
             AcquireOutcome::Unbounded => None,

@@ -1,5 +1,6 @@
 use super::DhtNode;
 use crate::error::DhtError;
+use crate::node::concurrency::SearchAcquireError;
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag};
 
@@ -35,9 +36,9 @@ impl DhtNode {
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         // Oracle CSearchManager: a keyword store traversal for an already in-flight
         // target is dropped, and concurrent traversals are capped. Held to return.
-        let Some(_permit) = self.acquire_search_permit(keyword_hash).await else {
-            return Ok(crate::publish::PublishAttemptStats::default());
-        };
+        let _permit = self
+            .try_acquire_search_permit(keyword_hash)
+            .map_err(search_acquire_error_to_dht_error)?;
         crate::publish::publish_keyword(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -83,9 +84,9 @@ impl DhtNode {
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         // Oracle CSearchManager: dedup/cap the source store traversal by target.
         let target = NodeId::from_be_bytes(file_hash.0);
-        let Some(_permit) = self.acquire_search_permit(target).await else {
-            return Ok(crate::publish::PublishAttemptStats::default());
-        };
+        let _permit = self
+            .try_acquire_search_permit(target)
+            .map_err(search_acquire_error_to_dht_error)?;
         crate::publish::publish_source(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -131,9 +132,9 @@ impl DhtNode {
     ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         // Oracle CSearchManager: dedup/cap the notes store traversal by target.
         let target = NodeId::from_be_bytes(file_hash.0);
-        let Some(_permit) = self.acquire_search_permit(target).await else {
-            return Ok(crate::publish::PublishAttemptStats::default());
-        };
+        let _permit = self
+            .try_acquire_search_permit(target)
+            .map_err(search_acquire_error_to_dht_error)?;
         crate::publish::publish_notes(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -146,5 +147,12 @@ impl DhtNode {
             Some(self.res_contact_sink()),
         )
         .await
+    }
+}
+
+fn search_acquire_error_to_dht_error(error: SearchAcquireError) -> DhtError {
+    match error {
+        SearchAcquireError::Duplicate | SearchAcquireError::Busy => DhtError::SearchBusy,
+        SearchAcquireError::Closed => DhtError::SemaphoreClosed,
     }
 }

@@ -4394,6 +4394,7 @@ impl KadSharedPublishKind {
 struct KadSharedPublishOutcome {
     kind: KadSharedPublishKind,
     file_hash: String,
+    keyword: Option<String>,
     started_at: Instant,
     result: Result<PublishAttemptStats, KadSharedPublishError>,
 }
@@ -4663,6 +4664,8 @@ async fn publish_kad_due_shared_files(
     let mut source_published = 0usize;
     let mut notes_published = 0usize;
     drain_completed_kad_publish_tasks(
+        runtime,
+        schedule,
         publish_tasks,
         &mut keyword_totals,
         &mut source_totals,
@@ -4781,14 +4784,6 @@ async fn publish_kad_due_shared_files(
                     .aich_root
                     .as_deref()
                     .and_then(decode_aich_root_hex_for_publish);
-                schedule.mark_keyword_published(&entry.file_hash, &keyword, now);
-                persist_kad_outbound_publish(
-                    &runtime.metadata_store,
-                    &entry.file_hash,
-                    MetadataKadOutboundPublishKind::Keyword,
-                    &keyword,
-                    Utc::now().timestamp_millis(),
-                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
@@ -4807,6 +4802,7 @@ async fn publish_kad_due_shared_files(
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Keyword,
                         file_hash: file_hash_text,
+                        keyword: Some(keyword),
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
@@ -4827,14 +4823,6 @@ async fn publish_kad_due_shared_files(
                 attempted_this_file = true;
                 let source_tags =
                     build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
-                schedule.mark_source_published(&entry.file_hash, now);
-                persist_kad_outbound_publish(
-                    &runtime.metadata_store,
-                    &entry.file_hash,
-                    MetadataKadOutboundPublishKind::Source,
-                    "",
-                    Utc::now().timestamp_millis(),
-                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
@@ -4852,6 +4840,7 @@ async fn publish_kad_due_shared_files(
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Source,
                         file_hash: file_hash_text,
+                        keyword: None,
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
@@ -4890,14 +4879,6 @@ async fn publish_kad_due_shared_files(
                     ));
                 }
                 notes_tags.push(Tag::filesize(entry.file_size));
-                schedule.mark_notes_published(&entry.file_hash, now);
-                persist_kad_outbound_publish(
-                    &runtime.metadata_store,
-                    &entry.file_hash,
-                    MetadataKadOutboundPublishKind::Notes,
-                    "",
-                    Utc::now().timestamp_millis(),
-                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
@@ -4915,6 +4896,7 @@ async fn publish_kad_due_shared_files(
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Notes,
                         file_hash: file_hash_text,
+                        keyword: None,
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
@@ -5034,6 +5016,8 @@ async fn publish_kad_due_shared_files(
 }
 
 async fn drain_completed_kad_publish_tasks(
+    runtime: &KadPublishLoopRuntime,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     keyword_totals: &mut PublishAttemptStats,
     source_totals: &mut PublishAttemptStats,
@@ -5060,6 +5044,19 @@ async fn drain_completed_kad_publish_tasks(
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
                     accumulate_publish_stats(keyword_totals, stats);
+                    let keyword = outcome.keyword.as_deref().unwrap_or_default();
+                    schedule.mark_keyword_published(
+                        &outcome.file_hash,
+                        keyword,
+                        outcome.started_at,
+                    );
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &outcome.file_hash,
+                        MetadataKadOutboundPublishKind::Keyword,
+                        keyword,
+                        Utc::now().timestamp_millis(),
+                    );
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Keyword,
                         &outcome.file_hash,
@@ -5069,6 +5066,14 @@ async fn drain_completed_kad_publish_tasks(
                 }
                 KadSharedPublishKind::Source => {
                     accumulate_publish_stats(source_totals, stats);
+                    schedule.mark_source_published(&outcome.file_hash, outcome.started_at);
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &outcome.file_hash,
+                        MetadataKadOutboundPublishKind::Source,
+                        "",
+                        Utc::now().timestamp_millis(),
+                    );
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Source,
                         &outcome.file_hash,
@@ -5078,6 +5083,14 @@ async fn drain_completed_kad_publish_tasks(
                 }
                 KadSharedPublishKind::Notes => {
                     accumulate_publish_stats(notes_totals, stats);
+                    schedule.mark_notes_published(&outcome.file_hash, outcome.started_at);
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &outcome.file_hash,
+                        MetadataKadOutboundPublishKind::Notes,
+                        "",
+                        Utc::now().timestamp_millis(),
+                    );
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Notes,
                         &outcome.file_hash,

@@ -12,6 +12,8 @@ pub enum DhtError {
     SearchTimeout,
     #[error("publish failed - no node accepted")]
     PublishFailed,
+    #[error("search capacity is busy")]
+    SearchBusy,
     #[error("routing error: {0}")]
     Routing(#[from] emulebb_kad_routing::RoutingError),
     #[error("I/O error: {0}")]
@@ -33,5 +35,6 @@ mod tests {
         assert!(DhtError::MissingBindAddr.to_string().is_ascii());
         assert!(DhtError::BootstrapFailed.to_string().is_ascii());
         assert!(DhtError::PublishFailed.to_string().is_ascii());
+        assert!(DhtError::SearchBusy.to_string().is_ascii());
     }
 }

@@ -304,18 +304,17 @@ impl DhtNode {
         })
     }
 
-    /// Acquire a per-target search/publish concurrency permit (oracle
+    /// Try to acquire a per-target search/publish concurrency permit (oracle
     /// `CSearchManager::AlreadySearchingFor` + concurrent-search cap).
     ///
-    /// Returns `None` when a traversal for the same target is already in flight,
-    /// so the caller drops/coalesces the duplicate; otherwise it waits for a free
-    /// concurrency slot and returns an RAII permit that frees the slot and the
-    /// target on drop (every exit path, including unwind).
-    pub(crate) async fn acquire_search_permit(
+    /// Returns immediately when a traversal for the same target is already in
+    /// flight or the cap is full, so callers retry on their own cadence instead
+    /// of accumulating a hidden async wait queue.
+    pub(crate) fn try_acquire_search_permit(
         &self,
         target: NodeId,
-    ) -> Option<concurrency::SearchPermit> {
-        self.inner.search_concurrency.acquire(target).await
+    ) -> Result<concurrency::SearchPermit, concurrency::SearchAcquireError> {
+        self.inner.search_concurrency.try_acquire(target)
     }
 
     /// A clone of this node's search/publish concurrency guard, for the streaming

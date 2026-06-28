@@ -12,17 +12,23 @@
 //!   ("reserved for future use").
 //!
 //! [`SearchConcurrency`] combines both: callers ask for a [`SearchPermit`] for a
-//! target; a duplicate same-target request returns `None` (coalesced/dropped),
-//! otherwise the call waits for a semaphore slot and returns an RAII permit. The
-//! permit releases the semaphore slot and removes the target from the in-flight
-//! set on drop, so every exit path (including a panic that unwinds through the
-//! held permit) frees the resources.
+//! target; a duplicate same-target request or a saturated concurrency cap is
+//! rejected immediately. The permit releases the semaphore slot and removes the
+//! target from the in-flight set on drop, so every exit path (including a panic
+//! that unwinds through the held permit) frees the resources.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use emulebb_kad_proto::NodeId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchAcquireError {
+    Duplicate,
+    Busy,
+    Closed,
+}
 
 /// Shared search/publish concurrency state for a single [`super::DhtNode`].
 #[derive(Clone)]
@@ -49,38 +55,31 @@ impl SearchConcurrency {
         self.max_concurrent
     }
 
-    /// Acquire a permit for `target`.
+    /// Try to acquire a permit for `target`.
     ///
-    /// Returns `None` when a search for the same target is already in flight
-    /// (oracle `AlreadySearchingFor`): the duplicate is coalesced/dropped. When
-    /// the target is new this waits for a free concurrency slot and returns an
-    /// RAII [`SearchPermit`]; dropping it frees the slot and the target.
-    pub(crate) async fn acquire(&self, target: NodeId) -> Option<SearchPermit> {
-        // Reserve the target first so a duplicate is rejected without consuming
-        // a semaphore slot. If insertion fails the target is already in flight.
+    /// The oracle does not build an unbounded async wait queue in front of
+    /// `m_mapSearches`; if the cap is full, callers retry on their own cadence.
+    /// This also keeps cancellation safe: no target is reserved before a
+    /// semaphore slot is available.
+    pub(crate) fn try_acquire(&self, target: NodeId) -> Result<SearchPermit, SearchAcquireError> {
+        let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => return Err(SearchAcquireError::Busy),
+            Err(TryAcquireError::Closed) => return Err(SearchAcquireError::Closed),
+        };
+
         {
             let mut in_flight = self.in_flight.lock().expect("in-flight set poisoned");
             if !in_flight.insert(target) {
-                return None;
+                return Err(SearchAcquireError::Duplicate);
             }
         }
 
-        // `acquire_owned` only errors if the semaphore is closed, which we never
-        // do; on the (impossible) error path release the target we just claimed.
-        match Arc::clone(&self.semaphore).acquire_owned().await {
-            Ok(permit) => Some(SearchPermit {
-                _permit: permit,
-                target,
-                in_flight: Arc::clone(&self.in_flight),
-            }),
-            Err(_) => {
-                self.in_flight
-                    .lock()
-                    .expect("in-flight set poisoned")
-                    .remove(&target);
-                None
-            }
-        }
+        Ok(SearchPermit {
+            _permit: permit,
+            target,
+            in_flight: Arc::clone(&self.in_flight),
+        })
     }
 }
 
@@ -113,37 +112,36 @@ mod tests {
     #[tokio::test]
     async fn duplicate_same_target_is_dropped() {
         let guard = SearchConcurrency::new(5);
-        let first = guard.acquire(target(1)).await;
-        assert!(first.is_some(), "first search acquires");
-        let dup = guard.acquire(target(1)).await;
-        assert!(dup.is_none(), "duplicate same-target search is dropped");
+        let first = guard.try_acquire(target(1));
+        assert!(first.is_ok(), "first search acquires");
+        let dup = guard.try_acquire(target(1));
+        assert_eq!(
+            dup.err(),
+            Some(SearchAcquireError::Duplicate),
+            "duplicate same-target search is dropped"
+        );
 
         // A different target is still allowed concurrently.
-        let other = guard.acquire(target(2)).await;
-        assert!(other.is_some(), "different target acquires");
+        let other = guard.try_acquire(target(2));
+        assert!(other.is_ok(), "different target acquires");
     }
 
     #[tokio::test]
     async fn permit_drop_releases_target_and_slot() {
         let guard = SearchConcurrency::new(1);
         {
-            let permit = guard.acquire(target(1)).await;
-            assert!(permit.is_some());
-            // Slot is taken; a different target cannot acquire (cap is 1) without
-            // blocking. Use try via timeout to avoid hanging the test.
-            let blocked = tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                guard.acquire(target(2)),
-            )
-            .await;
-            assert!(
-                blocked.is_err(),
-                "second target blocks while the only slot is held"
+            let permit = guard.try_acquire(target(1));
+            assert!(permit.is_ok());
+            let busy = guard.try_acquire(target(2));
+            assert_eq!(
+                busy.err(),
+                Some(SearchAcquireError::Busy),
+                "second target is rejected while the only slot is held"
             );
         }
         // After drop, the same target can be searched again and the slot frees.
-        let again = guard.acquire(target(1)).await;
-        assert!(again.is_some(), "target released after permit drop");
+        let again = guard.try_acquire(target(1));
+        assert!(again.is_ok(), "target released after permit drop");
     }
 
     #[tokio::test]
@@ -153,13 +151,13 @@ mod tests {
         let guard = SearchConcurrency::new(1);
         let guard_clone = guard.clone();
         let handle = tokio::spawn(async move {
-            let _permit = guard_clone.acquire(target(7)).await.expect("acquire");
+            let _permit = guard_clone.try_acquire(target(7)).expect("acquire");
             panic!("worker panic with permit held");
         });
         assert!(handle.await.is_err(), "worker panicked");
 
         // The target and slot must be free again.
-        let after = guard.acquire(target(7)).await;
-        assert!(after.is_some(), "permit released on unwind");
+        let after = guard.try_acquire(target(7));
+        assert!(after.is_ok(), "permit released on unwind");
     }
 }

@@ -25,7 +25,7 @@ impl DhtNode {
         // Oracle CSearchManager: drop a duplicate same-target lookup and cap the
         // number of concurrent traversals. The permit is held until the lookup
         // returns (or unwinds), releasing the slot + target on drop.
-        let Some(_permit) = self.acquire_search_permit(*target).await else {
+        let Ok(_permit) = self.try_acquire_search_permit(*target) else {
             return Ok(Vec::new());
         };
         let initial = {
