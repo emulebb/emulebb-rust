@@ -69,6 +69,15 @@ fn transfer_manifest_roundtrips_sql_tables() {
         }]
     );
     assert_eq!(
+        store.share_in_place_reload_entries().unwrap(),
+        vec![MetadataShareInPlaceReloadEntry {
+            file_hash: manifest.file_hash.clone(),
+            file_size: manifest.file_size,
+            source_path: manifest.source_path.clone().unwrap(),
+            source_mtime_ms: manifest.source_mtime_ms,
+        }]
+    );
+    assert_eq!(
         store.transfer_counts().unwrap(),
         MetadataTransferCounts {
             active: 0,

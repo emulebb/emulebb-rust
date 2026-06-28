@@ -4,9 +4,9 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     transfer_model::{
-        MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
-        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-        MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataShareInPlaceReloadEntry, MetadataTransferCatalogEntry, MetadataTransferCounts,
+        MetadataTransferManifest, MetadataTransferPiece, MetadataTransferPublishEntry,
+        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -354,6 +354,31 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn share_in_place_reload_entries(&self) -> Result<Vec<MetadataShareInPlaceReloadEntry>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
+                   transfers.source_path, transfers.source_mtime_ms
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND transfers.source_path IS NOT NULL
+              AND transfers.removed_at_ms IS NULL
+            ORDER BY transfers.source_path
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataShareInPlaceReloadEntry {
+                file_hash: row.get(0)?,
+                file_size: row.get::<_, i64>(1)? as u64,
+                source_path: row.get(2)?,
+                source_mtime_ms: row.get(3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

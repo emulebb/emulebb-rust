@@ -12,7 +12,6 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::transfer_sql::manifest_from_metadata;
 use super::{Ed2kReloadIndexEntry, Ed2kTransferRuntime};
 
 impl Ed2kTransferRuntime {
@@ -31,22 +30,21 @@ impl Ed2kTransferRuntime {
     pub async fn share_in_place_reload_index(
         &self,
     ) -> Result<HashMap<String, Ed2kReloadIndexEntry>> {
-        let _guard = self.manifest_io.lock().await;
+        let metadata = self.metadata.clone();
+        let entries = tokio::task::spawn_blocking(move || metadata.share_in_place_reload_entries())
+            .await
+            .map_err(anyhow::Error::from)??;
         let mut index = HashMap::new();
-        for manifest in self.metadata.transfer_manifests()? {
-            let manifest = manifest_from_metadata(manifest)?;
-            let Some(source_path) = manifest.source_path.as_deref() else {
-                continue;
-            };
-            let key = crate::long_path::long_path(Path::new(source_path))
+        for entry in entries {
+            let key = crate::long_path::long_path(Path::new(&entry.source_path))
                 .display()
                 .to_string();
             index.insert(
                 key,
                 Ed2kReloadIndexEntry {
-                    file_hash: manifest.file_hash,
-                    file_size: manifest.file_size,
-                    source_mtime_ms: manifest.source_mtime_ms,
+                    file_hash: entry.file_hash,
+                    file_size: entry.file_size,
+                    source_mtime_ms: entry.source_mtime_ms,
                 },
             );
         }

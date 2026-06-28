@@ -77,6 +77,14 @@ pub struct MetadataTransferShareEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataShareInPlaceReloadEntry {
+    pub file_hash: String,
+    pub file_size: u64,
+    pub source_path: String,
+    pub source_mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,
