@@ -464,17 +464,32 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         )?
         .with_incoming_dir(incoming_dir),
     );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Keep an owned handle for the post-serve teardown; the router gets a clone.
+    let app = router_with_shutdown(
+        Arc::clone(&core),
+        RestConfig {
+            api_key: config.rest.api_key.clone(),
+        },
+        Some(shutdown_tx.clone()),
+    );
+    let rest_bind_addr = config.rest_bind_addr()?;
+    let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
+    info!("emulebb-rust REST listening on {}", rest_bind_addr);
+
     // Deliver any completed-but-undelivered transfers from a previous run in
     // the background. A persisted sharing profile can carry tens of thousands
-    // of manifests, so this sweep must not block REST/network readiness.
+    // of manifests, so this sweep starts only after REST is bound.
     let delivery_core = Arc::clone(&core);
     tokio::spawn(async move {
         delivery_core.deliver_pending_completed_transfers().await;
     });
-    let startup_preferences = core.preferences().await;
-    if ed2k_network_configured && startup_preferences.auto_connect {
+    if ed2k_network_configured {
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
+            if !connect_core.preferences().await.auto_connect {
+                return;
+            }
             match connect_core.connect_ed2k().await {
                 Ok(status) => info!(
                     connected = status.connected,
@@ -492,9 +507,10 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     // start the live auto-pickup monitor (eMule directory auto-monitor parity).
     // Both startup tasks are detached so REST readiness is never blocked on
     // scanning, watch registration, or hashing the shared library (a large
-    // library hashes far longer than any client timeout). The reload worker
-    // updates `hashingCount`; shares are seeded in place, not copied. The
-    // monitor is torn down by the graceful teardown's disconnect_ed2k.
+    // library hashes far longer than any client timeout). They are started
+    // after REST is bound; the reload worker updates `hashingCount`; shares are
+    // seeded in place, not copied. The monitor is torn down by the graceful
+    // teardown's disconnect_ed2k.
     let reload_core = Arc::clone(&core);
     tokio::spawn(async move {
         if let Err(error) = reload_core.reload_shared_directories_detached().await {
@@ -505,7 +521,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     tokio::spawn(async move {
         monitor_core.start_shared_directory_monitor().await;
     });
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     if let Some(monitor) = vpn_guard_monitor {
         tokio::spawn(vpn_guard_monitor::run(
             Arc::clone(&core),
@@ -513,17 +528,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             monitor,
         ));
     }
-    // Keep an owned handle for the post-serve teardown; the router gets a clone.
-    let app = router_with_shutdown(
-        Arc::clone(&core),
-        RestConfig {
-            api_key: config.rest.api_key.clone(),
-        },
-        Some(shutdown_tx),
-    );
-    let rest_bind_addr = config.rest_bind_addr()?;
-    let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
-    info!("emulebb-rust REST listening on {}", rest_bind_addr);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown_signal(shutdown_rx))
         .await;
