@@ -464,10 +464,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         )?
         .with_incoming_dir(incoming_dir),
     );
-    // Deliver any completed-but-undelivered transfers from a previous run (files
-    // that finished before this build, or a crash between completion and
-    // delivery) so a restart never leaves a finished file undelivered.
-    core.deliver_pending_completed_transfers().await;
+    // Deliver any completed-but-undelivered transfers from a previous run in
+    // the background. A persisted sharing profile can carry tens of thousands
+    // of manifests, so this sweep must not block REST/network readiness.
+    let delivery_core = Arc::clone(&core);
+    tokio::spawn(async move {
+        delivery_core.deliver_pending_completed_transfers().await;
+    });
     let startup_preferences = core.preferences().await;
     if ed2k_network_configured && startup_preferences.auto_connect {
         let connect_core = Arc::clone(&core);
@@ -486,16 +489,22 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         });
     }
     // Initial scan-on-demand pickup of the already-present shared files, then
-    // start the live auto-pickup monitor (eMule directory auto-monitor parity);
-    // the monitor is torn down by the graceful teardown's disconnect_ed2k. Use
-    // the DETACHED variant so REST readiness is never blocked on hashing the
-    // shared library (a large library hashes far longer than any client timeout):
-    // the scan returns once files are enumerated and hashes in the background
-    // (`hashingCount` tracks progress); shares are seeded in place, not copied.
-    if let Err(error) = core.reload_shared_directories_detached().await {
-        tracing::warn!(%error, "initial shared-directory scan failed; continuing");
-    }
-    core.start_shared_directory_monitor().await;
+    // start the live auto-pickup monitor (eMule directory auto-monitor parity).
+    // Both startup tasks are detached so REST readiness is never blocked on
+    // scanning, watch registration, or hashing the shared library (a large
+    // library hashes far longer than any client timeout). The reload worker
+    // updates `hashingCount`; shares are seeded in place, not copied. The
+    // monitor is torn down by the graceful teardown's disconnect_ed2k.
+    let reload_core = Arc::clone(&core);
+    tokio::spawn(async move {
+        if let Err(error) = reload_core.reload_shared_directories_detached().await {
+            tracing::warn!(%error, "initial shared-directory scan failed; continuing");
+        }
+    });
+    let monitor_core = Arc::clone(&core);
+    tokio::spawn(async move {
+        monitor_core.start_shared_directory_monitor().await;
+    });
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     if let Some(monitor) = vpn_guard_monitor {
         tokio::spawn(vpn_guard_monitor::run(
