@@ -4175,6 +4175,11 @@ struct KadPublishLoopRuntime {
 /// (re)publish rate is bounded per-file by the 24h keyword / 5h source intervals,
 /// so this only controls how often we re-evaluate which files are due.
 const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 60;
+/// Upper bound on files attempted in one shared-file publish cycle. A persisted
+/// library can contain tens of thousands of files; even when every file is due
+/// after startup, we must drain progressively instead of issuing a live-network
+/// publish burst in one loop.
+const KAD_SHARED_FILE_PUBLISH_FILE_BUDGET: usize = 50;
 
 async fn run_kad_shared_file_publish_loop(
     runtime: KadPublishLoopRuntime,
@@ -4270,12 +4275,40 @@ async fn publish_kad_due_shared_files(
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
     let item_count = shared_files.len();
+    let start = schedule.cursor(item_count);
+    let mut inspected = 0usize;
+    let mut attempted_files = 0usize;
 
-    for entry in shared_files {
+    for offset in 0..item_count {
+        let entry = &shared_files[(start + offset) % item_count];
         let now = Instant::now();
-        let file_hash: Ed2kHash = entry.file_hash.parse()?;
+        let keyword_due = schedule.keyword_due(&entry.file_hash, now);
+        let source_due = schedule.source_due(&entry.file_hash, now);
+        let notes_due =
+            kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
+                && schedule.notes_due(&entry.file_hash, now);
+        inspected = offset + 1;
+        if !keyword_due && !source_due && !notes_due {
+            continue;
+        }
+        if attempted_files >= KAD_SHARED_FILE_PUBLISH_FILE_BUDGET {
+            inspected = offset;
+            break;
+        }
+        attempted_files += 1;
+        let file_hash: Ed2kHash = match entry.file_hash.parse() {
+            Ok(hash) => hash,
+            Err(error) => {
+                tracing::warn!(
+                    file_hash = %entry.file_hash,
+                    error = %error,
+                    "skipping invalid shared-file hash during Kad publish cycle"
+                );
+                continue;
+            }
+        };
 
-        if schedule.keyword_due(&entry.file_hash, now) {
+        if keyword_due {
             let keyword_hash = keyword_target(&entry.canonical_name);
             let mut keyword_tags = vec![
                 Tag::filename(entry.canonical_name.clone()),
@@ -4327,7 +4360,7 @@ async fn publish_kad_due_shared_files(
             }
         }
 
-        if schedule.source_due(&entry.file_hash, now) {
+        if source_due {
             let source_tags =
                 build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
             match runtime
@@ -4365,9 +4398,7 @@ async fn publish_kad_due_shared_files(
         // user-set comment/rating, on the 24h notes interval (master
         // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
         // and source so an un-annotated file never emits a notes publish.
-        if kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
-            && schedule.notes_due(&entry.file_hash, now)
-        {
+        if notes_due {
             // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
             // DESCRIPTION (non-empty only), FILESIZE.
             let mut notes_tags = vec![Tag::filename(entry.canonical_name.clone())];
@@ -4415,11 +4446,14 @@ async fn publish_kad_due_shared_files(
             }
         }
     }
+    schedule.advance_cursor(start, inspected, item_count);
 
     if keyword_published > 0 || source_published > 0 || notes_published > 0 {
         tracing::info!(
-            "Kad shared-file publish cycle items={} keyword_published={} keyword_acked={} source_published={} source_acked={} notes_published={} notes_acked={}",
+            "Kad shared-file publish cycle items={} inspected={} attempted_files={} keyword_published={} keyword_acked={} source_published={} source_acked={} notes_published={} notes_acked={}",
             item_count,
+            inspected,
+            attempted_files,
             keyword_published,
             keyword_totals.acked_contacts,
             source_published,

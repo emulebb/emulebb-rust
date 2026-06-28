@@ -89,6 +89,7 @@ struct FilePublishState {
 #[derive(Debug, Default)]
 pub(crate) struct KadPublishSchedule {
     files: HashMap<String, FilePublishState>,
+    next_cursor: usize,
 }
 
 impl KadPublishSchedule {
@@ -155,6 +156,28 @@ impl KadPublishSchedule {
     pub(crate) fn retain_only<'a>(&mut self, keep: impl IntoIterator<Item = &'a str>) {
         let keep: std::collections::HashSet<&str> = keep.into_iter().collect();
         self.files.retain(|hash, _| keep.contains(hash.as_str()));
+    }
+
+    /// Rotating scan cursor for budgeted publish rounds. The publish loop uses
+    /// this to avoid revisiting the first files forever when a large shared
+    /// library needs several cycles to drain.
+    pub(crate) fn cursor(&self, item_count: usize) -> usize {
+        if item_count == 0 {
+            0
+        } else {
+            self.next_cursor % item_count
+        }
+    }
+
+    /// Advance the rotating scan cursor by the number of entries inspected this
+    /// round. `start` is passed back in so callers can use a local modulo view
+    /// without exposing the stored cursor.
+    pub(crate) fn advance_cursor(&mut self, start: usize, inspected: usize, item_count: usize) {
+        if item_count == 0 {
+            self.next_cursor = 0;
+        } else {
+            self.next_cursor = (start + inspected) % item_count;
+        }
     }
 }
 
@@ -304,5 +327,20 @@ mod tests {
         assert!(!sched.keyword_due("keep", now));
         // "drop" was forgotten, so it reads as due (never published).
         assert!(sched.keyword_due("drop", now));
+    }
+
+    #[test]
+    fn cursor_rotates_through_budgeted_rounds() {
+        let mut sched = KadPublishSchedule::new();
+        assert_eq!(sched.cursor(10), 0);
+
+        sched.advance_cursor(0, 3, 10);
+        assert_eq!(sched.cursor(10), 3);
+
+        sched.advance_cursor(8, 5, 10);
+        assert_eq!(sched.cursor(10), 3);
+
+        sched.advance_cursor(3, 0, 0);
+        assert_eq!(sched.cursor(10), 0);
     }
 }
