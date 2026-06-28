@@ -37,6 +37,7 @@ use super::{
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
 const MAX_UDP_SOURCE_REQUESTS_PER_SERVER: usize = 35;
+const MAX_OFFER_FILES_PER_ADVERTISEMENT: usize = 200;
 const UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE: usize = 16;
 const UDP_SOURCE_REQUEST_G2_BYTES_PER_FILE: usize = 20;
 const UDP_SOURCE_REQUEST_G2_LARGE_FILE_EXTRA_BYTES: usize = 8;
@@ -92,31 +93,55 @@ pub(super) fn encode_offer_files_payload(
     tcp_port: u16,
     server_flags: Option<u32>,
 ) -> Vec<u8> {
+    encode_offer_files_payload_at_cursor(
+        shared_catalog,
+        0,
+        client_id,
+        bind_ip,
+        tcp_port,
+        server_flags,
+    )
+    .payload
+}
+
+fn encode_offer_files_payload_at_cursor(
+    shared_catalog: &[Ed2kSharedEntry],
+    cursor: usize,
+    client_id: Option<u32>,
+    bind_ip: Ipv4Addr,
+    tcp_port: u16,
+    server_flags: Option<u32>,
+) -> EncodedOfferFilesPayload {
     let (advertised_client_id, advertised_client_port) =
         advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
-    let offered_files = offered_files_catalog(shared_catalog);
-    let mut payload = Vec::with_capacity(80 * offered_files.len());
+    let offered_files = offered_files_catalog_at_cursor(shared_catalog, cursor);
+    let mut payload = Vec::with_capacity(80 * offered_files.entries.len());
     payload.extend_from_slice(
-        &u32::try_from(offered_files.len())
+        &u32::try_from(offered_files.entries.len())
             .expect("offered file count fits in u32")
             .to_le_bytes(),
     );
-    for (file_hash, file_name, file_size, file_type) in offered_files {
-        let lower_file_size = file_size as u32;
+    for (file_hash, file_name, file_size, file_type) in &offered_files.entries {
+        let lower_file_size = *file_size as u32;
         let upper_file_size = u32::try_from(file_size >> 32).unwrap_or(u32::MAX);
         let tag_count = if upper_file_size == 0 { 3u32 } else { 4u32 };
-        payload.extend_from_slice(&file_hash);
+        payload.extend_from_slice(file_hash);
         payload.extend_from_slice(&advertised_client_id.to_le_bytes());
         payload.extend_from_slice(&advertised_client_port.to_le_bytes());
         payload.extend_from_slice(&tag_count.to_le_bytes());
-        push_short_string_tag(&mut payload, FT_FILENAME, &file_name);
+        push_short_string_tag(&mut payload, FT_FILENAME, file_name);
         push_short_u32_tag(&mut payload, FT_FILESIZE, lower_file_size);
         if upper_file_size != 0 {
             push_short_u32_tag(&mut payload, FT_FILESIZE_HI, upper_file_size);
         }
-        push_short_u8_tag(&mut payload, FT_FILETYPE, file_type);
+        push_short_u8_tag(&mut payload, FT_FILETYPE, *file_type);
     }
-    payload
+    EncodedOfferFilesPayload {
+        payload,
+        entries: offered_files.entries,
+        next_cursor: offered_files.next_cursor,
+        total_entries: offered_files.total_entries,
+    }
 }
 
 fn advertised_client_endpoint_for_offer_file(
@@ -258,26 +283,69 @@ pub(super) fn source_request_opcode(connect_options: u8, server_flags: Option<u3
     }
 }
 
-fn offered_files_catalog(shared_catalog: &[Ed2kSharedEntry]) -> Vec<([u8; 16], String, u64, u8)> {
-    let mut offered_files = shared_catalog
+#[derive(Debug)]
+struct OfferedFilesCatalog {
+    entries: Vec<([u8; 16], String, u64, u8)>,
+    next_cursor: usize,
+    total_entries: usize,
+}
+
+#[derive(Debug)]
+struct EncodedOfferFilesPayload {
+    payload: Vec<u8>,
+    entries: Vec<([u8; 16], String, u64, u8)>,
+    next_cursor: usize,
+    total_entries: usize,
+}
+
+fn offered_files_catalog_at_cursor(
+    shared_catalog: &[Ed2kSharedEntry],
+    cursor: usize,
+) -> OfferedFilesCatalog {
+    let mut all_offered_files = shared_catalog
         .iter()
         .filter_map(popular_hash_offer_file)
-        .take(200)
         .collect::<Vec<_>>();
-    if offered_files.is_empty() {
-        offered_files.push((
+    if all_offered_files.is_empty() {
+        all_offered_files.push((
             OFFER_FILE_SAMPLE_HASH,
             OFFER_FILE_SAMPLE_NAME.to_string(),
             u64::from(OFFER_FILE_SAMPLE_SIZE),
             ED2K_FILETYPE_PROGRAM,
         ));
     }
-    offered_files
+    let total_entries = all_offered_files.len();
+    if total_entries <= MAX_OFFER_FILES_PER_ADVERTISEMENT {
+        return OfferedFilesCatalog {
+            entries: all_offered_files,
+            next_cursor: 0,
+            total_entries,
+        };
+    }
+
+    let start = cursor % total_entries;
+    let mut entries = Vec::with_capacity(MAX_OFFER_FILES_PER_ADVERTISEMENT);
+    for offset in 0..MAX_OFFER_FILES_PER_ADVERTISEMENT {
+        entries.push(all_offered_files[(start + offset) % total_entries].clone());
+    }
+    OfferedFilesCatalog {
+        entries,
+        next_cursor: (start + MAX_OFFER_FILES_PER_ADVERTISEMENT) % total_entries,
+        total_entries,
+    }
 }
 
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    offered_files_catalog(shared_catalog).hash(&mut hasher);
+    offered_files_catalog_at_cursor(shared_catalog, 0)
+        .entries
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    entries.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -331,30 +399,33 @@ pub(super) async fn send_offer_files_advertisement(
     tcp_port: u16,
 ) -> Result<()> {
     let shared_catalog = shared_catalog.read().await.clone();
-    let catalog_fingerprint = offer_files_catalog_fingerprint(&shared_catalog);
-    if session.offer_files_sent
-        && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
-    {
-        return Ok(());
-    }
-    let payload = encode_offer_files_payload(
+    let encoded = encode_offer_files_payload_at_cursor(
         &shared_catalog,
+        session.offer_files_catalog_cursor,
         session.assigned_client_id,
         bind_ip,
         tcp_port,
         session.server_flags,
     );
+    let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
+    if session.offer_files_sent
+        && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
+    {
+        return Ok(());
+    }
     let was_sent = session.offer_files_sent;
-    session.send_packet(OP_OFFERFILES, &payload).await?;
+    session.send_packet(OP_OFFERFILES, &encoded.payload).await?;
     session.offer_files_sent = true;
     session.offer_files_sent_at = Some(Instant::now());
     session.offer_files_catalog_fingerprint = Some(catalog_fingerprint);
+    session.offer_files_catalog_cursor = encoded.next_cursor;
     session.set_phase(
         ServerSessionPhase::OfferFilesSent,
         format!(
-            "{} offer-files advertisement entries={}",
+            "{} offer-files advertisement entries={} catalog={}",
             if was_sent { "refreshed" } else { "sent" },
-            offered_files_catalog(&shared_catalog).len()
+            encoded.entries.len(),
+            encoded.total_entries
         ),
     );
     debug!(
@@ -414,6 +485,23 @@ mod tests {
             file_hash: "00112233445566778899aabbccddeeff".to_string(),
             canonical_name: "lan-bind-source.bin".to_string(),
             file_size: 1234,
+            verified_complete: true,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            complete_parts: Vec::new(),
+        }
+    }
+
+    fn shared_entry(index: usize) -> Ed2kSharedEntry {
+        let mut hash = [0u8; 16];
+        hash[0..8].copy_from_slice(&(index as u64).to_le_bytes());
+        hash[8..16].copy_from_slice(&(!(index as u64)).to_le_bytes());
+        Ed2kSharedEntry {
+            file_hash: hex::encode(hash),
+            canonical_name: format!("sample-file-{index:03}.bin"),
+            file_size: 1_000 + index as u64,
             verified_complete: true,
             verified_ranges: Vec::new(),
             compatibility_hint: false,
@@ -498,5 +586,41 @@ mod tests {
                 "unicode-\u{00e9}-\u{6f22}.bin".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn offered_files_catalog_rotates_large_libraries() {
+        let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+
+        let first = offered_files_catalog_at_cursor(&shared_catalog, 0);
+        let second = offered_files_catalog_at_cursor(&shared_catalog, first.next_cursor);
+        let third = offered_files_catalog_at_cursor(&shared_catalog, second.next_cursor);
+
+        assert_eq!(first.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        assert_eq!(first.total_entries, 450);
+        assert_eq!(first.next_cursor, 200);
+        assert_eq!(second.next_cursor, 400);
+        assert_eq!(third.next_cursor, 150);
+        assert_ne!(first.entries[0].0, second.entries[0].0);
+        assert_ne!(second.entries[0].0, third.entries[0].0);
+        assert_eq!(
+            third.entries[0].0,
+            popular_hash_offer_file(&shared_catalog[400]).unwrap().0
+        );
+        assert_eq!(
+            third.entries[50].0,
+            popular_hash_offer_file(&shared_catalog[0]).unwrap().0
+        );
+    }
+
+    #[test]
+    fn offered_files_catalog_small_libraries_do_not_rotate() {
+        let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
+
+        let offered = offered_files_catalog_at_cursor(&shared_catalog, 2);
+
+        assert_eq!(offered.entries.len(), 3);
+        assert_eq!(offered.next_cursor, 0);
+        assert_eq!(offered.total_entries, 3);
     }
 }
