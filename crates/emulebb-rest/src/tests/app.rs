@@ -193,6 +193,14 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
     assert_eq!(value["data"]["runtimeDiagnostics"]["downloadFileCount"], 2);
     assert_eq!(value["data"]["sharedStartupCache"]["hashingCount"], 0);
     assert_eq!(
+        value["data"]["sharedStartupCache"]["reload"]["phase"],
+        "idle"
+    );
+    assert_eq!(
+        value["data"]["runtimeDiagnostics"]["sharedReload"]["plannedHashCount"],
+        0
+    );
+    assert_eq!(
         value["data"]["sharedStartupCache"]["deferredHashingActive"],
         false
     );

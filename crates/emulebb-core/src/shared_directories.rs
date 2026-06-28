@@ -25,6 +25,44 @@ pub struct SharedDirectories {
     pub items: Vec<SharedDirectoryRoot>,
     pub monitor_owned: Vec<String>,
     pub hashing_count: i64,
+    pub reload: SharedReloadDiagnostics,
+}
+
+/// Path-free counters for the latest shared-directory reload decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedReloadDiagnostics {
+    pub phase: String,
+    pub running: bool,
+    pub pending: bool,
+    pub scanned_count: usize,
+    pub planned_hash_count: usize,
+    pub reused_count: usize,
+    pub new_count: usize,
+    pub changed_count: usize,
+    pub missing_mtime_count: usize,
+    pub stat_failed_count: usize,
+    pub stale_hash_count: usize,
+    pub disk_count: usize,
+}
+
+impl Default for SharedReloadDiagnostics {
+    fn default() -> Self {
+        Self {
+            phase: "idle".to_string(),
+            running: false,
+            pending: false,
+            scanned_count: 0,
+            planned_hash_count: 0,
+            reused_count: 0,
+            new_count: 0,
+            changed_count: 0,
+            missing_mtime_count: 0,
+            stat_failed_count: 0,
+            stale_hash_count: 0,
+            disk_count: 0,
+        }
+    }
 }
 
 /// Replacement request for the configured shared-directory roots.
@@ -230,6 +268,67 @@ struct ReloadPlan {
     /// resolve their `Localshare`s for the reload result so an unchanged file
     /// still appears in the returned set.
     reused_shares: Vec<ReusedReloadShare>,
+    /// Path-free reload counters for REST diagnostics and live-parity evidence.
+    stats: ReloadPlanStats,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReloadPlanStats {
+    scanned_count: usize,
+    planned_hash_count: usize,
+    reused_count: usize,
+    new_count: usize,
+    changed_count: usize,
+    missing_mtime_count: usize,
+    stat_failed_count: usize,
+    stale_hash_count: usize,
+}
+
+impl ReloadPlanStats {
+    fn into_diagnostics(
+        self,
+        phase: &str,
+        running: bool,
+        pending: bool,
+    ) -> SharedReloadDiagnostics {
+        SharedReloadDiagnostics {
+            phase: phase.to_string(),
+            running,
+            pending,
+            scanned_count: self.scanned_count,
+            planned_hash_count: self.planned_hash_count,
+            reused_count: self.reused_count,
+            new_count: self.new_count,
+            changed_count: self.changed_count,
+            missing_mtime_count: self.missing_mtime_count,
+            stat_failed_count: self.stat_failed_count,
+            stale_hash_count: self.stale_hash_count,
+            disk_count: 0,
+        }
+    }
+}
+
+pub(crate) fn reload_diagnostics_snapshot(core: &EmulebbCore) -> SharedReloadDiagnostics {
+    let mut snapshot = match core.shared_reload_diagnostics.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    snapshot.running = core.shared_reload_running.load(Ordering::Acquire);
+    snapshot.pending = core.shared_reload_pending.load(Ordering::Acquire);
+    snapshot
+}
+
+fn record_reload_diagnostics(
+    core: &EmulebbCore,
+    update: impl FnOnce(&mut SharedReloadDiagnostics),
+) {
+    let mut diagnostics = match core.shared_reload_diagnostics.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    update(&mut diagnostics);
+    diagnostics.running = core.shared_reload_running.load(Ordering::Acquire);
+    diagnostics.pending = core.shared_reload_pending.load(Ordering::Acquire);
 }
 
 /// Decide which scanned files actually need (re)hashing on this reload.
@@ -251,6 +350,10 @@ async fn plan_incremental_reload(
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     tokio::task::spawn_blocking(move || {
+        let mut stats = ReloadPlanStats {
+            scanned_count: file_paths.len(),
+            ..ReloadPlanStats::default()
+        };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
         for path in file_paths {
@@ -268,6 +371,8 @@ async fn plan_incremental_reload(
                                 && entry.source_mtime_ms.is_some()
                                 && entry.source_mtime_ms == mtime_ms
                         }) {
+                            stats.reused_count += 1;
+                            stats.stale_hash_count += entries.len().saturating_sub(1);
                             reused_shares.push(ReusedReloadShare {
                                 file_hash: entry.file_hash.clone(),
                                 stale_hashes: entries
@@ -277,6 +382,13 @@ async fn plan_incremental_reload(
                                     .collect(),
                             });
                         } else {
+                            stats.planned_hash_count += 1;
+                            stats.stale_hash_count += entries.len();
+                            if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
+                                stats.missing_mtime_count += 1;
+                            } else {
+                                stats.changed_count += 1;
+                            }
                             to_hash.push(ReloadHashTarget {
                                 path,
                                 stale_hashes: entries
@@ -287,20 +399,29 @@ async fn plan_incremental_reload(
                         }
                     }
                     // Brand-new path: hash it, nothing stale to clean up.
-                    None => to_hash.push(ReloadHashTarget {
+                    None => {
+                        stats.planned_hash_count += 1;
+                        stats.new_count += 1;
+                        to_hash.push(ReloadHashTarget {
+                            path,
+                            stale_hashes: Vec::new(),
+                        });
+                    }
+                },
+                None => {
+                    stats.planned_hash_count += 1;
+                    stats.stat_failed_count += 1;
+                    to_hash.push(ReloadHashTarget {
                         path,
                         stale_hashes: Vec::new(),
-                    }),
-                },
-                None => to_hash.push(ReloadHashTarget {
-                    path,
-                    stale_hashes: Vec::new(),
-                }),
+                    });
+                }
             }
         }
         ReloadPlan {
             to_hash,
             reused_shares,
+            stats,
         }
     })
     .await
@@ -320,10 +441,20 @@ async fn plan_incremental_reload(
 /// set to the file count up front and decremented per file as the hash completes,
 /// reaching 0 when the library is fully indexed.
 pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<LocalShare>> {
+    record_reload_diagnostics(core, |diagnostics| {
+        diagnostics.phase = "scanning".to_string();
+    });
     let file_paths = scan_shared_files(core).await?;
+    record_reload_diagnostics(core, |diagnostics| {
+        diagnostics.phase = "planning".to_string();
+        diagnostics.scanned_count = file_paths.len();
+    });
     // Incremental skip: only (re)hash files that are new or whose size/mtime
     // changed since the last index; unchanged files keep their persisted shares.
     let plan = plan_incremental_reload(core, file_paths).await?;
+    record_reload_diagnostics(core, |diagnostics| {
+        *diagnostics = plan.stats.clone().into_diagnostics("hashing", true, false);
+    });
     // `hashingCount` reflects only the files actually being hashed, so an
     // unchanged library reports ~0 and REST stays responsive.
     core.shared_hashing_count
@@ -350,6 +481,10 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
     }
+    record_reload_diagnostics(core, |diagnostics| {
+        diagnostics.phase = "idle".to_string();
+        diagnostics.disk_count = 0;
+    });
     Ok(shares)
 }
 
@@ -396,6 +531,9 @@ async fn forget_stale_shares(core: &EmulebbCore, stale_hashes: &[String], new_ha
 /// the library.
 pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
     core.shared_reload_pending.store(true, Ordering::Release);
+    record_reload_diagnostics(core, |diagnostics| {
+        diagnostics.phase = "queued".to_string();
+    });
     if core.shared_reload_running.swap(true, Ordering::AcqRel) {
         return Ok(0);
     }
@@ -421,12 +559,26 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
 }
 
 async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
+    record_reload_diagnostics(&core, |diagnostics| {
+        diagnostics.phase = "scanning".to_string();
+    });
     let file_paths = scan_shared_files(&core).await?;
     let scanned = file_paths.len();
+    record_reload_diagnostics(&core, |diagnostics| {
+        diagnostics.phase = "planning".to_string();
+        diagnostics.scanned_count = scanned;
+    });
     // Incremental skip: an unchanged file (same path + size + mtime as its
     // persisted manifest) is NOT re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
     let plan = plan_incremental_reload(&core, file_paths).await?;
+    record_reload_diagnostics(&core, |diagnostics| {
+        *diagnostics = plan.stats.clone().into_diagnostics(
+            "hashing",
+            true,
+            core.shared_reload_pending.load(Ordering::Acquire),
+        );
+    });
     let queued = plan.to_hash.len();
     let reused = plan.reused_shares.len();
     // Publish the pending count after scan/planning. It counts only the files
@@ -461,6 +613,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             .push(target);
     }
     let disk_count = by_disk.len();
+    record_reload_diagnostics(&core, |diagnostics| {
+        diagnostics.disk_count = disk_count;
+    });
     tracing::info!(
         disks = disk_count,
         "background shared-directory reload hashing across physical disks"
@@ -482,6 +637,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
         });
     }
     while workers.join_next().await.is_some() {}
+    record_reload_diagnostics(&core, |diagnostics| {
+        diagnostics.phase = "idle".to_string();
+    });
     tracing::info!("background shared-directory reload finished hashing the library");
     Ok(())
 }

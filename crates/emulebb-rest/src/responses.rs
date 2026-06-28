@@ -92,7 +92,9 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let network = state.core.network_binding_status();
     let upload_policy = state.core.upload_policy_metrics().await;
     let throughput = state.core.transfer_throughput_stats();
-    let shared_hashing_count = state.core.shared_directories().await.hashing_count;
+    let shared_directories = state.core.shared_directories().await;
+    let shared_hashing_count = shared_directories.hashing_count;
+    let shared_reload = shared_directories.reload;
     let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = status.transfers.total;
@@ -114,13 +116,15 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "volumesLoaded": 0,
             "hashingCount": shared_hashing_count,
             "deferredHashingActive": shared_hashing_active,
-            "interruptedHashingInvalidatedCache": false
+            "interruptedHashingInvalidatedCache": false,
+            "reload": shared_reload.clone()
         },
         "runtimeDiagnostics": {
             "processId": std::process::id(),
             "knownFileCount": shared_file_count,
             "sharedFileCount": shared_file_count,
             "sharedHashingCount": shared_hashing_count,
+            "sharedReload": shared_reload,
             "downloadFileCount": download_file_count,
             "activeUploads": upload_policy.active_sessions,
             "waitingUploads": upload_policy.waiting_sessions,

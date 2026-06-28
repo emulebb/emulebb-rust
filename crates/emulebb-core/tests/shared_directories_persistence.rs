@@ -254,6 +254,11 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
         0,
         "hashingCount must stay 0 when nothing needs re-hashing",
     );
+    wait_for_reload_reuse_count(&core, FILE_COUNT).await;
+    let reload = core.shared_directories().await.reload;
+    assert_eq!(reload.scanned_count, FILE_COUNT);
+    assert_eq!(reload.planned_hash_count, 0);
+    assert_eq!(reload.reused_count, FILE_COUNT);
     assert_eq!(
         shared_file_names(core.shares().await),
         expected_names,
@@ -498,6 +503,17 @@ async fn wait_for_shared_file_names(core: &EmulebbCore, expected: Vec<String>) {
     panic!(
         "shared file names did not settle to expected set: expected {expected:?}, last seen {last_seen:?}"
     );
+}
+
+async fn wait_for_reload_reuse_count(core: &EmulebbCore, count: usize) {
+    for _ in 0..600 {
+        let reload = core.shared_directories().await.reload;
+        if reload.phase == "idle" && reload.reused_count >= count {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("shared-directory reload diagnostics did not report {count} reused files");
 }
 
 fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {

@@ -194,10 +194,11 @@ use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
 use shared_dir_monitor::SharedDirMonitor;
 pub use shared_directories::{
     SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
+    SharedReloadDiagnostics,
 };
 use shared_directories::{
-    refresh_shared_directory_row, shared_directory_from_index, shared_directory_to_index,
-    shared_directory_update_parts,
+    refresh_shared_directory_row, reload_diagnostics_snapshot, shared_directory_from_index,
+    shared_directory_to_index, shared_directory_update_parts,
 };
 
 mod rest_model;
@@ -351,6 +352,10 @@ pub struct EmulebbCore {
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
     shared_hashing_count: Arc<std::sync::atomic::AtomicI64>,
+    /// Path-free live counters for the latest shared-directory reload plan.
+    /// This is deliberately separate from tracing so REST can report why hashing
+    /// is active without exposing operator file paths or names.
+    shared_reload_diagnostics: Arc<std::sync::Mutex<SharedReloadDiagnostics>>,
     /// Serializes detached shared-directory reloads. A controller may request
     /// reload while a prior scan/hash job is still pruning stale shares; coalesce
     /// such requests and run one follow-up pass instead of overlapping jobs.
@@ -458,6 +463,9 @@ impl EmulebbCore {
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            shared_reload_diagnostics: Arc::new(std::sync::Mutex::new(
+                SharedReloadDiagnostics::default(),
+            )),
             shared_reload_running: Arc::new(AtomicBool::new(false)),
             shared_reload_pending: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
@@ -1809,6 +1817,7 @@ impl EmulebbCore {
             monitor_owned: Vec::new(),
             // Files still pending the initial hash in the background reload worker.
             hashing_count: shared_directories::hashing_count_snapshot(self),
+            reload: reload_diagnostics_snapshot(self),
         }
     }
 
