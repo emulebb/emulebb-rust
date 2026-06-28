@@ -95,6 +95,7 @@ mod ed2k_buddy_reask;
 mod ed2k_direct_download_types;
 mod ed2k_download_retry;
 mod ed2k_net_drivers;
+mod ed2k_publish_diagnostics;
 mod ed2k_source_batch;
 mod ed2k_sources;
 mod kad_buddy;
@@ -134,6 +135,7 @@ use ed2k_net_drivers::{
     ed2k_nat_mappings, fetch_url_bytes, run_advertised_ports_sync, run_ed2k_nat_type_probe,
     run_ed2k_public_ip_probe, run_ed2k_reask_reengage, run_ed2k_server_list_events,
 };
+pub use ed2k_publish_diagnostics::Ed2kPublishDiagnostics;
 use ed2k_source_batch::{
     claim_connected_server_source_refresh, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
 };
@@ -373,6 +375,7 @@ pub struct EmulebbCore {
     shared_catalog_publish_dirty: Arc<AtomicBool>,
     shared_catalog_publish_worker: Arc<AtomicBool>,
     shared_catalog_publish_last: Arc<Mutex<Option<Instant>>>,
+    ed2k_publish_diagnostics: ed2k_publish_diagnostics::SharedEd2kPublishDiagnostics,
     kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
     state: Arc<Mutex<CoreState>>,
 }
@@ -478,6 +481,7 @@ impl EmulebbCore {
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
+            ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             state: Arc::new(Mutex::new(core_state)),
         })
@@ -1749,6 +1753,10 @@ impl EmulebbCore {
 
     pub fn kad_publish_diagnostics(&self) -> KadPublishDiagnostics {
         kad_publish_diagnostics::snapshot(&self.kad_publish_diagnostics)
+    }
+
+    pub fn ed2k_publish_diagnostics(&self) -> Ed2kPublishDiagnostics {
+        ed2k_publish_diagnostics::snapshot(&self.ed2k_publish_diagnostics)
     }
 
     pub async fn share(&self, hash: &str) -> Option<LocalShare> {
@@ -3968,6 +3976,12 @@ impl EmulebbCore {
     fn queue_ed2k_shared_catalog_publish(&self) {
         self.shared_catalog_publish_dirty
             .store(true, Ordering::Release);
+        ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
+            diagnostics.phase = "queued".to_string();
+            diagnostics.running = true;
+            diagnostics.dirty = true;
+            diagnostics.queued_count = diagnostics.queued_count.saturating_add(1);
+        });
         if self
             .shared_catalog_publish_worker
             .swap(true, Ordering::AcqRel)
@@ -3986,6 +4000,11 @@ impl EmulebbCore {
         const ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY: Duration = Duration::from_secs(10);
 
         loop {
+            ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
+                diagnostics.phase = "debouncing".to_string();
+                diagnostics.running = true;
+                diagnostics.dirty = self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+            });
             tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
             let wait = {
                 let last = self.shared_catalog_publish_last.lock().await;
@@ -3994,6 +4013,11 @@ impl EmulebbCore {
                 })
             };
             if let Some(wait) = wait {
+                ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
+                    diagnostics.phase = "waitingInterval".to_string();
+                    diagnostics.running = true;
+                    diagnostics.dirty = self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+                });
                 tokio::time::sleep(wait).await;
             }
             // Clear before the network publish. If hashing completes another
@@ -4001,9 +4025,31 @@ impl EmulebbCore {
             // dirty again and this loop performs a follow-up publish.
             self.shared_catalog_publish_dirty
                 .store(false, Ordering::Release);
+            ed2k_publish_diagnostics::record(&self.ed2k_publish_diagnostics, |diagnostics| {
+                diagnostics.phase = "publishing".to_string();
+                diagnostics.running = true;
+                diagnostics.dirty = false;
+                diagnostics.last_attempt_at_ms = Utc::now().timestamp_millis();
+            });
             match self.publish_ed2k_shared_catalog().await {
                 Ok(Ed2kSharedCatalogPublishOutcome::Published(stats)) => {
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.phase = "published".to_string();
+                            diagnostics.running = true;
+                            diagnostics.dirty =
+                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+                            diagnostics.entries_sent = stats.entries_sent;
+                            diagnostics.total_entries = stats.total_entries;
+                            diagnostics.next_cursor = stats.next_cursor;
+                            diagnostics.wrapped = stats.wrapped;
+                            diagnostics.skipped_duplicate_batch = stats.skipped_duplicate_batch;
+                            diagnostics.last_error = None;
+                            diagnostics.last_success_at_ms = Utc::now().timestamp_millis();
+                        },
+                    );
                     tracing::debug!(
                         entries_sent = stats.entries_sent,
                         total_entries = stats.total_entries,
@@ -4015,17 +4061,56 @@ impl EmulebbCore {
                     if !stats.wrapped && !stats.skipped_duplicate_batch {
                         self.shared_catalog_publish_dirty
                             .store(true, Ordering::Release);
+                        ed2k_publish_diagnostics::record(
+                            &self.ed2k_publish_diagnostics,
+                            |diagnostics| {
+                                diagnostics.dirty = true;
+                            },
+                        );
                     }
                 }
-                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {}
+                Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.phase = "noNetwork".to_string();
+                            diagnostics.running = true;
+                            diagnostics.dirty =
+                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+                            diagnostics.no_network_count =
+                                diagnostics.no_network_count.saturating_add(1);
+                        },
+                    );
+                }
                 Ok(Ed2kSharedCatalogPublishOutcome::NotConnected) => {
                     self.shared_catalog_publish_dirty
                         .store(true, Ordering::Release);
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.phase = "notConnected".to_string();
+                            diagnostics.running = true;
+                            diagnostics.dirty = true;
+                            diagnostics.not_connected_count =
+                                diagnostics.not_connected_count.saturating_add(1);
+                        },
+                    );
                     tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_NOT_CONNECTED_RETRY).await;
                     continue;
                 }
                 Err(error) => {
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.phase = "failed".to_string();
+                            diagnostics.running = true;
+                            diagnostics.dirty =
+                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+                            diagnostics.failure_count = diagnostics.failure_count.saturating_add(1);
+                            diagnostics.last_error = Some(error.to_string());
+                        },
+                    );
                     tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
                 }
             }
@@ -4033,12 +4118,27 @@ impl EmulebbCore {
                 self.shared_catalog_publish_worker
                     .store(false, Ordering::Release);
                 if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.phase = "idle".to_string();
+                            diagnostics.running = false;
+                            diagnostics.dirty = false;
+                        },
+                    );
                     break;
                 }
                 if self
                     .shared_catalog_publish_worker
                     .swap(true, Ordering::AcqRel)
                 {
+                    ed2k_publish_diagnostics::record(
+                        &self.ed2k_publish_diagnostics,
+                        |diagnostics| {
+                            diagnostics.running = true;
+                            diagnostics.dirty = true;
+                        },
+                    );
                     break;
                 }
             }

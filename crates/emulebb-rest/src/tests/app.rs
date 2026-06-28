@@ -201,6 +201,14 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
         0
     );
     assert_eq!(
+        value["data"]["runtimeDiagnostics"]["ed2kPublish"]["phase"],
+        "idle"
+    );
+    assert_eq!(
+        value["data"]["runtimeDiagnostics"]["ed2kPublish"]["running"],
+        false
+    );
+    assert_eq!(
         value["data"]["runtimeDiagnostics"]["kadPublish"]["phase"],
         "idle"
     );
