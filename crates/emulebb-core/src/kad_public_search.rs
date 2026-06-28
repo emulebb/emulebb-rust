@@ -139,10 +139,15 @@ mod tests {
     // (returns 0). Was 15s vs a 45s traversal; keep it >= the traversal lifetime.
     #[test]
     fn keyword_search_timeout_covers_traversal_lifetime() {
-        assert!(
-            KAD_KEYWORD_SEARCH_TIMEOUT_SECS >= SEARCH_TIMEOUT_SECS,
-            "keyword search outer timeout ({KAD_KEYWORD_SEARCH_TIMEOUT_SECS}s) must be >= the Kad \
-             traversal lifetime ({SEARCH_TIMEOUT_SECS}s) so phase-2 SEARCH_KEY_REQ can fire"
-        );
+        // Compile-time assertion: both operands are consts, so a const block fails
+        // the build (not just the test) if the invariant is ever broken. The const
+        // context cannot format the values, so the message is static; the exact
+        // numbers live in the regression comment above.
+        const {
+            assert!(
+                KAD_KEYWORD_SEARCH_TIMEOUT_SECS >= SEARCH_TIMEOUT_SECS,
+                "keyword search outer timeout must be >= the Kad traversal lifetime so phase-2 SEARCH_KEY_REQ can fire"
+            )
+        };
     }
 }

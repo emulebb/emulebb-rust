@@ -5205,7 +5205,7 @@ async fn publish_kad_due_shared_files(
     }
 
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
-        diagnostics.phase = if publish_tasks.len() == 0 {
+        diagnostics.phase = if publish_tasks.is_empty() {
             "idle".to_string()
         } else {
             "publishing".to_string()
@@ -5273,6 +5273,7 @@ async fn publish_kad_due_shared_files(
     Ok(item_count)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drain_completed_kad_publish_tasks(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,

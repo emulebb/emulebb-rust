@@ -129,6 +129,7 @@ async fn execute_publish_fanout_for_contacts(
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_publish_contacts(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,

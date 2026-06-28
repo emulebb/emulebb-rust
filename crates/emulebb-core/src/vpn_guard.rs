@@ -94,9 +94,7 @@ pub(crate) fn public_ip_block_reason(
         networks.push(network);
     }
 
-    let Some(public_ip) = public_ip else {
-        return None;
-    };
+    let public_ip = public_ip?;
     if networks.iter().any(|network| network.contains(&public_ip)) {
         return None;
     }

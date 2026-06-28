@@ -22,14 +22,11 @@ impl DaemonConfig {
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-            {
-                if let Err(error) =
+                && let Err(error) =
                     ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)
-                {
-                    if !self.vpn_guard_blocks_p2p() {
-                        return Err(error);
-                    }
-                }
+                && !self.vpn_guard_blocks_p2p()
+            {
+                return Err(error);
             }
             return Ok(candidate);
         }
