@@ -91,10 +91,18 @@ pub(super) fn encode_search_request_with_criteria(
         constraints.push(encode_string_meta_node(FT_FILETYPE, &file_type)?);
     }
     if let Some(min) = criteria.min_size {
-        constraints.push(encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_GREATER_EQUAL, min));
+        constraints.push(encode_numeric_meta_node(
+            FT_FILESIZE,
+            ED2K_SEARCH_OP_GREATER_EQUAL,
+            min,
+        ));
     }
     if let Some(max) = criteria.max_size {
-        constraints.push(encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_LESS_EQUAL, max));
+        constraints.push(encode_numeric_meta_node(
+            FT_FILESIZE,
+            ED2K_SEARCH_OP_LESS_EQUAL,
+            max,
+        ));
     }
     if let Some(avail) = criteria.min_availability {
         constraints.push(encode_numeric_meta_node(
@@ -473,6 +481,9 @@ mod criteria_tests {
     fn large_size_uses_64bit_numeric_form() {
         let big = u64::from(u32::MAX) + 1;
         let node = encode_numeric_meta_node(FT_FILESIZE, ED2K_SEARCH_OP_GREATER_EQUAL, big);
-        assert_eq!(node[0], 8, "values > u32 must use the 64-bit (0x08) numeric form");
+        assert_eq!(
+            node[0], 8,
+            "values > u32 must use the 64-bit (0x08) numeric form"
+        );
     }
 }

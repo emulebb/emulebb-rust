@@ -155,7 +155,10 @@ mod tests {
     fn drive_letter_tolerates_verbatim_prefix_and_rejects_unc() {
         assert_eq!(drive_letter(&PathBuf::from(r"F:\M\x")), Some('F'));
         assert_eq!(drive_letter(&PathBuf::from(r"\\?\f:\M\x")), Some('F'));
-        assert_eq!(drive_letter(&PathBuf::from(r"\\?\C:\dir\file.bin")), Some('C'));
+        assert_eq!(
+            drive_letter(&PathBuf::from(r"\\?\C:\dir\file.bin")),
+            Some('C')
+        );
         assert_eq!(drive_letter(&PathBuf::from(r"\\server\share\file")), None);
         assert_eq!(drive_letter(&PathBuf::from(r"\\?\UNC\server\share")), None);
         assert_eq!(drive_letter(&PathBuf::from("relative\\path")), None);

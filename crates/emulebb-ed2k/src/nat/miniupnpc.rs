@@ -540,7 +540,10 @@ mod tests {
 
     #[test]
     fn discovery_without_bind_ip_leaves_multicast_unset() {
-        assert_eq!(discovery_options(&NatConfig::default()).multicast_interface, None);
+        assert_eq!(
+            discovery_options(&NatConfig::default()).multicast_interface,
+            None
+        );
     }
 
     // RUST-FEAT-003: a wildcard listener forwards to the VPN-side address, so the

@@ -266,8 +266,8 @@ impl Gateway {
         lease_duration_secs: Option<u32>,
     ) -> Result<(), AddPortMappingError> {
         let _winsock = WinsockGuard::init().map_err(AddPortMappingError::setup)?;
-        let control_url =
-            c_string(&self.summary.control_url, "control_url").map_err(AddPortMappingError::setup)?;
+        let control_url = c_string(&self.summary.control_url, "control_url")
+            .map_err(AddPortMappingError::setup)?;
         let service_type = c_string(&self.summary.service_type, "service_type")
             .map_err(AddPortMappingError::setup)?;
         let external_port = CString::new(external_port.to_string()).unwrap();
@@ -279,7 +279,8 @@ impl Gateway {
         let protocol = c_string(protocol, "protocol").map_err(AddPortMappingError::setup)?;
         // MFC passes remoteHost=NULL and leaseDuration=NULL (indefinite). Mirror
         // that exactly: a real null pointer, never an empty CString.
-        let lease_duration = lease_duration_secs.map(|secs| CString::new(secs.to_string()).unwrap());
+        let lease_duration =
+            lease_duration_secs.map(|secs| CString::new(secs.to_string()).unwrap());
 
         let status = unsafe {
             sys::UPNP_AddPortMapping(

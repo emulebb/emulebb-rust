@@ -256,7 +256,10 @@ mod tests {
 
         let seeds = dht.routing_table_bootstrap_contacts().await;
         assert_eq!(seeds.len(), 1);
-        assert_eq!(seeds[0].ip, "203.0.113.10".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(
+            seeds[0].ip,
+            "203.0.113.10".parse::<std::net::Ipv4Addr>().unwrap()
+        );
         assert_eq!(seeds[0].udp_port, 4672);
         assert_eq!(seeds[0].tcp_port, 4662);
         assert_eq!(seeds[0].version, 10);
