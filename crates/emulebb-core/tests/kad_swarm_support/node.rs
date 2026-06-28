@@ -85,7 +85,6 @@ impl LocalKadNode {
             node_id: own_id,
             bootstrap_min_routing_contacts: 1,
             search_timeout: Duration::from_secs(5),
-            store_timeout: Duration::from_secs(5),
             publish_contact_fanout: 4,
             max_outbound_pps: 0,
             search_phase2_fanout: 4,

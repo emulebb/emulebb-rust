@@ -3,7 +3,11 @@ use crate::error::DhtError;
 use crate::node::concurrency::SearchAcquireError;
 use crate::publish::KeywordPublishEntry;
 use emulebb_kad_net::RpcWorkClass;
-use emulebb_kad_proto::{Ed2kHash, NodeId, Tag};
+use emulebb_kad_proto::{
+    Ed2kHash, NodeId, Tag,
+    constants::{STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS},
+};
+use std::time::Duration;
 use tokio::time;
 
 impl DhtNode {
@@ -74,7 +78,7 @@ impl DhtNode {
             self.ip_filter(),
             Some(self.res_contact_sink()),
         );
-        match time::timeout(self.inner.config.store_timeout, result).await {
+        match time::timeout(Duration::from_secs(STORE_KEYWORD_TIMEOUT_SECS), result).await {
             Ok(result) => result,
             Err(_) => Err(DhtError::SearchTimeout),
         }
@@ -122,7 +126,7 @@ impl DhtNode {
             self.ip_filter(),
             Some(self.res_contact_sink()),
         );
-        match time::timeout(self.inner.config.store_timeout, result).await {
+        match time::timeout(Duration::from_secs(STORE_SOURCE_TIMEOUT_SECS), result).await {
             Ok(result) => result,
             Err(_) => Err(DhtError::SearchTimeout),
         }
@@ -173,7 +177,7 @@ impl DhtNode {
             self.ip_filter(),
             Some(self.res_contact_sink()),
         );
-        match time::timeout(self.inner.config.store_timeout, result).await {
+        match time::timeout(Duration::from_secs(STORE_NOTES_TIMEOUT_SECS), result).await {
             Ok(result) => result,
             Err(_) => Err(DhtError::SearchTimeout),
         }

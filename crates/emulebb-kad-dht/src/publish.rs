@@ -9,7 +9,8 @@ use crate::error::DhtError;
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::{
-    KAD_VERSION_AICH_KEYWORD_PUBLISH, SEARCHTOLERANCE, STORE_TIMEOUT_SECS,
+    KAD_VERSION_AICH_KEYWORD_PUBLISH, SEARCHTOLERANCE, STORE_KEYWORD_TIMEOUT_SECS,
+    STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS, STORE_STOP_GRACE_SECS,
 };
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
@@ -22,9 +23,12 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-const STORE_STOP_GRACE_SECS: u64 = 20;
-const PUBLISH_LOOKUP_TIMEOUT: Duration =
-    Duration::from_secs(STORE_TIMEOUT_SECS - STORE_STOP_GRACE_SECS);
+const PUBLISH_KEYWORD_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(STORE_KEYWORD_TIMEOUT_SECS - STORE_STOP_GRACE_SECS);
+const PUBLISH_SOURCE_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(STORE_SOURCE_TIMEOUT_SECS - STORE_STOP_GRACE_SECS);
+const PUBLISH_NOTES_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(STORE_NOTES_TIMEOUT_SECS - STORE_STOP_GRACE_SECS);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -130,6 +134,7 @@ async fn resolve_publish_contacts(
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
     target: NodeId,
     publish_contact_fanout: usize,
+    lookup_timeout: Duration,
     work_class: RpcWorkClass,
     ip_filter: Option<crate::traversal::KadIpFilter>,
     res_contact_sink: Option<crate::traversal::KadResContactSink>,
@@ -141,7 +146,7 @@ async fn resolve_publish_contacts(
         TraversalConfig {
             target,
             search_kind: TraversalKind::Store,
-            timeout: PUBLISH_LOOKUP_TIMEOUT,
+            timeout: lookup_timeout,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: publish_contact_fanout.max(K),
             cancel: CancellationToken::new(),
@@ -361,6 +366,7 @@ pub async fn publish_keyword(
         routing_table,
         target,
         publish_contact_fanout,
+        PUBLISH_KEYWORD_LOOKUP_TIMEOUT,
         work_class,
         ip_filter,
         res_contact_sink,
@@ -437,6 +443,7 @@ pub async fn publish_source(
         routing_table,
         target,
         publish_contact_fanout,
+        PUBLISH_SOURCE_LOOKUP_TIMEOUT,
         work_class,
         ip_filter,
         res_contact_sink,
@@ -492,6 +499,7 @@ pub async fn publish_notes(
         routing_table,
         target,
         publish_contact_fanout,
+        PUBLISH_NOTES_LOOKUP_TIMEOUT,
         work_class,
         ip_filter,
         res_contact_sink,

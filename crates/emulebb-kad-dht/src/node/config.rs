@@ -18,8 +18,6 @@ pub struct DhtConfig {
     pub max_concurrent_searches: usize,
     /// Search timeout.
     pub search_timeout: Duration,
-    /// Store/publish timeout.
-    pub store_timeout: Duration,
     /// Republish interval.
     pub republish_interval: Duration,
     /// Maximum number of closest contacts to publish to per publish round.
@@ -59,7 +57,6 @@ impl Default for DhtConfig {
             bootstrap_min_routing_contacts: 10,
             max_concurrent_searches: 5,
             search_timeout: Duration::from_secs(45),
-            store_timeout: Duration::from_secs(140),
             republish_interval: Duration::from_secs(18000),
             publish_contact_fanout: STORE_PUBLISH_TARGET_CONTACTS,
             max_outbound_pps: 8,

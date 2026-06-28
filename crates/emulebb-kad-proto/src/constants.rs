@@ -31,7 +31,13 @@ pub const KBASE: usize = 4;
 pub const KK: usize = 5;
 
 pub const SEARCH_TIMEOUT_SECS: u64 = 45;
-pub const STORE_TIMEOUT_SECS: u64 = 140;
+pub const STORE_KEYWORD_TIMEOUT_SECS: u64 = 140;
+pub const STORE_SOURCE_TIMEOUT_SECS: u64 = 140;
+pub const STORE_NOTES_TIMEOUT_SECS: u64 = 100;
+/// Backward-compatible source/keyword store lifetime alias.
+pub const STORE_TIMEOUT_SECS: u64 = STORE_SOURCE_TIMEOUT_SECS;
+/// MFC stops STORE searches in the final 20 seconds so late responses can land.
+pub const STORE_STOP_GRACE_SECS: u64 = 20;
 /// Target store answers for STOREKEYWORD/STOREFILE/STORENOTES searches.
 ///
 /// Mirrors MFC `SEARCHSTORE*_TOTAL`; this is distinct from active store caps.

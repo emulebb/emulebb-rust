@@ -1,10 +1,16 @@
 use super::{
-    KeywordPublishEntry, PUBLISH_LOOKUP_TIMEOUT, STORE_STOP_GRACE_SECS,
-    build_keyword_publish_packet, publish_target_is_within_tolerance, select_publish_contacts,
+    KeywordPublishEntry, PUBLISH_KEYWORD_LOOKUP_TIMEOUT, PUBLISH_NOTES_LOOKUP_TIMEOUT,
+    PUBLISH_SOURCE_LOOKUP_TIMEOUT, build_keyword_publish_packet,
+    publish_target_is_within_tolerance, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
 use emulebb_kad_proto::{
-    Ed2kHash, KadPacket, NodeId, Tag, TagName, TagValue, constants::STORE_TIMEOUT_SECS, tag_name,
+    Ed2kHash, KadPacket, NodeId, Tag, TagName, TagValue,
+    constants::{
+        STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS,
+        STORE_STOP_GRACE_SECS,
+    },
+    tag_name,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -24,8 +30,16 @@ fn close_publish_contact(distance_low_byte: u8, host: u8) -> TraversalContact {
 fn publish_lookup_leaves_mfc_stop_grace_for_store_fanout() {
     assert_eq!(STORE_STOP_GRACE_SECS, 20);
     assert_eq!(
-        PUBLISH_LOOKUP_TIMEOUT,
-        Duration::from_secs(STORE_TIMEOUT_SECS - STORE_STOP_GRACE_SECS)
+        PUBLISH_KEYWORD_LOOKUP_TIMEOUT,
+        Duration::from_secs(STORE_KEYWORD_TIMEOUT_SECS - STORE_STOP_GRACE_SECS)
+    );
+    assert_eq!(
+        PUBLISH_SOURCE_LOOKUP_TIMEOUT,
+        Duration::from_secs(STORE_SOURCE_TIMEOUT_SECS - STORE_STOP_GRACE_SECS)
+    );
+    assert_eq!(
+        PUBLISH_NOTES_LOOKUP_TIMEOUT,
+        Duration::from_secs(STORE_NOTES_TIMEOUT_SECS - STORE_STOP_GRACE_SECS)
     );
 }
 
