@@ -94,7 +94,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let throughput = state.core.transfer_throughput_stats();
     let shared_hashing_count = state.core.shared_directories().await.hashing_count;
     let shared_hashing_active = shared_hashing_count > 0;
-    let shared_file_count = state.core.shares().await.len();
+    let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = status.transfers.total;
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),

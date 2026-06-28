@@ -1668,6 +1668,10 @@ impl EmulebbCore {
         }
     }
 
+    pub async fn shared_catalog_count(&self) -> usize {
+        self.ed2k_transfers.shared_catalog_count().await
+    }
+
     pub async fn share(&self, hash: &str) -> Option<LocalShare> {
         self.shares()
             .await

@@ -9,6 +9,7 @@ use emulebb_index::FileIndex;
 use serde_json::Value;
 use tower::ServiceExt;
 
+use crate::rest_test_support::unique_test_dir;
 use crate::{RestConfig, router};
 
 fn test_router() -> axum::Router {
@@ -196,4 +197,53 @@ async fn stats_distinguish_active_downloads_from_total_queue() {
         false
     );
     assert_eq!(value["data"]["runtimeDiagnostics"]["sharedHashingCount"], 0);
+}
+
+#[tokio::test]
+async fn status_reports_shared_catalog_count_without_catalog_listing() {
+    let runtime_dir = unique_test_dir("status-shared-count");
+    let payload_path = runtime_dir.join("Shared.Count.bin");
+    std::fs::write(&payload_path, b"shared count payload").unwrap();
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let router = router(
+        core,
+        RestConfig {
+            api_key: "secret".to_string(),
+        },
+    );
+
+    let create = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-files")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"path":"{}"}}"#,
+                    payload_path.display().to_string().replace('\\', "\\\\")
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+
+    let status = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["runtimeDiagnostics"]["knownFileCount"], 1);
+    assert_eq!(value["data"]["runtimeDiagnostics"]["sharedFileCount"], 1);
 }

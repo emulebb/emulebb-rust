@@ -14,6 +14,13 @@ impl Ed2kTransferRuntime {
         Arc::clone(&self.shared_catalog)
     }
 
+    /// Return the current verified shared-catalog entry count without walking
+    /// persisted manifests. This is used by liveness/status surfaces that must
+    /// stay cheap while a large shared-library hash is in progress.
+    pub async fn shared_catalog_count(&self) -> usize {
+        self.shared_catalog.read().await.len()
+    }
+
     /// Replace compatibility-hint catalog entries while preserving verified
     /// local files loaded from manifests.
     pub async fn replace_catalog_hints(&self, hashes: &[PopularHash]) {
