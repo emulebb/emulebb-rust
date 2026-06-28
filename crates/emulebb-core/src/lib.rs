@@ -4758,7 +4758,9 @@ async fn publish_kad_due_shared_files(
         let mut attempted_this_file = false;
 
         if let Some(keyword) = due_keyword.as_deref() {
-            if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET {
+            if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET
+                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+            {
                 keyword_skipped_by_budget += 1;
             } else {
                 keyword_attempted += 1;
@@ -4814,7 +4816,9 @@ async fn publish_kad_due_shared_files(
         }
 
         if source_due {
-            if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET {
+            if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
+                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+            {
                 source_skipped_by_budget += 1;
             } else {
                 source_attempted += 1;
@@ -4861,7 +4865,9 @@ async fn publish_kad_due_shared_files(
         // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
         // and source so an un-annotated file never emits a notes publish.
         if notes_due {
-            if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET {
+            if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET
+                || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
+            {
                 notes_skipped_by_budget += 1;
             } else {
                 notes_attempted += 1;
@@ -4923,6 +4929,7 @@ async fn publish_kad_due_shared_files(
     schedule.advance_cursor(start, inspected, item_count);
     let budget_exhausted = (inspected >= KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET
         && inspected < item_count)
+        || publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET
         || keyword_skipped_by_budget > 0
         || source_skipped_by_budget > 0
         || notes_skipped_by_budget > 0;
