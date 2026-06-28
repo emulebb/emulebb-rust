@@ -4451,6 +4451,17 @@ impl KadSharedPublishActiveCounts {
             KadSharedPublishKind::Notes => self.notes = self.notes.saturating_sub(1),
         }
     }
+
+    fn write_diagnostics(
+        &self,
+        diagnostics: &mut KadPublishDiagnostics,
+        available_search_permits: usize,
+    ) {
+        diagnostics.active_keyword_publishes = self.keyword;
+        diagnostics.active_source_publishes = self.source;
+        diagnostics.active_notes_publishes = self.notes;
+        diagnostics.available_search_permits = available_search_permits;
+    }
 }
 
 fn kad_shared_publish_kind_cap(kind: KadSharedPublishKind) -> usize {
@@ -4476,6 +4487,7 @@ async fn run_kad_shared_file_publish_loop(
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
             let in_flight_budget = kad_shared_file_publish_in_flight_budget(&runtime);
+            let available_search_permits = runtime.dht.available_search_permits();
             kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
                 diagnostics.phase = "waitingBootstrap".to_string();
                 diagnostics.running = true;
@@ -4486,6 +4498,7 @@ async fn run_kad_shared_file_publish_loop(
                 diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
                 diagnostics.in_flight_count = publish_tasks.len();
                 diagnostics.in_flight_budget = in_flight_budget;
+                active_counts.write_diagnostics(diagnostics, available_search_permits);
                 diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
                 diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
                 diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4621,6 +4634,7 @@ async fn publish_kad_due_shared_files(
     active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
     let Some(shared_files) = kad_publishable_shared_files(&runtime.transfer_runtime).await? else {
+        let available_search_permits = runtime.dht.available_search_permits();
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "metadataBusy".to_string();
             diagnostics.running = true;
@@ -4631,6 +4645,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
+            active_counts.write_diagnostics(diagnostics, available_search_permits);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4638,6 +4653,7 @@ async fn publish_kad_due_shared_files(
         return Ok(0);
     };
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
+    let available_search_permits = runtime.dht.available_search_permits();
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
         diagnostics.running = true;
@@ -4646,6 +4662,7 @@ async fn publish_kad_due_shared_files(
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
         diagnostics.in_flight_count = publish_tasks.len();
         diagnostics.in_flight_budget = in_flight_budget;
+        active_counts.write_diagnostics(diagnostics, available_search_permits);
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4667,6 +4684,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = in_flight_budget;
+            active_counts.write_diagnostics(diagnostics, available_search_permits);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4713,6 +4731,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = in_flight_budget;
+            active_counts.write_diagnostics(diagnostics, available_search_permits);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4770,6 +4789,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = in_flight_budget;
+            active_counts.write_diagnostics(diagnostics, available_publish_starts);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4797,6 +4817,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = in_flight_budget;
+            active_counts.write_diagnostics(diagnostics, available_publish_starts);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -5064,6 +5085,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
             diagnostics.in_flight_count = publish_tasks.len();
             diagnostics.in_flight_budget = in_flight_budget;
+            active_counts.write_diagnostics(diagnostics, available_publish_starts);
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -5097,6 +5119,7 @@ async fn publish_kad_due_shared_files(
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
         diagnostics.in_flight_count = publish_tasks.len();
         diagnostics.in_flight_budget = in_flight_budget;
+        active_counts.write_diagnostics(diagnostics, available_publish_starts);
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -5180,7 +5203,12 @@ async fn drain_completed_kad_publish_tasks(
         match outcome.result {
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
-                    record_kad_publish_completion(runtime, outcome.kind);
+                    record_kad_publish_completion(
+                        runtime,
+                        outcome.kind,
+                        outcome.file_hashes.len(),
+                        stats,
+                    );
                     accumulate_publish_stats(keyword_totals, stats);
                     let keyword = outcome.keyword.as_deref().unwrap_or_default();
                     let published_at_ms = Utc::now().timestamp_millis();
@@ -5202,7 +5230,7 @@ async fn drain_completed_kad_publish_tasks(
                     *keyword_published += outcome.file_hashes.len();
                 }
                 KadSharedPublishKind::Source => {
-                    record_kad_publish_completion(runtime, outcome.kind);
+                    record_kad_publish_completion(runtime, outcome.kind, 1, stats);
                     accumulate_publish_stats(source_totals, stats);
                     schedule.mark_source_published(&primary_file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
@@ -5220,7 +5248,7 @@ async fn drain_completed_kad_publish_tasks(
                     *source_published += 1;
                 }
                 KadSharedPublishKind::Notes => {
-                    record_kad_publish_completion(runtime, outcome.kind);
+                    record_kad_publish_completion(runtime, outcome.kind, 1, stats);
                     accumulate_publish_stats(notes_totals, stats);
                     schedule.mark_notes_published(&primary_file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
@@ -5276,9 +5304,67 @@ enum KadPublishFailureClass {
     Other,
 }
 
-fn record_kad_publish_completion(runtime: &KadPublishLoopRuntime, _kind: KadSharedPublishKind) {
+fn record_kad_publish_completion(
+    runtime: &KadPublishLoopRuntime,
+    kind: KadSharedPublishKind,
+    published_count: usize,
+    stats: PublishAttemptStats,
+) {
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.completed_count = diagnostics.completed_count.saturating_add(1);
+        match kind {
+            KadSharedPublishKind::Keyword => {
+                diagnostics.keyword_published_total = diagnostics
+                    .keyword_published_total
+                    .saturating_add(published_count);
+                diagnostics.keyword_contacts_considered_total = diagnostics
+                    .keyword_contacts_considered_total
+                    .saturating_add(stats.closest_contacts_considered);
+                diagnostics.keyword_attempted_contacts_total = diagnostics
+                    .keyword_attempted_contacts_total
+                    .saturating_add(stats.attempted_contacts);
+                diagnostics.keyword_acked_contacts_total = diagnostics
+                    .keyword_acked_contacts_total
+                    .saturating_add(stats.acked_contacts);
+                diagnostics.keyword_contact_timeouts_total = diagnostics
+                    .keyword_contact_timeouts_total
+                    .saturating_add(stats.timed_out_contacts);
+            }
+            KadSharedPublishKind::Source => {
+                diagnostics.source_published_total = diagnostics
+                    .source_published_total
+                    .saturating_add(published_count);
+                diagnostics.source_contacts_considered_total = diagnostics
+                    .source_contacts_considered_total
+                    .saturating_add(stats.closest_contacts_considered);
+                diagnostics.source_attempted_contacts_total = diagnostics
+                    .source_attempted_contacts_total
+                    .saturating_add(stats.attempted_contacts);
+                diagnostics.source_acked_contacts_total = diagnostics
+                    .source_acked_contacts_total
+                    .saturating_add(stats.acked_contacts);
+                diagnostics.source_contact_timeouts_total = diagnostics
+                    .source_contact_timeouts_total
+                    .saturating_add(stats.timed_out_contacts);
+            }
+            KadSharedPublishKind::Notes => {
+                diagnostics.notes_published_total = diagnostics
+                    .notes_published_total
+                    .saturating_add(published_count);
+                diagnostics.notes_contacts_considered_total = diagnostics
+                    .notes_contacts_considered_total
+                    .saturating_add(stats.closest_contacts_considered);
+                diagnostics.notes_attempted_contacts_total = diagnostics
+                    .notes_attempted_contacts_total
+                    .saturating_add(stats.attempted_contacts);
+                diagnostics.notes_acked_contacts_total = diagnostics
+                    .notes_acked_contacts_total
+                    .saturating_add(stats.acked_contacts);
+                diagnostics.notes_contact_timeouts_total = diagnostics
+                    .notes_contact_timeouts_total
+                    .saturating_add(stats.timed_out_contacts);
+            }
+        }
     });
 }
 
