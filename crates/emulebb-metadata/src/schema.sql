@@ -257,6 +257,17 @@ CREATE TABLE transfers (
     UNIQUE(known_file_id)
 );
 
+CREATE TABLE share_in_place_sources (
+    id INTEGER PRIMARY KEY,
+    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+    source_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    source_mtime_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(source_path)
+);
+
 CREATE TABLE transfer_pieces (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,

@@ -143,6 +143,29 @@ impl super::MetadataStore {
             params![known_file_id],
             |row| row.get(0),
         )?;
+        if let Some(source_path) = manifest.source_path.as_ref() {
+            tx.execute(
+                r#"
+                INSERT INTO share_in_place_sources(
+                    known_file_id, source_path, file_size, source_mtime_ms,
+                    created_at_ms, updated_at_ms
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                ON CONFLICT(source_path) DO UPDATE SET
+                    known_file_id = excluded.known_file_id,
+                    file_size = excluded.file_size,
+                    source_mtime_ms = excluded.source_mtime_ms,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![
+                    known_file_id,
+                    source_path,
+                    manifest.file_size as i64,
+                    manifest.source_mtime_ms,
+                    now,
+                ],
+            )?;
+        }
 
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
         tx.commit()?;
@@ -363,13 +386,13 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                   transfers.source_path, transfers.source_mtime_ms
-            FROM known_files
-            JOIN transfers ON transfers.known_file_id = known_files.id
+            SELECT lower(hex(known_files.ed2k_hash)), share_in_place_sources.file_size,
+                   share_in_place_sources.source_path,
+                   share_in_place_sources.source_mtime_ms
+            FROM share_in_place_sources
+            JOIN known_files ON known_files.id = share_in_place_sources.known_file_id
             WHERE known_files.completed != 0
-              AND transfers.source_path IS NOT NULL
-            ORDER BY transfers.source_path
+            ORDER BY share_in_place_sources.source_path
             "#,
         )?;
         let rows = stmt.query_map([], |row| {

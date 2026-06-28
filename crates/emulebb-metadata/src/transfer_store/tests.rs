@@ -137,6 +137,66 @@ fn transfer_manifest_roundtrips_sql_tables() {
 }
 
 #[test]
+fn share_in_place_reload_entries_remember_duplicate_source_paths() {
+    let store = MetadataStore::in_memory().unwrap();
+    let mut manifest = MetadataTransferManifest {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        canonical_name: "Duplicate.Payload.bin".to_string(),
+        file_size: 1024,
+        piece_size: 1024,
+        completed: true,
+        md4_hashset_acquired: true,
+        md4_hashset: Vec::new(),
+        aich_hashset_acquired: true,
+        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
+        aich_hashset: Vec::new(),
+        verified_ranges: Vec::new(),
+        pieces: vec![MetadataTransferPiece {
+            piece_index: 0,
+            state: "Verified".to_string(),
+            bytes_written: 1024,
+            block_bitmap: None,
+        }],
+        sources: Vec::new(),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: true,
+        comment: String::new(),
+        rating: 0,
+        category_id: 0,
+        control_state: None,
+        transfer_row_removed: false,
+        delivered_path: None,
+        source_path: Some("/library/Alpha.bin".to_string()),
+        source_mtime_ms: Some(1_700_000_000_000),
+    };
+
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    manifest.source_path = Some("/library/Beta.bin".to_string());
+    manifest.source_mtime_ms = Some(1_700_000_000_123);
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert_eq!(
+        store.share_in_place_reload_entries().unwrap(),
+        vec![
+            MetadataShareInPlaceReloadEntry {
+                file_hash: manifest.file_hash.clone(),
+                file_size: manifest.file_size,
+                source_path: "/library/Alpha.bin".to_string(),
+                source_mtime_ms: Some(1_700_000_000_000),
+            },
+            MetadataShareInPlaceReloadEntry {
+                file_hash: manifest.file_hash.clone(),
+                file_size: manifest.file_size,
+                source_path: "/library/Beta.bin".to_string(),
+                source_mtime_ms: Some(1_700_000_000_123),
+            },
+        ]
+    );
+    assert_eq!(store.completed_transfer_publish_entries().unwrap().len(), 1);
+    assert_eq!(store.completed_transfer_share_entries().unwrap().len(), 1);
+}
+
+#[test]
 fn delete_transfer_manifest_removes_transfer_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {

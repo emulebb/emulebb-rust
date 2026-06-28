@@ -37,11 +37,13 @@
 //!   reload. NULL for a real download or a pre-v9 share-in-place row.
 //! - v9 -> v10: `kad_outbound_publish_schedule` table for durable outbound Kad
 //!   keyword/source/notes publish due timers.
+//! - v10 -> v11: `share_in_place_sources` path-alias table for duplicate shared
+//!   files with the same ED2K hash.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
 //! applying it to any real older DB (whatever intermediate shape it is in)
-//! converges on the v8 shape without ever dropping user data. Each step runs in
+//! converges on the current shape without ever dropping user data. Each step runs in
 //! its own transaction and bumps the stored marker only after the change
 //! commits, so an interrupted upgrade resumes cleanly from the last good
 //! version.
@@ -154,6 +156,41 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS kad_outbound_publish_file_idx
                 ON kad_outbound_publish_schedule(file_hash, publish_kind);
+                "#,
+            )?;
+            Ok(())
+        }
+        // v10 -> v11: remember every share-in-place source path, not only the
+        // one path stored on the hash-unique transfers row. Duplicate files with
+        // the same ED2K hash otherwise rehash on every restart.
+        11 => {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS share_in_place_sources (
+                    id INTEGER PRIMARY KEY,
+                    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
+                    source_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    source_mtime_ms INTEGER,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    UNIQUE(source_path)
+                );
+
+                INSERT INTO share_in_place_sources(
+                    known_file_id, source_path, file_size, source_mtime_ms,
+                    created_at_ms, updated_at_ms
+                )
+                SELECT transfers.known_file_id, transfers.source_path, known_files.size_bytes,
+                       transfers.source_mtime_ms, transfers.updated_at_ms, transfers.updated_at_ms
+                FROM transfers
+                JOIN known_files ON known_files.id = transfers.known_file_id
+                WHERE transfers.source_path IS NOT NULL
+                ON CONFLICT(source_path) DO UPDATE SET
+                    known_file_id = excluded.known_file_id,
+                    file_size = excluded.file_size,
+                    source_mtime_ms = excluded.source_mtime_ms,
+                    updated_at_ms = excluded.updated_at_ms;
                 "#,
             )?;
             Ok(())
@@ -321,6 +358,7 @@ mod tests {
             ("transfers", "delivered_path"),
             ("transfers", "source_path"),
             ("transfers", "source_mtime_ms"),
+            ("share_in_place_sources", "source_path"),
         ] {
             let tx = conn.transaction().unwrap();
             assert!(
