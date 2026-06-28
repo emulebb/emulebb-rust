@@ -477,32 +477,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
 
-    // Deliver any completed-but-undelivered transfers from a previous run in
-    // the background. A persisted sharing profile can carry tens of thousands
-    // of manifests, so this sweep starts only after REST is bound.
-    let delivery_core = Arc::clone(&core);
-    tokio::spawn(async move {
-        delivery_core.deliver_pending_completed_transfers().await;
-    });
-    if ed2k_network_configured {
-        let connect_core = Arc::clone(&core);
-        tokio::spawn(async move {
-            if !connect_core.preferences().await.auto_connect {
-                return;
-            }
-            match connect_core.connect_ed2k().await {
-                Ok(status) => info!(
-                    connected = status.connected,
-                    firewalled = status.firewalled.unwrap_or(false),
-                    "automatic ED2K/Kad startup complete"
-                ),
-                Err(error) => tracing::warn!(
-                    %error,
-                    "automatic ED2K/Kad startup failed; REST connect remains available"
-                ),
-            }
-        });
-    }
     // Initial scan-on-demand pickup of the already-present shared files, then
     // start the live auto-pickup monitor (eMule directory auto-monitor parity).
     // Both startup tasks are detached so REST readiness is never blocked on
@@ -521,12 +495,39 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     tokio::spawn(async move {
         monitor_core.start_shared_directory_monitor().await;
     });
+    // Deliver any completed-but-undelivered transfers from a previous run in
+    // the background. A persisted sharing profile can carry tens of thousands
+    // of manifests, so this sweep starts only after REST is bound and after the
+    // sharing workers have been scheduled.
+    let delivery_core = Arc::clone(&core);
+    tokio::spawn(async move {
+        delivery_core.deliver_pending_completed_transfers().await;
+    });
     if let Some(monitor) = vpn_guard_monitor {
         tokio::spawn(vpn_guard_monitor::run(
             Arc::clone(&core),
             shutdown_tx.clone(),
             monitor,
         ));
+    }
+    if ed2k_network_configured {
+        let connect_core = Arc::clone(&core);
+        tokio::spawn(async move {
+            if !connect_core.preferences().await.auto_connect {
+                return;
+            }
+            match connect_core.connect_ed2k().await {
+                Ok(status) => info!(
+                    connected = status.connected,
+                    firewalled = status.firewalled.unwrap_or(false),
+                    "automatic ED2K/Kad startup complete"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "automatic ED2K/Kad startup failed; REST connect remains available"
+                ),
+            }
+        });
     }
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown_signal(shutdown_rx))
