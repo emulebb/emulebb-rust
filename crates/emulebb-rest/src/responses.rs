@@ -77,7 +77,8 @@ pub(crate) fn stats_response(
         "downloadCount": status.transfers.total,
         "sharedHashingActive": shared_hashing_active,
         "sharedHashingCount": shared_hashing_count,
-        "sharedFilesReady": status.lifecycle.state == "running" && !shared_hashing_active,
+        "sharedFilesReady": status.lifecycle.state == "running",
+        "sharedFilesComplete": !shared_hashing_active,
         "ed2kConnected": ed2k_connected,
         "ed2kHighId": ed2k_high_id,
         "kadRunning": status.kad.running,
@@ -107,7 +108,8 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
         "network": network_response(network.as_ref(), &guard),
         "sharedStartupCache": {
             "available": false,
-            "ready": status.lifecycle.state == "running" && !shared_hashing_active,
+            "ready": status.lifecycle.state == "running",
+            "complete": !shared_hashing_active,
             "filePresent": false,
             "loaded": false,
             "rejected": false,
@@ -530,6 +532,7 @@ mod tests {
         assert_eq!(value["sharedHashingActive"], false);
         assert_eq!(value["sharedHashingCount"], 0);
         assert_eq!(value["sharedFilesReady"], true);
+        assert_eq!(value["sharedFilesComplete"], true);
         // Lifetime totals are optional in the contract and eMuleBB omits them; we
         // omit rather than emit a misleading 0 (no lifetime persistence).
         assert!(value.get("totalDownloadedBytes").is_none());
@@ -548,7 +551,8 @@ mod tests {
 
         assert_eq!(value["sharedHashingActive"], true);
         assert_eq!(value["sharedHashingCount"], 3);
-        assert_eq!(value["sharedFilesReady"], false);
+        assert_eq!(value["sharedFilesReady"], true);
+        assert_eq!(value["sharedFilesComplete"], false);
     }
 
     #[tokio::test]
