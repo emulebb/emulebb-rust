@@ -39,6 +39,14 @@ pub struct MetadataTransferManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferCatalogEntry {
+    pub file_hash: String,
+    pub canonical_name: String,
+    pub file_size: u64,
+    pub aich_root: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,

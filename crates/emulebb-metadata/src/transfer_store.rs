@@ -4,8 +4,8 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     transfer_model::{
-        MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange,
-        MetadataTransferSource,
+        MetadataTransferCatalogEntry, MetadataTransferManifest, MetadataTransferPiece,
+        MetadataTransferRange, MetadataTransferSource,
     },
 };
 
@@ -325,6 +325,33 @@ impl super::MetadataStore {
         })?;
         rows.map(|row| manifest_from_row(&conn, row?))
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn completed_transfer_catalog_entries(&self) -> Result<Vec<MetadataTransferCatalogEntry>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                   known_files.size_bytes,
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+            ORDER BY known_files.ed2k_hash
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataTransferCatalogEntry {
+                file_hash: row.get(0)?,
+                canonical_name: row.get(1)?,
+                file_size: row.get::<_, i64>(2)? as u64,
+                aich_root: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {

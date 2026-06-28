@@ -1,6 +1,7 @@
 use anyhow::Result;
 use emulebb_metadata::{
-    MetadataTransferManifest, MetadataTransferPiece, MetadataTransferRange, MetadataTransferSource,
+    MetadataStore, MetadataTransferCatalogEntry, MetadataTransferManifest, MetadataTransferPiece,
+    MetadataTransferRange, MetadataTransferSource,
 };
 
 use super::{
@@ -127,15 +128,28 @@ pub(super) fn manifest_from_metadata(
     })
 }
 
-pub(super) fn completed_catalog_from_metadata(
-    manifests: Vec<MetadataTransferManifest>,
+pub(super) fn completed_catalog_from_metadata_store(
+    metadata: &MetadataStore,
 ) -> Result<Vec<Ed2kSharedEntry>> {
-    manifests
+    metadata
+        .completed_transfer_catalog_entries()?
         .into_iter()
-        .filter(|manifest| manifest.completed)
-        .map(manifest_from_metadata)
-        .map(|manifest| manifest.map(|manifest| Ed2kSharedEntry::from_manifest(&manifest)))
+        .map(shared_entry_from_catalog_entry)
         .collect()
+}
+
+fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {
+    Ok(Ed2kSharedEntry {
+        file_hash: entry.file_hash,
+        canonical_name: entry.canonical_name,
+        file_size: entry.file_size,
+        verified_complete: true,
+        verified_ranges: Vec::new(),
+        compatibility_hint: false,
+        source_count_hint: None,
+        aich_root: entry.aich_root,
+        complete_parts: Vec::new(),
+    })
 }
 
 fn transfer_state_to_sql(state: Ed2kTransferState) -> &'static str {

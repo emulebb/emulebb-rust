@@ -59,6 +59,15 @@ fn transfer_manifest_roundtrips_sql_tables() {
         .unwrap();
 
     assert_eq!(restored, manifest);
+    assert_eq!(
+        store.completed_transfer_catalog_entries().unwrap(),
+        vec![MetadataTransferCatalogEntry {
+            file_hash: manifest.file_hash.clone(),
+            canonical_name: manifest.canonical_name.clone(),
+            file_size: manifest.file_size,
+            aich_root: manifest.aich_root.clone(),
+        }]
+    );
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
 }
 

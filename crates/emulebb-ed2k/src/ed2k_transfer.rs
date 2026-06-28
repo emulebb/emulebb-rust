@@ -279,9 +279,9 @@ impl Ed2kTransferRuntime {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())
         })?;
-        let shared_catalog = Arc::new(RwLock::new(transfer_sql::completed_catalog_from_metadata(
-            metadata.transfer_manifests()?,
-        )?));
+        let shared_catalog = Arc::new(RwLock::new(
+            transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
+        ));
         let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,
