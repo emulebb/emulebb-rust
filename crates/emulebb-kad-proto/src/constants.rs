@@ -88,9 +88,9 @@ pub mod opcode {
     pub const FINDBUDDY_REQ: u8 = 0x51;
     /// Buddy-callback request sent to the chosen relay node.
     ///
-    /// The request shape is still part of the Kad2 oracle surface even though
-    /// the current eMuleBB Rust runtime does not drive the full buddy state
-    /// machine yet.
+    /// Driven end-to-end by the runtime: the LowID buddy / firewalled-callback
+    /// state machine acquires a buddy (`FINDBUDDY_REQ`/`RES`), holds the relay
+    /// TCP link, and relays `CALLBACK_REQ` to the served buddy.
     pub const CALLBACK_REQ: u8 = 0x52;
     /// Buddy-discovery response returned by an accepted relay node.
     pub const FINDBUDDY_RES: u8 = 0x5A;

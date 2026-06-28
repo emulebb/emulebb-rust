@@ -70,7 +70,11 @@ pub struct Ed2kConfig {
     /// This applies only to the initial source acquisition round; short source
     /// requery rounds do not open extra server source probes.
     pub source_server_attempt_budget: usize,
-    /// Only run Kad source supplementation when server search found few sources.
+    /// Only run global UDP + Kad source supplementation while a file is
+    /// source-scarce (existing sources <= this, default 2). Deliberate be-gentle
+    /// divergence from eMule's per-file UDP source cap (~100); the connected-server
+    /// reask is unaffected. Recorded as `source-supplement-scarcity-gate` in
+    /// `policy/rust-client-omissions.toml`.
     pub kad_source_supplement_max_existing_sources: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
     pub upload_queue: Ed2kUploadQueuePolicyConfig,

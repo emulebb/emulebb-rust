@@ -111,7 +111,10 @@ pub(super) fn emule_misc_options2(connect_options: u8, direct_udp_callback: bool
     // Mirror the recent eMule hello profile (sources2/EXT2/hashset-request2).
     let supports_file_identifiers = 1u32;
     let direct_udp_callback = u32::from(direct_udp_callback);
-    // Chat/captcha is still an `ITEM_032` parity gap, so do not advertise it.
+    // Captcha is the anti-spam gate for peer chat (OP_MESSAGE), which is
+    // decode-only here (peer-chat-messaging omission). Advertising captcha
+    // support would invite chat we never answer, so it stays unadvertised by
+    // design. See `policy/rust-client-omissions.toml` (peer-chat-messaging).
     let supports_captcha = 0u32;
     let supports_source_exchange2 = 1u32;
     let requires_crypt_layer = 0u32;

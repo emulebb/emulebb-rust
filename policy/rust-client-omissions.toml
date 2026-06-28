@@ -50,7 +50,7 @@ compatibility = "Does not affect eD2K or Kad wire compatibility."
 id = "peer-chat-messaging"
 area = "ed2k"
 stock_behavior = "Classic eMule supports interactive peer-to-peer text chat/messaging (OP_MESSAGE) and a chat window."
-rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state."
+rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state. It also leaves the captcha-support hello bit (CT_EMULE_MISCOPTIONS2 bit 11) unadvertised, since captcha is the anti-spam gate for chat the client never answers."
 reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so it is outside the headless, REST-controllable scope of this client."
 compatibility = "Does not affect eD2K or Kad wire compatibility; unsupported OP_MESSAGE from peers is simply not surfaced."
 
@@ -61,14 +61,6 @@ stock_behavior = "Classic eMule can request a media preview from a peer (OP_REQU
 rust_behavior = "The Rust client decodes and logs inbound OP_REQUESTPREVIEW / OP_PREVIEWANSWER for diagnostics but never generates a preview answer and never requests previews; there is no frame-extraction or preview surface."
 reason = "Preview is a rarely-used interactive media feature: answering it needs a heavy media frame-extraction dependency and opens an untrusted-media decode surface, with no eMuleBB /api/v1 route to drive or expose it. Deliberately omitted (operator decision 2026-06-15); it is not advertised as required."
 compatibility = "Does not affect eD2K or Kad wire compatibility; an unanswered preview request simply yields no preview, exactly as a stock peer that has the feature disabled."
-
-[[omissions]]
-id = "pref-auto-connect"
-area = "preferences"
-stock_behavior = "Classic eMule auto-connects to the eD2K server / Kad on startup when 'Connect on startup' (autoConnect) is enabled."
-rust_behavior = "The Rust client accepts, persists and echoes the autoConnect preference for REST-contract compatibility, but does not drive any startup auto-connect from it; network connect is initiated explicitly via the REST control plane."
-reason = "Auto-connect is an eMule GUI startup behavior with no clean headless mapping: the headless client is driven by an external controller that decides when to connect, so a startup auto-connect flag is intentionally not wired."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
 
 [[omissions]]
 id = "pref-safe-server-connect"
@@ -109,3 +101,11 @@ stock_behavior = "Classic eMule's downloadAutoBroadbandIo enables an adaptive di
 rust_behavior = "The Rust client accepts, persists and echoes the downloadAutoBroadbandIo preference for REST-contract compatibility, but does not drive any adaptive IO tuning from it; the transfer runtime uses its own fixed IO/throttle model."
 reason = "downloadAutoBroadbandIo is an eMule GUI adaptive-IO convenience with no clean headless mapping: the headless transfer runtime has its own IO and throttle model, so the GUI auto-IO flag is intentionally not wired."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+
+[[omissions]]
+id = "source-supplement-scarcity-gate"
+area = "ed2k"
+stock_behavior = "eMule supplements a download's sources via global UDP server source search and Kad source search up to the per-file UDP source cap (CDownloadQueue, GetMaxSourcePerFileUDP = min(maxSources*3/4, 100)), i.e. it keeps launching fresh global lookups until a file already has on the order of 100 sources."
+rust_behavior = "The Rust client issues the global UDP and Kad source supplements only while a file is source-scarce (existing source count <= kad_source_supplement_max_existing_sources, default 2); the always-on connected-server source reask is unaffected. A well-sourced file (>= 3 sources) does not trigger fresh global UDP / Kad source searches until it drops back to scarcity."
+reason = "Deliberate be-gentle / no-ban divergence, matching the conn-rate gentleness (see conn-rate-rolling-five-second-window): a VPN'd headless client should not fan out global UDP + Kad source searches for files that already have enough sources to make progress. The connected-server reask still refreshes sources continuously; only the scatter-shot UDP/Kad supplement is gated to the scarce case, which is strictly less network-aggressive than eMule's per-file-UDP-cap model."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it only makes outbound source-discovery traffic equal-or-gentler than the master. A well-sourced file continues with its existing sources plus connected-server reasks instead of launching additional global lookups; a scarce file still gets the full UDP + Kad supplement."
