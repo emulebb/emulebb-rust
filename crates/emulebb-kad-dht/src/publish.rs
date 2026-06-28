@@ -164,6 +164,9 @@ async fn resolve_publish_contacts(
 
     let publish_contacts =
         select_publish_contacts(target, &traversal.closest, publish_contact_fanout);
+    if publish_contacts.is_empty() {
+        return Err(DhtError::PublishFailed);
+    }
     for contact in &publish_contacts {
         register_publish_contact(rpc, contact);
     }

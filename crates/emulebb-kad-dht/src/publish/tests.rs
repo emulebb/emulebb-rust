@@ -90,6 +90,21 @@ fn select_publish_contacts_filters_far_contacts_before_fanout() {
 }
 
 #[test]
+fn select_publish_contacts_can_filter_every_far_public_contact() {
+    let target = NodeId::ZERO;
+    let far = TraversalContact {
+        id: NodeId::from_bytes([0xFF; 16]),
+        addr: "8.8.8.8:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+
+    let selected = select_publish_contacts(target, &[far], 4);
+
+    assert!(selected.is_empty());
+}
+
+#[test]
 fn publish_tolerance_accepts_loopback_contacts_even_when_far() {
     let target = NodeId::ZERO;
     let far_loopback = TraversalContact {
