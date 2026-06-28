@@ -433,6 +433,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
             let files = targets.len();
             for target in targets {
                 hash_one_reload_target(&core, target).await;
+                tokio::task::yield_now().await;
             }
             tracing::debug!(
                 disk = %disk,

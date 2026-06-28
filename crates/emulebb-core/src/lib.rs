@@ -341,6 +341,11 @@ pub struct EmulebbCore {
     /// worker; surfaced as `hashingCount` on `GET /shared-directories`. Await-free
     /// atomic shared by the sync primitive and the worker (see `shared_directories`).
     shared_hashing_count: Arc<std::sync::atomic::AtomicI64>,
+    /// Coalesces ED2K server shared-catalog refreshes caused by share/hash
+    /// completion. Large startup reloads can complete many files quickly; waiting
+    /// for a server publish per file would serialize hashing behind network I/O.
+    shared_catalog_publish_dirty: Arc<AtomicBool>,
+    shared_catalog_publish_worker: Arc<AtomicBool>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -437,6 +442,8 @@ impl EmulebbCore {
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
+            shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1636,9 +1643,7 @@ impl EmulebbCore {
                 .to_string(),
             availability_score: 1,
         })?;
-        if let Err(error) = self.publish_ed2k_shared_catalog().await {
-            tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
-        }
+        self.queue_ed2k_shared_catalog_publish();
         Ok(local_share_from_summary(summary))
     }
 
@@ -3891,6 +3896,47 @@ impl EmulebbCore {
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
         publish_shared_catalog_via_background_session(&handle, timeout, &CancellationToken::new())
             .await
+    }
+
+    fn queue_ed2k_shared_catalog_publish(&self) {
+        self.shared_catalog_publish_dirty
+            .store(true, Ordering::Release);
+        if self
+            .shared_catalog_publish_worker
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let core = self.clone();
+        tokio::spawn(async move {
+            core.run_queued_ed2k_shared_catalog_publisher().await;
+        });
+    }
+
+    async fn run_queued_ed2k_shared_catalog_publisher(self) {
+        const ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE: Duration = Duration::from_secs(2);
+
+        loop {
+            tokio::time::sleep(ED2K_SHARED_CATALOG_PUBLISH_DEBOUNCE).await;
+            self.shared_catalog_publish_dirty
+                .store(false, Ordering::Release);
+            if let Err(error) = self.publish_ed2k_shared_catalog().await {
+                tracing::warn!("failed to refresh ED2K shared catalog advertisement: {error}");
+            }
+            if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
+                self.shared_catalog_publish_worker
+                    .store(false, Ordering::Release);
+                if !self.shared_catalog_publish_dirty.load(Ordering::Acquire) {
+                    break;
+                }
+                if self
+                    .shared_catalog_publish_worker
+                    .swap(true, Ordering::AcqRel)
+                {
+                    break;
+                }
+            }
+        }
     }
 
     async fn ed2k_server_connection_view(
