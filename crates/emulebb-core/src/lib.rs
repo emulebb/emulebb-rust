@@ -4423,6 +4423,12 @@ async fn run_kad_shared_file_publish_loop(
                 diagnostics.gate_allowed = false;
                 diagnostics.gate_block_reason = "kadNotBootstrapped".to_string();
                 diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+                diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+                diagnostics.in_flight_count = publish_tasks.len();
+                diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+                diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+                diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+                diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
             });
             tokio::time::sleep(Duration::from_secs(KAD_SHARED_FILE_PUBLISH_RETRY_SECS)).await;
             continue;
@@ -4684,6 +4690,15 @@ async fn publish_kad_due_shared_files(
             diagnostics.keyword_published = keyword_published;
             diagnostics.source_published = source_published;
             diagnostics.notes_published = notes_published;
+            diagnostics.keyword_due_count = 0;
+            diagnostics.source_due_count = 0;
+            diagnostics.notes_due_count = 0;
+            diagnostics.keyword_attempted = 0;
+            diagnostics.source_attempted = 0;
+            diagnostics.notes_attempted = 0;
+            diagnostics.keyword_skipped_by_budget = 0;
+            diagnostics.source_skipped_by_budget = 0;
+            diagnostics.notes_skipped_by_budget = 0;
             diagnostics.keyword_acked_contacts = keyword_totals.acked_contacts;
             diagnostics.source_acked_contacts = source_totals.acked_contacts;
             diagnostics.notes_acked_contacts = notes_totals.acked_contacts;
