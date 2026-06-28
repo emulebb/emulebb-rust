@@ -694,6 +694,25 @@ fn p2p_bind_ip_and_interface_reject_mismatched_pair() {
 }
 
 #[test]
+fn p2p_bind_ip_and_interface_mismatch_starts_when_vpn_guard_blocks_p2p() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(
+        temp.path().to_path_buf(),
+        Some("192.0.2.10".parse().unwrap()),
+    );
+    config.p2p_bind_interface = Some("hide.me".to_string());
+    config.vpn_guard.enabled = true;
+    config.vpn_guard.mode = "block".to_string();
+
+    let bind_ip = config
+        .resolve_p2p_bind_ip_from_interfaces(&[iface("Ethernet", "192.0.2.10")])
+        .unwrap();
+
+    assert_eq!(bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+    assert!(!config.vpn_binding_confirmed(bind_ip, &[iface("Ethernet", "192.0.2.10")]));
+}
+
+#[test]
 fn p2p_bind_interface_requires_matching_ipv4_interface() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(temp.path().to_path_buf(), None);

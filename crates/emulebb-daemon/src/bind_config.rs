@@ -23,7 +23,13 @@ impl DaemonConfig {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)?;
+                if let Err(error) =
+                    ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)
+                {
+                    if !self.vpn_guard_blocks_p2p() {
+                        return Err(error);
+                    }
+                }
             }
             return Ok(candidate);
         }
@@ -45,6 +51,10 @@ impl DaemonConfig {
         interfaces: &[NetworkInterface],
     ) -> bool {
         binding_confirmed(bind_ip, self.p2p_bind_interface.as_deref(), interfaces)
+    }
+
+    fn vpn_guard_blocks_p2p(&self) -> bool {
+        self.vpn_guard.enabled && self.vpn_guard.mode.eq_ignore_ascii_case("block")
     }
 }
 
