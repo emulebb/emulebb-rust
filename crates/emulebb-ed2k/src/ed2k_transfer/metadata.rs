@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::MetadataTransferCounts;
+use emulebb_metadata::{MetadataTransferCounts, MetadataTransferPublishEntry};
 
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
@@ -20,6 +20,14 @@ impl Ed2kTransferRuntime {
     /// Return persisted transfer counts without hydrating every manifest.
     pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
         self.metadata.transfer_counts()
+    }
+
+    /// Return Kad publish inputs without hydrating every persisted manifest.
+    pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.completed_transfer_publish_entries())
+            .await
+            .map_err(anyhow::Error::from)?
     }
 
     /// Ensure a transfer manifest exists for the provided job.

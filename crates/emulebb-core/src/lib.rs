@@ -66,7 +66,7 @@ use emulebb_kad_proto::{
 use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
-use emulebb_metadata::{MetadataStore, MetadataTransferCounts};
+use emulebb_metadata::{MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry};
 use serde_json::json;
 use tokio::{
     net::TcpListener,
@@ -4236,11 +4236,11 @@ async fn publish_kad_due_shared_files(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
 ) -> Result<usize> {
-    let manifests = kad_publishable_manifests(runtime.transfer_runtime.manifests().await?);
+    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
     // Keep the per-file schedule from growing without bound: forget files that
     // are no longer publishable (removed / no longer complete).
-    schedule.retain_only(manifests.iter().map(|m| m.file_hash.as_str()));
-    if manifests.is_empty() {
+    schedule.retain_only(shared_files.iter().map(|entry| entry.file_hash.as_str()));
+    if shared_files.is_empty() {
         return Ok(0);
     }
 
@@ -4269,23 +4269,23 @@ async fn publish_kad_due_shared_files(
     // Our Kad node id is the notes publisher identity (master STORENOTES writes
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
-    let item_count = manifests.len();
+    let item_count = shared_files.len();
 
-    for manifest in manifests {
+    for entry in shared_files {
         let now = Instant::now();
-        let file_hash: Ed2kHash = manifest.file_hash.parse()?;
+        let file_hash: Ed2kHash = entry.file_hash.parse()?;
 
-        if schedule.keyword_due(&manifest.file_hash, now) {
-            let keyword_hash = keyword_target(&manifest.canonical_name);
+        if schedule.keyword_due(&entry.file_hash, now) {
+            let keyword_hash = keyword_target(&entry.canonical_name);
             let mut keyword_tags = vec![
-                Tag::filename(manifest.canonical_name.clone()),
-                Tag::filesize(manifest.file_size),
+                Tag::filename(entry.canonical_name.clone()),
+                Tag::filesize(entry.file_size),
                 Tag::sources(1),
             ];
-            if let Some(file_type) = ed2k_file_type_search_term(&manifest.canonical_name) {
+            if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
                 keyword_tags.push(Tag::filetype(file_type));
             }
-            let aich_hash = manifest
+            let aich_hash = entry
                 .aich_root
                 .as_deref()
                 .and_then(decode_aich_root_hex_for_publish);
@@ -4308,28 +4308,28 @@ async fn publish_kad_due_shared_files(
                     // gauge). No-op unless EMULEBB_RUST_LOG_DIR is set.
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Keyword,
-                        &manifest.file_hash,
+                        &entry.file_hash,
                         stats,
                     );
                     // Mark published only on a successful attempt, mirroring the
                     // master setting the next-publish time when the store search
                     // was actually started.
-                    schedule.mark_keyword_published(&manifest.file_hash, now);
+                    schedule.mark_keyword_published(&entry.file_hash, now);
                     keyword_published += 1;
                 }
                 Err(error) => {
                     tracing::debug!(
-                        file_hash = %manifest.file_hash,
-                        name = manifest.canonical_name,
+                        file_hash = %entry.file_hash,
+                        name = entry.canonical_name,
                         "Kad keyword publish failed: {error:#}"
                     );
                 }
             }
         }
 
-        if schedule.source_due(&manifest.file_hash, now) {
+        if schedule.source_due(&entry.file_hash, now) {
             let source_tags =
-                build_source_publish_tags(bind_addr, source_publish_settings, manifest.file_size);
+                build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
             match runtime
                 .dht
                 .publish_source_with_class_and_fanout(
@@ -4345,16 +4345,16 @@ async fn publish_kad_due_shared_files(
                     accumulate_publish_stats(&mut source_totals, stats);
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Source,
-                        &manifest.file_hash,
+                        &entry.file_hash,
                         stats,
                     );
-                    schedule.mark_source_published(&manifest.file_hash, now);
+                    schedule.mark_source_published(&entry.file_hash, now);
                     source_published += 1;
                 }
                 Err(error) => {
                     tracing::debug!(
-                        file_hash = %manifest.file_hash,
-                        name = manifest.canonical_name,
+                        file_hash = %entry.file_hash,
+                        name = entry.canonical_name,
                         "Kad source publish failed: {error:#}"
                     );
                 }
@@ -4365,25 +4365,25 @@ async fn publish_kad_due_shared_files(
         // user-set comment/rating, on the 24h notes interval (master
         // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
         // and source so an un-annotated file never emits a notes publish.
-        if kad_publish_schedule::file_has_publishable_note(&manifest.comment, manifest.rating)
-            && schedule.notes_due(&manifest.file_hash, now)
+        if kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
+            && schedule.notes_due(&entry.file_hash, now)
         {
             // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
             // DESCRIPTION (non-empty only), FILESIZE.
-            let mut notes_tags = vec![Tag::filename(manifest.canonical_name.clone())];
-            if manifest.rating > 0 {
+            let mut notes_tags = vec![Tag::filename(entry.canonical_name.clone())];
+            if entry.rating > 0 {
                 notes_tags.push(Tag::new_short(
                     emulebb_kad_proto::tag_name::FILERATING,
-                    emulebb_kad_proto::TagValue::UInt(u64::from(manifest.rating)),
+                    emulebb_kad_proto::TagValue::UInt(u64::from(entry.rating)),
                 ));
             }
-            if !manifest.comment.is_empty() {
+            if !entry.comment.is_empty() {
                 notes_tags.push(Tag::new_short(
                     emulebb_kad_proto::tag_name::DESCRIPTION,
-                    emulebb_kad_proto::TagValue::String(manifest.comment.clone()),
+                    emulebb_kad_proto::TagValue::String(entry.comment.clone()),
                 ));
             }
-            notes_tags.push(Tag::filesize(manifest.file_size));
+            notes_tags.push(Tag::filesize(entry.file_size));
             match runtime
                 .dht
                 .publish_notes_with_class_and_fanout(
@@ -4399,16 +4399,16 @@ async fn publish_kad_due_shared_files(
                     accumulate_publish_stats(&mut notes_totals, stats);
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Notes,
-                        &manifest.file_hash,
+                        &entry.file_hash,
                         stats,
                     );
-                    schedule.mark_notes_published(&manifest.file_hash, now);
+                    schedule.mark_notes_published(&entry.file_hash, now);
                     notes_published += 1;
                 }
                 Err(error) => {
                     tracing::debug!(
-                        file_hash = %manifest.file_hash,
-                        name = manifest.canonical_name,
+                        file_hash = %entry.file_hash,
+                        name = entry.canonical_name,
                         "Kad notes publish failed: {error:#}"
                     );
                 }
@@ -4444,11 +4444,19 @@ async fn publish_kad_due_shared_files(
     Ok(item_count)
 }
 
-fn kad_publishable_manifests(manifests: Vec<Ed2kResumeManifest>) -> Vec<Ed2kResumeManifest> {
-    manifests
-        .into_iter()
-        .filter(|manifest| manifest.completed && !manifest.transfer_row_removed)
-        .collect()
+async fn kad_publishable_shared_files(
+    runtime: &Ed2kTransferRuntime,
+) -> Result<Vec<MetadataTransferPublishEntry>> {
+    runtime
+        .publish_entries()
+        .await
+        .map(kad_publishable_shared_file_entries)
+}
+
+fn kad_publishable_shared_file_entries(
+    entries: Vec<MetadataTransferPublishEntry>,
+) -> Vec<MetadataTransferPublishEntry> {
+    entries
 }
 
 fn decode_aich_root_hex_for_publish(value: &str) -> Option<[u8; 20]> {
@@ -6772,29 +6780,24 @@ mod tests {
     }
 
     #[test]
-    fn kad_publishable_manifests_skip_incomplete_and_removed_rows() {
-        let mut shared = Ed2kResumeManifest::new(&new_transfer_job(
-            Ed2kHash::from_bytes([0x11; 16]),
-            "shared.bin".to_string(),
-            128,
-        ));
-        shared.completed = true;
-        let incomplete = Ed2kResumeManifest::new(&new_transfer_job(
-            Ed2kHash::from_bytes([0x22; 16]),
-            "incomplete.bin".to_string(),
-            128,
-        ));
-        let mut removed = Ed2kResumeManifest::new(&new_transfer_job(
-            Ed2kHash::from_bytes([0x33; 16]),
-            "removed.bin".to_string(),
-            128,
-        ));
-        removed.completed = true;
-        removed.transfer_row_removed = true;
+    fn kad_publishable_shared_files_keep_metadata_publish_entries() {
+        let shared = MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0x11; 16]).to_string(),
+            canonical_name: "shared.bin".to_string(),
+            file_size: 128,
+            aich_root: None,
+            comment: "synthetic note".to_string(),
+            rating: 4,
+        };
+        let other = MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0x22; 16]).to_string(),
+            canonical_name: "other.bin".to_string(),
+            ..shared.clone()
+        };
 
-        let publishable = kad_publishable_manifests(vec![incomplete, removed, shared.clone()]);
+        let publishable = kad_publishable_shared_file_entries(vec![shared.clone(), other.clone()]);
 
-        assert_eq!(publishable, vec![shared]);
+        assert_eq!(publishable, vec![shared, other]);
     }
 
     #[test]

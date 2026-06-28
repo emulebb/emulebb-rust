@@ -54,6 +54,16 @@ pub struct MetadataTransferCounts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferPublishEntry {
+    pub file_hash: String,
+    pub canonical_name: String,
+    pub file_size: u64,
+    pub aich_root: Option<String>,
+    pub comment: String,
+    pub rating: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,

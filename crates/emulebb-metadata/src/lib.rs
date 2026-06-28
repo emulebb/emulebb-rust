@@ -33,5 +33,6 @@ pub use store::MetadataStore;
 pub use text::normalize_search_text;
 pub use transfer_model::{
     MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
-    MetadataTransferPiece, MetadataTransferRange, MetadataTransferSource,
+    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+    MetadataTransferSource,
 };
