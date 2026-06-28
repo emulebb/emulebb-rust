@@ -4380,6 +4380,9 @@ const KAD_KEYWORD_PUBLISH_BUDGET: usize = 1;
 const KAD_KEYWORD_PUBLISH_FILE_LIMIT: usize = 150;
 const KAD_SOURCE_PUBLISH_BUDGET: usize = 1;
 const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
+const KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP: usize = 3;
+const KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP: usize = 4;
+const KAD_NOTES_PUBLISH_IN_FLIGHT_CAP: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KadSharedPublishKind {
     Keyword,
@@ -4413,6 +4416,51 @@ enum KadSharedPublishError {
     Failed(String),
 }
 
+#[derive(Debug, Default)]
+struct KadSharedPublishActiveCounts {
+    keyword: usize,
+    source: usize,
+    notes: usize,
+}
+
+impl KadSharedPublishActiveCounts {
+    fn count(&self, kind: KadSharedPublishKind) -> usize {
+        match kind {
+            KadSharedPublishKind::Keyword => self.keyword,
+            KadSharedPublishKind::Source => self.source,
+            KadSharedPublishKind::Notes => self.notes,
+        }
+    }
+
+    fn can_start(&self, kind: KadSharedPublishKind) -> bool {
+        self.count(kind) < kad_shared_publish_kind_cap(kind)
+    }
+
+    fn started(&mut self, kind: KadSharedPublishKind) {
+        match kind {
+            KadSharedPublishKind::Keyword => self.keyword += 1,
+            KadSharedPublishKind::Source => self.source += 1,
+            KadSharedPublishKind::Notes => self.notes += 1,
+        }
+    }
+
+    fn finished(&mut self, kind: KadSharedPublishKind) {
+        match kind {
+            KadSharedPublishKind::Keyword => self.keyword = self.keyword.saturating_sub(1),
+            KadSharedPublishKind::Source => self.source = self.source.saturating_sub(1),
+            KadSharedPublishKind::Notes => self.notes = self.notes.saturating_sub(1),
+        }
+    }
+}
+
+fn kad_shared_publish_kind_cap(kind: KadSharedPublishKind) -> usize {
+    match kind {
+        KadSharedPublishKind::Keyword => KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP,
+        KadSharedPublishKind::Source => KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP,
+        KadSharedPublishKind::Notes => KAD_NOTES_PUBLISH_IN_FLIGHT_CAP,
+    }
+}
+
 fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> usize {
     runtime.dht.max_concurrent_searches().max(1)
 }
@@ -4424,6 +4472,7 @@ async fn run_kad_shared_file_publish_loop(
     let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
     hydrate_kad_outbound_publish_schedule(&runtime.metadata_store, &mut schedule);
     let mut publish_tasks = JoinSet::new();
+    let mut active_counts = KadSharedPublishActiveCounts::default();
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
             let in_flight_budget = kad_shared_file_publish_in_flight_budget(&runtime);
@@ -4445,8 +4494,13 @@ async fn run_kad_shared_file_publish_loop(
             continue;
         }
 
-        if let Err(error) =
-            publish_kad_due_shared_files(&runtime, &mut schedule, &mut publish_tasks).await
+        if let Err(error) = publish_kad_due_shared_files(
+            &runtime,
+            &mut schedule,
+            &mut publish_tasks,
+            &mut active_counts,
+        )
+        .await
         {
             tracing::debug!("Kad shared-file publish cycle failed: {error:#}");
         }
@@ -4564,6 +4618,7 @@ async fn publish_kad_due_shared_files(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
+    active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
     let Some(shared_files) = kad_publishable_shared_files(&runtime.transfer_runtime).await? else {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -4698,6 +4753,7 @@ async fn publish_kad_due_shared_files(
         &mut keyword_published,
         &mut source_published,
         &mut notes_published,
+        active_counts,
     )
     .await;
     let mut available_publish_starts = runtime.dht.available_search_permits();
@@ -4821,6 +4877,7 @@ async fn publish_kad_due_shared_files(
             if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET
                 || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
+                || !active_counts.can_start(KadSharedPublishKind::Keyword)
             {
                 keyword_skipped_by_budget += 1;
             } else {
@@ -4849,6 +4906,7 @@ async fn publish_kad_due_shared_files(
                     let fanout = network.kad_publish_contact_fanout;
                     let started_at = now;
                     available_publish_starts = available_publish_starts.saturating_sub(1);
+                    active_counts.started(KadSharedPublishKind::Keyword);
                     publish_tasks.spawn(async move {
                         let result = dht
                             .publish_keyword_entries_with_class_and_fanout(
@@ -4881,6 +4939,7 @@ async fn publish_kad_due_shared_files(
             if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
                 || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
+                || !active_counts.can_start(KadSharedPublishKind::Source)
             {
                 source_skipped_by_budget += 1;
             } else {
@@ -4893,6 +4952,7 @@ async fn publish_kad_due_shared_files(
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
                 available_publish_starts = available_publish_starts.saturating_sub(1);
+                active_counts.started(KadSharedPublishKind::Source);
                 publish_tasks.spawn(async move {
                     let result = dht
                         .publish_source_with_class_and_fanout(
@@ -4927,6 +4987,7 @@ async fn publish_kad_due_shared_files(
             if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET
                 || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
+                || !active_counts.can_start(KadSharedPublishKind::Notes)
             {
                 notes_skipped_by_budget += 1;
             } else {
@@ -4953,6 +5014,7 @@ async fn publish_kad_due_shared_files(
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
                 available_publish_starts = available_publish_starts.saturating_sub(1);
+                active_counts.started(KadSharedPublishKind::Notes);
                 publish_tasks.spawn(async move {
                     let result = dht
                         .publish_notes_with_class_and_fanout(
@@ -5097,6 +5159,7 @@ async fn drain_completed_kad_publish_tasks(
     keyword_published: &mut usize,
     source_published: &mut usize,
     notes_published: &mut usize,
+    active_counts: &mut KadSharedPublishActiveCounts,
 ) {
     loop {
         let joined =
@@ -5113,6 +5176,7 @@ async fn drain_completed_kad_publish_tasks(
         };
         let elapsed_ms = outcome.started_at.elapsed().as_millis() as u64;
         let primary_file_hash = outcome.file_hashes.first().cloned().unwrap_or_default();
+        active_counts.finished(outcome.kind);
         match outcome.result {
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
@@ -8260,6 +8324,36 @@ mod tests {
                 .iter()
                 .all(|(_, entry)| entry.tags.iter().any(|tag| tag == &Tag::sources(1)))
         );
+    }
+
+    #[test]
+    fn kad_shared_publish_active_counts_follow_mfc_store_caps() {
+        let mut counts = KadSharedPublishActiveCounts::default();
+        assert_eq!(
+            kad_shared_publish_kind_cap(KadSharedPublishKind::Keyword),
+            KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP
+        );
+        assert_eq!(
+            kad_shared_publish_kind_cap(KadSharedPublishKind::Source),
+            KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP
+        );
+        assert_eq!(
+            kad_shared_publish_kind_cap(KadSharedPublishKind::Notes),
+            KAD_NOTES_PUBLISH_IN_FLIGHT_CAP
+        );
+
+        for _ in 0..KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP {
+            assert!(counts.can_start(KadSharedPublishKind::Keyword));
+            counts.started(KadSharedPublishKind::Keyword);
+        }
+        assert!(!counts.can_start(KadSharedPublishKind::Keyword));
+        counts.finished(KadSharedPublishKind::Keyword);
+        assert!(counts.can_start(KadSharedPublishKind::Keyword));
+
+        counts.started(KadSharedPublishKind::Notes);
+        assert!(!counts.can_start(KadSharedPublishKind::Notes));
+        counts.finished(KadSharedPublishKind::Notes);
+        assert!(counts.can_start(KadSharedPublishKind::Notes));
     }
 
     #[test]
