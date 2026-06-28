@@ -32,6 +32,10 @@ pub const KK: usize = 5;
 
 pub const SEARCH_TIMEOUT_SECS: u64 = 45;
 pub const STORE_TIMEOUT_SECS: u64 = 140;
+/// Target store answers for STOREKEYWORD/STOREFILE/STORENOTES searches.
+///
+/// Mirrors MFC `SEARCHSTORE*_TOTAL`; this is distinct from active store caps.
+pub const STORE_PUBLISH_TARGET_CONTACTS: usize = 10;
 pub const REPUBLISH_INTERVAL_SECS: u64 = 18_000;
 
 /// Contacts to request in Req for value lookups (Keyword/Source/Notes/File).

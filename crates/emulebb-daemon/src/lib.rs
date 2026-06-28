@@ -24,6 +24,9 @@ pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard_monitor;
 
+/// MFC `SEARCHSTORE*_TOTAL`: target STORE responses for keyword/source/notes publishes.
+const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DaemonConfig {
@@ -162,7 +165,7 @@ impl Default for KadListenerConfig {
             local_store_notes_per_file_capacity: 150,
             publish_shared_files_enabled: true,
             republish_interval_secs: 1_800,
-            publish_contact_fanout: 4,
+            publish_contact_fanout: DEFAULT_KAD_PUBLISH_CONTACT_FANOUT,
             hello_intro_interval_secs: 300,
             hello_intro_fanout: 2,
             udp_firewall_check_enabled: true,

@@ -1,5 +1,5 @@
 use emulebb_kad_net::RpcClassBudgetConfig;
-use emulebb_kad_proto::NodeId;
+use emulebb_kad_proto::{NodeId, constants::STORE_PUBLISH_TARGET_CONTACTS};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -61,7 +61,7 @@ impl Default for DhtConfig {
             search_timeout: Duration::from_secs(45),
             store_timeout: Duration::from_secs(140),
             republish_interval: Duration::from_secs(18000),
-            publish_contact_fanout: 4,
+            publish_contact_fanout: STORE_PUBLISH_TARGET_CONTACTS,
             max_outbound_pps: 8,
             class_budgets: RpcClassBudgetConfig::default(),
             search_phase2_fanout: 50,

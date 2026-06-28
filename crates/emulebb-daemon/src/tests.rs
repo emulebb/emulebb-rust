@@ -450,7 +450,7 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
     assert_eq!(network.kad_bootstrap_min_routing_contacts, 10);
     assert!(network.kad_publish_shared_files);
     assert_eq!(network.kad_republish_interval_secs, 1_800);
-    assert_eq!(network.kad_publish_contact_fanout, 4);
+    assert_eq!(network.kad_publish_contact_fanout, 10);
     assert_eq!(network.kad_hello_intro_interval_secs, 300);
     assert_eq!(network.kad_hello_intro_fanout, 2);
     // Default source TTL mirrors the master inbound source entry lifetime =
