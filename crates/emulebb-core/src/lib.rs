@@ -54,7 +54,9 @@ use emulebb_index::{
 };
 #[cfg(test)]
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
-use emulebb_kad_dht::{DhtConfig, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass};
+use emulebb_kad_dht::{
+    DhtConfig, DhtError, DhtNode, PublishAttemptStats, ReceivedKadPacket, RpcWorkClass,
+};
 #[cfg(test)]
 use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
 #[cfg(test)]
@@ -4401,6 +4403,8 @@ struct KadSharedPublishOutcome {
 
 #[derive(Debug)]
 enum KadSharedPublishError {
+    Busy,
+    TimedOut,
     Failed(String),
 }
 
@@ -4806,6 +4810,8 @@ async fn publish_kad_due_shared_files(
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
+                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
+                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
                             Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
@@ -4844,6 +4850,8 @@ async fn publish_kad_due_shared_files(
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
+                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
+                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
                             Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
@@ -4900,6 +4908,8 @@ async fn publish_kad_due_shared_files(
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
+                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
+                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
                             Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
@@ -5043,6 +5053,7 @@ async fn drain_completed_kad_publish_tasks(
         match outcome.result {
             Ok(stats) => match outcome.kind {
                 KadSharedPublishKind::Keyword => {
+                    record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(keyword_totals, stats);
                     let keyword = outcome.keyword.as_deref().unwrap_or_default();
                     schedule.mark_keyword_published(
@@ -5065,6 +5076,7 @@ async fn drain_completed_kad_publish_tasks(
                     *keyword_published += 1;
                 }
                 KadSharedPublishKind::Source => {
+                    record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(source_totals, stats);
                     schedule.mark_source_published(&outcome.file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
@@ -5082,6 +5094,7 @@ async fn drain_completed_kad_publish_tasks(
                     *source_published += 1;
                 }
                 KadSharedPublishKind::Notes => {
+                    record_kad_publish_completion(runtime, outcome.kind);
                     accumulate_publish_stats(notes_totals, stats);
                     schedule.mark_notes_published(&outcome.file_hash, outcome.started_at);
                     persist_kad_outbound_publish(
@@ -5099,7 +5112,26 @@ async fn drain_completed_kad_publish_tasks(
                     *notes_published += 1;
                 }
             },
+            Err(KadSharedPublishError::Busy) => {
+                record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Busy);
+                tracing::debug!(
+                    file_hash = %outcome.file_hash,
+                    kind = outcome.kind.label(),
+                    elapsed_ms,
+                    "Kad shared-file publish skipped: DHT search capacity busy"
+                );
+            }
+            Err(KadSharedPublishError::TimedOut) => {
+                record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::TimedOut);
+                tracing::debug!(
+                    file_hash = %outcome.file_hash,
+                    kind = outcome.kind.label(),
+                    elapsed_ms,
+                    "Kad shared-file publish attempt timed out"
+                );
+            }
             Err(KadSharedPublishError::Failed(error)) => {
+                record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Other);
                 tracing::debug!(
                     file_hash = %outcome.file_hash,
                     kind = outcome.kind.label(),
@@ -5109,6 +5141,49 @@ async fn drain_completed_kad_publish_tasks(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KadPublishFailureClass {
+    Busy,
+    TimedOut,
+    Other,
+}
+
+fn record_kad_publish_completion(runtime: &KadPublishLoopRuntime, _kind: KadSharedPublishKind) {
+    kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+        diagnostics.completed_count = diagnostics.completed_count.saturating_add(1);
+    });
+}
+
+fn record_kad_publish_failure(
+    runtime: &KadPublishLoopRuntime,
+    kind: KadSharedPublishKind,
+    failure_class: KadPublishFailureClass,
+) {
+    kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+        diagnostics.failed_count = diagnostics.failed_count.saturating_add(1);
+        match failure_class {
+            KadPublishFailureClass::Busy => {
+                diagnostics.busy_count = diagnostics.busy_count.saturating_add(1);
+            }
+            KadPublishFailureClass::TimedOut => {
+                diagnostics.timed_out_count = diagnostics.timed_out_count.saturating_add(1);
+            }
+            KadPublishFailureClass::Other => {}
+        }
+        match kind {
+            KadSharedPublishKind::Keyword => {
+                diagnostics.keyword_failed = diagnostics.keyword_failed.saturating_add(1);
+            }
+            KadSharedPublishKind::Source => {
+                diagnostics.source_failed = diagnostics.source_failed.saturating_add(1);
+            }
+            KadSharedPublishKind::Notes => {
+                diagnostics.notes_failed = diagnostics.notes_failed.saturating_add(1);
+            }
+        }
+    });
 }
 
 async fn kad_publishable_shared_files(
