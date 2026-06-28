@@ -298,6 +298,16 @@ struct EncodedOfferFilesPayload {
     total_entries: usize,
 }
 
+/// Path-free summary of one `OP_OFFERFILES` advertisement batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OfferFilesPublishStats {
+    pub entries_sent: usize,
+    pub total_entries: usize,
+    pub next_cursor: usize,
+    pub wrapped: bool,
+    pub skipped_duplicate_batch: bool,
+}
+
 fn offered_files_catalog_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
@@ -349,6 +359,15 @@ fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8)]) -> u
     hasher.finish()
 }
 
+fn offer_files_cursor_wrapped(
+    total_entries: usize,
+    current_cursor: usize,
+    next_cursor: usize,
+) -> bool {
+    total_entries <= MAX_OFFER_FILES_PER_ADVERTISEMENT
+        || next_cursor <= (current_cursor % total_entries.max(1))
+}
+
 fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<([u8; 16], String, u64, u8)> {
     let file_hash = hash.parsed_hash().ok()?;
     Some((
@@ -397,21 +416,30 @@ pub(super) async fn send_offer_files_advertisement(
     shared_catalog: &Ed2kSharedCatalog,
     bind_ip: Ipv4Addr,
     tcp_port: u16,
-) -> Result<()> {
+) -> Result<OfferFilesPublishStats> {
     let shared_catalog = shared_catalog.read().await.clone();
+    let current_cursor = session.offer_files_catalog_cursor;
     let encoded = encode_offer_files_payload_at_cursor(
         &shared_catalog,
-        session.offer_files_catalog_cursor,
+        current_cursor,
         session.assigned_client_id,
         bind_ip,
         tcp_port,
         session.server_flags,
     );
+    let wrapped =
+        offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
     let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
     if session.offer_files_sent
         && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
     {
-        return Ok(());
+        return Ok(OfferFilesPublishStats {
+            entries_sent: encoded.entries.len(),
+            total_entries: encoded.total_entries,
+            next_cursor: encoded.next_cursor,
+            wrapped,
+            skipped_duplicate_batch: true,
+        });
     }
     let was_sent = session.offer_files_sent;
     session.send_packet(OP_OFFERFILES, &encoded.payload).await?;
@@ -433,7 +461,13 @@ pub(super) async fn send_offer_files_advertisement(
         if was_sent { "refreshed" } else { "sent" },
         session.endpoint
     );
-    Ok(())
+    Ok(OfferFilesPublishStats {
+        entries_sent: encoded.entries.len(),
+        total_entries: encoded.total_entries,
+        next_cursor: encoded.next_cursor,
+        wrapped,
+        skipped_duplicate_batch: false,
+    })
 }
 
 pub(super) async fn send_connected_server_startup(
@@ -446,7 +480,7 @@ pub(super) async fn send_connected_server_startup(
         ServerSessionPhase::Connected,
         "server session accepted after OP_IDCHANGE",
     );
-    send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
+    let _ = send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
     send_server_list_request(session).await?;
     Ok(())
 }
@@ -601,6 +635,21 @@ mod tests {
         assert_eq!(first.next_cursor, 200);
         assert_eq!(second.next_cursor, 400);
         assert_eq!(third.next_cursor, 150);
+        assert!(!offer_files_cursor_wrapped(
+            first.total_entries,
+            0,
+            first.next_cursor
+        ));
+        assert!(!offer_files_cursor_wrapped(
+            second.total_entries,
+            first.next_cursor,
+            second.next_cursor
+        ));
+        assert!(offer_files_cursor_wrapped(
+            third.total_entries,
+            second.next_cursor,
+            third.next_cursor
+        ));
         assert_ne!(first.entries[0].0, second.entries[0].0);
         assert_ne!(second.entries[0].0, third.entries[0].0);
         assert_eq!(

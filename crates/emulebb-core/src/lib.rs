@@ -26,11 +26,12 @@ use emulebb_ed2k::{
     config::Ed2kConfig,
     ed2k_server::{
         Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, SearchCriteria,
-        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_via_background_session,
-        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
-        search_source_udp_server_batches, search_source_via_background_session,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
+        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
+        parse_server_met, publish_shared_catalog_via_background_session,
+        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_udp_servers,
+        search_keyword_via_background_session, search_source_udp_server_batches,
+        search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -264,7 +265,7 @@ struct Ed2kRuntime {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Ed2kSharedCatalogPublishOutcome {
-    Published,
+    Published(OfferFilesPublishStats),
     NoNetwork,
     NotConnected,
 }
@@ -3944,9 +3945,13 @@ impl EmulebbCore {
             return Ok(Ed2kSharedCatalogPublishOutcome::NotConnected);
         }
         let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
-        publish_shared_catalog_via_background_session(&handle, timeout, &CancellationToken::new())
-            .await?;
-        Ok(Ed2kSharedCatalogPublishOutcome::Published)
+        let stats = publish_shared_catalog_via_background_session(
+            &handle,
+            timeout,
+            &CancellationToken::new(),
+        )
+        .await?;
+        Ok(Ed2kSharedCatalogPublishOutcome::Published(stats))
     }
 
     fn queue_ed2k_shared_catalog_publish(&self) {
@@ -3986,8 +3991,20 @@ impl EmulebbCore {
             self.shared_catalog_publish_dirty
                 .store(false, Ordering::Release);
             match self.publish_ed2k_shared_catalog().await {
-                Ok(Ed2kSharedCatalogPublishOutcome::Published) => {
+                Ok(Ed2kSharedCatalogPublishOutcome::Published(stats)) => {
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                    tracing::debug!(
+                        entries_sent = stats.entries_sent,
+                        total_entries = stats.total_entries,
+                        next_cursor = stats.next_cursor,
+                        wrapped = stats.wrapped,
+                        skipped_duplicate_batch = stats.skipped_duplicate_batch,
+                        "refreshed ED2K shared catalog advertisement"
+                    );
+                    if !stats.wrapped && !stats.skipped_duplicate_batch {
+                        self.shared_catalog_publish_dirty
+                            .store(true, Ordering::Release);
+                    }
                 }
                 Ok(Ed2kSharedCatalogPublishOutcome::NoNetwork) => {}
                 Ok(Ed2kSharedCatalogPublishOutcome::NotConnected) => {

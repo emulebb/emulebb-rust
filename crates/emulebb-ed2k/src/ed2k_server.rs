@@ -99,6 +99,7 @@ use session_driver::{clear_server_connection_state, run_one_server_session};
 use source_utils::{
     annotate_found_sources_server, ipv4_from_client_id, merge_found_sources, validate_found_sources,
 };
+pub use startup::OfferFilesPublishStats;
 use startup::{
     Ed2kUdpSourceRequestTarget, encode_login_request, encode_source_request,
     encode_udp_search_request, encode_udp_source_request_batch,

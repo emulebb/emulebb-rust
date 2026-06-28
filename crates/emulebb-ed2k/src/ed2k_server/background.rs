@@ -16,18 +16,19 @@ use emulebb_kad_proto::Ed2kHash;
 
 use super::{
     Ed2kFoundSource, Ed2kSearchFile, Ed2kServerState, OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES,
-    OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, ResolvedServerEntry, SearchCriteria,
-    ServerSession, ServerSessionPhase, ServerUdpPacket, decode_udp_found_source_sets,
-    decode_udp_search_result_pages, encode_search_request_with_criteria, encode_source_request,
-    merge_found_sources, send_offer_files_advertisement, source_request_opcode,
-    validate_found_sources, wait_for_offer_files_settle,
+    OP_GLOBSEARCHRES, OP_GLOBSERVSTATRES, OP_SEARCHREQUEST, OfferFilesPublishStats,
+    ResolvedServerEntry, SearchCriteria, ServerSession, ServerSessionPhase, ServerUdpPacket,
+    decode_udp_found_source_sets, decode_udp_search_result_pages,
+    encode_search_request_with_criteria, encode_source_request, merge_found_sources,
+    send_offer_files_advertisement, source_request_opcode, validate_found_sources,
+    wait_for_offer_files_settle,
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
 type BackgroundKeywordSearchResponse = std::result::Result<Vec<Ed2kSearchFile>, String>;
 type BackgroundSourceSearchResponse = std::result::Result<Vec<Ed2kFoundSource>, String>;
 type BackgroundCallbackRequestResponse = std::result::Result<(), String>;
-type BackgroundPublishResponse = std::result::Result<(), String>;
+type BackgroundPublishResponse = std::result::Result<OfferFilesPublishStats, String>;
 
 /// Handle used by active jobs to execute a keyword search through the
 /// long-lived ED2K background session.
@@ -202,7 +203,7 @@ pub async fn publish_shared_catalog_via_background_session(
     handle: &Ed2kServerSearchHandle,
     timeout: Duration,
     cancel: &CancellationToken,
-) -> Result<()> {
+) -> Result<OfferFilesPublishStats> {
     let (response, receive_response) = oneshot::channel();
     handle
         .sender
@@ -211,7 +212,11 @@ pub async fn publish_shared_catalog_via_background_session(
         .context("ED2K background publish channel is closed")?;
 
     tokio::select! {
-        _ = cancel.cancelled() => Ok(()),
+        _ = cancel.cancelled() => Ok(OfferFilesPublishStats {
+            wrapped: true,
+            skipped_duplicate_batch: true,
+            ..OfferFilesPublishStats::default()
+        }),
         result = tokio::time::timeout(timeout, receive_response) => {
             let response = result
                 .with_context(|| format!("timed out waiting for ED2K background publish response after {timeout:?}"))?
@@ -480,14 +485,14 @@ pub(super) async fn start_background_server_search(
             Ok(None)
         }
         BackgroundServerSearchRequest::Publish { response } => {
-            send_offer_files_advertisement(
+            let stats = send_offer_files_advertisement(
                 session,
                 context.shared_catalog,
                 context.bind_ip,
                 context.tcp_port,
             )
             .await?;
-            let _ = response.send(Ok(()));
+            let _ = response.send(Ok(stats));
             Ok(None)
         }
     }
