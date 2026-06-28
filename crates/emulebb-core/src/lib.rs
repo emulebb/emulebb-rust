@@ -66,7 +66,9 @@ use emulebb_kad_proto::{
 use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
-use emulebb_metadata::{MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry};
+use emulebb_metadata::{
+    MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
+};
 use serde_json::json;
 use tokio::{
     net::TcpListener,
@@ -1651,31 +1653,51 @@ impl EmulebbCore {
         match self.ed2k_transfers.share_entries().await {
             Ok(entries) => entries
                 .into_iter()
-                .map(|entry| LocalShare {
-                    hash: entry.file_hash.clone(),
-                    name: entry.canonical_name.clone(),
-                    size_bytes: entry.file_size,
-                    part_count: entry.part_count,
-                    ed2k_link: format!(
-                        "ed2k://|file|{}|{}|{}|/",
-                        entry.canonical_name, entry.file_size, entry.file_hash
-                    ),
-                    aich_root: entry.aich_root.clone().unwrap_or_default(),
-                    transfer_dir: self
-                        .ed2k_transfers
-                        .transfer_dir_path(&entry.file_hash)
-                        .display()
-                        .to_string(),
-                    priority: entry.upload_priority.clone(),
-                    auto_upload_priority: entry.auto_upload_priority,
-                    comment: entry.comment.clone(),
-                    rating: entry.rating,
-                })
+                .map(|entry| self.local_share_from_entry(entry))
                 .collect(),
             Err(error) => {
                 tracing::warn!("failed to enumerate ED2K shared-file summaries: {error}");
                 Vec::new()
             }
+        }
+    }
+
+    pub async fn shares_page(&self, offset: usize, limit: usize) -> (Vec<LocalShare>, usize) {
+        match self.ed2k_transfers.share_entries_page(offset, limit).await {
+            Ok((entries, total)) => (
+                entries
+                    .into_iter()
+                    .map(|entry| self.local_share_from_entry(entry))
+                    .collect(),
+                total,
+            ),
+            Err(error) => {
+                tracing::warn!("failed to enumerate ED2K shared-file summary page: {error}");
+                (Vec::new(), 0)
+            }
+        }
+    }
+
+    fn local_share_from_entry(&self, entry: MetadataTransferShareEntry) -> LocalShare {
+        LocalShare {
+            hash: entry.file_hash.clone(),
+            name: entry.canonical_name.clone(),
+            size_bytes: entry.file_size,
+            part_count: entry.part_count,
+            ed2k_link: format!(
+                "ed2k://|file|{}|{}|{}|/",
+                entry.canonical_name, entry.file_size, entry.file_hash
+            ),
+            aich_root: entry.aich_root.clone().unwrap_or_default(),
+            transfer_dir: self
+                .ed2k_transfers
+                .transfer_dir_path(&entry.file_hash)
+                .display()
+                .to_string(),
+            priority: entry.upload_priority.clone(),
+            auto_upload_priority: entry.auto_upload_priority,
+            comment: entry.comment.clone(),
+            rating: entry.rating,
         }
     }
 

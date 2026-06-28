@@ -443,6 +443,64 @@ impl super::MetadataStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn completed_transfer_share_entries_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
+        let conn = self.connection()?;
+        let total = conn.query_row(
+            r#"
+            SELECT count(*)
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            "#,
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                   known_files.size_bytes, coalesce(known_files.part_count, 0),
+                   CASE
+                       WHEN known_files.aich_root IS NULL THEN NULL
+                       ELSE lower(hex(known_files.aich_root))
+                   END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.comment, known_files.rating
+            FROM known_files
+            JOIN transfers ON transfers.known_file_id = known_files.id
+            WHERE known_files.completed != 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM unshared_files
+                  WHERE unshared_files.known_file_id = known_files.id
+              )
+            ORDER BY known_files.ed2k_hash
+            LIMIT ?1 OFFSET ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(MetadataTransferShareEntry {
+                file_hash: row.get(0)?,
+                canonical_name: row.get(1)?,
+                file_size: row.get::<_, i64>(2)? as u64,
+                part_count: row.get::<_, i64>(3)? as u32,
+                aich_root: row.get(4)?,
+                upload_priority: row.get(5)?,
+                auto_upload_priority: row.get::<_, i64>(6)? != 0,
+                comment: row.get(7)?,
+                rating: row.get::<_, i64>(8)? as u8,
+            })
+        })?;
+        let entries = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok((entries, total))
+    }
+
     pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;

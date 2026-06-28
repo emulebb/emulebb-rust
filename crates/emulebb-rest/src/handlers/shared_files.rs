@@ -24,14 +24,19 @@ pub(crate) async fn shared_files(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    let items = state
-        .core
-        .shares()
-        .await
-        .iter()
-        .map(shared_file_response)
-        .collect::<Vec<_>>();
-    api_collection_page(items, query).into_response()
+    let (offset, limit) = match resolve_page_bounds(query.offset, query.limit) {
+        Ok(bounds) => bounds,
+        Err(response) => return *response,
+    };
+    let (shares, total) = state.core.shares_page(offset, limit).await;
+    let items = shares.iter().map(shared_file_response).collect::<Vec<_>>();
+    api_ok(json!({
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit
+    }))
+    .into_response()
 }
 
 pub(crate) async fn create_shared_file(

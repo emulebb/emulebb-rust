@@ -45,6 +45,20 @@ impl Ed2kTransferRuntime {
             .map_err(anyhow::Error::from)?
     }
 
+    /// Return one REST shared-file summary page without hydrating every manifest.
+    pub async fn share_entries_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<MetadataTransferShareEntry>, usize)> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.completed_transfer_share_entries_page(offset, limit)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
+    }
+
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
         let _guard = self.manifest_io.lock().await;
