@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
+use emulebb_metadata::MetadataTransferCounts;
 
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
@@ -16,6 +17,11 @@ use super::{
 };
 
 impl Ed2kTransferRuntime {
+    /// Return persisted transfer counts without hydrating every manifest.
+    pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
+        self.metadata.transfer_counts()
+    }
+
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
         let _guard = self.manifest_io.lock().await;

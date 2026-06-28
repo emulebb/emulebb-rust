@@ -4,8 +4,8 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     transfer_model::{
-        MetadataTransferCatalogEntry, MetadataTransferManifest, MetadataTransferPiece,
-        MetadataTransferRange, MetadataTransferSource,
+        MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
+        MetadataTransferPiece, MetadataTransferRange, MetadataTransferSource,
     },
 };
 
@@ -352,6 +352,34 @@ impl super::MetadataStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {
+        let conn = self.connection()?;
+        conn.query_row(
+            r#"
+            SELECT count(*),
+                   coalesce(sum(CASE
+                       WHEN known_files.completed = 0
+                            AND transfers.control_state IS NULL
+                            AND transfers.visible_state IN ('downloading', 'queued')
+                       THEN 1 ELSE 0 END), 0),
+                   coalesce(sum(CASE
+                       WHEN known_files.completed != 0 THEN 1 ELSE 0 END), 0)
+            FROM transfers
+            JOIN known_files ON known_files.id = transfers.known_file_id
+            WHERE transfers.removed_at_ms IS NULL
+            "#,
+            [],
+            |row| {
+                Ok(MetadataTransferCounts {
+                    total: row.get::<_, i64>(0)? as usize,
+                    active: row.get::<_, i64>(1)? as usize,
+                    completed: row.get::<_, i64>(2)? as usize,
+                })
+            },
+        )
+        .map_err(Into::into)
     }
 
     pub fn delete_transfer_manifest(&self, file_hash: &str) -> Result<bool> {

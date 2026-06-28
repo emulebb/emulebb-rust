@@ -46,6 +46,13 @@ pub struct MetadataTransferCatalogEntry {
     pub aich_root: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataTransferCounts {
+    pub active: usize,
+    pub completed: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,

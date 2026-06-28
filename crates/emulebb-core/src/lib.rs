@@ -66,7 +66,7 @@ use emulebb_kad_proto::{
 use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
-use emulebb_metadata::MetadataStore;
+use emulebb_metadata::{MetadataStore, MetadataTransferCounts};
 use serde_json::json;
 use tokio::{
     net::TcpListener,
@@ -551,21 +551,27 @@ impl EmulebbCore {
     }
 
     pub async fn status(&self) -> Status {
-        if let Err(error) = self.refresh_transfers_from_manifests().await {
-            tracing::warn!("failed to refresh ED2K transfers from manifests: {error}");
-        }
+        let transfer_counts = self.ed2k_transfers.transfer_counts();
         let state = self.state.lock().await;
-        let total = state.transfers.len();
-        let mut active = 0;
-        let mut completed = 0;
-        for transfer in state.transfers.values() {
-            match transfer.state.as_str() {
-                "downloading" | "queued" => active += 1,
-                "completed" => completed += 1,
-                _ => {}
-            }
-        }
         let kad_running = state.kad_running;
+        let transfer_counts = transfer_counts.unwrap_or_else(|error| {
+            tracing::warn!("failed to read persisted ED2K transfer counts: {error}");
+            let total = state.transfers.len();
+            let mut active = 0;
+            let mut completed = 0;
+            for transfer in state.transfers.values() {
+                match transfer.state.as_str() {
+                    "downloading" | "queued" => active += 1,
+                    "completed" => completed += 1,
+                    _ => {}
+                }
+            }
+            MetadataTransferCounts {
+                active,
+                completed,
+                total,
+            }
+        });
         drop(state);
 
         Status {
@@ -580,9 +586,9 @@ impl EmulebbCore {
                 backend: "sqlite-fts5".to_string(),
             },
             transfers: TransferStats {
-                active,
-                completed,
-                total,
+                active: transfer_counts.active,
+                completed: transfer_counts.completed,
+                total: transfer_counts.total,
             },
         }
     }

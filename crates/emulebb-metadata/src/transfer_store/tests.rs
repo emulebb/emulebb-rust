@@ -68,6 +68,14 @@ fn transfer_manifest_roundtrips_sql_tables() {
             aich_root: manifest.aich_root.clone(),
         }]
     );
+    assert_eq!(
+        store.transfer_counts().unwrap(),
+        MetadataTransferCounts {
+            active: 0,
+            completed: 1,
+            total: 1,
+        }
+    );
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
 }
 
