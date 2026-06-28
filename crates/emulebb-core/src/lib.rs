@@ -3893,7 +3893,9 @@ impl EmulebbCore {
         &self,
     ) -> (Option<String>, Option<String>, ServerLiveDetails) {
         let server_state = {
-            let runtime_guard = self.ed2k_runtime.lock().await;
+            let Ok(runtime_guard) = self.ed2k_runtime.try_lock() else {
+                return (None, None, ServerLiveDetails::default());
+            };
             let Some(runtime) = runtime_guard.as_ref() else {
                 return (None, None, ServerLiveDetails::default());
             };
@@ -3914,24 +3916,11 @@ impl EmulebbCore {
 
     async fn ed2k_status(&self) -> NetworkStatus {
         let server_state = {
-            let runtime_guard = self.ed2k_runtime.lock().await;
+            let Ok(runtime_guard) = self.ed2k_runtime.try_lock() else {
+                return ed2k_starting_status();
+            };
             let Some(runtime) = runtime_guard.as_ref() else {
-                return NetworkStatus {
-                    running: false,
-                    connected: false,
-                    peer_count: 0,
-                    firewalled: None,
-                    bootstrapping: None,
-                    bootstrap_progress: None,
-                    contact_count: None,
-                    lan_mode: None,
-                    users: None,
-                    files: None,
-                    indexed_sources: None,
-                    indexed_keywords: None,
-                    operation_queued: None,
-                    already_running: None,
-                };
+                return ed2k_stopped_status();
             };
             Arc::clone(&runtime.server_state)
         };
@@ -3956,7 +3945,9 @@ impl EmulebbCore {
 
     async fn kad_status(&self, manual_running: bool) -> NetworkStatus {
         let runtime_snapshot = {
-            let runtime_guard = self.ed2k_runtime.lock().await;
+            let Ok(runtime_guard) = self.ed2k_runtime.try_lock() else {
+                return kad_starting_status(manual_running);
+            };
             runtime_guard
                 .as_ref()
                 .map(|runtime| (runtime.dht.clone(), Arc::clone(&runtime.kad_firewall)))
@@ -4007,6 +3998,52 @@ impl EmulebbCore {
             already_running: None,
         }
     }
+}
+
+fn ed2k_stopped_status() -> NetworkStatus {
+    NetworkStatus {
+        running: false,
+        connected: false,
+        peer_count: 0,
+        firewalled: None,
+        bootstrapping: None,
+        bootstrap_progress: None,
+        contact_count: None,
+        lan_mode: None,
+        users: None,
+        files: None,
+        indexed_sources: None,
+        indexed_keywords: None,
+        operation_queued: None,
+        already_running: None,
+    }
+}
+
+fn ed2k_starting_status() -> NetworkStatus {
+    NetworkStatus {
+        running: true,
+        connected: false,
+        peer_count: 0,
+        firewalled: None,
+        bootstrapping: Some(true),
+        bootstrap_progress: Some(0),
+        contact_count: None,
+        lan_mode: None,
+        users: None,
+        files: None,
+        indexed_sources: None,
+        indexed_keywords: None,
+        operation_queued: Some(true),
+        already_running: None,
+    }
+}
+
+fn kad_starting_status(manual_running: bool) -> NetworkStatus {
+    let mut status = kad_status_from_running(manual_running);
+    if manual_running {
+        status.operation_queued = Some(true);
+    }
+    status
 }
 
 impl fmt::Debug for EmulebbCore {
