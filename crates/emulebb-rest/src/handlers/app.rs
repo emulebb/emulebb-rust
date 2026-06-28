@@ -146,16 +146,14 @@ pub(crate) async fn snapshot(
         network.as_ref(),
         &state.core.vpn_guard_status(),
     );
-    let shared_files = bounded(
-        state
-            .core
-            .shares()
-            .await
-            .iter()
-            .map(shared_file_response)
-            .collect::<Vec<_>>(),
-        limit,
-    );
+    let shared_files = state
+        .core
+        .shares_page(0, limit)
+        .await
+        .0
+        .iter()
+        .map(shared_file_response)
+        .collect::<Vec<_>>();
     api_ok(json!({
         "app": app_info_response(state.core.app_info()),
         "status": status,
