@@ -3,6 +3,7 @@ use crate::error::DhtError;
 use crate::node::concurrency::SearchAcquireError;
 use emulebb_kad_net::RpcWorkClass;
 use emulebb_kad_proto::{Ed2kHash, NodeId, Tag};
+use tokio::time;
 
 impl DhtNode {
     /// Publish a keyword -> file mapping.
@@ -39,7 +40,7 @@ impl DhtNode {
         let _permit = self
             .try_acquire_search_permit(keyword_hash)
             .map_err(search_acquire_error_to_dht_error)?;
-        crate::publish::publish_keyword(
+        let result = crate::publish::publish_keyword(
             &self.inner.rpc,
             &self.inner.routing_table,
             crate::publish::KeywordPublishRequest {
@@ -52,8 +53,11 @@ impl DhtNode {
             },
             self.ip_filter(),
             Some(self.res_contact_sink()),
-        )
-        .await
+        );
+        match time::timeout(self.inner.config.store_timeout, result).await {
+            Ok(result) => result,
+            Err(_) => Err(DhtError::SearchTimeout),
+        }
     }
 
     /// Publish source availability for a file.
@@ -87,7 +91,7 @@ impl DhtNode {
         let _permit = self
             .try_acquire_search_permit(target)
             .map_err(search_acquire_error_to_dht_error)?;
-        crate::publish::publish_source(
+        let result = crate::publish::publish_source(
             &self.inner.rpc,
             &self.inner.routing_table,
             publisher_id,
@@ -97,8 +101,11 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
-        )
-        .await
+        );
+        match time::timeout(self.inner.config.store_timeout, result).await {
+            Ok(result) => result,
+            Err(_) => Err(DhtError::SearchTimeout),
+        }
     }
 
     /// Publish a note/rating for a file.
@@ -135,7 +142,7 @@ impl DhtNode {
         let _permit = self
             .try_acquire_search_permit(target)
             .map_err(search_acquire_error_to_dht_error)?;
-        crate::publish::publish_notes(
+        let result = crate::publish::publish_notes(
             &self.inner.rpc,
             &self.inner.routing_table,
             file_hash,
@@ -145,8 +152,11 @@ impl DhtNode {
             work_class,
             self.ip_filter(),
             Some(self.res_contact_sink()),
-        )
-        .await
+        );
+        match time::timeout(self.inner.config.store_timeout, result).await {
+            Ok(result) => result,
+            Err(_) => Err(DhtError::SearchTimeout),
+        }
     }
 }
 
