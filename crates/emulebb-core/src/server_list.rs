@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use emulebb_ed2k::config::Ed2kConfig;
+use emulebb_ed2k::config::{Ed2kConfig, Ed2kServerEntry};
 
 use super::{
     EmulebbCore, ServerInfo, parse_server_endpoint,
@@ -106,9 +106,23 @@ impl EmulebbCore {
                 .iter()
                 .any(|existing| existing.eq_ignore_ascii_case(endpoint));
             if !exists {
-                config
-                    .server_endpoints
-                    .push(format!("{}:{}", server.address, server.port));
+                // Carry the full server record (incl. the persisted soft/hard file
+                // limits) so the OP_OFFERFILES batch can honor the server's soft
+                // limit (server_offer_file_limit) instead of the flat 200 default.
+                config.server_entries.push(Ed2kServerEntry {
+                    host: server.address.clone(),
+                    port: server.port,
+                    name: Some(server.name.clone()).filter(|name| !name.is_empty()),
+                    description: Some(server.description.clone())
+                        .filter(|description| !description.is_empty()),
+                    udp_flags: 0,
+                    udp_key: 0,
+                    udp_key_ip: 0,
+                    obfuscation_port_tcp: 0,
+                    obfuscation_port_udp: 0,
+                    soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
+                    hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),
+                });
             }
         }
         Ok(config)

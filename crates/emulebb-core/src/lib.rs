@@ -8329,9 +8329,9 @@ mod tests {
         );
         assert!(
             config
-                .server_endpoints
+                .server_entries
                 .iter()
-                .any(|endpoint| endpoint == "203.0.113.20:4661")
+                .any(|entry| entry.host == "203.0.113.20" && entry.port == 4661)
         );
     }
 

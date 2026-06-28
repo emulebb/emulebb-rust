@@ -50,6 +50,9 @@ pub(super) async fn run_one_server_session(
         context.connect_timeout,
     )
     .await?;
+    // Cap each OP_OFFERFILES batch at the connected server's soft file limit
+    // (server_offer_file_limit clamps unknown/oversized to 200, matching MFC).
+    session.server_soft_files = server.entry.soft_files;
     let server_udp_socket = match bind_server_udp_socket(context.bind_ip).await {
         Ok(socket) => {
             info!(

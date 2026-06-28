@@ -127,6 +127,10 @@ pub struct Ed2kServerEntry {
     pub udp_key_ip: u32,
     pub obfuscation_port_tcp: u16,
     pub obfuscation_port_udp: u16,
+    /// Server-reported soft file limit (server.met / status). 0 = unknown.
+    pub soft_files: u32,
+    /// Server-reported hard file limit (server.met / status). 0 = unknown.
+    pub hard_files: u32,
 }
 
 impl Default for Ed2kConfig {

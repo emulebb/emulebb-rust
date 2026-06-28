@@ -190,6 +190,8 @@ mod tests {
                 udp_key_ip: 0,
                 obfuscation_port_tcp: 0,
                 obfuscation_port_udp: 0,
+                soft_files: 0,
+                hard_files: 0,
             },
             ip,
         }

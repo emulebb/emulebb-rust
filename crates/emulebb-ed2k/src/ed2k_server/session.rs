@@ -83,6 +83,9 @@ pub(super) struct ServerSession {
     pub(super) offer_files_published_hashes: HashSet<[u8; 16]>,
     pub(super) assigned_client_id: Option<u32>,
     pub(super) server_flags: Option<u32>,
+    /// Soft file limit of the connected server (from the resolved entry); 0 when
+    /// unknown. Caps the OP_OFFERFILES batch size (see `server_offer_file_limit`).
+    pub(super) server_soft_files: u32,
     pub(super) server_list_requested: bool,
     pub(super) phase: ServerSessionPhase,
 }
@@ -154,6 +157,7 @@ impl ServerSession {
             offer_files_published_hashes: HashSet::new(),
             assigned_client_id: None,
             server_flags: None,
+            server_soft_files: 0,
             server_list_requested: false,
             phase: ServerSessionPhase::Connecting,
         })
@@ -180,6 +184,7 @@ impl ServerSession {
             offer_files_published_hashes: HashSet::new(),
             assigned_client_id: None,
             server_flags: None,
+            server_soft_files: 0,
             server_list_requested: false,
             phase: ServerSessionPhase::Connecting,
         }

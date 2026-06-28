@@ -101,10 +101,12 @@ pub(super) fn encode_offer_files_payload(
         bind_ip,
         tcp_port,
         server_flags,
+        MAX_OFFER_FILES_PER_ADVERTISEMENT,
     )
     .payload
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_offer_files_payload_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
@@ -113,6 +115,7 @@ fn encode_offer_files_payload_at_cursor(
     bind_ip: Ipv4Addr,
     tcp_port: u16,
     server_flags: Option<u32>,
+    max_offer_files: usize,
 ) -> EncodedOfferFilesPayload {
     let (advertised_client_id, advertised_client_port) =
         advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
@@ -121,8 +124,9 @@ fn encode_offer_files_payload_at_cursor(
             shared_catalog,
             cursor,
             already_published,
+            max_offer_files,
         ),
-        None => offered_files_catalog_at_cursor(shared_catalog, cursor),
+        None => offered_files_catalog_at_cursor(shared_catalog, cursor, max_offer_files),
     };
     let mut payload = Vec::with_capacity(80 * offered_files.entries.len());
     payload.extend_from_slice(
@@ -320,7 +324,12 @@ pub struct OfferFilesPublishStats {
 fn offered_files_catalog_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
+    max_offer_files: usize,
 ) -> OfferedFilesCatalog {
+    // max_offer_files is the per-server offer cap (server soft limit, clamped to
+    // <= MAX_OFFER_FILES_PER_ADVERTISEMENT); guard against a 0 so a misconfigured
+    // server can never zero out the batch.
+    let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
     let mut all_offered_files = shared_catalog
         .iter()
         .filter_map(popular_hash_offer_file)
@@ -334,7 +343,7 @@ fn offered_files_catalog_at_cursor(
         ));
     }
     let total_entries = all_offered_files.len();
-    if total_entries <= MAX_OFFER_FILES_PER_ADVERTISEMENT {
+    if total_entries <= max_offer_files {
         return OfferedFilesCatalog {
             entries: all_offered_files,
             next_cursor: 0,
@@ -343,13 +352,13 @@ fn offered_files_catalog_at_cursor(
     }
 
     let start = cursor % total_entries;
-    let mut entries = Vec::with_capacity(MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    for offset in 0..MAX_OFFER_FILES_PER_ADVERTISEMENT {
+    let mut entries = Vec::with_capacity(max_offer_files);
+    for offset in 0..max_offer_files {
         entries.push(all_offered_files[(start + offset) % total_entries].clone());
     }
     OfferedFilesCatalog {
         entries,
-        next_cursor: (start + MAX_OFFER_FILES_PER_ADVERTISEMENT) % total_entries,
+        next_cursor: (start + max_offer_files) % total_entries,
         total_entries,
     }
 }
@@ -358,20 +367,22 @@ fn offered_files_catalog_at_cursor_skipping_published(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
     already_published: &HashSet<[u8; 16]>,
+    max_offer_files: usize,
 ) -> OfferedFilesCatalog {
+    let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
     let all_offered_files = shared_catalog
         .iter()
         .filter_map(popular_hash_offer_file)
         .collect::<Vec<_>>();
     if all_offered_files.is_empty() {
-        return offered_files_catalog_at_cursor(shared_catalog, cursor);
+        return offered_files_catalog_at_cursor(shared_catalog, cursor, max_offer_files);
     }
 
     let total_entries = all_offered_files.len();
     let start = cursor % total_entries;
-    let mut entries = Vec::with_capacity(MAX_OFFER_FILES_PER_ADVERTISEMENT);
+    let mut entries = Vec::with_capacity(max_offer_files);
     let mut scanned = 0usize;
-    while scanned < total_entries && entries.len() < MAX_OFFER_FILES_PER_ADVERTISEMENT {
+    while scanned < total_entries && entries.len() < max_offer_files {
         let index = (start + scanned) % total_entries;
         let entry = &all_offered_files[index];
         if !already_published.contains(&entry.0) {
@@ -388,7 +399,7 @@ fn offered_files_catalog_at_cursor_skipping_published(
 
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    offered_files_catalog_at_cursor(shared_catalog, 0)
+    offered_files_catalog_at_cursor(shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT)
         .entries
         .hash(&mut hasher);
     hasher.finish()
@@ -468,6 +479,7 @@ pub(super) async fn send_offer_files_advertisement(
         bind_ip,
         tcp_port,
         session.server_flags,
+        super::server_entry::server_offer_file_limit(session.server_soft_files),
     );
     let wrapped =
         offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
@@ -677,12 +689,57 @@ mod tests {
     }
 
     #[test]
+    fn server_offer_file_limit_clamps_like_mfc() {
+        use super::super::server_entry::server_offer_file_limit;
+        // Unknown (0) and above-200 soft limits fall back to 200; an in-range
+        // soft limit is used verbatim (eMule offer-batch clamp).
+        assert_eq!(server_offer_file_limit(0), 200);
+        assert_eq!(server_offer_file_limit(50), 50);
+        assert_eq!(server_offer_file_limit(200), 200);
+        assert_eq!(server_offer_file_limit(500), 200);
+    }
+
+    #[test]
+    fn offered_files_catalog_honors_server_soft_limit() {
+        let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+        // A soft limit below 200 caps the batch at the soft limit and advances
+        // the cursor by that amount (so the next batch continues the rotation).
+        let limited = offered_files_catalog_at_cursor(&shared_catalog, 0, 50);
+        assert_eq!(limited.entries.len(), 50);
+        assert_eq!(limited.total_entries, 450);
+        assert_eq!(limited.next_cursor, 50);
+        // The catalog clamps an out-of-range cap to [1, MAX]; 0 cannot zero the
+        // batch and a huge cap cannot exceed MAX_OFFER_FILES_PER_ADVERTISEMENT.
+        assert_eq!(
+            offered_files_catalog_at_cursor(&shared_catalog, 0, 0)
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(
+            offered_files_catalog_at_cursor(&shared_catalog, 0, 10_000)
+                .entries
+                .len(),
+            MAX_OFFER_FILES_PER_ADVERTISEMENT
+        );
+    }
+
+    #[test]
     fn offered_files_catalog_rotates_large_libraries() {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
 
-        let first = offered_files_catalog_at_cursor(&shared_catalog, 0);
-        let second = offered_files_catalog_at_cursor(&shared_catalog, first.next_cursor);
-        let third = offered_files_catalog_at_cursor(&shared_catalog, second.next_cursor);
+        let first =
+            offered_files_catalog_at_cursor(&shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        let second = offered_files_catalog_at_cursor(
+            &shared_catalog,
+            first.next_cursor,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+        );
+        let third = offered_files_catalog_at_cursor(
+            &shared_catalog,
+            second.next_cursor,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+        );
 
         assert_eq!(first.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
         assert_eq!(first.total_entries, 450);
@@ -720,7 +777,8 @@ mod tests {
     fn offered_files_catalog_small_libraries_do_not_rotate() {
         let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
 
-        let offered = offered_files_catalog_at_cursor(&shared_catalog, 2);
+        let offered =
+            offered_files_catalog_at_cursor(&shared_catalog, 2, MAX_OFFER_FILES_PER_ADVERTISEMENT);
 
         assert_eq!(offered.entries.len(), 3);
         assert_eq!(offered.next_cursor, 0);
@@ -739,6 +797,7 @@ mod tests {
             &shared_catalog,
             0,
             &already_published,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
         );
 
         assert_eq!(offered.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -761,6 +820,7 @@ mod tests {
             &shared_catalog,
             0,
             &already_published,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
         );
 
         assert_eq!(offered.entries.len(), 1);
@@ -783,6 +843,7 @@ mod tests {
             &shared_catalog,
             0,
             &already_published,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
         );
 
         assert!(offered.entries.is_empty());

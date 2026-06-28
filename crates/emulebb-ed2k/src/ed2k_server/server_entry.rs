@@ -18,9 +18,28 @@ pub(super) struct ConfiguredServerEntry {
     pub(super) udp_key_ip: u32,
     pub(super) obfuscation_port_tcp: u16,
     pub(super) obfuscation_port_udp: u16,
+    pub(super) soft_files: u32,
+    pub(super) hard_files: u32,
+}
+
+/// eMule offer-batch cap from a server's soft file limit: use the soft limit,
+/// falling back to 200 when it is unknown (0) or exceeds 200.
+pub(super) fn server_offer_file_limit(soft_files: u32) -> usize {
+    if soft_files == 0 || soft_files > 200 {
+        200
+    } else {
+        soft_files as usize
+    }
 }
 
 impl ConfiguredServerEntry {
+    /// eMule offer-batch cap for this server: the server's soft file limit,
+    /// falling back to 200 when unknown (0) or above 200 (matches MFC's
+    /// `CServerConnect`/`CSharedFileList` offer clamp).
+    pub(super) fn offer_file_limit(&self) -> usize {
+        server_offer_file_limit(self.soft_files)
+    }
+
     pub(super) fn from_endpoint_text(endpoint_text: &str) -> Result<Self> {
         let endpoint = endpoint_text
             .parse::<SocketAddr>()
@@ -35,6 +54,8 @@ impl ConfiguredServerEntry {
             udp_key_ip: 0,
             obfuscation_port_tcp: 0,
             obfuscation_port_udp: 0,
+            soft_files: 0,
+            hard_files: 0,
         })
     }
 
@@ -52,6 +73,8 @@ impl ConfiguredServerEntry {
             udp_key_ip: entry.udp_key_ip,
             obfuscation_port_tcp: entry.obfuscation_port_tcp,
             obfuscation_port_udp: entry.obfuscation_port_udp,
+            soft_files: entry.soft_files,
+            hard_files: entry.hard_files,
         })
     }
 
