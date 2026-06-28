@@ -4700,6 +4700,34 @@ async fn publish_kad_due_shared_files(
         &mut notes_published,
     )
     .await;
+    let mut available_publish_starts = runtime.dht.available_search_permits();
+    if available_publish_starts == 0 && publish_tasks.len() < in_flight_budget {
+        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+            diagnostics.phase = "dhtSearchBusy".to_string();
+            diagnostics.running = true;
+            diagnostics.bootstrapped = true;
+            diagnostics.gate_allowed = false;
+            diagnostics.gate_block_reason = "dhtSearchBusy".to_string();
+            diagnostics.item_count = shared_files.len();
+            diagnostics.inspected_count = 0;
+            diagnostics.attempted_files = 0;
+            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = in_flight_budget;
+            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
+            diagnostics.budget_exhausted = true;
+            diagnostics.keyword_attempted = 0;
+            diagnostics.source_attempted = 0;
+            diagnostics.notes_attempted = 0;
+            diagnostics.keyword_skipped_by_budget = 0;
+            diagnostics.source_skipped_by_budget = 0;
+            diagnostics.notes_skipped_by_budget = 0;
+            diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+        });
+        return Ok(shared_files.len());
+    }
     if publish_tasks.len() >= in_flight_budget {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "publishing".to_string();
@@ -4791,6 +4819,7 @@ async fn publish_kad_due_shared_files(
 
         if let Some(keyword) = due_keyword.as_deref() {
             if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET
+                || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
             {
                 keyword_skipped_by_budget += 1;
@@ -4819,6 +4848,7 @@ async fn publish_kad_due_shared_files(
                     let dht = runtime.dht.clone();
                     let fanout = network.kad_publish_contact_fanout;
                     let started_at = now;
+                    available_publish_starts = available_publish_starts.saturating_sub(1);
                     publish_tasks.spawn(async move {
                         let result = dht
                             .publish_keyword_entries_with_class_and_fanout(
@@ -4849,6 +4879,7 @@ async fn publish_kad_due_shared_files(
 
         if source_due {
             if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
+                || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
             {
                 source_skipped_by_budget += 1;
@@ -4861,6 +4892,7 @@ async fn publish_kad_due_shared_files(
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
+                available_publish_starts = available_publish_starts.saturating_sub(1);
                 publish_tasks.spawn(async move {
                     let result = dht
                         .publish_source_with_class_and_fanout(
@@ -4893,6 +4925,7 @@ async fn publish_kad_due_shared_files(
         // and source so an un-annotated file never emits a notes publish.
         if notes_due {
             if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET
+                || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
             {
                 notes_skipped_by_budget += 1;
@@ -4919,6 +4952,7 @@ async fn publish_kad_due_shared_files(
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
+                available_publish_starts = available_publish_starts.saturating_sub(1);
                 publish_tasks.spawn(async move {
                     let result = dht
                         .publish_notes_with_class_and_fanout(

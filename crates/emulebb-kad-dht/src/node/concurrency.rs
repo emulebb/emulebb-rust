@@ -55,6 +55,10 @@ impl SearchConcurrency {
         self.max_concurrent
     }
 
+    pub(crate) fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
     /// Try to acquire a permit for `target`.
     ///
     /// The oracle does not build an unbounded async wait queue in front of

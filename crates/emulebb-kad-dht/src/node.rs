@@ -178,6 +178,11 @@ impl DhtNode {
         self.inner.search_concurrency.max_concurrent()
     }
 
+    /// Currently free traversal slots in the shared search/publish scheduler.
+    pub fn available_search_permits(&self) -> usize {
+        self.inner.search_concurrency.available_permits()
+    }
+
     /// Our UDP anti-spoofing key.
     pub fn udp_key(&self) -> u32 {
         self.inner.config.udp_key
