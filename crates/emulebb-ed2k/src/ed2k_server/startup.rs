@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
     time::Instant,
@@ -96,6 +96,7 @@ pub(super) fn encode_offer_files_payload(
     encode_offer_files_payload_at_cursor(
         shared_catalog,
         0,
+        None,
         client_id,
         bind_ip,
         tcp_port,
@@ -107,6 +108,7 @@ pub(super) fn encode_offer_files_payload(
 fn encode_offer_files_payload_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
+    already_published: Option<&HashSet<[u8; 16]>>,
     client_id: Option<u32>,
     bind_ip: Ipv4Addr,
     tcp_port: u16,
@@ -114,7 +116,14 @@ fn encode_offer_files_payload_at_cursor(
 ) -> EncodedOfferFilesPayload {
     let (advertised_client_id, advertised_client_port) =
         advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
-    let offered_files = offered_files_catalog_at_cursor(shared_catalog, cursor);
+    let offered_files = match already_published {
+        Some(already_published) => offered_files_catalog_at_cursor_skipping_published(
+            shared_catalog,
+            cursor,
+            already_published,
+        ),
+        None => offered_files_catalog_at_cursor(shared_catalog, cursor),
+    };
     let mut payload = Vec::with_capacity(80 * offered_files.entries.len());
     payload.extend_from_slice(
         &u32::try_from(offered_files.entries.len())
@@ -345,6 +354,38 @@ fn offered_files_catalog_at_cursor(
     }
 }
 
+fn offered_files_catalog_at_cursor_skipping_published(
+    shared_catalog: &[Ed2kSharedEntry],
+    cursor: usize,
+    already_published: &HashSet<[u8; 16]>,
+) -> OfferedFilesCatalog {
+    let all_offered_files = shared_catalog
+        .iter()
+        .filter_map(popular_hash_offer_file)
+        .collect::<Vec<_>>();
+    if all_offered_files.is_empty() {
+        return offered_files_catalog_at_cursor(shared_catalog, cursor);
+    }
+
+    let total_entries = all_offered_files.len();
+    let start = cursor % total_entries;
+    let mut entries = Vec::with_capacity(MAX_OFFER_FILES_PER_ADVERTISEMENT);
+    let mut scanned = 0usize;
+    while scanned < total_entries && entries.len() < MAX_OFFER_FILES_PER_ADVERTISEMENT {
+        let index = (start + scanned) % total_entries;
+        let entry = &all_offered_files[index];
+        if !already_published.contains(&entry.0) {
+            entries.push(entry.clone());
+        }
+        scanned += 1;
+    }
+    OfferedFilesCatalog {
+        entries,
+        next_cursor: (start + scanned) % total_entries,
+        total_entries,
+    }
+}
+
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
     offered_files_catalog_at_cursor(shared_catalog, 0)
@@ -422,6 +463,7 @@ pub(super) async fn send_offer_files_advertisement(
     let encoded = encode_offer_files_payload_at_cursor(
         &shared_catalog,
         current_cursor,
+        Some(&session.offer_files_published_hashes),
         session.assigned_client_id,
         bind_ip,
         tcp_port,
@@ -430,6 +472,15 @@ pub(super) async fn send_offer_files_advertisement(
     let wrapped =
         offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
     let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
+    if encoded.entries.is_empty() {
+        return Ok(OfferFilesPublishStats {
+            entries_sent: 0,
+            total_entries: encoded.total_entries,
+            next_cursor: encoded.next_cursor,
+            wrapped: true,
+            skipped_duplicate_batch: true,
+        });
+    }
     if session.offer_files_sent
         && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
     {
@@ -447,6 +498,9 @@ pub(super) async fn send_offer_files_advertisement(
     session.offer_files_sent_at = Some(Instant::now());
     session.offer_files_catalog_fingerprint = Some(catalog_fingerprint);
     session.offer_files_catalog_cursor = encoded.next_cursor;
+    for (file_hash, _, _, _) in &encoded.entries {
+        session.offer_files_published_hashes.insert(*file_hash);
+    }
     session.set_phase(
         ServerSessionPhase::OfferFilesSent,
         format!(
@@ -669,6 +723,69 @@ mod tests {
         let offered = offered_files_catalog_at_cursor(&shared_catalog, 2);
 
         assert_eq!(offered.entries.len(), 3);
+        assert_eq!(offered.next_cursor, 0);
+        assert_eq!(offered.total_entries, 3);
+    }
+
+    #[test]
+    fn offered_files_catalog_prioritizes_unpublished_hashes() {
+        let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+        let mut already_published = HashSet::new();
+        for entry in shared_catalog.iter().take(200) {
+            already_published.insert(popular_hash_offer_file(entry).unwrap().0);
+        }
+
+        let offered = offered_files_catalog_at_cursor_skipping_published(
+            &shared_catalog,
+            0,
+            &already_published,
+        );
+
+        assert_eq!(offered.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        assert_eq!(offered.next_cursor, 400);
+        assert_eq!(
+            offered.entries[0].0,
+            popular_hash_offer_file(&shared_catalog[200]).unwrap().0
+        );
+    }
+
+    #[test]
+    fn offered_files_catalog_scans_to_late_new_hash() {
+        let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+        let mut already_published = HashSet::new();
+        for entry in shared_catalog.iter().take(449) {
+            already_published.insert(popular_hash_offer_file(entry).unwrap().0);
+        }
+
+        let offered = offered_files_catalog_at_cursor_skipping_published(
+            &shared_catalog,
+            0,
+            &already_published,
+        );
+
+        assert_eq!(offered.entries.len(), 1);
+        assert_eq!(offered.next_cursor, 0);
+        assert_eq!(
+            offered.entries[0].0,
+            popular_hash_offer_file(&shared_catalog[449]).unwrap().0
+        );
+    }
+
+    #[test]
+    fn offered_files_catalog_is_empty_when_every_hash_was_published() {
+        let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
+        let already_published = shared_catalog
+            .iter()
+            .map(|entry| popular_hash_offer_file(entry).unwrap().0)
+            .collect::<HashSet<_>>();
+
+        let offered = offered_files_catalog_at_cursor_skipping_published(
+            &shared_catalog,
+            0,
+            &already_published,
+        );
+
+        assert!(offered.entries.is_empty());
         assert_eq!(offered.next_cursor, 0);
         assert_eq!(offered.total_entries, 3);
     }

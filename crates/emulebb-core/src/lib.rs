@@ -4100,13 +4100,14 @@ impl EmulebbCore {
                 }
                 Err(error) => {
                     *self.shared_catalog_publish_last.lock().await = Some(Instant::now());
+                    self.shared_catalog_publish_dirty
+                        .store(true, Ordering::Release);
                     ed2k_publish_diagnostics::record(
                         &self.ed2k_publish_diagnostics,
                         |diagnostics| {
                             diagnostics.phase = "failed".to_string();
                             diagnostics.running = true;
-                            diagnostics.dirty =
-                                self.shared_catalog_publish_dirty.load(Ordering::Acquire);
+                            diagnostics.dirty = true;
                             diagnostics.failure_count = diagnostics.failure_count.saturating_add(1);
                             diagnostics.last_error = Some(error.to_string());
                         },

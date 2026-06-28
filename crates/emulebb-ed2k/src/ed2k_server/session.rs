@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
@@ -79,6 +80,7 @@ pub(super) struct ServerSession {
     pub(super) offer_files_sent_at: Option<Instant>,
     pub(super) offer_files_catalog_fingerprint: Option<u64>,
     pub(super) offer_files_catalog_cursor: usize,
+    pub(super) offer_files_published_hashes: HashSet<[u8; 16]>,
     pub(super) assigned_client_id: Option<u32>,
     pub(super) server_flags: Option<u32>,
     pub(super) server_list_requested: bool,
@@ -149,6 +151,7 @@ impl ServerSession {
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
             offer_files_catalog_cursor: 0,
+            offer_files_published_hashes: HashSet::new(),
             assigned_client_id: None,
             server_flags: None,
             server_list_requested: false,
@@ -174,6 +177,7 @@ impl ServerSession {
             offer_files_sent_at: None,
             offer_files_catalog_fingerprint: None,
             offer_files_catalog_cursor: 0,
+            offer_files_published_hashes: HashSet::new(),
             assigned_client_id: None,
             server_flags: None,
             server_list_requested: false,
