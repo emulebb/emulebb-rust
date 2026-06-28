@@ -545,6 +545,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         diagnostics.phase = "idle".to_string();
         diagnostics.disk_count = 0;
     });
+    core.queue_ed2k_shared_catalog_publish();
     Ok(shares)
 }
 
@@ -700,6 +701,9 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     record_reload_diagnostics(&core, |diagnostics| {
         diagnostics.phase = "idle".to_string();
     });
+    // A reused-only reload does not pass through `share_local_file`, so queue a
+    // final server offer refresh explicitly once the catalog is known complete.
+    core.queue_ed2k_shared_catalog_publish();
     tracing::info!("background shared-directory reload finished hashing the library");
     Ok(())
 }
