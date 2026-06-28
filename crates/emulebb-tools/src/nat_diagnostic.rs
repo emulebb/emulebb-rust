@@ -195,6 +195,7 @@ fn resolve_provider(backend: &str) -> Result<Arc<dyn PortMappingProvider>> {
 fn build_config(args: &SharedArgs) -> NatConfig {
     NatConfig {
         enabled: true,
+        require_initial_mapping: true,
         backend_order: vec![args.backend.clone()],
         bind_ip: args.bind_ip.clone(),
         igd_ip: args.igd_ip.clone(),

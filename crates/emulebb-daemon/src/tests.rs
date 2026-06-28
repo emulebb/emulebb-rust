@@ -118,6 +118,7 @@ publishEmuleRustIdentity = true
 
 [nat]
 enabled = true
+requireInitialMapping = false
 backendOrder = ["upnp_miniupnpc", "upnp_rupnp"]
 bindIp = "192.0.2.11"
 igdIp = "192.0.2.1"
@@ -171,6 +172,7 @@ externalIpOverride = "203.0.113.10"
     // Community, this opts in to publishing the real emule-rust identity.
     assert!(config.ed2k.publish_emule_rust_identity);
     assert!(config.nat.enabled);
+    assert!(!config.nat.require_initial_mapping);
     assert_eq!(
         config.nat.backend_order,
         ["upnp_miniupnpc".to_string(), "upnp_rupnp".to_string()]
@@ -761,6 +763,7 @@ fn ed2k_network_config_derives_nat_bind_from_configured_p2p_bind_ip() {
 
     assert_eq!(network.nat_config.bind_ip.as_deref(), Some("192.0.2.10"));
     assert!(network.nat_config.enabled);
+    assert!(network.nat_config.require_initial_mapping);
 }
 
 #[test]

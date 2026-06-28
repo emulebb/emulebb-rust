@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 #[cfg(test)]
 use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
@@ -237,7 +237,7 @@ const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// login (connection ordering: bind -> VPN guard -> UPnP await -> connect). Covers
 /// SSDP discovery + AddPortMapping for both eD2k TCP and Kad UDP with headroom over
 /// the 5s default discovery timeout, while bounding startup if the gateway is slow
-/// or absent — on timeout we connect best-effort with internal ports.
+/// or absent.
 const ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Ed2kRuntime {
@@ -797,9 +797,10 @@ impl EmulebbCore {
         // the server login below would race the async forward and announce the
         // internal (unmapped) port, yielding LowID. AWAIT one reconcile now (bounded)
         // and copy the gateway-granted external ports into reachability so the very
-        // first login reads the forwarded port. Best-effort: a reconcile failure /
-        // timeout (point-to-point VPN without an IGD) must not block connect — we log
-        // and proceed; the periodic sync still upgrades the port reactively later.
+        // first login reads the forwarded port. By default, an active UPnP config
+        // is a startup gate: if the operator enabled it, public P2P does not begin
+        // until this first mapping is confirmed. Profiles that intentionally run
+        // best-effort can set nat.requireInitialMapping=false.
         if network.nat_config.enabled {
             match tokio::time::timeout(ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT, nat.reconcile_now())
                 .await
@@ -820,13 +821,28 @@ impl EmulebbCore {
                             .advertised_udp_port(network.kad_bind_addr.port()),
                     );
                 }
-                Ok(Err(error)) => tracing::warn!(
-                    "UPnP initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds): {error:#}"
-                ),
-                Err(_) => tracing::warn!(
-                    "UPnP initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds)",
-                    ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs(),
-                ),
+                Ok(Err(error)) => {
+                    if network.nat_config.require_initial_mapping {
+                        let _ = nat.stop().await;
+                        bail!("UPnP initial reconcile failed before ED2K/Kad startup: {error:#}");
+                    }
+                    tracing::warn!(
+                        "UPnP initial reconcile failed before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds): {error:#}"
+                    );
+                }
+                Err(_) => {
+                    if network.nat_config.require_initial_mapping {
+                        let _ = nat.stop().await;
+                        bail!(
+                            "UPnP initial reconcile timed out after {}s before ED2K/Kad startup",
+                            ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs()
+                        );
+                    }
+                    tracing::warn!(
+                        "UPnP initial reconcile timed out after {}s before ED2K login; connecting with internal ports (may be LowID until UPnP succeeds)",
+                        ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT.as_secs(),
+                    );
+                }
             }
         }
         let mut tasks = Vec::new();
