@@ -67,7 +67,8 @@ use emulebb_kad_proto::{
     SearchKeyReq, SearchNotesReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
 use emulebb_metadata::{
-    MetadataStore, MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
+    MetadataKadOutboundPublish, MetadataKadOutboundPublishKind, MetadataStore,
+    MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
 };
 use serde_json::json;
 use tokio::{
@@ -882,6 +883,7 @@ impl EmulebbCore {
                 KadPublishLoopRuntime {
                     dht: dht.clone(),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
+                    metadata_store: self.metadata_store.clone(),
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
@@ -4313,6 +4315,7 @@ async fn run_kad_hello_intro_loop(
 struct KadPublishLoopRuntime {
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
+    metadata_store: MetadataStore,
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
@@ -4336,6 +4339,7 @@ async fn run_kad_shared_file_publish_loop(
     shutdown: Arc<AtomicBool>,
 ) {
     let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
+    hydrate_kad_outbound_publish_schedule(&runtime.metadata_store, &mut schedule);
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
             tokio::time::sleep(Duration::from_secs(KAD_SHARED_FILE_PUBLISH_RETRY_SECS)).await;
@@ -4353,6 +4357,70 @@ async fn run_kad_shared_file_publish_loop(
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+}
+
+fn hydrate_kad_outbound_publish_schedule(
+    metadata_store: &MetadataStore,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
+) {
+    let wall_now_ms = Utc::now().timestamp_millis();
+    let instant_now = Instant::now();
+    let persisted = match metadata_store.load_kad_outbound_publish_schedule() {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            tracing::warn!("failed to load Kad outbound publish schedule: {error:#}");
+            return;
+        }
+    };
+    for publish in persisted.publishes {
+        let at = instant_from_persisted_wall_ms(publish.published_at_ms, wall_now_ms, instant_now);
+        match publish.publish_kind {
+            MetadataKadOutboundPublishKind::Keyword => {
+                schedule.hydrate_keyword_published(&publish.file_hash, &publish.keyword, at);
+            }
+            MetadataKadOutboundPublishKind::Source => {
+                schedule.hydrate_source_published(&publish.file_hash, at);
+            }
+            MetadataKadOutboundPublishKind::Notes => {
+                schedule.hydrate_notes_published(&publish.file_hash, at);
+            }
+        }
+    }
+}
+
+fn instant_from_persisted_wall_ms(
+    persisted_ms: i64,
+    wall_now_ms: i64,
+    instant_now: Instant,
+) -> Instant {
+    let elapsed_ms = wall_now_ms.saturating_sub(persisted_ms);
+    instant_now
+        .checked_sub(Duration::from_millis(elapsed_ms as u64))
+        .unwrap_or(instant_now)
+}
+
+fn persist_kad_outbound_publish(
+    metadata_store: &MetadataStore,
+    file_hash: &str,
+    publish_kind: MetadataKadOutboundPublishKind,
+    keyword: &str,
+    published_at_ms: i64,
+) {
+    if let Err(error) = metadata_store.upsert_kad_outbound_publish(
+        &MetadataKadOutboundPublish {
+            file_hash: file_hash.to_string(),
+            publish_kind,
+            keyword: keyword.to_string(),
+            published_at_ms,
+        },
+        Utc::now().timestamp_millis(),
+    ) {
+        tracing::warn!(
+            file_hash,
+            publish_kind = publish_kind.as_str(),
+            "failed to persist Kad outbound publish schedule: {error:#}"
+        );
     }
 }
 
@@ -4504,6 +4572,13 @@ async fn publish_kad_due_shared_files(
                     // master setting the next-publish time when the store search
                     // was actually started.
                     schedule.mark_keyword_published(&entry.file_hash, keyword, now);
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &entry.file_hash,
+                        MetadataKadOutboundPublishKind::Keyword,
+                        keyword,
+                        Utc::now().timestamp_millis(),
+                    );
                     keyword_published += 1;
                 }
                 Err(error) => {
@@ -4538,6 +4613,13 @@ async fn publish_kad_due_shared_files(
                         stats,
                     );
                     schedule.mark_source_published(&entry.file_hash, now);
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &entry.file_hash,
+                        MetadataKadOutboundPublishKind::Source,
+                        "",
+                        Utc::now().timestamp_millis(),
+                    );
                     source_published += 1;
                 }
                 Err(error) => {
@@ -4590,6 +4672,13 @@ async fn publish_kad_due_shared_files(
                         stats,
                     );
                     schedule.mark_notes_published(&entry.file_hash, now);
+                    persist_kad_outbound_publish(
+                        &runtime.metadata_store,
+                        &entry.file_hash,
+                        MetadataKadOutboundPublishKind::Notes,
+                        "",
+                        Utc::now().timestamp_millis(),
+                    );
                     notes_published += 1;
                 }
                 Err(error) => {

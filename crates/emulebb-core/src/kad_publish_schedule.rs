@@ -153,6 +153,23 @@ impl KadPublishSchedule {
             .last_notes = Some(now);
     }
 
+    pub(crate) fn hydrate_keyword_published(
+        &mut self,
+        file_hash: &str,
+        keyword: &str,
+        at: Instant,
+    ) {
+        self.mark_keyword_published(file_hash, keyword, at);
+    }
+
+    pub(crate) fn hydrate_source_published(&mut self, file_hash: &str, at: Instant) {
+        self.mark_source_published(file_hash, at);
+    }
+
+    pub(crate) fn hydrate_notes_published(&mut self, file_hash: &str, at: Instant) {
+        self.mark_notes_published(file_hash, at);
+    }
+
     /// Drop bookkeeping for files no longer shared, so the map cannot grow
     /// without bound as transfers come and go. `keep` is the set of currently
     /// publishable file hashes.

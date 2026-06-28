@@ -35,6 +35,8 @@
 //!   time (Unix ms) of the share-in-place source captured at ingest, used to skip
 //!   re-hashing an unchanged shared file (same source_path + size + mtime) on
 //!   reload. NULL for a real download or a pre-v9 share-in-place row.
+//! - v9 -> v10: `kad_outbound_publish_schedule` table for durable outbound Kad
+//!   keyword/source/notes publish due timers.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -137,6 +139,25 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
         // v8 -> v9: last-modified time (ms) of the share-in-place source, used to
         // skip re-hashing an unchanged shared file on reload. NULL pre-v9.
         9 => add_column_if_missing(tx, "transfers", "source_mtime_ms", "INTEGER"),
+        // v9 -> v10: outbound Kad publish due state.
+        10 => {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS kad_outbound_publish_schedule (
+                    id INTEGER PRIMARY KEY,
+                    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+                    publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
+                    keyword TEXT NOT NULL DEFAULT '',
+                    published_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    UNIQUE(file_hash, publish_kind, keyword)
+                );
+                CREATE INDEX IF NOT EXISTS kad_outbound_publish_file_idx
+                ON kad_outbound_publish_schedule(file_hash, publish_kind);
+                "#,
+            )?;
+            Ok(())
+        }
         other => bail!("no metadata migration defined for schema version v{other}"),
     }
 }
@@ -354,6 +375,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(all_time, 0);
+        let outbound_rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM kad_outbound_publish_schedule",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbound_rows, 0);
     }
 
     #[test]

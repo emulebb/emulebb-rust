@@ -5,6 +5,45 @@ pub struct MetadataKadPublishCache {
     pub note_publishes: Vec<MetadataKadNotePublish>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MetadataKadOutboundPublishSchedule {
+    pub publishes: Vec<MetadataKadOutboundPublish>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataKadOutboundPublish {
+    pub file_hash: String,
+    pub publish_kind: MetadataKadOutboundPublishKind,
+    pub keyword: String,
+    pub published_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataKadOutboundPublishKind {
+    Keyword,
+    Source,
+    Notes,
+}
+
+impl MetadataKadOutboundPublishKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Source => "source",
+            Self::Notes => "notes",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "keyword" => Some(Self::Keyword),
+            "source" => Some(Self::Source),
+            "notes" => Some(Self::Notes),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataKadKeywordPublish {
     pub target_node_id: String,

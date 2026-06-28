@@ -435,6 +435,16 @@ CREATE TABLE kad_note_publishes (
     observed_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE kad_outbound_publish_schedule (
+    id INTEGER PRIMARY KEY,
+    file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
+    publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
+    keyword TEXT NOT NULL DEFAULT '',
+    published_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(file_hash, publish_kind, keyword)
+);
+
 -- RESERVED / UNUSED: no code path writes kad_snoop_requests yet. Kept as the
 -- forward Kad snoop/harvest request-tracking surface; created empty and never
 -- grows until a writer is added. Do not remove without a migration step.
@@ -504,4 +514,6 @@ CREATE INDEX kad_nodes_last_seen_idx ON kad_nodes(last_seen_ms);
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);
+CREATE INDEX kad_outbound_publish_file_idx
+ON kad_outbound_publish_schedule(file_hash, publish_kind);
 CREATE INDEX search_results_session_idx ON search_results(session_id, observed_at_ms);

@@ -20,7 +20,8 @@ mod transfer_store;
 
 pub use identity_model::MetadataLocalIdentity;
 pub use kad_publish_model::{
-    MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadPublishCache,
+    MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
+    MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule, MetadataKadPublishCache,
     MetadataKadSourcePublish,
 };
 pub use model::{MetadataIndexedFile, MetadataSharedDirectoryRoot};

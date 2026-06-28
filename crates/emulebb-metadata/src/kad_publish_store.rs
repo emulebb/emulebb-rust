@@ -3,8 +3,9 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     kad_publish_model::{
-        MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadPublishCache,
-        MetadataKadSourcePublish,
+        MetadataKadKeywordPublish, MetadataKadNotePublish, MetadataKadOutboundPublish,
+        MetadataKadOutboundPublishKind, MetadataKadOutboundPublishSchedule,
+        MetadataKadPublishCache, MetadataKadSourcePublish,
     },
     store::decode_fixed_hex,
 };
@@ -93,6 +94,64 @@ impl super::MetadataStore {
             keyword_publishes: load_keyword_publishes(&conn)?,
             source_publishes: load_source_publishes(&conn)?,
             note_publishes: load_note_publishes(&conn)?,
+        })
+    }
+
+    pub fn upsert_kad_outbound_publish(
+        &self,
+        publish: &MetadataKadOutboundPublish,
+        updated_at_ms: i64,
+    ) -> Result<()> {
+        let file_hash = decode_fixed_hex(&publish.file_hash, 16, "Kad outbound file hash")?;
+        self.connection()?.execute(
+            r#"
+            INSERT INTO kad_outbound_publish_schedule(
+                file_hash, publish_kind, keyword, published_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(file_hash, publish_kind, keyword) DO UPDATE SET
+                published_at_ms = excluded.published_at_ms,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                file_hash,
+                publish.publish_kind.as_str(),
+                publish.keyword,
+                publish.published_at_ms,
+                updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_kad_outbound_publish_schedule(&self) -> Result<MetadataKadOutboundPublishSchedule> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(file_hash)), publish_kind, keyword, published_at_ms
+            FROM kad_outbound_publish_schedule
+            ORDER BY file_hash, publish_kind, keyword
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let kind_text: String = row.get(1)?;
+            let publish_kind =
+                MetadataKadOutboundPublishKind::from_str(&kind_text).ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        1,
+                        "publish_kind".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+            Ok(MetadataKadOutboundPublish {
+                file_hash: row.get(0)?,
+                publish_kind,
+                keyword: row.get(2)?,
+                published_at_ms: row.get(3)?,
+            })
+        })?;
+        Ok(MetadataKadOutboundPublishSchedule {
+            publishes: rows.collect::<std::result::Result<Vec<_>, _>>()?,
         })
     }
 }
@@ -257,5 +316,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.table_count("kad_keyword_publishes").unwrap(), 0);
+    }
+
+    #[test]
+    fn kad_outbound_publish_schedule_upserts_and_loads() {
+        let store = MetadataStore::in_memory().unwrap();
+        store
+            .upsert_kad_outbound_publish(
+                &MetadataKadOutboundPublish {
+                    file_hash: "11112222333344445555666677778888".to_string(),
+                    publish_kind: MetadataKadOutboundPublishKind::Keyword,
+                    keyword: "ubuntu".to_string(),
+                    published_at_ms: 10,
+                },
+                11,
+            )
+            .unwrap();
+        store
+            .upsert_kad_outbound_publish(
+                &MetadataKadOutboundPublish {
+                    file_hash: "11112222333344445555666677778888".to_string(),
+                    publish_kind: MetadataKadOutboundPublishKind::Keyword,
+                    keyword: "ubuntu".to_string(),
+                    published_at_ms: 20,
+                },
+                21,
+            )
+            .unwrap();
+        store
+            .upsert_kad_outbound_publish(
+                &MetadataKadOutboundPublish {
+                    file_hash: "99992222333344445555666677778888".to_string(),
+                    publish_kind: MetadataKadOutboundPublishKind::Source,
+                    keyword: String::new(),
+                    published_at_ms: 30,
+                },
+                31,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.load_kad_outbound_publish_schedule().unwrap(),
+            MetadataKadOutboundPublishSchedule {
+                publishes: vec![
+                    MetadataKadOutboundPublish {
+                        file_hash: "11112222333344445555666677778888".to_string(),
+                        publish_kind: MetadataKadOutboundPublishKind::Keyword,
+                        keyword: "ubuntu".to_string(),
+                        published_at_ms: 20,
+                    },
+                    MetadataKadOutboundPublish {
+                        file_hash: "99992222333344445555666677778888".to_string(),
+                        publish_kind: MetadataKadOutboundPublishKind::Source,
+                        keyword: String::new(),
+                        published_at_ms: 30,
+                    },
+                ],
+            }
+        );
     }
 }
