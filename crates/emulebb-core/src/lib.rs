@@ -1599,9 +1599,6 @@ impl EmulebbCore {
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
-        if let Err(error) = self.refresh_transfers_from_manifests().await {
-            tracing::warn!("failed to refresh ED2K transfers from manifests: {error}");
-        }
         self.state
             .lock()
             .await
@@ -2580,29 +2577,6 @@ impl EmulebbCore {
             self.queue_ed2k_download_attempt(transfer.clone());
         }
         Ok(transfer)
-    }
-
-    async fn refresh_transfers_from_manifests(&self) -> Result<()> {
-        let manifests = self.ed2k_transfers.manifests().await?;
-        let mut state = self.state.lock().await;
-        for manifest in manifests {
-            if manifest.transfer_row_removed {
-                state.transfers.remove(&manifest.file_hash);
-                continue;
-            }
-            let state_name = state
-                .transfers
-                .get(&manifest.file_hash)
-                .map(|transfer| transfer.state.clone())
-                .unwrap_or_else(|| manifest_default_state_name(&manifest).to_string());
-            let mut transfer = self.transfer_from_manifest(&manifest, &state_name);
-            apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
-            if let Some(existing) = state.transfers.get(&manifest.file_hash) {
-                preserve_transfer_public_metadata(&mut transfer, existing);
-            }
-            state.transfers.insert(transfer.hash.clone(), transfer);
-        }
-        Ok(())
     }
 
     async fn refresh_transfer_from_manifest(
