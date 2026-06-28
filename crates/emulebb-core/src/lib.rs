@@ -752,36 +752,6 @@ impl EmulebbCore {
         // listener, outbound buddy link, and buddy-management loop.
         let buddy_registry = BuddySocketRegistry::new();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let configured_bootstrap_nodes_text =
-            configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
-        let kad_bind_if_index =
-            emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
-        let dht = DhtNode::new(DhtConfig {
-            bind_addr: Some(network.kad_bind_addr),
-            obfuscation_enabled: network.config.obfuscation_enabled,
-            bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
-            nodes_text: configured_bootstrap_nodes_text.clone(),
-            // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
-            bind_if_index: Some(kad_bind_if_index),
-            ..DhtConfig::default()
-        })
-        .await
-        .context("failed to initialize Kad runtime for ED2K listener")?;
-        // Bridge the live ed2k IpFilter into the Kad traversal layer so per-RES
-        // contacts from filtered/banned IPs are dropped (oracle
-        // KademliaUDPListener.cpp:830-857). The IpFilter lives in emulebb-ed2k
-        // which depends on emulebb-kad-dht, so core (depending on both) bridges it
-        // via a closure hook rather than moving the filter across the boundary.
-        {
-            let kad_ip_filter = network.ip_filter.clone();
-            dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
-        }
-        let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
-        let ed2k_listener =
-            Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
-                format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
-            })?);
-        let hello_identity = self.ed2k_hello_identity(&network);
         let nat = Arc::new(
             NatManagerBuilder::new(network.nat_config.clone())
                 .with_mappings(ed2k_nat_mappings(&network))
@@ -789,17 +759,13 @@ impl EmulebbCore {
                 .build(),
         );
         nat.start().await?;
-        // Connection ordering (bind -> VPN guard -> UPnP await -> connect): the eD2k
-        // server login must announce an already-forwarded listen port to win HighID
-        // on the FIRST connect. The bind happened above (eD2k TCP listener + Kad UDP
-        // socket, egress-pinned to the VPN), the VPN guard was checked at the top of
-        // this fn, and `nat.start()` only *spawns* the periodic reconcile loop — so
-        // the server login below would race the async forward and announce the
-        // internal (unmapped) port, yielding LowID. AWAIT one reconcile now (bounded)
-        // and copy the gateway-granted external ports into reachability so the very
-        // first login reads the forwarded port. By default, an active UPnP config
-        // is a startup gate: if the operator enabled it, public P2P does not begin
-        // until this first mapping is confirmed. Profiles that intentionally run
+        // Connection ordering (VPN guard -> UPnP await -> P2P sockets -> connect):
+        // the eD2k server login must announce an already-forwarded listen port to
+        // win HighID on the FIRST connect, and when UPnP is active the public P2P
+        // sockets should not exist before the mapping gate completes. NAT mapping
+        // only needs the intended ports, so await one reconcile now (bounded) and
+        // copy the gateway-granted external ports into reachability before binding
+        // Kad UDP or the eD2K TCP listener. Profiles that intentionally run
         // best-effort can set nat.requireInitialMapping=false.
         if network.nat_config.enabled {
             match tokio::time::timeout(ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT, nat.reconcile_now())
@@ -845,6 +811,36 @@ impl EmulebbCore {
                 }
             }
         }
+        let configured_bootstrap_nodes_text =
+            configured_kad_bootstrap_nodes_text(&network.kad_bootstrap_nodes);
+        let kad_bind_if_index =
+            emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(network.kad_bind_addr),
+            obfuscation_enabled: network.config.obfuscation_enabled,
+            bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
+            nodes_text: configured_bootstrap_nodes_text.clone(),
+            // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
+            bind_if_index: Some(kad_bind_if_index),
+            ..DhtConfig::default()
+        })
+        .await
+        .context("failed to initialize Kad runtime for ED2K listener")?;
+        // Bridge the live ed2k IpFilter into the Kad traversal layer so per-RES
+        // contacts from filtered/banned IPs are dropped (oracle
+        // KademliaUDPListener.cpp:830-857). The IpFilter lives in emulebb-ed2k
+        // which depends on emulebb-kad-dht, so core (depending on both) bridges it
+        // via a closure hook rather than moving the filter across the boundary.
+        {
+            let kad_ip_filter = network.ip_filter.clone();
+            dht.set_ip_filter(std::sync::Arc::new(move |ip| kad_ip_filter.is_filtered(ip)));
+        }
+        let ed2k_bind_addr = SocketAddr::new(IpAddr::V4(network.bind_ip), network.listen_port);
+        let ed2k_listener =
+            Arc::new(TcpListener::bind(ed2k_bind_addr).await.with_context(|| {
+                format!("failed to bind eD2k TCP listener on {ed2k_bind_addr}")
+            })?);
+        let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
         tasks.push(dht.clone().start());
         // "Reconnect now" signal: the advertised-ports sync fires it when the
