@@ -6455,7 +6455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vpn_guard_blocks_kad_start_until_public_ip_is_known() {
+    async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
         let transfer_root = unique_runtime_dir("emulebb-core-vpn-guard-kad-start");
         let mut network = test_network_config_with_store(
             &transfer_root,
@@ -6476,12 +6476,22 @@ mod tests {
         )
         .unwrap();
 
+        assert!(
+            core.start_kad().await.is_ok(),
+            "valid VPN-bound public-CIDR mode should not block before any public IP is observed"
+        );
+        core.set_kad_running(false).await;
+
+        core.ed2k_reachability.set(Ipv4Addr::new(1, 1, 1, 1));
         let err = core
             .start_kad()
             .await
-            .expect_err("Kad start must be refused until VPN Guard proves public IP");
+            .expect_err("Kad start must be refused after public IP is outside the allowed CIDR");
         assert!(err.to_string().contains("blocked by VPN guard"));
-        assert!(err.to_string().contains("public IP is unknown"));
+        assert!(
+            err.to_string()
+                .contains("outside VPN Guard allowed public IP CIDRs")
+        );
 
         core.ed2k_reachability.set(Ipv4Addr::new(8, 8, 8, 8));
         assert!(core.start_kad().await.is_ok());

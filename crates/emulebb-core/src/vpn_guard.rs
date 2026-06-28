@@ -95,7 +95,7 @@ pub(crate) fn public_ip_block_reason(
     }
 
     let Some(public_ip) = public_ip else {
-        return Some("public IP is unknown for VPN Guard allowed public IP CIDRs".to_string());
+        return None;
     };
     if networks.iter().any(|network| network.contains(&public_ip)) {
         return None;
@@ -208,12 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn public_ip_cidr_blocks_until_public_ip_is_known_and_reports_invalid_cidr() {
-        assert!(
-            public_ip_block_reason(&guard("8.8.8.0/24"), None)
-                .unwrap()
-                .contains("public IP is unknown")
-        );
+    fn public_ip_cidr_waits_for_public_ip_observation_and_reports_invalid_cidr() {
+        assert!(public_ip_block_reason(&guard("8.8.8.0/24"), None).is_none());
         assert!(
             public_ip_block_reason(&guard("not-a-cidr"), Some(Ipv4Addr::new(203, 0, 113, 5)))
                 .unwrap()
