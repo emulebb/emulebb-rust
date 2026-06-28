@@ -4907,6 +4907,7 @@ async fn publish_kad_due_shared_files(
                     &shared_files,
                     &keyword,
                     KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+                    (start + offset) % item_count,
                 );
                 if keyword_entries.is_empty() {
                     keyword_skipped_by_budget += 1;
@@ -5416,12 +5417,18 @@ fn kad_keyword_publish_entries_for_keyword(
     shared_files: &[MetadataTransferPublishEntry],
     keyword: &str,
     limit: usize,
+    start_index: usize,
 ) -> Vec<(String, KeywordPublishEntry)> {
     let mut entries = Vec::new();
-    for entry in shared_files {
+    if shared_files.is_empty() || limit == 0 {
+        return entries;
+    }
+    let start_index = start_index % shared_files.len();
+    for offset in 0..shared_files.len() {
         if entries.len() >= limit {
             break;
         }
+        let entry = &shared_files[(start_index + offset) % shared_files.len()];
         if !significant_keyword_words_unique(&entry.canonical_name)
             .iter()
             .any(|term| term == keyword)
@@ -8399,6 +8406,7 @@ mod tests {
             &shared_files,
             "ubuntu",
             KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+            0,
         );
 
         assert_eq!(entries.len(), KAD_KEYWORD_PUBLISH_FILE_LIMIT);
@@ -8409,6 +8417,33 @@ mod tests {
                 .iter()
                 .all(|(_, entry)| entry.tags.iter().any(|tag| tag == &Tag::sources(1)))
         );
+    }
+
+    #[test]
+    fn keyword_publish_entries_start_at_triggering_file_and_wrap() {
+        let shared_files = (0..160)
+            .map(|index| MetadataTransferPublishEntry {
+                file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
+                canonical_name: format!("Ubuntu Python Sample {index}.iso"),
+                file_size: 1000 + index,
+                aich_root: None,
+                comment: String::new(),
+                rating: 0,
+            })
+            .collect::<Vec<_>>();
+
+        let entries = kad_keyword_publish_entries_for_keyword(
+            &shared_files,
+            "ubuntu",
+            KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+            155,
+        );
+
+        assert_eq!(entries.len(), KAD_KEYWORD_PUBLISH_FILE_LIMIT);
+        assert_eq!(entries[0].1.file_hash, Ed2kHash::from_bytes([155_u8; 16]));
+        assert_eq!(entries[4].1.file_hash, Ed2kHash::from_bytes([159_u8; 16]));
+        assert_eq!(entries[5].1.file_hash, Ed2kHash::from_bytes([0_u8; 16]));
+        assert_eq!(entries[149].1.file_hash, Ed2kHash::from_bytes([144_u8; 16]));
     }
 
     #[test]
