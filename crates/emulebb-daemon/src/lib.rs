@@ -477,23 +477,19 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
 
-    // Initial scan-on-demand pickup of the already-present shared files, then
-    // start the live auto-pickup monitor (eMule directory auto-monitor parity).
-    // Both startup tasks are detached so REST readiness is never blocked on
-    // scanning, watch registration, or hashing the shared library (a large
-    // library hashes far longer than any client timeout). They are started
-    // after REST is bound; the reload worker updates `hashingCount`; shares are
-    // seeded in place, not copied. The monitor is torn down by the graceful
-    // teardown's disconnect_ed2k.
-    let reload_core = Arc::clone(&core);
+    // Start the live auto-pickup monitor first, then run the initial
+    // scan-on-demand pickup of files that are already present. Keeping both
+    // steps in one detached task avoids the startup race where a file created
+    // after a scan pass but before watcher registration could be missed until a
+    // later reload. REST is already bound, and hashing remains detached in
+    // `reload_shared_directories_detached`, so readiness never waits on a large
+    // library hash.
+    let sharing_core = Arc::clone(&core);
     tokio::spawn(async move {
-        if let Err(error) = reload_core.reload_shared_directories_detached().await {
+        sharing_core.start_shared_directory_monitor().await;
+        if let Err(error) = sharing_core.reload_shared_directories_detached().await {
             tracing::warn!(%error, "initial shared-directory scan failed; continuing");
         }
-    });
-    let monitor_core = Arc::clone(&core);
-    tokio::spawn(async move {
-        monitor_core.start_shared_directory_monitor().await;
     });
     // Deliver any completed-but-undelivered transfers from a previous run in
     // the background. A persisted sharing profile can carry tens of thousands
