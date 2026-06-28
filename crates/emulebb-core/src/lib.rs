@@ -4363,12 +4363,16 @@ struct KadPublishLoopRuntime {
 /// off its 1s heartbeat gated by `KADEMLIAPUBLISHTIME` (2s); the actual
 /// (re)publish rate is bounded per-file by the 24h keyword / 5h source intervals,
 /// so this only controls how often we re-evaluate which files are due.
-const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 60;
-/// Upper bound on files attempted in one shared-file publish cycle. A persisted
-/// library can contain tens of thousands of files; even when every file is due
-/// after startup, we must drain progressively instead of issuing a live-network
-/// publish burst in one loop.
-const KAD_SHARED_FILE_PUBLISH_FILE_BUDGET: usize = 50;
+const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 2;
+/// Upper bound on files inspected in one Kad publish cycle. A large library may
+/// need several rounds to drain; this keeps each async loop slice bounded while
+/// the rotating cursor prevents first-file starvation.
+const KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET: usize = 256;
+/// Per-kind publish caps per 2s round, matching the MFC Kad store cadence shape
+/// (key/source/notes caps are independent instead of one coarse file budget).
+const KAD_KEYWORD_PUBLISH_BUDGET: usize = 3;
+const KAD_SOURCE_PUBLISH_BUDGET: usize = 4;
+const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 
 async fn run_kad_shared_file_publish_loop(
     runtime: KadPublishLoopRuntime,
@@ -4513,7 +4517,10 @@ async fn publish_kad_due_shared_files(
         diagnostics.running = true;
         diagnostics.bootstrapped = true;
         diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
-        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_FILE_BUDGET;
+        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+        diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+        diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+        diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
         diagnostics.item_count = shared_files.len();
     });
     // Keep the per-file schedule from growing without bound: forget files that
@@ -4529,10 +4536,20 @@ async fn publish_kad_due_shared_files(
             diagnostics.item_count = 0;
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
+            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
             diagnostics.budget_exhausted = false;
             diagnostics.keyword_due_count = 0;
             diagnostics.source_due_count = 0;
             diagnostics.notes_due_count = 0;
+            diagnostics.keyword_attempted = 0;
+            diagnostics.source_attempted = 0;
+            diagnostics.notes_attempted = 0;
+            diagnostics.keyword_skipped_by_budget = 0;
+            diagnostics.source_skipped_by_budget = 0;
+            diagnostics.notes_skipped_by_budget = 0;
             diagnostics.keyword_published = 0;
             diagnostics.source_published = 0;
             diagnostics.notes_published = 0;
@@ -4563,7 +4580,17 @@ async fn publish_kad_due_shared_files(
             diagnostics.item_count = shared_files.len();
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
+            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
             diagnostics.budget_exhausted = false;
+            diagnostics.keyword_attempted = 0;
+            diagnostics.source_attempted = 0;
+            diagnostics.notes_attempted = 0;
+            diagnostics.keyword_skipped_by_budget = 0;
+            diagnostics.source_skipped_by_budget = 0;
+            diagnostics.notes_skipped_by_budget = 0;
         });
         tracing::debug!(
             "Kad shared-file publish skipped: firewalled without buddy and UDP not verified-open"
@@ -4587,6 +4614,12 @@ async fn publish_kad_due_shared_files(
     let mut keyword_due_count = 0usize;
     let mut source_due_count = 0usize;
     let mut notes_due_count = 0usize;
+    let mut keyword_attempted = 0usize;
+    let mut source_attempted = 0usize;
+    let mut notes_attempted = 0usize;
+    let mut keyword_skipped_by_budget = 0usize;
+    let mut source_skipped_by_budget = 0usize;
+    let mut notes_skipped_by_budget = 0usize;
     // Our Kad node id is the notes publisher identity (master STORENOTES writes
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
@@ -4595,7 +4628,7 @@ async fn publish_kad_due_shared_files(
     let mut inspected = 0usize;
     let mut attempted_files = 0usize;
 
-    for offset in 0..item_count {
+    for offset in 0..item_count.min(KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET) {
         let entry = &shared_files[(start + offset) % item_count];
         let now = Instant::now();
         let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
@@ -4616,11 +4649,6 @@ async fn publish_kad_due_shared_files(
         if !keyword_due && !source_due && !notes_due {
             continue;
         }
-        if attempted_files >= KAD_SHARED_FILE_PUBLISH_FILE_BUDGET {
-            inspected = offset;
-            break;
-        }
-        attempted_files += 1;
         let file_hash: Ed2kHash = match entry.file_hash.parse() {
             Ok(hash) => hash,
             Err(error) => {
@@ -4632,103 +4660,116 @@ async fn publish_kad_due_shared_files(
                 continue;
             }
         };
+        let mut attempted_this_file = false;
 
         if let Some(keyword) = due_keyword.as_deref() {
-            let keyword_hash = keyword_target(keyword);
-            let mut keyword_tags = vec![
-                Tag::filename(entry.canonical_name.clone()),
-                Tag::filesize(entry.file_size),
-                Tag::sources(1),
-            ];
-            if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
-                keyword_tags.push(Tag::filetype(file_type));
-            }
-            let aich_hash = entry
-                .aich_root
-                .as_deref()
-                .and_then(decode_aich_root_hex_for_publish);
-            match runtime
-                .dht
-                .publish_keyword_with_class_and_fanout(
-                    keyword_hash,
-                    file_hash,
-                    keyword_tags,
-                    aich_hash,
-                    RpcWorkClass::Publish,
-                    network.kad_publish_contact_fanout,
-                )
-                .await
-            {
-                Ok(stats) => {
-                    accumulate_publish_stats(&mut keyword_totals, stats);
-                    // Outbound-publish observability: record that we STORED this
-                    // file's keywords to Kad (mirrors the inbound indexedKeywords
-                    // gauge). No-op unless EMULEBB_RUST_LOG_DIR is set.
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Keyword,
-                        &entry.file_hash,
-                        stats,
-                    );
-                    // Mark published only on a successful attempt, mirroring the
-                    // master setting the next-publish time when the store search
-                    // was actually started.
-                    schedule.mark_keyword_published(&entry.file_hash, keyword, now);
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &entry.file_hash,
-                        MetadataKadOutboundPublishKind::Keyword,
-                        keyword,
-                        Utc::now().timestamp_millis(),
-                    );
-                    keyword_published += 1;
+            if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET {
+                keyword_skipped_by_budget += 1;
+            } else {
+                keyword_attempted += 1;
+                attempted_this_file = true;
+                let keyword_hash = keyword_target(keyword);
+                let mut keyword_tags = vec![
+                    Tag::filename(entry.canonical_name.clone()),
+                    Tag::filesize(entry.file_size),
+                    Tag::sources(1),
+                ];
+                if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
+                    keyword_tags.push(Tag::filetype(file_type));
                 }
-                Err(error) => {
-                    tracing::debug!(
-                        file_hash = %entry.file_hash,
-                        name = entry.canonical_name,
-                        "Kad keyword publish failed: {error:#}"
-                    );
+                let aich_hash = entry
+                    .aich_root
+                    .as_deref()
+                    .and_then(decode_aich_root_hex_for_publish);
+                match runtime
+                    .dht
+                    .publish_keyword_with_class_and_fanout(
+                        keyword_hash,
+                        file_hash,
+                        keyword_tags,
+                        aich_hash,
+                        RpcWorkClass::Publish,
+                        network.kad_publish_contact_fanout,
+                    )
+                    .await
+                {
+                    Ok(stats) => {
+                        accumulate_publish_stats(&mut keyword_totals, stats);
+                        // Outbound-publish observability: record that we STORED this
+                        // file's keywords to Kad (mirrors the inbound indexedKeywords
+                        // gauge). No-op unless EMULEBB_RUST_LOG_DIR is set.
+                        diag_kad_event::publish(
+                            diag_kad_event::KadPublishKind::Keyword,
+                            &entry.file_hash,
+                            stats,
+                        );
+                        // Mark published only on a successful attempt, mirroring the
+                        // master setting the next-publish time when the store search
+                        // was actually started.
+                        schedule.mark_keyword_published(&entry.file_hash, keyword, now);
+                        persist_kad_outbound_publish(
+                            &runtime.metadata_store,
+                            &entry.file_hash,
+                            MetadataKadOutboundPublishKind::Keyword,
+                            keyword,
+                            Utc::now().timestamp_millis(),
+                        );
+                        keyword_published += 1;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            file_hash = %entry.file_hash,
+                            name = entry.canonical_name,
+                            "Kad keyword publish failed: {error:#}"
+                        );
+                    }
                 }
             }
         }
 
         if source_due {
-            let source_tags =
-                build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
-            match runtime
-                .dht
-                .publish_source_with_class_and_fanout(
-                    file_hash,
-                    source_publish_identity,
-                    source_tags,
-                    RpcWorkClass::Publish,
-                    network.kad_publish_contact_fanout,
-                )
-                .await
-            {
-                Ok(stats) => {
-                    accumulate_publish_stats(&mut source_totals, stats);
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Source,
-                        &entry.file_hash,
-                        stats,
-                    );
-                    schedule.mark_source_published(&entry.file_hash, now);
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &entry.file_hash,
-                        MetadataKadOutboundPublishKind::Source,
-                        "",
-                        Utc::now().timestamp_millis(),
-                    );
-                    source_published += 1;
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        file_hash = %entry.file_hash,
-                        name = entry.canonical_name,
-                        "Kad source publish failed: {error:#}"
-                    );
+            if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET {
+                source_skipped_by_budget += 1;
+            } else {
+                source_attempted += 1;
+                attempted_this_file = true;
+                let source_tags =
+                    build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
+                match runtime
+                    .dht
+                    .publish_source_with_class_and_fanout(
+                        file_hash,
+                        source_publish_identity,
+                        source_tags,
+                        RpcWorkClass::Publish,
+                        network.kad_publish_contact_fanout,
+                    )
+                    .await
+                {
+                    Ok(stats) => {
+                        accumulate_publish_stats(&mut source_totals, stats);
+                        diag_kad_event::publish(
+                            diag_kad_event::KadPublishKind::Source,
+                            &entry.file_hash,
+                            stats,
+                        );
+                        schedule.mark_source_published(&entry.file_hash, now);
+                        persist_kad_outbound_publish(
+                            &runtime.metadata_store,
+                            &entry.file_hash,
+                            MetadataKadOutboundPublishKind::Source,
+                            "",
+                            Utc::now().timestamp_millis(),
+                        );
+                        source_published += 1;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            file_hash = %entry.file_hash,
+                            name = entry.canonical_name,
+                            "Kad source publish failed: {error:#}"
+                        );
+                    }
                 }
             }
         }
@@ -4738,63 +4779,75 @@ async fn publish_kad_due_shared_files(
         // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
         // and source so an un-annotated file never emits a notes publish.
         if notes_due {
-            // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
-            // DESCRIPTION (non-empty only), FILESIZE.
-            let mut notes_tags = vec![Tag::filename(entry.canonical_name.clone())];
-            if entry.rating > 0 {
-                notes_tags.push(Tag::new_short(
-                    emulebb_kad_proto::tag_name::FILERATING,
-                    emulebb_kad_proto::TagValue::UInt(u64::from(entry.rating)),
-                ));
-            }
-            if !entry.comment.is_empty() {
-                notes_tags.push(Tag::new_short(
-                    emulebb_kad_proto::tag_name::DESCRIPTION,
-                    emulebb_kad_proto::TagValue::String(entry.comment.clone()),
-                ));
-            }
-            notes_tags.push(Tag::filesize(entry.file_size));
-            match runtime
-                .dht
-                .publish_notes_with_class_and_fanout(
-                    file_hash,
-                    notes_publisher_id,
-                    notes_tags,
-                    RpcWorkClass::Publish,
-                    network.kad_publish_contact_fanout,
-                )
-                .await
-            {
-                Ok(stats) => {
-                    accumulate_publish_stats(&mut notes_totals, stats);
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Notes,
-                        &entry.file_hash,
-                        stats,
-                    );
-                    schedule.mark_notes_published(&entry.file_hash, now);
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &entry.file_hash,
-                        MetadataKadOutboundPublishKind::Notes,
-                        "",
-                        Utc::now().timestamp_millis(),
-                    );
-                    notes_published += 1;
+            if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET {
+                notes_skipped_by_budget += 1;
+            } else {
+                notes_attempted += 1;
+                attempted_this_file = true;
+                // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
+                // DESCRIPTION (non-empty only), FILESIZE.
+                let mut notes_tags = vec![Tag::filename(entry.canonical_name.clone())];
+                if entry.rating > 0 {
+                    notes_tags.push(Tag::new_short(
+                        emulebb_kad_proto::tag_name::FILERATING,
+                        emulebb_kad_proto::TagValue::UInt(u64::from(entry.rating)),
+                    ));
                 }
-                Err(error) => {
-                    tracing::debug!(
-                        file_hash = %entry.file_hash,
-                        name = entry.canonical_name,
-                        "Kad notes publish failed: {error:#}"
-                    );
+                if !entry.comment.is_empty() {
+                    notes_tags.push(Tag::new_short(
+                        emulebb_kad_proto::tag_name::DESCRIPTION,
+                        emulebb_kad_proto::TagValue::String(entry.comment.clone()),
+                    ));
+                }
+                notes_tags.push(Tag::filesize(entry.file_size));
+                match runtime
+                    .dht
+                    .publish_notes_with_class_and_fanout(
+                        file_hash,
+                        notes_publisher_id,
+                        notes_tags,
+                        RpcWorkClass::Publish,
+                        network.kad_publish_contact_fanout,
+                    )
+                    .await
+                {
+                    Ok(stats) => {
+                        accumulate_publish_stats(&mut notes_totals, stats);
+                        diag_kad_event::publish(
+                            diag_kad_event::KadPublishKind::Notes,
+                            &entry.file_hash,
+                            stats,
+                        );
+                        schedule.mark_notes_published(&entry.file_hash, now);
+                        persist_kad_outbound_publish(
+                            &runtime.metadata_store,
+                            &entry.file_hash,
+                            MetadataKadOutboundPublishKind::Notes,
+                            "",
+                            Utc::now().timestamp_millis(),
+                        );
+                        notes_published += 1;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            file_hash = %entry.file_hash,
+                            name = entry.canonical_name,
+                            "Kad notes publish failed: {error:#}"
+                        );
+                    }
                 }
             }
         }
+        if attempted_this_file {
+            attempted_files += 1;
+        }
     }
     schedule.advance_cursor(start, inspected, item_count);
-    let budget_exhausted =
-        attempted_files >= KAD_SHARED_FILE_PUBLISH_FILE_BUDGET && inspected < item_count;
+    let budget_exhausted = (inspected >= KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET
+        && inspected < item_count)
+        || keyword_skipped_by_budget > 0
+        || source_skipped_by_budget > 0
+        || notes_skipped_by_budget > 0;
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.phase = "idle".to_string();
         diagnostics.running = true;
@@ -4804,11 +4857,20 @@ async fn publish_kad_due_shared_files(
         diagnostics.item_count = item_count;
         diagnostics.inspected_count = inspected;
         diagnostics.attempted_files = attempted_files;
-        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_FILE_BUDGET;
+        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+        diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+        diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+        diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
         diagnostics.budget_exhausted = budget_exhausted;
         diagnostics.keyword_due_count = keyword_due_count;
         diagnostics.source_due_count = source_due_count;
         diagnostics.notes_due_count = notes_due_count;
+        diagnostics.keyword_attempted = keyword_attempted;
+        diagnostics.source_attempted = source_attempted;
+        diagnostics.notes_attempted = notes_attempted;
+        diagnostics.keyword_skipped_by_budget = keyword_skipped_by_budget;
+        diagnostics.source_skipped_by_budget = source_skipped_by_budget;
+        diagnostics.notes_skipped_by_budget = notes_skipped_by_budget;
         diagnostics.keyword_published = keyword_published;
         diagnostics.source_published = source_published;
         diagnostics.notes_published = notes_published;
