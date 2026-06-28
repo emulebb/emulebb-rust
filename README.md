@@ -43,9 +43,11 @@ not change the semantics of supported stock interactions.
 Rust source should stay split by subsystem and responsibility. The guardrail in
 `policy/rust-client.toml` sets file-size budgets, names current legacy oversized
 files as refactor debt, and prevents new oversized modules from appearing
-without an explicit rationale. Existing caps can be raised only when the touched
-behavior is one cohesive function or protocol decision surface and the policy
-rationale explains why splitting it would make the code harder to reason about.
+without an explicit rationale. During the parity push, source caps are
+engineering guardrails rather than refactor triggers; raise an allowlist cap
+when the touched behavior is one cohesive function or protocol decision surface
+and the policy rationale explains why splitting it would make the code harder to
+reason about.
 
 Run the local policy guard before policy-sensitive protocol or architecture
 changes:
