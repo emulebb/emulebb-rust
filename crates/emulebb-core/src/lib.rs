@@ -3813,6 +3813,21 @@ impl EmulebbCore {
                 "ED2K dropped {dropped} self-source(s) for file_hash={file_hash} (own user-hash or endpoint)"
             );
         }
+        // WHY: ban + IP-filter at the acquisition chokepoint. eMule
+        // `CDownloadQueue::CheckAndAddSource` gates EVERY added source, but the
+        // connected-server, Kad, and remembered merge legs above add sources
+        // without filtering (only the UDP-batch leg pre-filters). Apply it once
+        // over the fully-merged set before any source is remembered, returned, or
+        // dialed, so a banned / ip-filtered peer reflected back by a server or Kad
+        // on an initial OR requery lookup can never be leased. Invariant: no
+        // banned/filtered endpoint leaves acquire_ed2k_sources.
+        if !network.ip_filter.is_empty() {
+            sources.retain(|source| !network.ip_filter.is_filtered(source.ip));
+        }
+        let acquire_ban_store = self.ed2k_transfers.ban_store();
+        sources.retain(|source| {
+            !acquire_ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
+        });
         for source in &sources {
             self.remember_ed2k_sources(file_hash, std::slice::from_ref(source))
                 .await?;
