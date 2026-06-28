@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
-use emulebb_metadata::{MetadataTransferCounts, MetadataTransferPublishEntry};
+use emulebb_metadata::{
+    MetadataTransferCounts, MetadataTransferPublishEntry, MetadataTransferShareEntry,
+};
 
 use super::hashset::{
     decode_aich_hash_hex, decode_manifest_aich_hashset, expected_md4_hash_count,
@@ -26,6 +28,14 @@ impl Ed2kTransferRuntime {
     pub async fn publish_entries(&self) -> Result<Vec<MetadataTransferPublishEntry>> {
         let metadata = self.metadata.clone();
         tokio::task::spawn_blocking(move || metadata.completed_transfer_publish_entries())
+            .await
+            .map_err(anyhow::Error::from)?
+    }
+
+    /// Return REST shared-file summaries without hydrating every manifest.
+    pub async fn share_entries(&self) -> Result<Vec<MetadataTransferShareEntry>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || metadata.completed_transfer_share_entries())
             .await
             .map_err(anyhow::Error::from)?
     }

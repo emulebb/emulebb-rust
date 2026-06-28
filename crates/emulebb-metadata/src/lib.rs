@@ -34,5 +34,5 @@ pub use text::normalize_search_text;
 pub use transfer_model::{
     MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
     MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-    MetadataTransferSource,
+    MetadataTransferShareEntry, MetadataTransferSource,
 };

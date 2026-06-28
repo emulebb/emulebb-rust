@@ -87,10 +87,25 @@ fn transfer_manifest_roundtrips_sql_tables() {
             rating: manifest.rating,
         }]
     );
+    assert_eq!(
+        store.completed_transfer_share_entries().unwrap(),
+        vec![MetadataTransferShareEntry {
+            file_hash: manifest.file_hash.clone(),
+            canonical_name: manifest.canonical_name.clone(),
+            file_size: manifest.file_size,
+            part_count: 1,
+            aich_root: manifest.aich_root.clone(),
+            upload_priority: manifest.upload_priority.clone(),
+            auto_upload_priority: manifest.auto_upload_priority,
+            comment: manifest.comment.clone(),
+            rating: manifest.rating,
+        }]
+    );
     store
         .mark_unshared_file(&manifest.file_hash, "manual")
         .unwrap();
     assert_eq!(store.completed_transfer_publish_entries().unwrap(), vec![]);
+    assert_eq!(store.completed_transfer_share_entries().unwrap(), vec![]);
     store.unmark_unshared_file(&manifest.file_hash).unwrap();
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
 }

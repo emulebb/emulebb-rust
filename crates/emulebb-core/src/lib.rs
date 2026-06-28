@@ -1639,36 +1639,32 @@ impl EmulebbCore {
     }
 
     pub async fn shares(&self) -> Vec<LocalShare> {
-        let unshared_hashes = self.state.lock().await.unshared_hashes.clone();
-        match self.ed2k_transfers.manifests().await {
-            Ok(manifests) => manifests
+        match self.ed2k_transfers.share_entries().await {
+            Ok(entries) => entries
                 .into_iter()
-                .filter(|manifest| {
-                    manifest.completed && !unshared_hashes.contains(&manifest.file_hash)
-                })
-                .map(|manifest| LocalShare {
-                    hash: manifest.file_hash.clone(),
-                    name: manifest.canonical_name.clone(),
-                    size_bytes: manifest.file_size,
-                    part_count: ed2k_part_count(manifest.file_size),
+                .map(|entry| LocalShare {
+                    hash: entry.file_hash.clone(),
+                    name: entry.canonical_name.clone(),
+                    size_bytes: entry.file_size,
+                    part_count: entry.part_count,
                     ed2k_link: format!(
                         "ed2k://|file|{}|{}|{}|/",
-                        manifest.canonical_name, manifest.file_size, manifest.file_hash
+                        entry.canonical_name, entry.file_size, entry.file_hash
                     ),
-                    aich_root: manifest.aich_root.clone().unwrap_or_default(),
+                    aich_root: entry.aich_root.clone().unwrap_or_default(),
                     transfer_dir: self
                         .ed2k_transfers
-                        .transfer_dir_path(&manifest.file_hash)
+                        .transfer_dir_path(&entry.file_hash)
                         .display()
                         .to_string(),
-                    priority: manifest.upload_priority.clone(),
-                    auto_upload_priority: manifest.auto_upload_priority,
-                    comment: manifest.comment.clone(),
-                    rating: manifest.rating,
+                    priority: entry.upload_priority.clone(),
+                    auto_upload_priority: entry.auto_upload_priority,
+                    comment: entry.comment.clone(),
+                    rating: entry.rating,
                 })
                 .collect(),
             Err(error) => {
-                tracing::warn!("failed to enumerate ED2K shared-file manifests: {error}");
+                tracing::warn!("failed to enumerate ED2K shared-file summaries: {error}");
                 Vec::new()
             }
         }

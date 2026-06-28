@@ -64,6 +64,19 @@ pub struct MetadataTransferPublishEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataTransferShareEntry {
+    pub file_hash: String,
+    pub canonical_name: String,
+    pub file_size: u64,
+    pub part_count: u32,
+    pub aich_root: Option<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub comment: String,
+    pub rating: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,
