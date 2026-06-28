@@ -369,23 +369,33 @@ async fn forget_stale_share(core: &EmulebbCore, stale_hash: Option<&str>, new_ha
 /// promptly while `hashingCount` climbs/drains in the background and
 /// `shared-files` fills in on its own.
 ///
-/// Returns the number of files queued for hashing. The scan itself runs before
-/// returning, so the count and the initial `hashingCount` are accurate the
-/// instant the caller gets control back. Unlike the synchronous primitive, the
-/// background worker logs and skips a file that fails to hash and continues, so
-/// one bad file never aborts indexing of the rest of the library.
+/// Returns immediately after enqueueing the reload job. The queued hash count is
+/// only known after the background scan/stat planning phase, so callers should
+/// observe `hashingCount` instead of relying on the return value. Unlike the
+/// synchronous primitive, the background worker logs and skips a file that fails
+/// to hash and continues, so one bad file never aborts indexing of the rest of
+/// the library.
 pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Result<usize> {
-    let file_paths = scan_shared_files(core).await?;
+    let core = core.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_shared_directories_reload_job(core).await {
+            tracing::warn!(%error, "background shared-directory reload failed");
+        }
+    });
+    Ok(0)
+}
+
+async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
+    let file_paths = scan_shared_files(&core).await?;
     let scanned = file_paths.len();
     // Incremental skip: an unchanged file (same path + size + mtime as its
     // persisted manifest) is NOT re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
-    let plan = plan_incremental_reload(core, file_paths).await?;
+    let plan = plan_incremental_reload(&core, file_paths).await?;
     let queued = plan.to_hash.len();
     let reused = plan.reused_hashes.len();
-    // Publish the pending count now so `hashingCount` is non-zero the instant the
-    // request returns, before the detached worker starts draining it. It counts
-    // only the files actually being hashed, so an unchanged library reports ~0.
+    // Publish the pending count after scan/planning. It counts only the files
+    // actually being hashed, so an unchanged library reports ~0.
     core.shared_hashing_count
         .store(queued as i64, Ordering::Relaxed);
     tracing::info!(
@@ -396,48 +406,44 @@ pub(crate) async fn reload_shared_directories_detached(core: &EmulebbCore) -> Re
     );
 
     let to_hash = plan.to_hash;
-    let core = core.clone();
-    tokio::spawn(async move {
-        let _guard = HashingCountGuard(core.shared_hashing_count.clone());
-        // Group the to-hash set by physical disk and hash one file at a time per
-        // spindle, with distinct disks running in parallel. Concurrent reads on a
-        // single HDD seek-thrash (slower than serial), so per-disk concurrency is
-        // 1; the speed-up comes from fanning out across disks. The hash itself
-        // already runs off the manifest lock and on a blocking thread (see
-        // `ingest_local_file`), so N disks means N files in flight without
-        // freezing the REST/control plane.
-        let mut by_disk: HashMap<String, Vec<ReloadHashTarget>> = HashMap::new();
-        for target in to_hash {
-            by_disk
-                .entry(physical_disk_key(&target.path))
-                .or_default()
-                .push(target);
-        }
-        let disk_count = by_disk.len();
-        tracing::info!(
-            disks = disk_count,
-            "background shared-directory reload hashing across physical disks"
-        );
-        let mut workers = JoinSet::new();
-        for (disk, targets) in by_disk {
-            let core = core.clone();
-            workers.spawn(async move {
-                let files = targets.len();
-                for target in targets {
-                    hash_one_reload_target(&core, target).await;
-                }
-                tracing::debug!(
-                    disk = %disk,
-                    files,
-                    "per-disk shared-directory hashing worker finished"
-                );
-            });
-        }
-        while workers.join_next().await.is_some() {}
-        tracing::info!("background shared-directory reload finished hashing the library");
-    });
-
-    Ok(queued)
+    let _guard = HashingCountGuard(core.shared_hashing_count.clone());
+    // Group the to-hash set by physical disk and hash one file at a time per
+    // spindle, with distinct disks running in parallel. Concurrent reads on a
+    // single HDD seek-thrash (slower than serial), so per-disk concurrency is 1;
+    // the speed-up comes from fanning out across disks. The hash itself already
+    // runs off the manifest lock and on a blocking thread (see
+    // `ingest_local_file`), so N disks means N files in flight without freezing
+    // the REST/control plane.
+    let mut by_disk: HashMap<String, Vec<ReloadHashTarget>> = HashMap::new();
+    for target in to_hash {
+        by_disk
+            .entry(physical_disk_key(&target.path))
+            .or_default()
+            .push(target);
+    }
+    let disk_count = by_disk.len();
+    tracing::info!(
+        disks = disk_count,
+        "background shared-directory reload hashing across physical disks"
+    );
+    let mut workers = JoinSet::new();
+    for (disk, targets) in by_disk {
+        let core = core.clone();
+        workers.spawn(async move {
+            let files = targets.len();
+            for target in targets {
+                hash_one_reload_target(&core, target).await;
+            }
+            tracing::debug!(
+                disk = %disk,
+                files,
+                "per-disk shared-directory hashing worker finished"
+            );
+        });
+    }
+    while workers.join_next().await.is_some() {}
+    tracing::info!("background shared-directory reload finished hashing the library");
+    Ok(())
 }
 
 /// Hash and share one reloaded file, then prune a now-stale duplicate manifest

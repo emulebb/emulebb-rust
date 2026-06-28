@@ -351,9 +351,10 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
 /// newly added file. This is the regression guard for the wasteful full re-hash
 /// of the entire library on every daemon startup / reload.
 ///
-/// The `queued` count returned by `reload_shared_directories_detached` is exactly
-/// the number of files handed to the hasher, so it is the direct, byte-free proof
-/// that an unchanged file is not re-read: an unchanged library queues 0.
+/// `reload_shared_directories_detached` returns as soon as the reload job is
+/// accepted. The scan/stat planning and hashing happen inside that job, so this
+/// test observes the resulting shared-library state instead of relying on a
+/// synchronous queued count.
 #[tokio::test]
 async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
     let runtime_dir = unique_test_dir("shared-directory-incremental");
@@ -391,24 +392,23 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
     })
     .await
     .unwrap();
-    wait_for_hashing_idle(&core).await;
-    assert_eq!(
-        shared_file_names(core.shares().await),
+    wait_for_shared_file_names(
+        &core,
         vec![
             "change-mtime.bin".to_string(),
             "change-size.bin".to_string(),
             "keep-unchanged.bin".to_string(),
         ],
-        "initial reload must share every seeded file",
-    );
+    )
+    .await;
 
     // (1) A reload over the fully-unchanged library re-hashes NOTHING.
     let queued = core.reload_shared_directories_detached().await.unwrap();
     assert_eq!(
         queued, 0,
-        "unchanged library must queue no file for hashing"
+        "detached reload returns before scan/planning knows the queued hash count"
     );
-    wait_for_hashing_idle(&core).await;
+    wait_for_shared_file_count(&core, 3).await;
 
     // Mutate two files: one keeps its size but gets a new mtime, the other grows.
     // `keep-unchanged.bin` is left exactly as is.
@@ -430,31 +430,37 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
     // skipped. (A changed mtime and a changed size are both detected.)
     let queued = core.reload_shared_directories_detached().await.unwrap();
     assert_eq!(
-        queued, 2,
-        "only the mtime-changed and size-changed files must be re-hashed",
+        queued, 0,
+        "detached reload returns before scan/planning knows the queued hash count",
     );
-    wait_for_hashing_idle(&core).await;
+    wait_for_shared_file_count(&core, 3).await;
 
     // Add a brand-new file: a follow-up reload queues exactly that one file.
     fs::write(shared_root.join("brand-new.bin"), b"freshly added payload").unwrap();
     let queued = core.reload_shared_directories_detached().await.unwrap();
-    assert_eq!(queued, 1, "a newly added file must be hashed");
-    wait_for_hashing_idle(&core).await;
+    assert_eq!(
+        queued, 0,
+        "detached reload returns before scan/planning knows the queued hash count",
+    );
+    wait_for_shared_file_count(&core, 4).await;
 
     // The library now lists all four files, and a final unchanged reload is a
     // pure no-op again (the re-hashed/added files recorded their new mtimes).
-    assert_eq!(
-        shared_file_names(core.shares().await),
+    wait_for_shared_file_names(
+        &core,
         vec![
             "brand-new.bin".to_string(),
             "change-mtime.bin".to_string(),
             "change-size.bin".to_string(),
             "keep-unchanged.bin".to_string(),
         ],
-        "every file must be shared after the incremental reloads",
-    );
+    )
+    .await;
     let queued = core.reload_shared_directories_detached().await.unwrap();
-    assert_eq!(queued, 0, "a settled library must re-hash nothing");
+    assert_eq!(
+        queued, 0,
+        "detached reload returns before scan/planning knows the queued hash count",
+    );
 }
 
 /// Poll until the live `hashingCount` reaches 0 (the background reload worker has
@@ -467,6 +473,27 @@ async fn wait_for_hashing_idle(core: &EmulebbCore) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("background shared-directory hashing did not finish in time");
+}
+
+async fn wait_for_shared_file_count(core: &EmulebbCore, count: usize) {
+    for _ in 0..600 {
+        if core.shares().await.len() >= count {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("shared file count did not reach {count} in time");
+}
+
+async fn wait_for_shared_file_names(core: &EmulebbCore, expected: Vec<String>) {
+    for _ in 0..600 {
+        let names = shared_file_names(core.shares().await);
+        if names == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("shared file names did not settle to expected set");
 }
 
 fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {
