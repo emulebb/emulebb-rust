@@ -98,6 +98,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = status.transfers.total;
+    let kad_publish = state.core.kad_publish_diagnostics();
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &upload_policy, &throughput, shared_hashing_count),
@@ -125,6 +126,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "sharedFileCount": shared_file_count,
             "sharedHashingCount": shared_hashing_count,
             "sharedReload": shared_reload,
+            "kadPublish": kad_publish,
             "downloadFileCount": download_file_count,
             "activeUploads": upload_policy.active_sessions,
             "waitingUploads": upload_policy.waiting_sessions,

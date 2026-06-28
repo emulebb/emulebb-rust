@@ -99,6 +99,7 @@ mod kad_control;
 mod kad_hello;
 mod kad_passive_replay;
 mod kad_public_search;
+mod kad_publish_diagnostics;
 mod kad_publish_schedule;
 mod kad_routing_maintenance;
 mod kad_snoop_entry;
@@ -170,6 +171,7 @@ use kad_passive_replay::{
 };
 use kad_passive_replay::{PassiveReplayWorker, run_kad_passive_replay_loop};
 use kad_public_search::search_kad_keywords;
+pub use kad_publish_diagnostics::KadPublishDiagnostics;
 use kad_snoop_entry::{
     build_keyword_snoop_entry, build_notes_snoop_entry, build_source_snoop_entry,
 };
@@ -368,6 +370,7 @@ pub struct EmulebbCore {
     shared_catalog_publish_dirty: Arc<AtomicBool>,
     shared_catalog_publish_worker: Arc<AtomicBool>,
     shared_catalog_publish_last: Arc<Mutex<Option<Instant>>>,
+    kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -472,6 +475,7 @@ impl EmulebbCore {
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
+            kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -893,6 +897,7 @@ impl EmulebbCore {
                     dht: dht.clone(),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
                     metadata_store: self.metadata_store.clone(),
+                    diagnostics: Arc::clone(&self.kad_publish_diagnostics),
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
@@ -1740,6 +1745,10 @@ impl EmulebbCore {
 
     pub async fn shared_catalog_count(&self) -> usize {
         self.ed2k_transfers.shared_catalog_count().await
+    }
+
+    pub fn kad_publish_diagnostics(&self) -> KadPublishDiagnostics {
+        kad_publish_diagnostics::snapshot(&self.kad_publish_diagnostics)
     }
 
     pub async fn share(&self, hash: &str) -> Option<LocalShare> {
@@ -4342,6 +4351,7 @@ struct KadPublishLoopRuntime {
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     metadata_store: MetadataStore,
+    diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
     ed2k_listener: Arc<TcpListener>,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
@@ -4368,6 +4378,14 @@ async fn run_kad_shared_file_publish_loop(
     hydrate_kad_outbound_publish_schedule(&runtime.metadata_store, &mut schedule);
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
+            kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+                diagnostics.phase = "waitingBootstrap".to_string();
+                diagnostics.running = true;
+                diagnostics.bootstrapped = false;
+                diagnostics.gate_allowed = false;
+                diagnostics.gate_block_reason = "kadNotBootstrapped".to_string();
+                diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+            });
             tokio::time::sleep(Duration::from_secs(KAD_SHARED_FILE_PUBLISH_RETRY_SECS)).await;
             continue;
         }
@@ -4384,6 +4402,10 @@ async fn run_kad_shared_file_publish_loop(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
+    kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+        diagnostics.phase = "stopped".to_string();
+        diagnostics.running = false;
+    });
 }
 
 fn hydrate_kad_outbound_publish_schedule(
@@ -4486,16 +4508,63 @@ async fn publish_kad_due_shared_files(
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
 ) -> Result<usize> {
     let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
+    kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+        diagnostics.phase = "scanning".to_string();
+        diagnostics.running = true;
+        diagnostics.bootstrapped = true;
+        diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_FILE_BUDGET;
+        diagnostics.item_count = shared_files.len();
+    });
     // Keep the per-file schedule from growing without bound: forget files that
     // are no longer publishable (removed / no longer complete).
     schedule.retain_only(shared_files.iter().map(|entry| entry.file_hash.as_str()));
     if shared_files.is_empty() {
+        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+            diagnostics.phase = "idle".to_string();
+            diagnostics.running = true;
+            diagnostics.bootstrapped = true;
+            diagnostics.gate_allowed = true;
+            diagnostics.gate_block_reason.clear();
+            diagnostics.item_count = 0;
+            diagnostics.inspected_count = 0;
+            diagnostics.attempted_files = 0;
+            diagnostics.budget_exhausted = false;
+            diagnostics.keyword_due_count = 0;
+            diagnostics.source_due_count = 0;
+            diagnostics.notes_due_count = 0;
+            diagnostics.keyword_published = 0;
+            diagnostics.source_published = 0;
+            diagnostics.notes_published = 0;
+            diagnostics.keyword_acked_contacts = 0;
+            diagnostics.source_acked_contacts = 0;
+            diagnostics.notes_acked_contacts = 0;
+        });
         return Ok(0);
     }
 
     // Master CSharedFileList::Publish gate (SharedFileList.cpp:3066-3076): do not
     // emit PUBLISH_*_REQ while firewalled-and-unreachable (no buddy, UDP closed).
-    if !kad_publish_schedule::kad_publish_allowed(kad_publish_gate_input(runtime).await) {
+    let gate = kad_publish_gate_input(runtime).await;
+    if !kad_publish_schedule::kad_publish_allowed(gate) {
+        let gate_block_reason = if !gate.kad_connected {
+            "kadNotConnected"
+        } else if gate.tcp_firewalled && !gate.buddy_connected && !gate.udp_open {
+            "firewalledWithoutBuddyOrUdp"
+        } else {
+            "blocked"
+        };
+        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+            diagnostics.phase = "blocked".to_string();
+            diagnostics.running = true;
+            diagnostics.bootstrapped = true;
+            diagnostics.gate_allowed = false;
+            diagnostics.gate_block_reason = gate_block_reason.to_string();
+            diagnostics.item_count = shared_files.len();
+            diagnostics.inspected_count = 0;
+            diagnostics.attempted_files = 0;
+            diagnostics.budget_exhausted = false;
+        });
         tracing::debug!(
             "Kad shared-file publish skipped: firewalled without buddy and UDP not verified-open"
         );
@@ -4515,6 +4584,9 @@ async fn publish_kad_due_shared_files(
     let mut keyword_published = 0usize;
     let mut source_published = 0usize;
     let mut notes_published = 0usize;
+    let mut keyword_due_count = 0usize;
+    let mut source_due_count = 0usize;
+    let mut notes_due_count = 0usize;
     // Our Kad node id is the notes publisher identity (master STORENOTES writes
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
@@ -4537,6 +4609,9 @@ async fn publish_kad_due_shared_files(
         let notes_due =
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now);
+        keyword_due_count += usize::from(keyword_due);
+        source_due_count += usize::from(source_due);
+        notes_due_count += usize::from(notes_due);
         inspected = offset + 1;
         if !keyword_due && !source_due && !notes_due {
             continue;
@@ -4718,6 +4793,30 @@ async fn publish_kad_due_shared_files(
         }
     }
     schedule.advance_cursor(start, inspected, item_count);
+    let budget_exhausted =
+        attempted_files >= KAD_SHARED_FILE_PUBLISH_FILE_BUDGET && inspected < item_count;
+    kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+        diagnostics.phase = "idle".to_string();
+        diagnostics.running = true;
+        diagnostics.bootstrapped = true;
+        diagnostics.gate_allowed = true;
+        diagnostics.gate_block_reason.clear();
+        diagnostics.item_count = item_count;
+        diagnostics.inspected_count = inspected;
+        diagnostics.attempted_files = attempted_files;
+        diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_FILE_BUDGET;
+        diagnostics.budget_exhausted = budget_exhausted;
+        diagnostics.keyword_due_count = keyword_due_count;
+        diagnostics.source_due_count = source_due_count;
+        diagnostics.notes_due_count = notes_due_count;
+        diagnostics.keyword_published = keyword_published;
+        diagnostics.source_published = source_published;
+        diagnostics.notes_published = notes_published;
+        diagnostics.keyword_acked_contacts = keyword_totals.acked_contacts;
+        diagnostics.source_acked_contacts = source_totals.acked_contacts;
+        diagnostics.notes_acked_contacts = notes_totals.acked_contacts;
+        diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+    });
 
     if keyword_published > 0 || source_published > 0 || notes_published > 0 {
         tracing::info!(
