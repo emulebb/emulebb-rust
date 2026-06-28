@@ -39,6 +39,8 @@
 //!   keyword/source/notes publish due timers.
 //! - v10 -> v11: `share_in_place_sources` path-alias table for duplicate shared
 //!   files with the same ED2K hash.
+//! - v11 -> v12: `shared_source_failures` table for stable skip of unchanged
+//!   shared-source paths whose ingest failed.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -191,6 +193,25 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
                     file_size = excluded.file_size,
                     source_mtime_ms = excluded.source_mtime_ms,
                     updated_at_ms = excluded.updated_at_ms;
+                "#,
+            )?;
+            Ok(())
+        }
+        // v11 -> v12: remember failed shared-source identities so an unchanged
+        // unsupported/unreadable path does not re-enter the hash queue forever.
+        12 => {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS shared_source_failures (
+                    id INTEGER PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    source_mtime_ms INTEGER,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    UNIQUE(source_path)
+                );
                 "#,
             )?;
             Ok(())
@@ -359,6 +380,7 @@ mod tests {
             ("transfers", "source_path"),
             ("transfers", "source_mtime_ms"),
             ("share_in_place_sources", "source_path"),
+            ("shared_source_failures", "source_path"),
         ] {
             let tx = conn.transaction().unwrap();
             assert!(

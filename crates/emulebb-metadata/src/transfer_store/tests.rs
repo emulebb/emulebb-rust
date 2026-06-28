@@ -197,6 +197,102 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
 }
 
 #[test]
+fn shared_source_failures_roundtrip_update_and_clear() {
+    let store = MetadataStore::in_memory().unwrap();
+
+    store
+        .upsert_shared_source_failure(
+            "/library/Broken.Source.bin",
+            1024,
+            Some(1_700_000_000_000),
+            "ingest failed",
+        )
+        .unwrap();
+    let initial = store.shared_source_failures().unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].source_path, "/library/Broken.Source.bin");
+    assert_eq!(initial[0].file_size, 1024);
+    assert_eq!(initial[0].source_mtime_ms, Some(1_700_000_000_000));
+    assert_eq!(initial[0].reason, "ingest failed");
+
+    store
+        .upsert_shared_source_failure(
+            "/library/Broken.Source.bin",
+            2048,
+            Some(1_700_000_000_111),
+            "changed identity failed",
+        )
+        .unwrap();
+    let updated = store.shared_source_failures().unwrap();
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].file_size, 2048);
+    assert_eq!(updated[0].source_mtime_ms, Some(1_700_000_000_111));
+    assert_eq!(updated[0].reason, "changed identity failed");
+    assert_eq!(updated[0].created_at_ms, initial[0].created_at_ms);
+    assert!(updated[0].updated_at_ms >= initial[0].updated_at_ms);
+
+    assert!(
+        store
+            .clear_shared_source_failure("/library/Broken.Source.bin")
+            .unwrap()
+    );
+    assert!(store.shared_source_failures().unwrap().is_empty());
+    assert!(
+        !store
+            .clear_shared_source_failure("/library/Broken.Source.bin")
+            .unwrap()
+    );
+}
+
+#[test]
+fn transfer_manifest_clears_matching_shared_source_failure() {
+    let store = MetadataStore::in_memory().unwrap();
+    store
+        .upsert_shared_source_failure(
+            "/library/Recovered.Source.bin",
+            1024,
+            Some(1_700_000_000_000),
+            "ingest failed",
+        )
+        .unwrap();
+    let manifest = MetadataTransferManifest {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        canonical_name: "Recovered.Source.bin".to_string(),
+        file_size: 1024,
+        piece_size: 1024,
+        completed: true,
+        md4_hashset_acquired: true,
+        md4_hashset: Vec::new(),
+        aich_hashset_acquired: true,
+        aich_root: Some("1111111111111111111111111111111111111111".to_string()),
+        aich_hashset: Vec::new(),
+        verified_ranges: Vec::new(),
+        pieces: vec![MetadataTransferPiece {
+            piece_index: 0,
+            state: "Verified".to_string(),
+            bytes_written: 1024,
+            block_bitmap: None,
+        }],
+        sources: Vec::new(),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: true,
+        comment: String::new(),
+        rating: 0,
+        category_id: 0,
+        control_state: None,
+        transfer_row_removed: false,
+        delivered_path: None,
+        source_path: Some("/library/Recovered.Source.bin".to_string()),
+        source_mtime_ms: Some(1_700_000_000_000),
+    };
+
+    store.upsert_transfer_manifest(&manifest).unwrap();
+
+    assert!(store.shared_source_failures().unwrap().is_empty());
+    assert_eq!(store.share_in_place_reload_entries().unwrap().len(), 1);
+}
+
+#[test]
 fn delete_transfer_manifest_removes_transfer_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {

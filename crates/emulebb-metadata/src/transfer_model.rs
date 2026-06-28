@@ -85,6 +85,16 @@ pub struct MetadataShareInPlaceReloadEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSharedSourceFailure {
+    pub source_path: String,
+    pub file_size: u64,
+    pub source_mtime_ms: Option<i64>,
+    pub reason: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPiece {
     pub piece_index: u32,
     pub state: String,

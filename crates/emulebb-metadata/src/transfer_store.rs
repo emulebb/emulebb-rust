@@ -4,9 +4,10 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     transfer_model::{
-        MetadataShareInPlaceReloadEntry, MetadataTransferCatalogEntry, MetadataTransferCounts,
-        MetadataTransferManifest, MetadataTransferPiece, MetadataTransferPublishEntry,
-        MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
+        MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
+        MetadataTransferCounts, MetadataTransferManifest, MetadataTransferPiece,
+        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
+        MetadataTransferSource,
     },
 };
 
@@ -164,6 +165,10 @@ impl super::MetadataStore {
                     manifest.source_mtime_ms,
                     now,
                 ],
+            )?;
+            tx.execute(
+                "DELETE FROM shared_source_failures WHERE source_path = ?1",
+                params![source_path],
             )?;
         }
 
@@ -404,6 +409,63 @@ impl super::MetadataStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn shared_source_failures(&self) -> Result<Vec<MetadataSharedSourceFailure>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT source_path, file_size, source_mtime_ms, reason,
+                   created_at_ms, updated_at_ms
+            FROM shared_source_failures
+            ORDER BY source_path
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataSharedSourceFailure {
+                source_path: row.get(0)?,
+                file_size: row.get::<_, i64>(1)? as u64,
+                source_mtime_ms: row.get(2)?,
+                reason: row.get(3)?,
+                created_at_ms: row.get(4)?,
+                updated_at_ms: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn upsert_shared_source_failure(
+        &self,
+        source_path: &str,
+        file_size: u64,
+        source_mtime_ms: Option<i64>,
+        reason: &str,
+    ) -> Result<()> {
+        let now = unix_ms();
+        self.connection()?.execute(
+            r#"
+            INSERT INTO shared_source_failures(
+                source_path, file_size, source_mtime_ms, reason,
+                created_at_ms, updated_at_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(source_path) DO UPDATE SET
+                file_size = excluded.file_size,
+                source_mtime_ms = excluded.source_mtime_ms,
+                reason = excluded.reason,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![source_path, file_size as i64, source_mtime_ms, reason, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_shared_source_failure(&self, source_path: &str) -> Result<bool> {
+        let deleted = self.connection()?.execute(
+            "DELETE FROM shared_source_failures WHERE source_path = ?1",
+            params![source_path],
+        )?;
+        Ok(deleted != 0)
     }
 
     pub fn transfer_counts(&self) -> Result<MetadataTransferCounts> {

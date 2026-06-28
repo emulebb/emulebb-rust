@@ -42,6 +42,7 @@ pub struct SharedReloadDiagnostics {
     pub changed_count: usize,
     pub missing_mtime_count: usize,
     pub stat_failed_count: usize,
+    pub skipped_failed_count: usize,
     pub stale_hash_count: usize,
     pub disk_count: usize,
 }
@@ -59,6 +60,7 @@ impl Default for SharedReloadDiagnostics {
             changed_count: 0,
             missing_mtime_count: 0,
             stat_failed_count: 0,
+            skipped_failed_count: 0,
             stale_hash_count: 0,
             disk_count: 0,
         }
@@ -207,6 +209,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use emulebb_ed2k::ed2k_transfer::Ed2kTransferRuntime;
+use emulebb_metadata::MetadataSharedSourceFailure;
 use tokio::task::JoinSet;
 
 use crate::physical_disk::physical_disk_key;
@@ -246,6 +249,12 @@ async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
 struct ReloadHashTarget {
     /// The scanned file to (re)hash via `share_local_file`.
     path: PathBuf,
+    /// Long-path-normalized source identity key used by the durable failure cache.
+    key: String,
+    /// File size captured at planning time.
+    file_size: u64,
+    /// Source mtime captured at planning time, when the filesystem reports it.
+    source_mtime_ms: Option<i64>,
     /// Existing hashes for the same source path. Once the current identity is
     /// known, every different hash here is removed so a changed file does not
     /// leave duplicate shares for the same source path.
@@ -281,6 +290,7 @@ struct ReloadPlanStats {
     changed_count: usize,
     missing_mtime_count: usize,
     stat_failed_count: usize,
+    skipped_failed_count: usize,
     stale_hash_count: usize,
 }
 
@@ -302,6 +312,7 @@ impl ReloadPlanStats {
             changed_count: self.changed_count,
             missing_mtime_count: self.missing_mtime_count,
             stat_failed_count: self.stat_failed_count,
+            skipped_failed_count: self.skipped_failed_count,
             stale_hash_count: self.stale_hash_count,
             disk_count: 0,
         }
@@ -349,7 +360,12 @@ async fn plan_incremental_reload(
     file_paths: Vec<PathBuf>,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
+    let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
+        let failures = failure_entries
+            .into_iter()
+            .map(|failure| (failure.source_path.clone(), failure))
+            .collect::<HashMap<_, _>>();
         let mut stats = ReloadPlanStats {
             scanned_count: file_paths.len(),
             ..ReloadPlanStats::default()
@@ -361,58 +377,78 @@ async fn plan_incremental_reload(
             // persisted index keys use. A file that cannot be stat-ed is treated
             // as needing a hash (the ingest path will surface the real error).
             match Ed2kTransferRuntime::scanned_source_identity(&path) {
-                Some((key, size, mtime_ms)) => match index.get(&key) {
-                    // Reuse only on an exact size + mtime match, and only when the
-                    // persisted manifest actually recorded an mtime (pre-v9 rows
-                    // store `None`, so they are rehashed once to backfill it).
-                    Some(entries) => {
-                        if let Some(entry) = entries.iter().find(|entry| {
-                            entry.file_size == size
-                                && entry.source_mtime_ms.is_some()
-                                && entry.source_mtime_ms == mtime_ms
-                        }) {
-                            stats.reused_count += 1;
-                            stats.stale_hash_count += entries.len().saturating_sub(1);
-                            reused_shares.push(ReusedReloadShare {
-                                file_hash: entry.file_hash.clone(),
-                                stale_hashes: entries
-                                    .iter()
-                                    .filter(|stale| stale.file_hash != entry.file_hash)
-                                    .map(|stale| stale.file_hash.clone())
-                                    .collect(),
-                            });
-                        } else {
-                            stats.planned_hash_count += 1;
-                            stats.stale_hash_count += entries.len();
-                            if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
-                                stats.missing_mtime_count += 1;
+                Some((key, size, mtime_ms)) => {
+                    if unchanged_failure(&failures, &key, size, mtime_ms) {
+                        stats.skipped_failed_count += 1;
+                        continue;
+                    }
+                    match index.get(&key) {
+                        // Reuse only on an exact size + mtime match, and only when the
+                        // persisted manifest actually recorded an mtime (pre-v9 rows
+                        // store `None`, so they are rehashed once to backfill it).
+                        Some(entries) => {
+                            if let Some(entry) = entries.iter().find(|entry| {
+                                entry.file_size == size
+                                    && entry.source_mtime_ms.is_some()
+                                    && entry.source_mtime_ms == mtime_ms
+                            }) {
+                                stats.reused_count += 1;
+                                stats.stale_hash_count += entries.len().saturating_sub(1);
+                                reused_shares.push(ReusedReloadShare {
+                                    file_hash: entry.file_hash.clone(),
+                                    stale_hashes: entries
+                                        .iter()
+                                        .filter(|stale| stale.file_hash != entry.file_hash)
+                                        .map(|stale| stale.file_hash.clone())
+                                        .collect(),
+                                });
                             } else {
-                                stats.changed_count += 1;
+                                stats.planned_hash_count += 1;
+                                stats.stale_hash_count += entries.len();
+                                if entries.iter().any(|entry| entry.source_mtime_ms.is_none()) {
+                                    stats.missing_mtime_count += 1;
+                                } else {
+                                    stats.changed_count += 1;
+                                }
+                                to_hash.push(ReloadHashTarget {
+                                    path,
+                                    key,
+                                    file_size: size,
+                                    source_mtime_ms: mtime_ms,
+                                    stale_hashes: entries
+                                        .iter()
+                                        .map(|entry| entry.file_hash.clone())
+                                        .collect(),
+                                });
                             }
+                        }
+                        // Brand-new path: hash it, nothing stale to clean up.
+                        None => {
+                            stats.planned_hash_count += 1;
+                            stats.new_count += 1;
                             to_hash.push(ReloadHashTarget {
                                 path,
-                                stale_hashes: entries
-                                    .iter()
-                                    .map(|entry| entry.file_hash.clone())
-                                    .collect(),
+                                key,
+                                file_size: size,
+                                source_mtime_ms: mtime_ms,
+                                stale_hashes: Vec::new(),
                             });
                         }
                     }
-                    // Brand-new path: hash it, nothing stale to clean up.
-                    None => {
-                        stats.planned_hash_count += 1;
-                        stats.new_count += 1;
-                        to_hash.push(ReloadHashTarget {
-                            path,
-                            stale_hashes: Vec::new(),
-                        });
-                    }
-                },
+                }
                 None => {
+                    let key = shared_source_key(&path);
+                    if unchanged_failure(&failures, &key, 0, None) {
+                        stats.skipped_failed_count += 1;
+                        continue;
+                    }
                     stats.planned_hash_count += 1;
                     stats.stat_failed_count += 1;
                     to_hash.push(ReloadHashTarget {
                         path,
+                        key,
+                        file_size: 0,
+                        source_mtime_ms: None,
                         stale_hashes: Vec::new(),
                     });
                 }
@@ -426,6 +462,30 @@ async fn plan_incremental_reload(
     })
     .await
     .map_err(Into::into)
+}
+
+async fn load_shared_source_failures(
+    core: &EmulebbCore,
+) -> Result<Vec<MetadataSharedSourceFailure>> {
+    let metadata = core.metadata_store.clone();
+    tokio::task::spawn_blocking(move || metadata.shared_source_failures())
+        .await
+        .map_err(anyhow::Error::from)?
+}
+
+fn shared_source_key(path: &Path) -> String {
+    long_path(path).display().to_string()
+}
+
+fn unchanged_failure(
+    failures: &HashMap<String, MetadataSharedSourceFailure>,
+    key: &str,
+    file_size: u64,
+    source_mtime_ms: Option<i64>,
+) -> bool {
+    failures.get(key).is_some_and(|failure| {
+        failure.file_size == file_size && failure.source_mtime_ms == source_mtime_ms
+    })
 }
 
 /// Synchronous core primitive: scan + hash + share the whole library, returning
@@ -659,6 +719,7 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
             forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         }
         Err(error) => {
+            record_reload_target_failure(core, &target, "ingest failed").await;
             tracing::warn!(
                 path = %target.path.display(),
                 error = %error,
@@ -667,6 +728,27 @@ async fn hash_one_reload_target(core: &EmulebbCore, target: ReloadHashTarget) {
         }
     }
     core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
+}
+
+async fn record_reload_target_failure(core: &EmulebbCore, target: &ReloadHashTarget, reason: &str) {
+    let metadata = core.metadata_store.clone();
+    let key = target.key.clone();
+    let file_size = target.file_size;
+    let source_mtime_ms = target.source_mtime_ms;
+    let reason = reason.to_string();
+    match tokio::task::spawn_blocking(move || {
+        metadata.upsert_shared_source_failure(&key, file_size, source_mtime_ms, &reason)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to persist shared-source reload failure");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "shared-source failure persistence task panicked");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +775,39 @@ mod tests {
             .into_iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn incremental_reload_skips_unchanged_failed_source_and_retries_changed_identity() {
+        let root = scratch_dir("failed-source");
+        let source = root.join("Failed.Source.bin");
+        fs::write(&source, b"initial payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        let (key, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+        core.metadata_store
+            .upsert_shared_source_failure(&key, size, mtime_ms, "ingest failed")
+            .unwrap();
+
+        let skipped = plan_incremental_reload(&core, vec![source.clone()])
+            .await
+            .unwrap();
+
+        assert!(skipped.to_hash.is_empty());
+        assert_eq!(skipped.stats.planned_hash_count, 0);
+        assert_eq!(skipped.stats.skipped_failed_count, 1);
+
+        fs::write(&source, b"changed payload with a different length").unwrap();
+        let retried = plan_incremental_reload(&core, vec![source.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(retried.to_hash.len(), 1);
+        assert_eq!(retried.stats.planned_hash_count, 1);
+        assert_eq!(retried.stats.new_count, 1);
+        assert_eq!(retried.stats.skipped_failed_count, 0);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
