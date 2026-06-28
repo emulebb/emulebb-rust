@@ -4373,10 +4373,9 @@ const KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET: usize = 256;
 const KAD_KEYWORD_PUBLISH_BUDGET: usize = 3;
 const KAD_SOURCE_PUBLISH_BUDGET: usize = 4;
 const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
-/// Bound each background shared-file Kad store traversal. The lower DHT helper
-/// keeps the protocol STORE timeout, but the shared-file scheduler must keep
-/// rotating over large libraries even when public Kad contacts are slow.
-const KAD_SHARED_FILE_PUBLISH_ATTEMPT_TIMEOUT_SECS: u64 = 30;
+/// Cap detached shared-file publish traversals so a slow public Kad round cannot
+/// accumulate unbounded background work.
+const KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KadSharedPublishKind {
@@ -4399,14 +4398,12 @@ impl KadSharedPublishKind {
 struct KadSharedPublishOutcome {
     kind: KadSharedPublishKind,
     file_hash: String,
-    keyword: Option<String>,
     started_at: Instant,
     result: Result<PublishAttemptStats, KadSharedPublishError>,
 }
 
 #[derive(Debug)]
 enum KadSharedPublishError {
-    Timeout,
     Failed(String),
 }
 
@@ -4416,6 +4413,7 @@ async fn run_kad_shared_file_publish_loop(
 ) {
     let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
     hydrate_kad_outbound_publish_schedule(&runtime.metadata_store, &mut schedule);
+    let mut publish_tasks = JoinSet::new();
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
             kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -4430,7 +4428,9 @@ async fn run_kad_shared_file_publish_loop(
             continue;
         }
 
-        if let Err(error) = publish_kad_due_shared_files(&runtime, &mut schedule).await {
+        if let Err(error) =
+            publish_kad_due_shared_files(&runtime, &mut schedule, &mut publish_tasks).await
+        {
             tracing::debug!("Kad shared-file publish cycle failed: {error:#}");
         }
 
@@ -4546,6 +4546,7 @@ async fn kad_publish_gate_input(
 async fn publish_kad_due_shared_files(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
+    publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
 ) -> Result<usize> {
     let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -4554,6 +4555,8 @@ async fn publish_kad_due_shared_files(
         diagnostics.bootstrapped = true;
         diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+        diagnostics.in_flight_count = publish_tasks.len();
+        diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4573,6 +4576,8 @@ async fn publish_kad_due_shared_files(
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4617,6 +4622,8 @@ async fn publish_kad_due_shared_files(
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4647,6 +4654,43 @@ async fn publish_kad_due_shared_files(
     let mut keyword_published = 0usize;
     let mut source_published = 0usize;
     let mut notes_published = 0usize;
+    drain_completed_kad_publish_tasks(
+        publish_tasks,
+        &mut keyword_totals,
+        &mut source_totals,
+        &mut notes_totals,
+        &mut keyword_published,
+        &mut source_published,
+        &mut notes_published,
+    )
+    .await;
+    if publish_tasks.len() >= KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET {
+        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
+            diagnostics.phase = "publishing".to_string();
+            diagnostics.running = true;
+            diagnostics.bootstrapped = true;
+            diagnostics.gate_allowed = true;
+            diagnostics.gate_block_reason.clear();
+            diagnostics.item_count = shared_files.len();
+            diagnostics.inspected_count = 0;
+            diagnostics.attempted_files = 0;
+            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
+            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
+            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
+            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
+            diagnostics.budget_exhausted = true;
+            diagnostics.keyword_published = keyword_published;
+            diagnostics.source_published = source_published;
+            diagnostics.notes_published = notes_published;
+            diagnostics.keyword_acked_contacts = keyword_totals.acked_contacts;
+            diagnostics.source_acked_contacts = source_totals.acked_contacts;
+            diagnostics.notes_acked_contacts = notes_totals.acked_contacts;
+            diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
+        });
+        return Ok(shared_files.len());
+    }
     let mut keyword_due_count = 0usize;
     let mut source_due_count = 0usize;
     let mut notes_due_count = 0usize;
@@ -4663,7 +4707,6 @@ async fn publish_kad_due_shared_files(
     let start = schedule.cursor(item_count);
     let mut inspected = 0usize;
     let mut attempted_files = 0usize;
-    let mut publish_tasks = JoinSet::new();
 
     for offset in 0..item_count.min(KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET) {
         let entry = &shared_files[(start + offset) % item_count];
@@ -4719,33 +4762,36 @@ async fn publish_kad_due_shared_files(
                     .aich_root
                     .as_deref()
                     .and_then(decode_aich_root_hex_for_publish);
+                schedule.mark_keyword_published(&entry.file_hash, &keyword, now);
+                persist_kad_outbound_publish(
+                    &runtime.metadata_store,
+                    &entry.file_hash,
+                    MetadataKadOutboundPublishKind::Keyword,
+                    &keyword,
+                    Utc::now().timestamp_millis(),
+                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
-                let timeout = Duration::from_secs(KAD_SHARED_FILE_PUBLISH_ATTEMPT_TIMEOUT_SECS);
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
                 publish_tasks.spawn(async move {
-                    let result = tokio::time::timeout(
-                        timeout,
-                        dht.publish_keyword_with_class_and_fanout(
+                    let result = dht
+                        .publish_keyword_with_class_and_fanout(
                             keyword_hash,
                             file_hash,
                             keyword_tags,
                             aich_hash,
                             RpcWorkClass::Publish,
                             fanout,
-                        ),
-                    )
-                    .await;
+                        )
+                        .await;
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Keyword,
                         file_hash: file_hash_text,
-                        keyword: Some(keyword),
                         started_at,
                         result: match result {
-                            Ok(Ok(stats)) => Ok(stats),
-                            Ok(Err(error)) => Err(KadSharedPublishError::Failed(error.to_string())),
-                            Err(_) => Err(KadSharedPublishError::Timeout),
+                            Ok(stats) => Ok(stats),
+                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
                 });
@@ -4760,32 +4806,35 @@ async fn publish_kad_due_shared_files(
                 attempted_this_file = true;
                 let source_tags =
                     build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
+                schedule.mark_source_published(&entry.file_hash, now);
+                persist_kad_outbound_publish(
+                    &runtime.metadata_store,
+                    &entry.file_hash,
+                    MetadataKadOutboundPublishKind::Source,
+                    "",
+                    Utc::now().timestamp_millis(),
+                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
-                let timeout = Duration::from_secs(KAD_SHARED_FILE_PUBLISH_ATTEMPT_TIMEOUT_SECS);
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
                 publish_tasks.spawn(async move {
-                    let result = tokio::time::timeout(
-                        timeout,
-                        dht.publish_source_with_class_and_fanout(
+                    let result = dht
+                        .publish_source_with_class_and_fanout(
                             file_hash,
                             source_publish_identity,
                             source_tags,
                             RpcWorkClass::Publish,
                             fanout,
-                        ),
-                    )
-                    .await;
+                        )
+                        .await;
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Source,
                         file_hash: file_hash_text,
-                        keyword: None,
                         started_at,
                         result: match result {
-                            Ok(Ok(stats)) => Ok(stats),
-                            Ok(Err(error)) => Err(KadSharedPublishError::Failed(error.to_string())),
-                            Err(_) => Err(KadSharedPublishError::Timeout),
+                            Ok(stats) => Ok(stats),
+                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
                 });
@@ -4818,32 +4867,35 @@ async fn publish_kad_due_shared_files(
                     ));
                 }
                 notes_tags.push(Tag::filesize(entry.file_size));
+                schedule.mark_notes_published(&entry.file_hash, now);
+                persist_kad_outbound_publish(
+                    &runtime.metadata_store,
+                    &entry.file_hash,
+                    MetadataKadOutboundPublishKind::Notes,
+                    "",
+                    Utc::now().timestamp_millis(),
+                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
-                let timeout = Duration::from_secs(KAD_SHARED_FILE_PUBLISH_ATTEMPT_TIMEOUT_SECS);
                 let fanout = network.kad_publish_contact_fanout;
                 let started_at = now;
                 publish_tasks.spawn(async move {
-                    let result = tokio::time::timeout(
-                        timeout,
-                        dht.publish_notes_with_class_and_fanout(
+                    let result = dht
+                        .publish_notes_with_class_and_fanout(
                             file_hash,
                             notes_publisher_id,
                             notes_tags,
                             RpcWorkClass::Publish,
                             fanout,
-                        ),
-                    )
-                    .await;
+                        )
+                        .await;
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Notes,
                         file_hash: file_hash_text,
-                        keyword: None,
                         started_at,
                         result: match result {
-                            Ok(Ok(stats)) => Ok(stats),
-                            Ok(Err(error)) => Err(KadSharedPublishError::Failed(error.to_string())),
-                            Err(_) => Err(KadSharedPublishError::Timeout),
+                            Ok(stats) => Ok(stats),
+                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
                         },
                     }
                 });
@@ -4870,6 +4922,8 @@ async fn publish_kad_due_shared_files(
             diagnostics.inspected_count = inspected;
             diagnostics.attempted_files = attempted_files;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+            diagnostics.in_flight_count = publish_tasks.len();
+            diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
             diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
             diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
             diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -4887,94 +4941,12 @@ async fn publish_kad_due_shared_files(
         });
     }
 
-    while let Some(joined) = publish_tasks.join_next().await {
-        let outcome = match joined {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                tracing::warn!("Kad shared-file publish task failed to join: {error}");
-                continue;
-            }
-        };
-        match outcome.result {
-            Ok(stats) => match outcome.kind {
-                KadSharedPublishKind::Keyword => {
-                    accumulate_publish_stats(&mut keyword_totals, stats);
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Keyword,
-                        &outcome.file_hash,
-                        stats,
-                    );
-                    if let Some(keyword) = outcome.keyword.as_deref() {
-                        schedule.mark_keyword_published(
-                            &outcome.file_hash,
-                            keyword,
-                            outcome.started_at,
-                        );
-                        persist_kad_outbound_publish(
-                            &runtime.metadata_store,
-                            &outcome.file_hash,
-                            MetadataKadOutboundPublishKind::Keyword,
-                            keyword,
-                            Utc::now().timestamp_millis(),
-                        );
-                    }
-                    keyword_published += 1;
-                }
-                KadSharedPublishKind::Source => {
-                    accumulate_publish_stats(&mut source_totals, stats);
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Source,
-                        &outcome.file_hash,
-                        stats,
-                    );
-                    schedule.mark_source_published(&outcome.file_hash, outcome.started_at);
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &outcome.file_hash,
-                        MetadataKadOutboundPublishKind::Source,
-                        "",
-                        Utc::now().timestamp_millis(),
-                    );
-                    source_published += 1;
-                }
-                KadSharedPublishKind::Notes => {
-                    accumulate_publish_stats(&mut notes_totals, stats);
-                    diag_kad_event::publish(
-                        diag_kad_event::KadPublishKind::Notes,
-                        &outcome.file_hash,
-                        stats,
-                    );
-                    schedule.mark_notes_published(&outcome.file_hash, outcome.started_at);
-                    persist_kad_outbound_publish(
-                        &runtime.metadata_store,
-                        &outcome.file_hash,
-                        MetadataKadOutboundPublishKind::Notes,
-                        "",
-                        Utc::now().timestamp_millis(),
-                    );
-                    notes_published += 1;
-                }
-            },
-            Err(KadSharedPublishError::Timeout) => {
-                tracing::debug!(
-                    file_hash = %outcome.file_hash,
-                    kind = outcome.kind.label(),
-                    timeout_secs = KAD_SHARED_FILE_PUBLISH_ATTEMPT_TIMEOUT_SECS,
-                    "Kad shared-file publish attempt timed out"
-                );
-            }
-            Err(KadSharedPublishError::Failed(error)) => {
-                tracing::debug!(
-                    file_hash = %outcome.file_hash,
-                    kind = outcome.kind.label(),
-                    "Kad shared-file publish attempt failed: {error}"
-                );
-            }
-        }
-    }
-
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
-        diagnostics.phase = "idle".to_string();
+        diagnostics.phase = if publish_tasks.len() == 0 {
+            "idle".to_string()
+        } else {
+            "publishing".to_string()
+        };
         diagnostics.running = true;
         diagnostics.bootstrapped = true;
         diagnostics.gate_allowed = true;
@@ -4983,6 +4955,8 @@ async fn publish_kad_due_shared_files(
         diagnostics.inspected_count = inspected;
         diagnostics.attempted_files = attempted_files;
         diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
+        diagnostics.in_flight_count = publish_tasks.len();
+        diagnostics.in_flight_budget = KAD_SHARED_FILE_PUBLISH_IN_FLIGHT_BUDGET;
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
@@ -5033,6 +5007,71 @@ async fn publish_kad_due_shared_files(
     }
 
     Ok(item_count)
+}
+
+async fn drain_completed_kad_publish_tasks(
+    publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
+    keyword_totals: &mut PublishAttemptStats,
+    source_totals: &mut PublishAttemptStats,
+    notes_totals: &mut PublishAttemptStats,
+    keyword_published: &mut usize,
+    source_published: &mut usize,
+    notes_published: &mut usize,
+) {
+    loop {
+        let joined =
+            match tokio::time::timeout(Duration::from_millis(1), publish_tasks.join_next()).await {
+                Ok(Some(joined)) => joined,
+                Ok(None) | Err(_) => break,
+            };
+        let outcome = match joined {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::warn!("Kad shared-file publish task failed to join: {error}");
+                continue;
+            }
+        };
+        let elapsed_ms = outcome.started_at.elapsed().as_millis() as u64;
+        match outcome.result {
+            Ok(stats) => match outcome.kind {
+                KadSharedPublishKind::Keyword => {
+                    accumulate_publish_stats(keyword_totals, stats);
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Keyword,
+                        &outcome.file_hash,
+                        stats,
+                    );
+                    *keyword_published += 1;
+                }
+                KadSharedPublishKind::Source => {
+                    accumulate_publish_stats(source_totals, stats);
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Source,
+                        &outcome.file_hash,
+                        stats,
+                    );
+                    *source_published += 1;
+                }
+                KadSharedPublishKind::Notes => {
+                    accumulate_publish_stats(notes_totals, stats);
+                    diag_kad_event::publish(
+                        diag_kad_event::KadPublishKind::Notes,
+                        &outcome.file_hash,
+                        stats,
+                    );
+                    *notes_published += 1;
+                }
+            },
+            Err(KadSharedPublishError::Failed(error)) => {
+                tracing::debug!(
+                    file_hash = %outcome.file_hash,
+                    kind = outcome.kind.label(),
+                    elapsed_ms,
+                    "Kad shared-file publish attempt failed: {error}"
+                );
+            }
+        }
+    }
 }
 
 async fn kad_publishable_shared_files(
