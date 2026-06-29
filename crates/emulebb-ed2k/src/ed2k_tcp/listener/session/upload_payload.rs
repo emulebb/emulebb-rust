@@ -115,6 +115,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     let is_i64 = opcode == OP_REQUESTPARTS_I64;
     let (requested, ranges) = decode_request_parts_payload(payload, is_i64)?;
     let mut request_diag = UploadRequestDiag::from_ranges(&ranges);
+    transfer_runtime.note_file_upload_request(&requested).await;
     // Only a cryptographically verified peer may be credited: the credit store is
     // keyed on the user hash and feeds the upload score, so an unverified hash is
     // spoofable (eMule attributes credits only in IS_IDENTIFIED).
@@ -185,6 +186,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             return Ok(UploadPayloadOutcome::Close);
         }
     }
+    transfer_runtime.note_file_upload_accept(&requested).await;
 
     for (start, end) in ranges {
         // FIX (memory-amplification DoS): never read or buffer a whole

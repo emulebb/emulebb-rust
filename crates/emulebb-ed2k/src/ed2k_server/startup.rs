@@ -439,9 +439,15 @@ fn ranked_offer_files(shared_catalog: &[Ed2kSharedEntry]) -> Vec<([u8; 16], Stri
                 file_size: entry.file_size,
                 upload_priority: &entry.upload_priority,
                 auto_upload_priority: entry.auto_upload_priority,
+                queued_count: 0,
+                session_request_count: entry.publish.session_request_count,
+                session_accept_count: entry.publish.session_accept_count,
+                all_time_request_count: entry.publish.all_time_request_count,
+                all_time_accept_count: entry.publish.all_time_accept_count,
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
-                session_uploaded_bytes: 0,
-                last_publish_unix_ms: 0,
+                session_uploaded_bytes: entry.publish.session_uploaded_bytes,
+                last_request_unix_ms: entry.publish.last_request_unix_ms,
+                last_publish_unix_ms: entry.publish.last_ed2k_publish_unix_ms,
                 sequence,
                 now_unix_ms,
             });
@@ -498,10 +504,10 @@ pub(super) async fn send_offer_files_advertisement(
     bind_ip: Ipv4Addr,
     tcp_port: u16,
 ) -> Result<OfferFilesPublishStats> {
-    let shared_catalog = shared_catalog.read().await.clone();
+    let shared_catalog_snapshot = shared_catalog.read().await.clone();
     let current_cursor = session.offer_files_catalog_cursor;
     let encoded = encode_offer_files_payload_at_cursor(
-        &shared_catalog,
+        &shared_catalog_snapshot,
         current_cursor,
         Some(&session.offer_files_published_hashes),
         session.assigned_client_id,
@@ -546,6 +552,7 @@ pub(super) async fn send_offer_files_advertisement(
     for (file_hash, _, _, _) in &encoded.entries {
         session.offer_files_published_hashes.insert(*file_hash);
     }
+    mark_offer_files_published(shared_catalog, &encoded.entries, unix_time_ms()).await;
     session.set_phase(
         ServerSessionPhase::OfferFilesSent,
         format!(
@@ -569,6 +576,23 @@ pub(super) async fn send_offer_files_advertisement(
         wrapped,
         skipped_duplicate_batch: false,
     })
+}
+
+async fn mark_offer_files_published(
+    shared_catalog: &Ed2kSharedCatalog,
+    entries: &[([u8; 16], String, u64, u8)],
+    published_at_ms: i64,
+) {
+    let published = entries
+        .iter()
+        .map(|(file_hash, _, _, _)| hex::encode(file_hash))
+        .collect::<HashSet<_>>();
+    let mut catalog = shared_catalog.write().await;
+    for entry in catalog.iter_mut() {
+        if published.contains(&entry.file_hash.to_ascii_lowercase()) {
+            entry.publish.last_ed2k_publish_unix_ms = published_at_ms;
+        }
+    }
 }
 
 #[cfg(feature = "packet-diagnostics")]
@@ -655,6 +679,7 @@ mod tests {
             auto_upload_priority: false,
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
+            publish: Default::default(),
         }
     }
 
@@ -675,6 +700,7 @@ mod tests {
             auto_upload_priority: false,
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
+            publish: Default::default(),
         }
     }
 

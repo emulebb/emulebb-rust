@@ -18,8 +18,14 @@ pub struct SharedPublishRankInput<'a> {
     pub file_size: u64,
     pub upload_priority: &'a str,
     pub auto_upload_priority: bool,
+    pub queued_count: u64,
+    pub session_request_count: u64,
+    pub session_accept_count: u64,
+    pub all_time_request_count: u64,
+    pub all_time_accept_count: u64,
     pub all_time_uploaded_bytes: u64,
     pub session_uploaded_bytes: u64,
+    pub last_request_unix_ms: i64,
     pub last_publish_unix_ms: i64,
     pub sequence: usize,
     pub now_unix_ms: i64,
@@ -102,6 +108,8 @@ fn publish_under_shared_score(
     all_time_upload_ratio: f64,
     session_upload_ratio: f64,
     all_time_uploaded_bytes: u64,
+    all_time_request_count: u64,
+    all_time_accept_count: u64,
 ) -> f64 {
     let mut score = 0.0;
     if all_time_upload_ratio < 1.0 {
@@ -113,7 +121,18 @@ fn publish_under_shared_score(
     if all_time_uploaded_bytes == 0 {
         score += 35.0;
     }
+    if all_time_request_count > 0 && all_time_accept_count == 0 {
+        score += 20.0;
+    }
     score
+}
+
+fn publish_recent_request_score(last_request_unix_ms: i64, now_unix_ms: i64) -> f64 {
+    if last_request_unix_ms <= 0 {
+        return 0.0;
+    }
+    let hours_since_request = ((now_unix_ms - last_request_unix_ms).max(0) as f64) / 3_600_000.0;
+    (60.0 - hours_since_request * 2.0).max(0.0)
 }
 
 fn publish_deterministic_jitter(file_hash: &str, now_unix_ms: i64, sequence: usize) -> f64 {
@@ -135,15 +154,18 @@ fn publish_balanced_score(
     all_time_upload_ratio: f64,
     session_upload_ratio: f64,
 ) -> f64 {
-    publish_log_score(0, 70.0)
-        + publish_log_score(0, 45.0)
-        + publish_log_score(0, 30.0)
-        + publish_log_score(0, 20.0)
-        + publish_log_score(0, 12.0)
+    publish_log_score(input.queued_count, 70.0)
+        + publish_log_score(input.session_request_count, 45.0)
+        + publish_log_score(input.session_accept_count, 30.0)
+        + publish_log_score(input.all_time_request_count, 20.0)
+        + publish_log_score(input.all_time_accept_count, 12.0)
+        + publish_recent_request_score(input.last_request_unix_ms, input.now_unix_ms)
         + publish_under_shared_score(
             all_time_upload_ratio,
             session_upload_ratio,
             input.all_time_uploaded_bytes,
+            input.all_time_request_count,
+            input.all_time_accept_count,
         )
         + publish_age_score(input.last_publish_unix_ms, input.now_unix_ms)
         + publish_deterministic_jitter(input.file_hash, input.now_unix_ms, input.sequence)
@@ -159,8 +181,14 @@ mod tests {
             file_size: 1_000,
             upload_priority: priority,
             auto_upload_priority: false,
+            queued_count: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_request_count: 0,
+            all_time_accept_count: 0,
             all_time_uploaded_bytes: uploaded,
             session_uploaded_bytes: 0,
+            last_request_unix_ms: 0,
             last_publish_unix_ms: 0,
             sequence,
             now_unix_ms: 4_000,
@@ -181,5 +209,28 @@ mod tests {
         assert!(
             compare_shared_publish_rank(&rank("normal", 0, 0), &rank("normal", 2_000, 1)).is_lt()
         );
+    }
+
+    #[test]
+    fn recent_demand_wins_within_same_priority() {
+        let quiet = rank("normal", 0, 0);
+        let requested = shared_publish_rank(SharedPublishRankInput {
+            file_hash: "00112233445566778899aabbccddeeff",
+            file_size: 1_000,
+            upload_priority: "normal",
+            auto_upload_priority: false,
+            queued_count: 0,
+            session_request_count: 3,
+            session_accept_count: 0,
+            all_time_request_count: 3,
+            all_time_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            session_uploaded_bytes: 0,
+            last_request_unix_ms: 3_000,
+            last_publish_unix_ms: 0,
+            sequence: 1,
+            now_unix_ms: 4_000,
+        });
+        assert!(compare_shared_publish_rank(&requested, &quiet).is_lt());
     }
 }

@@ -52,6 +52,29 @@ pub struct Ed2kSharedEntry {
     /// `CPartFile::IsCompleteBD(uPart)` used by `CPartFile::WritePartStatus`.
     #[serde(default)]
     pub complete_parts: Vec<bool>,
+    /// In-memory publish/demand counters used by the MFC-compatible publish
+    /// ranker. These are intentionally path/name-free and may be rebuilt during
+    /// a long session.
+    #[serde(default)]
+    pub publish: Ed2kSharedPublishStats,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ed2kSharedPublishStats {
+    #[serde(default)]
+    pub session_uploaded_bytes: u64,
+    #[serde(default)]
+    pub session_request_count: u64,
+    #[serde(default)]
+    pub session_accept_count: u64,
+    #[serde(default)]
+    pub all_time_request_count: u64,
+    #[serde(default)]
+    pub all_time_accept_count: u64,
+    #[serde(default)]
+    pub last_request_unix_ms: i64,
+    #[serde(default)]
+    pub last_ed2k_publish_unix_ms: i64,
 }
 
 impl Ed2kSharedEntry {
@@ -73,6 +96,7 @@ impl Ed2kSharedEntry {
             auto_upload_priority: false,
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
+            publish: Ed2kSharedPublishStats::default(),
         })
     }
 
@@ -101,6 +125,7 @@ impl Ed2kSharedEntry {
             auto_upload_priority: manifest.auto_upload_priority,
             all_time_uploaded_bytes: 0,
             complete_parts,
+            publish: Ed2kSharedPublishStats::default(),
         }
     }
 

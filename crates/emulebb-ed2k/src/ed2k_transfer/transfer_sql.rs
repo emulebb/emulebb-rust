@@ -152,6 +152,7 @@ fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Resul
         auto_upload_priority: entry.auto_upload_priority,
         all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
         complete_parts: Vec::new(),
+        publish: Default::default(),
     })
 }
 

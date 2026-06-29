@@ -31,6 +31,7 @@ fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
         auto_upload_priority: false,
         all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
+        publish: Default::default(),
     }
 }
 

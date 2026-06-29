@@ -1,6 +1,9 @@
 //! Runtime-facing upload queue methods.
 
-use std::{sync::atomic::Ordering, time::Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::MetadataPeerCredit;
@@ -108,6 +111,29 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .note_request_parts(handle, Instant::now())
+    }
+
+    /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.
+    pub(crate) async fn note_file_upload_request(&self, file_hash: &Ed2kHash) {
+        self.update_shared_publish_stats(file_hash, |entry| {
+            entry.publish.session_request_count =
+                entry.publish.session_request_count.saturating_add(1);
+            entry.publish.all_time_request_count =
+                entry.publish.all_time_request_count.saturating_add(1);
+            entry.publish.last_request_unix_ms = unix_time_ms();
+        })
+        .await;
+    }
+
+    /// Record one accepted upload request for a shared file.
+    pub(crate) async fn note_file_upload_accept(&self, file_hash: &Ed2kHash) {
+        self.update_shared_publish_stats(file_hash, |entry| {
+            entry.publish.session_accept_count =
+                entry.publish.session_accept_count.saturating_add(1);
+            entry.publish.all_time_accept_count =
+                entry.publish.all_time_accept_count.saturating_add(1);
+        })
+        .await;
     }
 
     pub(crate) async fn note_upload_payload_sent(
@@ -273,10 +299,30 @@ impl Ed2kTransferRuntime {
                 if entry.file_hash.eq_ignore_ascii_case(&hash_text) && !entry.compatibility_hint {
                     entry.all_time_uploaded_bytes =
                         entry.all_time_uploaded_bytes.saturating_add(delta);
+                    entry.publish.session_uploaded_bytes =
+                        entry.publish.session_uploaded_bytes.saturating_add(delta);
                 }
             }
         }
         Ok(())
+    }
+
+    async fn update_shared_publish_stats(
+        &self,
+        file_hash: &Ed2kHash,
+        update: impl FnOnce(&mut super::Ed2kSharedEntry),
+    ) {
+        let hash_text = file_hash.to_string();
+        let mut update = Some(update);
+        let mut catalog = self.shared_catalog.write().await;
+        for entry in catalog.iter_mut() {
+            if entry.file_hash.eq_ignore_ascii_case(&hash_text) && !entry.compatibility_hint {
+                if let Some(update) = update.take() {
+                    update(entry);
+                }
+                break;
+            }
+        }
     }
 
     /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).
@@ -303,4 +349,11 @@ impl Ed2kTransferRuntime {
             })
             .unwrap_or(DEFAULT_CREDIT_SCORE_PERMILLE)
     }
+}
+
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
 }
