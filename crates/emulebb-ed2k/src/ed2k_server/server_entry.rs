@@ -127,19 +127,83 @@ impl ResolvedServerEntry {
 }
 
 pub(super) fn configured_server_entries(config: &Ed2kConfig) -> Result<Vec<ConfiguredServerEntry>> {
-    if !config.server_entries.is_empty() {
-        return config
-            .server_entries
-            .iter()
-            .map(ConfiguredServerEntry::from_metadata)
-            .collect();
+    let metadata_entries = config
+        .server_entries
+        .iter()
+        .map(ConfiguredServerEntry::from_metadata)
+        .collect::<Result<Vec<_>>>()?;
+    let mut ordered = Vec::with_capacity(config.server_endpoints.len() + metadata_entries.len());
+
+    for endpoint_text in &config.server_endpoints {
+        if let Some(entry) = metadata_entries.iter().find(|entry| {
+            entry
+                .base_endpoint_text()
+                .eq_ignore_ascii_case(endpoint_text)
+        }) {
+            ordered.push(entry.clone());
+        } else {
+            ordered.push(ConfiguredServerEntry::from_endpoint_text(endpoint_text)?);
+        }
+    }
+    for entry in metadata_entries {
+        if !ordered.iter().any(|existing| {
+            existing
+                .base_endpoint_text()
+                .eq_ignore_ascii_case(&entry.base_endpoint_text())
+        }) {
+            ordered.push(entry);
+        }
     }
 
-    config
-        .server_endpoints
-        .iter()
-        .map(|endpoint_text| ConfiguredServerEntry::from_endpoint_text(endpoint_text))
-        .collect()
+    Ok(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata_entry(host: &str, port: u16, name: &str) -> Ed2kServerEntry {
+        Ed2kServerEntry {
+            host: host.to_string(),
+            port,
+            name: Some(name.to_string()),
+            ..Ed2kServerEntry::default()
+        }
+    }
+
+    #[test]
+    fn configured_endpoints_are_ordered_before_persisted_metadata() {
+        let config = Ed2kConfig {
+            server_endpoints: vec!["203.0.113.20:4661".to_string()],
+            server_entries: vec![
+                metadata_entry("203.0.113.10", 4661, "persisted-a"),
+                metadata_entry("203.0.113.20", 4661, "configured-with-metadata"),
+            ],
+            ..Ed2kConfig::default()
+        };
+
+        let entries = configured_server_entries(&config).unwrap();
+
+        assert_eq!(entries[0].base_endpoint_text(), "203.0.113.20:4661");
+        assert_eq!(entries[0].display_name(), "configured-with-metadata");
+        assert_eq!(entries[1].base_endpoint_text(), "203.0.113.10:4661");
+    }
+
+    #[test]
+    fn metadata_entries_are_used_when_no_endpoints_are_configured() {
+        let config = Ed2kConfig {
+            server_entries: vec![
+                metadata_entry("203.0.113.10", 4661, "persisted-a"),
+                metadata_entry("203.0.113.20", 4661, "persisted-b"),
+            ],
+            ..Ed2kConfig::default()
+        };
+
+        let entries = configured_server_entries(&config).unwrap();
+
+        assert_eq!(entries[0].base_endpoint_text(), "203.0.113.10:4661");
+        assert_eq!(entries[1].base_endpoint_text(), "203.0.113.20:4661");
+    }
 }
 
 pub(super) async fn resolve_server_entry(
