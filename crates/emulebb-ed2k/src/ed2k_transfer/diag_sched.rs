@@ -161,3 +161,30 @@ pub(crate) fn capacity_snapshot(
         body,
     );
 }
+
+/// `shared_publish_offer_batch`: one ED2K `OP_OFFERFILES` server publish batch.
+/// Hash samples are enough to align Rust/MFC batch selection without leaking
+/// private filenames or paths.
+#[cfg(feature = "packet-diagnostics")]
+pub(crate) fn shared_publish_offer_batch(
+    server: &str,
+    entries_sent: usize,
+    total_entries: usize,
+    cursor_before: usize,
+    next_cursor: usize,
+    wrapped: bool,
+    skipped_duplicate_batch: bool,
+    file_hashes: Vec<String>,
+) {
+    let keys = json!({ "server": server });
+    let body = json!({
+        "entriesSent": entries_sent,
+        "totalEntries": total_entries,
+        "cursorBefore": cursor_before,
+        "nextCursor": next_cursor,
+        "wrapped": wrapped,
+        "skippedDuplicateBatch": skipped_duplicate_batch,
+        "fileHashes": file_hashes,
+    });
+    emit(FAMILY, "shared_publish_offer_batch", "info", keys, body);
+}

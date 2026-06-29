@@ -514,6 +514,8 @@ pub(super) async fn send_offer_files_advertisement(
         offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
     let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
     if encoded.entries.is_empty() {
+        #[cfg(feature = "packet-diagnostics")]
+        log_shared_publish_offer_batch(session, current_cursor, &encoded, true, true);
         return Ok(OfferFilesPublishStats {
             entries_sent: 0,
             total_entries: encoded.total_entries,
@@ -525,6 +527,8 @@ pub(super) async fn send_offer_files_advertisement(
     if session.offer_files_sent
         && session.offer_files_catalog_fingerprint == Some(catalog_fingerprint)
     {
+        #[cfg(feature = "packet-diagnostics")]
+        log_shared_publish_offer_batch(session, current_cursor, &encoded, wrapped, true);
         return Ok(OfferFilesPublishStats {
             entries_sent: encoded.entries.len(),
             total_entries: encoded.total_entries,
@@ -556,6 +560,8 @@ pub(super) async fn send_offer_files_advertisement(
         if was_sent { "refreshed" } else { "sent" },
         session.endpoint
     );
+    #[cfg(feature = "packet-diagnostics")]
+    log_shared_publish_offer_batch(session, current_cursor, &encoded, wrapped, false);
     Ok(OfferFilesPublishStats {
         entries_sent: encoded.entries.len(),
         total_entries: encoded.total_entries,
@@ -563,6 +569,32 @@ pub(super) async fn send_offer_files_advertisement(
         wrapped,
         skipped_duplicate_batch: false,
     })
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn log_shared_publish_offer_batch(
+    session: &ServerSession,
+    cursor_before: usize,
+    encoded: &EncodedOfferFilesPayload,
+    wrapped: bool,
+    skipped_duplicate_batch: bool,
+) {
+    let file_hashes = encoded
+        .entries
+        .iter()
+        .take(16)
+        .map(|(file_hash, _, _, _)| hex::encode(file_hash))
+        .collect::<Vec<_>>();
+    crate::ed2k_transfer::diag_sched::shared_publish_offer_batch(
+        &session.endpoint.to_string(),
+        encoded.entries.len(),
+        encoded.total_entries,
+        cursor_before,
+        encoded.next_cursor,
+        wrapped,
+        skipped_duplicate_batch,
+        file_hashes,
+    );
 }
 
 pub(super) async fn send_connected_server_startup(
