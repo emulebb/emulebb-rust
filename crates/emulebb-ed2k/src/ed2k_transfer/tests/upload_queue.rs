@@ -304,6 +304,61 @@ async fn upload_queue_grants_immediately_then_promotes_waiter() {
 }
 
 #[tokio::test]
+async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
+    let root = unique_test_dir("ed2k-upload-queue-idle-granted-recycle");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            granted_timeout: std::time::Duration::from_secs(2),
+            upload_timeout: std::time::Duration::from_secs(60),
+            ..one_slot_config()
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x5B; 16]);
+    let now = std::time::Instant::now();
+
+    let (active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x12, 0x0A00_0012), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0x13, 0x0A00_0013), &file_hash, now)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &active_handle,
+                false,
+                now + std::time::Duration::from_secs(1),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &active_handle,
+                false,
+                now + std::time::Duration::from_secs(3),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &waiting_handle,
+                false,
+                now + std::time::Duration::from_secs(3),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[tokio::test]
 async fn upload_queue_release_client_selects_waiter_or_active_slot() {
     let root = unique_test_dir("ed2k-upload-queue-release-client");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

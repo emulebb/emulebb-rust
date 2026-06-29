@@ -105,7 +105,7 @@ impl ListenerUploadQueue {
             return Ok(ListenerQueuePoll::Close);
         };
         match transfer_runtime
-            .poll_upload_session(upload_session_handle, true)
+            .poll_upload_session(upload_session_handle, false)
             .await
         {
             Ed2kUploadSessionStatus::Granted => {
