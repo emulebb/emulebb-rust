@@ -90,6 +90,40 @@ pub(crate) fn queue_rank(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &st
     emit(FAMILY, "queue_rank", "info", keys, body);
 }
 
+/// `upload_request_outcome` (schema extension): one OP_REQUESTPARTS admission and
+/// payload-serving result. This fills the parity gap between "request accepted"
+/// and "payload packet left the socket", without logging file names or payload.
+pub(crate) fn upload_request_outcome(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    outcome: &str,
+    requested_ranges: usize,
+    served_ranges: usize,
+    skipped_ranges: usize,
+    requested_bytes: u64,
+    served_bytes: u64,
+    payload_packets: usize,
+    throttle_delay_ms: u64,
+    first_skip_reason: Option<&str>,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let mut body = json!({
+        "outcome": outcome,
+        "requestedRanges": requested_ranges,
+        "servedRanges": served_ranges,
+        "skippedRanges": skipped_ranges,
+        "requestedBytes": requested_bytes,
+        "servedBytes": served_bytes,
+        "payloadPackets": payload_packets,
+        "throttleDelayMs": throttle_delay_ms,
+    });
+    if let (Value::Object(fields), Some(reason)) = (&mut body, first_skip_reason) {
+        fields.insert("firstSkipReason".to_string(), json!(reason));
+    }
+    emit(FAMILY, "upload_request_outcome", "info", keys, body);
+}
+
 /// `capacity_snapshot` (schema §3.5): the rate-aware upload-slot capacity gauge
 /// (master upload-slot summary `baseSlotTarget`/`effectiveSlotCap`/`activeSlots`).
 /// Rust has no periodic upload-queue tick (its slot scheduling is driven per
