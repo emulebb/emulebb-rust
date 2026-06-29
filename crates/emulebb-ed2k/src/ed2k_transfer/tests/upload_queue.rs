@@ -359,6 +359,90 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
 }
 
 #[tokio::test]
+async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
+    let root = unique_test_dir("ed2k-upload-queue-slow-active-recycle");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            active_slots: 1,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 100 * 1024,
+            elastic_underfill_bytes_per_sec: 50 * 1024,
+            elastic_underfill: std::time::Duration::from_secs(2),
+            waiting_capacity: 8,
+            soft_queue_size: 10_000,
+            waiting_timeout: std::time::Duration::from_secs(60),
+            granted_timeout: std::time::Duration::from_secs(2),
+            upload_timeout: std::time::Duration::from_secs(5),
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x5C; 16]);
+    let now = std::time::Instant::now();
+
+    let (active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x14, 0x0A00_0014), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        runtime
+            .upload_queue
+            .lock()
+            .await
+            .note_request_parts(&active_handle, now + std::time::Duration::from_secs(1)),
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .note_upload_payload_sent_at(
+                &active_handle,
+                1024,
+                now + std::time::Duration::from_secs(1),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(2, 0x15, 0x0A00_0015),
+            &file_hash,
+            now + std::time::Duration::from_secs(2),
+        )
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    assert_eq!(
+        runtime
+            .note_upload_payload_sent_at(
+                &active_handle,
+                1024,
+                now + std::time::Duration::from_secs(5),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &active_handle,
+                false,
+                now + std::time::Duration::from_secs(7),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &waiting_handle,
+                false,
+                now + std::time::Duration::from_secs(7),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+#[tokio::test]
 async fn upload_queue_release_client_selects_waiter_or_active_slot() {
     let root = unique_test_dir("ed2k-upload-queue-release-client");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

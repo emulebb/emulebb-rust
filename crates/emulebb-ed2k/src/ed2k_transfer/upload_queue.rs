@@ -725,6 +725,7 @@ impl Ed2kUploadQueueState {
     }
 
     fn reap_expired_sessions(&mut self, now: Instant) {
+        self.refresh_elastic_underfill(now);
         let expired = self
             .sessions
             .iter()
@@ -734,8 +735,9 @@ impl Ed2kUploadQueueState {
                     Ed2kUploadSessionPhase::Granted => self.config.granted_timeout,
                     Ed2kUploadSessionPhase::Uploading => self.config.upload_timeout,
                 };
-                (now.saturating_duration_since(session.last_activity) > timeout)
-                    .then(|| (key.clone(), session.phase))
+                (now.saturating_duration_since(session.last_activity) > timeout
+                    || self.should_recycle_underfilled_active_session(session, now))
+                .then(|| (key.clone(), session.phase))
             })
             .collect::<Vec<_>>();
         for (key, phase) in expired {
@@ -756,6 +758,35 @@ impl Ed2kUploadQueueState {
             self.waiting_order.retain(|queued| queued != &key);
         }
         self.promote_waiters(now);
+    }
+
+    fn should_recycle_underfilled_active_session(
+        &self,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+    ) -> bool {
+        if !matches!(
+            session.phase,
+            Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+        ) {
+            return false;
+        }
+        if self.waiting_session_count() == 0
+            || self.config.upload_limit_bytes_per_sec == 0
+            || !self.sustained_upload_underfill_ready(now)
+        {
+            return false;
+        }
+        if session.uploaded_bytes == 0 {
+            return now.saturating_duration_since(session.queued_at) > self.config.granted_timeout;
+        }
+        let Some(started_at) = session.upload_started_at else {
+            return false;
+        };
+        if now.saturating_duration_since(started_at) < self.config.upload_timeout {
+            return false;
+        }
+        upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec()
     }
 
     fn promote_waiters(&mut self, now: Instant) {
@@ -870,14 +901,18 @@ impl Ed2kUploadQueueState {
     }
 
     fn elastic_underfill_ready(&self, now: Instant) -> bool {
-        self.elastic_slot_allowance() != 0
+        self.elastic_slot_allowance() != 0 && self.sustained_upload_underfill_ready(now)
+    }
+
+    fn sustained_upload_underfill_ready(&self, now: Instant) -> bool {
+        self.config.upload_limit_bytes_per_sec != 0
             && self.underfill_since.is_some_and(|underfill_since| {
                 now.saturating_duration_since(underfill_since) >= self.config.elastic_underfill
             })
     }
 
     fn refresh_elastic_underfill(&mut self, now: Instant) {
-        if self.elastic_slot_allowance() == 0 || self.config.upload_limit_bytes_per_sec == 0 {
+        if self.config.upload_limit_bytes_per_sec == 0 {
             self.underfill_since = None;
             return;
         }
@@ -907,6 +942,12 @@ impl Ed2kUploadQueueState {
                 }
             })
             .sum()
+    }
+
+    fn slow_upload_threshold_bytes_per_sec(&self) -> u64 {
+        let base_slots = self.config.active_slots.max(1) as u64;
+        let target_per_slot = self.config.upload_limit_bytes_per_sec / base_slots;
+        target_per_slot.saturating_div(20).max(1024)
     }
 }
 
