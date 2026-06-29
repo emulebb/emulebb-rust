@@ -148,6 +148,9 @@ fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Resul
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: entry.aich_root,
+        upload_priority: entry.upload_priority,
+        auto_upload_priority: entry.auto_upload_priority,
+        all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
         complete_parts: Vec::new(),
     })
 }

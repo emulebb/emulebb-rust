@@ -365,7 +365,9 @@ impl super::MetadataStore {
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
-                   END
+                   END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.completed != 0
@@ -382,6 +384,9 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
+                upload_priority: row.get(4)?,
+                auto_upload_priority: row.get::<_, i64>(5)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(6)? as u64,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -490,6 +495,8 @@ impl super::MetadataStore {
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -507,8 +514,11 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
-                comment: row.get(4)?,
-                rating: row.get::<_, i64>(5)? as u8,
+                upload_priority: row.get(4)?,
+                auto_upload_priority: row.get::<_, i64>(5)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(6)? as u64,
+                comment: row.get(7)?,
+                rating: row.get::<_, i64>(8)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -528,6 +538,8 @@ impl super::MetadataStore {
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
                    END,
+                   known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -545,8 +557,11 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
-                comment: row.get(4)?,
-                rating: row.get::<_, i64>(5)? as u8,
+                upload_priority: row.get(4)?,
+                auto_upload_priority: row.get::<_, i64>(5)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(6)? as u64,
+                comment: row.get(7)?,
+                rating: row.get::<_, i64>(8)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()

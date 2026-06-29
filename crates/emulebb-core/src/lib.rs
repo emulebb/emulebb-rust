@@ -47,6 +47,9 @@ use emulebb_ed2k::{
     long_path::long_path,
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
+    shared_publish_rank::{
+        SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
+    },
 };
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, SnoopEntry, SnoopQueue, metadata_from_publish_snapshot,
@@ -5538,7 +5541,27 @@ async fn kad_publishable_shared_files(
 fn kad_publishable_shared_file_entries(
     entries: Vec<MetadataTransferPublishEntry>,
 ) -> Vec<MetadataTransferPublishEntry> {
-    entries
+    let now_unix_ms = Utc::now().timestamp_millis();
+    let mut ranked = entries
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, entry)| {
+            let rank = shared_publish_rank(SharedPublishRankInput {
+                file_hash: &entry.file_hash,
+                file_size: entry.file_size,
+                upload_priority: &entry.upload_priority,
+                auto_upload_priority: entry.auto_upload_priority,
+                all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+                session_uploaded_bytes: 0,
+                last_publish_unix_ms: 0,
+                sequence,
+                now_unix_ms,
+            });
+            (rank, entry)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right));
+    ranked.into_iter().map(|(_, entry)| entry).collect()
 }
 
 fn kad_keyword_publish_entries_for_keyword(
@@ -7975,24 +7998,28 @@ mod tests {
     }
 
     #[test]
-    fn kad_publishable_shared_files_keep_metadata_publish_entries() {
+    fn kad_publishable_shared_files_follow_mfc_publish_rank() {
         let shared = MetadataTransferPublishEntry {
             file_hash: Ed2kHash::from_bytes([0x11; 16]).to_string(),
             canonical_name: "shared.bin".to_string(),
             file_size: 128,
             aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
             comment: "synthetic note".to_string(),
             rating: 4,
         };
         let other = MetadataTransferPublishEntry {
             file_hash: Ed2kHash::from_bytes([0x22; 16]).to_string(),
             canonical_name: "other.bin".to_string(),
+            upload_priority: "release".to_string(),
             ..shared.clone()
         };
 
         let publishable = kad_publishable_shared_file_entries(vec![shared.clone(), other.clone()]);
 
-        assert_eq!(publishable, vec![shared, other]);
+        assert_eq!(publishable, vec![other, shared]);
     }
 
     #[test]
@@ -8574,6 +8601,9 @@ mod tests {
                 canonical_name: format!("Ubuntu Python Sample {index}.iso"),
                 file_size: 1000 + index,
                 aich_root: None,
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 0,
                 comment: String::new(),
                 rating: 0,
             })
@@ -8583,6 +8613,9 @@ mod tests {
             canonical_name: "Apache Camel Sample.iso".to_string(),
             file_size: 1,
             aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
             comment: String::new(),
             rating: 0,
         });
@@ -8612,6 +8645,9 @@ mod tests {
                 canonical_name: format!("Ubuntu Python Sample {index}.iso"),
                 file_size: 1000 + index,
                 aich_root: None,
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 0,
                 comment: String::new(),
                 rating: 0,
             })

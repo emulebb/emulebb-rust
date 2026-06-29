@@ -22,6 +22,7 @@ pub mod long_path;
 pub mod nat;
 pub mod networking;
 pub mod reachability;
+pub mod shared_publish_rank;
 pub mod stun;
 
 #[allow(deprecated)]

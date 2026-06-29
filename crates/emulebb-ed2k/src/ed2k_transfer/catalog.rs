@@ -32,6 +32,15 @@ pub struct Ed2kSharedEntry {
     /// Canonical AICH root in lowercase hex when known.
     #[serde(default)]
     pub aich_root: Option<String>,
+    /// Public upload-priority token used by the MFC-compatible publish ranker.
+    #[serde(default = "default_upload_priority")]
+    pub upload_priority: String,
+    /// Whether upload priority is automatically managed.
+    #[serde(default)]
+    pub auto_upload_priority: bool,
+    /// Lifetime bytes uploaded for this file, used for the all-time share ratio.
+    #[serde(default)]
+    pub all_time_uploaded_bytes: u64,
     /// Per-ED2K-part availability for an in-progress download ("share while
     /// downloading"). One entry per ED2K part (`ed2k_part_count(file_size)` =
     /// `size / PARTSIZE + 1`, i.e. eMule `m_iED2KPartCount`, one more than the
@@ -60,6 +69,9 @@ impl Ed2kSharedEntry {
             compatibility_hint: true,
             source_count_hint: Some(hash.source_count),
             aich_root: None,
+            upload_priority: default_upload_priority(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
         })
     }
@@ -85,6 +97,9 @@ impl Ed2kSharedEntry {
             compatibility_hint: false,
             source_count_hint: None,
             aich_root: manifest.aich_root.clone(),
+            upload_priority: manifest.upload_priority.clone(),
+            auto_upload_priority: manifest.auto_upload_priority,
+            all_time_uploaded_bytes: 0,
             complete_parts,
         }
     }
@@ -129,6 +144,10 @@ impl Ed2kSharedEntry {
         }
         body
     }
+}
+
+fn default_upload_priority() -> String {
+    "normal".to_string()
 }
 
 /// Derive the per-ED2K-part complete bitmap from verified byte ranges, one bit

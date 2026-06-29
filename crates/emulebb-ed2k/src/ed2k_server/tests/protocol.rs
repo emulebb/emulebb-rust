@@ -487,6 +487,9 @@ fn offer_files_payload_matches_oracle_search_session_sample() {
         compatibility_hint: true,
         source_count_hint: Some(12),
         aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
     }];
     let packet = encode_packet(
@@ -522,6 +525,9 @@ fn offer_files_payload_advertises_large_file_size_truthfully() {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
     }];
     let payload = encode_offer_files_payload(
@@ -568,6 +574,9 @@ fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
         compatibility_hint: true,
         source_count_hint: Some(12),
         aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
     }];
     let mut expanded_catalog = base_catalog.clone();
@@ -580,6 +589,9 @@ fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
     });
 

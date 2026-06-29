@@ -66,6 +66,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
             canonical_name: manifest.canonical_name.clone(),
             file_size: manifest.file_size,
             aich_root: manifest.aich_root.clone(),
+            upload_priority: manifest.upload_priority.clone(),
+            auto_upload_priority: manifest.auto_upload_priority,
+            all_time_uploaded_bytes: 0,
         }]
     );
     assert_eq!(
@@ -92,6 +95,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
             canonical_name: manifest.canonical_name.clone(),
             file_size: manifest.file_size,
             aich_root: manifest.aich_root.clone(),
+            upload_priority: manifest.upload_priority.clone(),
+            auto_upload_priority: manifest.auto_upload_priority,
+            all_time_uploaded_bytes: 0,
             comment: manifest.comment.clone(),
             rating: manifest.rating,
         }]

@@ -267,6 +267,15 @@ impl Ed2kTransferRuntime {
         }
         self.metadata
             .add_file_all_time_uploaded(&file_hash.to_string(), delta)?;
+        let hash_text = file_hash.to_string();
+        if let Ok(mut catalog) = self.shared_catalog.try_write() {
+            for entry in catalog.iter_mut() {
+                if entry.file_hash.eq_ignore_ascii_case(&hash_text) && !entry.compatibility_hint {
+                    entry.all_time_uploaded_bytes =
+                        entry.all_time_uploaded_bytes.saturating_add(delta);
+                }
+            }
+        }
         Ok(())
     }
 

@@ -27,6 +27,9 @@ fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
         compatibility_hint: false,
         source_count_hint: None,
         aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
         complete_parts: Vec::new(),
     }
 }

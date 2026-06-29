@@ -2,7 +2,7 @@ use std::{
     collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -13,6 +13,9 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kSharedCatalog, Ed2kSharedEntry},
+    shared_publish_rank::{
+        SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
+    },
 };
 
 use super::tag_codec::{
@@ -330,10 +333,7 @@ fn offered_files_catalog_at_cursor(
     // <= MAX_OFFER_FILES_PER_ADVERTISEMENT); guard against a 0 so a misconfigured
     // server can never zero out the batch.
     let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    let mut all_offered_files = shared_catalog
-        .iter()
-        .filter_map(popular_hash_offer_file)
-        .collect::<Vec<_>>();
+    let mut all_offered_files = ranked_offer_files(shared_catalog);
     if all_offered_files.is_empty() {
         all_offered_files.push((
             OFFER_FILE_SAMPLE_HASH,
@@ -370,10 +370,7 @@ fn offered_files_catalog_at_cursor_skipping_published(
     max_offer_files: usize,
 ) -> OfferedFilesCatalog {
     let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    let all_offered_files = shared_catalog
-        .iter()
-        .filter_map(popular_hash_offer_file)
-        .collect::<Vec<_>>();
+    let all_offered_files = ranked_offer_files(shared_catalog);
     if all_offered_files.is_empty() {
         return offered_files_catalog_at_cursor(shared_catalog, cursor, max_offer_files);
     }
@@ -428,6 +425,38 @@ fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<([u8; 16], String, 
         hash.file_size,
         ed2k_offer_file_type(&hash.canonical_name),
     ))
+}
+
+fn ranked_offer_files(shared_catalog: &[Ed2kSharedEntry]) -> Vec<([u8; 16], String, u64, u8)> {
+    let now_unix_ms = unix_time_ms();
+    let mut ranked = shared_catalog
+        .iter()
+        .enumerate()
+        .filter_map(|(sequence, entry)| {
+            let offered = popular_hash_offer_file(entry)?;
+            let rank = shared_publish_rank(SharedPublishRankInput {
+                file_hash: &entry.file_hash,
+                file_size: entry.file_size,
+                upload_priority: &entry.upload_priority,
+                auto_upload_priority: entry.auto_upload_priority,
+                all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+                session_uploaded_bytes: 0,
+                last_publish_unix_ms: 0,
+                sequence,
+                now_unix_ms,
+            });
+            Some((rank, offered))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right));
+    ranked.into_iter().map(|(_, offered)| offered).collect()
+}
+
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 fn ed2k_offer_file_type(file_name: &str) -> u8 {
@@ -590,6 +619,9 @@ mod tests {
             compatibility_hint: false,
             source_count_hint: None,
             aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
         }
     }
@@ -607,6 +639,9 @@ mod tests {
             compatibility_hint: false,
             source_count_hint: None,
             aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
         }
     }
@@ -727,6 +762,7 @@ mod tests {
     #[test]
     fn offered_files_catalog_rotates_large_libraries() {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+        let ranked = ranked_offer_files(&shared_catalog);
 
         let first =
             offered_files_catalog_at_cursor(&shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -763,14 +799,8 @@ mod tests {
         ));
         assert_ne!(first.entries[0].0, second.entries[0].0);
         assert_ne!(second.entries[0].0, third.entries[0].0);
-        assert_eq!(
-            third.entries[0].0,
-            popular_hash_offer_file(&shared_catalog[400]).unwrap().0
-        );
-        assert_eq!(
-            third.entries[50].0,
-            popular_hash_offer_file(&shared_catalog[0]).unwrap().0
-        );
+        assert_eq!(third.entries[0].0, ranked[400].0);
+        assert_eq!(third.entries[50].0, ranked[0].0);
     }
 
     #[test]
@@ -788,9 +818,10 @@ mod tests {
     #[test]
     fn offered_files_catalog_prioritizes_unpublished_hashes() {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
+        let ranked = ranked_offer_files(&shared_catalog);
         let mut already_published = HashSet::new();
-        for entry in shared_catalog.iter().take(200) {
-            already_published.insert(popular_hash_offer_file(entry).unwrap().0);
+        for entry in ranked.iter().take(200) {
+            already_published.insert(entry.0);
         }
 
         let offered = offered_files_catalog_at_cursor_skipping_published(
@@ -802,10 +833,7 @@ mod tests {
 
         assert_eq!(offered.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
         assert_eq!(offered.next_cursor, 400);
-        assert_eq!(
-            offered.entries[0].0,
-            popular_hash_offer_file(&shared_catalog[200]).unwrap().0
-        );
+        assert_eq!(offered.entries[0].0, ranked[200].0);
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub struct MetadataTransferCatalogEntry {
     pub canonical_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub all_time_uploaded_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -59,6 +62,9 @@ pub struct MetadataTransferPublishEntry {
     pub canonical_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub all_time_uploaded_bytes: u64,
     pub comment: String,
     pub rating: u8,
 }
