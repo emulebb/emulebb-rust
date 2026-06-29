@@ -250,6 +250,15 @@ struct Ed2kUploadSessionEntry {
     upload_started_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ed2kUploadRecycleDiagnostics {
+    reason: &'static str,
+    slot_age_ms: u64,
+    idle_ms: u64,
+    uploaded_bytes: u64,
+    slot_rate_bytes_per_sec: u64,
+}
+
 /// Rate-aware upload slot capacity state for diagnostics and policy tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ed2kUploadQueueCapacitySnapshot {
@@ -259,7 +268,10 @@ pub struct Ed2kUploadQueueCapacitySnapshot {
     pub active_sessions: usize,
     pub waiting_sessions: usize,
     pub upload_rate_bytes_per_sec: u64,
+    pub upload_limit_bytes_per_sec: u64,
+    pub elastic_underfill_bytes_per_sec: u64,
     pub elastic_underfill: bool,
+    pub underfill_since_ms: Option<u64>,
 }
 
 /// Global upload-rate reservation result for listener payload writes.
@@ -324,7 +336,15 @@ impl Ed2kUploadQueueState {
             active_sessions: self.active_session_count(),
             waiting_sessions: self.waiting_session_count(),
             upload_rate_bytes_per_sec: self.upload_rate_bytes_per_sec(now),
+            upload_limit_bytes_per_sec: self.config.upload_limit_bytes_per_sec,
+            elastic_underfill_bytes_per_sec: self.config.elastic_underfill_bytes_per_sec,
             elastic_underfill: self.elastic_underfill_ready(now),
+            underfill_since_ms: self.underfill_since.map(|since| {
+                now.saturating_duration_since(since)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            }),
         };
         super::diag_sched::capacity_snapshot(
             snapshot.base_slots,
@@ -332,6 +352,11 @@ impl Ed2kUploadQueueState {
             snapshot.active_slots,
             snapshot.active_sessions,
             snapshot.waiting_sessions,
+            snapshot.upload_rate_bytes_per_sec,
+            snapshot.upload_limit_bytes_per_sec,
+            snapshot.elastic_underfill_bytes_per_sec,
+            snapshot.elastic_underfill,
+            snapshot.underfill_since_ms,
         );
         snapshot
     }
@@ -726,6 +751,8 @@ impl Ed2kUploadQueueState {
 
     fn reap_expired_sessions(&mut self, now: Instant) {
         self.refresh_elastic_underfill(now);
+        let active_before = self.active_session_count();
+        let waiting_before = self.waiting_session_count();
         let expired = self
             .sessions
             .iter()
@@ -735,12 +762,19 @@ impl Ed2kUploadQueueState {
                     Ed2kUploadSessionPhase::Granted => self.config.granted_timeout,
                     Ed2kUploadSessionPhase::Uploading => self.config.upload_timeout,
                 };
-                (now.saturating_duration_since(session.last_activity) > timeout
-                    || self.should_recycle_underfilled_active_session(session, now))
-                .then(|| (key.clone(), session.phase))
+                let timeout_expired =
+                    now.saturating_duration_since(session.last_activity) > timeout;
+                let recycle = self.underfilled_active_recycle_diagnostics(session, now);
+                (timeout_expired || recycle.is_some()).then(|| {
+                    (
+                        key.clone(),
+                        session.phase,
+                        recycle.unwrap_or_else(|| self.timeout_recycle_diagnostics(session, now)),
+                    )
+                })
             })
             .collect::<Vec<_>>();
-        for (key, phase) in expired {
+        for (key, phase, recycle) in expired {
             // An idle active slot reclaimed by the queue is a `recycle` (master
             // activeNoRequestRecycle*), distinct from a peer-initiated close; a
             // reaped waiter is a plain queue drop and is not emitted here.
@@ -752,6 +786,13 @@ impl Ed2kUploadQueueState {
                     &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
                     key.peer.user_hash,
                     &key.file_hash,
+                    recycle.reason,
+                    recycle.slot_age_ms,
+                    recycle.idle_ms,
+                    recycle.uploaded_bytes,
+                    recycle.slot_rate_bytes_per_sec,
+                    active_before,
+                    waiting_before,
                 );
             }
             self.sessions.remove(&key);
@@ -760,33 +801,72 @@ impl Ed2kUploadQueueState {
         self.promote_waiters(now);
     }
 
-    fn should_recycle_underfilled_active_session(
+    fn underfilled_active_recycle_diagnostics(
         &self,
         session: &Ed2kUploadSessionEntry,
         now: Instant,
-    ) -> bool {
+    ) -> Option<Ed2kUploadRecycleDiagnostics> {
         if !matches!(
             session.phase,
             Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
         ) {
-            return false;
+            return None;
         }
         if self.waiting_session_count() == 0
             || self.config.upload_limit_bytes_per_sec == 0
             || !self.sustained_upload_underfill_ready(now)
         {
-            return false;
+            return None;
         }
         if session.uploaded_bytes == 0 {
-            return now.saturating_duration_since(session.queued_at) > self.config.granted_timeout;
+            return (now.saturating_duration_since(session.queued_at)
+                > self.config.granted_timeout)
+                .then(|| self.recycle_diagnostics(session, now, "noRequestUnderfill"));
         }
         let Some(started_at) = session.upload_started_at else {
-            return false;
+            return None;
         };
         if now.saturating_duration_since(started_at) < self.config.upload_timeout {
-            return false;
+            return None;
         }
-        upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec()
+        (upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec())
+            .then(|| self.recycle_diagnostics(session, now, "slowUnderfill"))
+    }
+
+    fn timeout_recycle_diagnostics(
+        &self,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+    ) -> Ed2kUploadRecycleDiagnostics {
+        let reason = match session.phase {
+            Ed2kUploadSessionPhase::Waiting => "waitingTimeout",
+            Ed2kUploadSessionPhase::Granted => "grantedTimeout",
+            Ed2kUploadSessionPhase::Uploading => "uploadTimeout",
+        };
+        self.recycle_diagnostics(session, now, reason)
+    }
+
+    fn recycle_diagnostics(
+        &self,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+        reason: &'static str,
+    ) -> Ed2kUploadRecycleDiagnostics {
+        Ed2kUploadRecycleDiagnostics {
+            reason,
+            slot_age_ms: now
+                .saturating_duration_since(session.queued_at)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            idle_ms: now
+                .saturating_duration_since(session.last_activity)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            uploaded_bytes: session.uploaded_bytes,
+            slot_rate_bytes_per_sec: upload_speed_bytes_per_sec(session, now),
+        }
     }
 
     fn promote_waiters(&mut self, now: Instant) {

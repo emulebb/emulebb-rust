@@ -8,11 +8,28 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use serde::Serialize;
 use serde_json::json;
 
 use emulebb_core::Upload;
 
 use crate::handlers::prelude::*;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadQueueEntry {
+    #[serde(flatten)]
+    upload: Upload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_rank: Option<u16>,
+}
+
+fn upload_queue_entry(upload: Upload) -> UploadQueueEntry {
+    UploadQueueEntry {
+        queue_rank: upload.queue_rank,
+        upload,
+    }
+}
 
 /// Drops `scoreBreakdown` from every upload so list endpoints stay parity-exact
 /// with master, which omits the breakdown unless the caller opts in.
@@ -52,6 +69,10 @@ pub(crate) async fn upload_queue(
     } else {
         without_score_breakdown(items)
     };
+    let items = items
+        .into_iter()
+        .map(upload_queue_entry)
+        .collect::<Vec<_>>();
     api_collection_page(items, query.page()).into_response()
 }
 
@@ -68,6 +89,7 @@ pub(crate) async fn upload_by_client_id(
     waiting_queue: bool,
 ) -> Response {
     match state.core.upload(&client_id, waiting_queue).await {
+        Some(upload) if waiting_queue => api_ok(upload_queue_entry(upload)).into_response(),
         Some(upload) => api_ok(upload).into_response(),
         None if waiting_queue => api_error(
             StatusCode::NOT_FOUND,
@@ -193,7 +215,7 @@ pub(crate) async fn upload_unban(
 mod tests {
     use emulebb_core::Upload;
 
-    use super::without_score_breakdown;
+    use super::{upload_queue_entry, without_score_breakdown};
 
     #[test]
     fn without_score_breakdown_strips_the_diagnostics() {
@@ -253,5 +275,45 @@ mod tests {
         assert!(stripped[0].score_breakdown.is_none());
         let value = serde_json::to_value(&stripped[0]).unwrap();
         assert!(value.get("scoreBreakdown").is_none());
+    }
+
+    #[test]
+    fn upload_queue_entry_serializes_wait_rank() {
+        let upload = Upload {
+            client_id: "0102030405060708090a0b0c0d0e0f10".to_string(),
+            user_name: "peer".to_string(),
+            user_hash: None,
+            client_software: "eMule".to_string(),
+            client_mod: String::new(),
+            upload_state: "queued".to_string(),
+            upload_speed_ki_bps: 0.0,
+            uploaded_bytes: 0,
+            queue_session_uploaded: 0,
+            payload_buffered: 0,
+            wait_time_ms: 123,
+            wait_started_tick: 0,
+            score: 100,
+            address: "192.0.2.10".to_string(),
+            port: 4662,
+            server_ip: String::new(),
+            server_port: 0,
+            low_id: false,
+            friend_slot: false,
+            uploading: false,
+            waiting_queue: true,
+            requested_file_hash: None,
+            requested_file_name: None,
+            requested_file_size_bytes: None,
+            requested_parts_obtained: 0,
+            requested_parts_total: 0,
+            requested_parts_progress_text: String::new(),
+            score_breakdown: None,
+            queue_rank: Some(7),
+        };
+
+        let plain = serde_json::to_value(&upload).unwrap();
+        assert!(plain.get("queueRank").is_none());
+        let queued = serde_json::to_value(upload_queue_entry(upload)).unwrap();
+        assert_eq!(queued["queueRank"], 7);
     }
 }

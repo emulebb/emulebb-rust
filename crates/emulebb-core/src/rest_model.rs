@@ -639,7 +639,10 @@ pub struct UploadPolicyMetrics {
     pub active_sessions: usize,
     pub waiting_sessions: usize,
     pub upload_rate_bytes_per_sec: u64,
+    pub upload_limit_bytes_per_sec: u64,
+    pub elastic_underfill_bytes_per_sec: u64,
     pub elastic_underfill: bool,
+    pub underfill_since_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

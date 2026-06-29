@@ -104,7 +104,10 @@ pub(crate) fn upload_policy_metrics_from_capacity(
         active_sessions: capacity.active_sessions,
         waiting_sessions: capacity.waiting_sessions,
         upload_rate_bytes_per_sec: capacity.upload_rate_bytes_per_sec,
+        upload_limit_bytes_per_sec: capacity.upload_limit_bytes_per_sec,
+        elastic_underfill_bytes_per_sec: capacity.elastic_underfill_bytes_per_sec,
         elastic_underfill: capacity.elastic_underfill,
+        underfill_since_ms: capacity.underfill_since_ms,
     }
 }
 

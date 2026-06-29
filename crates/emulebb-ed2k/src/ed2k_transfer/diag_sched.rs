@@ -56,9 +56,29 @@ pub(crate) fn upload_slot_closed(peer: &str, peer_hash: Option<[u8; 16]>, file_h
 /// `upload_slot_recycled` (schema §3.5): an idle/timed-out active slot is
 /// reclaimed by the queue (master `activeNoRequestRecycle*`), distinct from a
 /// peer-initiated close.
-pub(crate) fn upload_slot_recycled(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+pub(crate) fn upload_slot_recycled(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    reason: &str,
+    slot_age_ms: u64,
+    idle_ms: u64,
+    uploaded_bytes: u64,
+    slot_rate_bytes_per_sec: u64,
+    active_before: usize,
+    waiting_before: usize,
+) {
     let keys = upload_keys(peer, peer_hash, file_hash);
-    let body = json!({ "outcome": "recycled" });
+    let body = json!({
+        "outcome": "recycled",
+        "reason": reason,
+        "slotAgeMs": slot_age_ms,
+        "idleMs": idle_ms,
+        "uploadedBytes": uploaded_bytes,
+        "slotRateBytesPerSec": slot_rate_bytes_per_sec,
+        "activeBefore": active_before,
+        "waitingBefore": waiting_before,
+    });
     emit(FAMILY, "upload_slot_recycled", "low", keys, body);
 }
 
@@ -81,6 +101,11 @@ pub(crate) fn capacity_snapshot(
     effective_slot_cap: usize,
     active_sessions: usize,
     waiting_sessions: usize,
+    upload_rate_bytes_per_sec: u64,
+    upload_limit_bytes_per_sec: u64,
+    elastic_underfill_bytes_per_sec: u64,
+    elastic_underfill: bool,
+    underfill_since_ms: Option<u64>,
 ) {
     let body = json!({
         "baseSlots": base_slots,
@@ -88,6 +113,11 @@ pub(crate) fn capacity_snapshot(
         "effectiveSlotCap": effective_slot_cap,
         "activeSlots": active_sessions,
         "waitingSessions": waiting_sessions,
+        "uploadRateBytesPerSec": upload_rate_bytes_per_sec,
+        "uploadLimitBytesPerSec": upload_limit_bytes_per_sec,
+        "elasticUnderfillBytesPerSec": elastic_underfill_bytes_per_sec,
+        "elasticUnderfill": elastic_underfill,
+        "underfillSinceMs": underfill_since_ms,
     });
     emit(
         FAMILY,
