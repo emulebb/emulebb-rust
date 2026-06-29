@@ -241,6 +241,7 @@ fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
     };
     let _ = std::io::Write::write_all(file, line.as_bytes());
     let _ = std::io::Write::write_all(file, b"\n");
+    let _ = std::io::Write::flush(file);
 }
 
 #[cfg(test)]

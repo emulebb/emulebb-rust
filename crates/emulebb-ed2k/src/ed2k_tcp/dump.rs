@@ -325,6 +325,7 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
         && let Some(file) = guard.as_mut()
     {
         let _ = writeln!(file, "{line}");
+        let _ = file.flush();
     }
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`

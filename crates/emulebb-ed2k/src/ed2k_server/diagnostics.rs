@@ -268,6 +268,7 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
     };
     let _ = std::io::Write::write_all(file, line.as_bytes());
     let _ = std::io::Write::write_all(file, b"\n");
+    let _ = std::io::Write::flush(file);
 }
 
 fn server_opcode_name(opcode: u8) -> &'static str {
