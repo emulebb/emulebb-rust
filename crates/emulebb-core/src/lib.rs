@@ -40,8 +40,8 @@ use emulebb_ed2k::{
         run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSourceHint,
-        Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSharedPublishDemandSignal,
+        Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     long_path::long_path,
@@ -1049,6 +1049,13 @@ impl EmulebbCore {
             target_server_endpoint: Arc::clone(&target_server_endpoint),
             server_list_events: Some(server_list_events_tx),
         })));
+        tasks.push(tokio::spawn(
+            Self::run_ed2k_shared_catalog_demand_publish_loop(
+                self.clone(),
+                self.ed2k_transfers.shared_publish_demand_signal(),
+                Arc::clone(&shutdown),
+            ),
+        ));
         tasks.push(tokio::spawn(run_ed2k_server_list_events(
             self.clone(),
             server_list_events_rx,
@@ -1756,6 +1763,9 @@ impl EmulebbCore {
                 .to_string(),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
+            all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+            all_time_upload_requests: entry.all_time_upload_requests,
+            all_time_upload_accepts: entry.all_time_upload_accepts,
             comment: entry.comment.clone(),
             rating: entry.rating,
         }
@@ -4171,6 +4181,28 @@ impl EmulebbCore {
                     );
                     break;
                 }
+            }
+        }
+    }
+
+    async fn run_ed2k_shared_catalog_demand_publish_loop(
+        core: EmulebbCore,
+        signal: Ed2kSharedPublishDemandSignal,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        let mut observed_revision = signal.revision();
+        while !shutdown.load(Ordering::SeqCst) {
+            let revision = signal.revision();
+            if revision != observed_revision {
+                observed_revision = revision;
+                core.queue_ed2k_shared_catalog_publish();
+                continue;
+            }
+            if tokio::time::timeout(Duration::from_secs(1), signal.notified())
+                .await
+                .is_err()
+            {
+                continue;
             }
         }
     }
@@ -6973,6 +7005,9 @@ fn local_share_from_summary(
         transfer_dir: summary.transfer_dir,
         priority: "normal".to_string(),
         auto_upload_priority: false,
+        all_time_uploaded_bytes: 0,
+        all_time_upload_requests: 0,
+        all_time_upload_accepts: 0,
         comment: String::new(),
         rating: 0,
     }

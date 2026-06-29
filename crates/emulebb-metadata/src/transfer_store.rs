@@ -629,6 +629,9 @@ impl super::MetadataStore {
                        ELSE lower(hex(known_files.aich_root))
                    END,
                    known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
+                   known_files.all_time_upload_requests,
+                   known_files.all_time_upload_accepts,
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -649,8 +652,11 @@ impl super::MetadataStore {
                 aich_root: row.get(4)?,
                 upload_priority: row.get(5)?,
                 auto_upload_priority: row.get::<_, i64>(6)? != 0,
-                comment: row.get(7)?,
-                rating: row.get::<_, i64>(8)? as u8,
+                all_time_uploaded_bytes: row.get::<_, i64>(7)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(8)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(9)? as u64,
+                comment: row.get(10)?,
+                rating: row.get::<_, i64>(11)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -685,6 +691,9 @@ impl super::MetadataStore {
                        ELSE lower(hex(known_files.aich_root))
                    END,
                    known_files.upload_priority, known_files.auto_upload_priority,
+                   known_files.all_time_uploaded_bytes,
+                   known_files.all_time_upload_requests,
+                   known_files.all_time_upload_accepts,
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
@@ -706,8 +715,11 @@ impl super::MetadataStore {
                 aich_root: row.get(4)?,
                 upload_priority: row.get(5)?,
                 auto_upload_priority: row.get::<_, i64>(6)? != 0,
-                comment: row.get(7)?,
-                rating: row.get::<_, i64>(8)? as u8,
+                all_time_uploaded_bytes: row.get::<_, i64>(7)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(8)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(9)? as u64,
+                comment: row.get(10)?,
+                rating: row.get::<_, i64>(11)? as u8,
             })
         })?;
         let entries = rows.collect::<Result<Vec<_>, _>>()?;

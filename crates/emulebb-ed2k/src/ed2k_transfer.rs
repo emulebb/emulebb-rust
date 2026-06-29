@@ -17,14 +17,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use emulebb_metadata::MetadataStore;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
 
@@ -200,6 +200,11 @@ pub struct Ed2kTransferRuntime {
     /// `theStats.sessionReceivedBytes`/`sessionSentBytes`). In-memory only.
     session_downloaded_bytes: AtomicU64,
     session_uploaded_bytes: AtomicU64,
+    /// Monotonic shared-file demand revision. Upload serving bumps this when
+    /// requests/accepts alter publish rank inputs, and core listens for changes
+    /// to queue the existing ED2K OP_OFFERFILES refresh worker.
+    shared_publish_demand_revision: Arc<AtomicU64>,
+    shared_publish_demand_notify: Arc<Notify>,
     /// Whether the credit system weights upload scoring (eMule
     /// `thePrefs.GetCreditSystem()`). When false, every peer gets the neutral 1.0
     /// credit ratio (`DEFAULT_CREDIT_SCORE_PERMILLE`) so stored bytes never alter
@@ -211,6 +216,25 @@ pub struct Ed2kTransferRuntime {
     /// the download driver, the UDP reask runtime, and core via this runtime's
     /// `Arc`. Not persisted across restart, matching the master.
     ban_store: Arc<crate::ban_store::BanStore>,
+}
+
+/// Lightweight notification handle for shared-file demand changes that can
+/// affect ED2K/Kad publish ranking.
+#[derive(Debug, Clone)]
+pub struct Ed2kSharedPublishDemandSignal {
+    revision: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl Ed2kSharedPublishDemandSignal {
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
 }
 
 impl Ed2kTransferRuntime {
@@ -305,6 +329,8 @@ impl Ed2kTransferRuntime {
             next_upload_connection_id: AtomicU64::new(1),
             session_downloaded_bytes: AtomicU64::new(0),
             session_uploaded_bytes: AtomicU64::new(0),
+            shared_publish_demand_revision: Arc::new(AtomicU64::new(0)),
+            shared_publish_demand_notify: Arc::new(Notify::new()),
             credit_system_enabled: AtomicBool::new(true),
             ban_store: Arc::new(crate::ban_store::BanStore::new()),
         };
@@ -323,6 +349,22 @@ impl Ed2kTransferRuntime {
     #[must_use]
     pub fn ban_store(&self) -> Arc<crate::ban_store::BanStore> {
         Arc::clone(&self.ban_store)
+    }
+
+    /// Return a cloneable signal that fires when upload demand changes the
+    /// shared-file publish rank inputs.
+    #[must_use]
+    pub fn shared_publish_demand_signal(&self) -> Ed2kSharedPublishDemandSignal {
+        Ed2kSharedPublishDemandSignal {
+            revision: Arc::clone(&self.shared_publish_demand_revision),
+            notify: Arc::clone(&self.shared_publish_demand_notify),
+        }
+    }
+
+    pub(crate) fn notify_shared_publish_demand_changed(&self) {
+        self.shared_publish_demand_revision
+            .fetch_add(1, Ordering::AcqRel);
+        self.shared_publish_demand_notify.notify_waiters();
     }
 
     /// Ban a client by IP and/or user hash for `CLIENTBANTIME` (4h), mirroring

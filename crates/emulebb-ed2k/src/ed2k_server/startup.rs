@@ -387,6 +387,9 @@ fn offered_files_catalog_at_cursor_skipping_published(
         }
         scanned += 1;
     }
+    if entries.is_empty() && already_published.len() >= total_entries {
+        return offered_files_catalog_at_cursor(shared_catalog, 0, max_offer_files);
+    }
     OfferedFilesCatalog {
         entries,
         next_cursor: (start + scanned) % total_entries,
@@ -918,8 +921,9 @@ mod tests {
     }
 
     #[test]
-    fn offered_files_catalog_is_empty_when_every_hash_was_published() {
+    fn offered_files_catalog_restarts_ranked_cycle_when_every_hash_was_published() {
         let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
+        let ranked = ranked_offer_files(&shared_catalog);
         let already_published = shared_catalog
             .iter()
             .map(|entry| popular_hash_offer_file(entry).unwrap().0)
@@ -932,7 +936,7 @@ mod tests {
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
         );
 
-        assert!(offered.entries.is_empty());
+        assert_eq!(offered.entries, ranked);
         assert_eq!(offered.next_cursor, 0);
         assert_eq!(offered.total_entries, 3);
     }

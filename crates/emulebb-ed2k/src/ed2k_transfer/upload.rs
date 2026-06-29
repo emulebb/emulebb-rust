@@ -127,6 +127,7 @@ impl Ed2kTransferRuntime {
             entry.publish.last_request_unix_ms = entry.publish.last_request_unix_ms.max(now);
         })
         .await;
+        self.notify_shared_publish_demand_changed();
     }
 
     /// Record one accepted upload request for a shared file.
@@ -139,6 +140,7 @@ impl Ed2kTransferRuntime {
                 entry.publish.all_time_accept_count.saturating_add(1);
         })
         .await;
+        self.notify_shared_publish_demand_changed();
     }
 
     pub(crate) async fn note_upload_payload_sent(

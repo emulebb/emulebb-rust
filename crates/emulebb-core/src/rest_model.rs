@@ -439,6 +439,9 @@ pub struct LocalShare {
     pub transfer_dir: String,
     pub priority: String,
     pub auto_upload_priority: bool,
+    pub all_time_uploaded_bytes: u64,
+    pub all_time_upload_requests: u64,
+    pub all_time_upload_accepts: u64,
     pub comment: String,
     pub rating: u8,
 }

@@ -390,12 +390,12 @@ pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
         size_bytes: share.size_bytes,
         priority: share.priority.clone(),
         auto_upload_priority: share.auto_upload_priority,
-        requests: 0,
-        accepted_requests: 0,
-        transferred_bytes: 0,
-        all_time_requests: 0,
-        all_time_accepts: 0,
-        all_time_transferred: 0,
+        requests: share.all_time_upload_requests,
+        accepted_requests: share.all_time_upload_accepts,
+        transferred_bytes: share.all_time_uploaded_bytes,
+        all_time_requests: share.all_time_upload_requests,
+        all_time_accepts: share.all_time_upload_accepts,
+        all_time_transferred: share.all_time_uploaded_bytes,
         part_count: share.part_count,
         part_file: false,
         complete: true,
@@ -450,12 +450,42 @@ mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, NetworkBindingStatus, NetworkStatus, ServerInfo, TransferThroughputStats,
-        VpnGuardStatus,
+        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, ServerInfo,
+        TransferThroughputStats, VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
-    use super::{kad_response, network_response, server_status_value, stats_response};
+    use super::{
+        kad_response, network_response, server_status_value, shared_file_response, stats_response,
+    };
+
+    #[test]
+    fn shared_file_response_exposes_persisted_upload_counters() {
+        let response = shared_file_response(&LocalShare {
+            hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Synthetic.Shared.bin".to_string(),
+            size_bytes: 123,
+            part_count: 1,
+            ed2k_link: "ed2k://|file|Synthetic.Shared.bin|123|00112233445566778899aabbccddeeff|/"
+                .to_string(),
+            aich_root: String::new(),
+            transfer_dir: "transfers".to_string(),
+            priority: "normal".to_string(),
+            auto_upload_priority: false,
+            all_time_uploaded_bytes: 4096,
+            all_time_upload_requests: 7,
+            all_time_upload_accepts: 5,
+            comment: String::new(),
+            rating: 0,
+        });
+
+        assert_eq!(response.requests, 7);
+        assert_eq!(response.accepted_requests, 5);
+        assert_eq!(response.transferred_bytes, 4096);
+        assert_eq!(response.all_time_requests, 7);
+        assert_eq!(response.all_time_accepts, 5);
+        assert_eq!(response.all_time_transferred, 4096);
+    }
 
     #[test]
     fn kad_response_surfaces_indexed_counts() {
