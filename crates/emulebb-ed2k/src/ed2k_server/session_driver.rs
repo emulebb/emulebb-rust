@@ -21,12 +21,18 @@ use super::{
     validate_found_sources,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerSessionExit {
+    ContinueOrder,
+    RestartPreferredOrder,
+}
+
 #[allow(clippy::cognitive_complexity)]
 pub(super) async fn run_one_server_session(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
     search_inbox: &mut Ed2kServerSearchInbox,
-) -> Result<()> {
+) -> Result<ServerSessionExit> {
     let use_server_obfuscation =
         should_use_server_obfuscation(context.hello_identity.connect_options, server);
     let mut login_identity =
@@ -141,7 +147,7 @@ pub(super) async fn run_one_server_session(
                 "ED2K background session is shutting down before search completion",
             );
             clear_server_connection_state(&context.state).await;
-            return Ok(());
+            return Ok(ServerSessionExit::ContinueOrder);
         }
 
         tokio::select! {
@@ -166,7 +172,7 @@ pub(super) async fn run_one_server_session(
                     context.rotation_interval.expect("rotation interval is set"),
                 );
                 clear_server_connection_state(&context.state).await;
-                return Ok(());
+                return Ok(ServerSessionExit::ContinueOrder);
             }
             _ = context.reconnect_signal.notified() => {
                 // Drop the session and reconnect now: used both when advertised
@@ -184,7 +190,7 @@ pub(super) async fn run_one_server_session(
                     server.base_endpoint(),
                 );
                 clear_server_connection_state(&context.state).await;
-                return Ok(());
+                return Ok(ServerSessionExit::RestartPreferredOrder);
             }
             request = search_inbox.receiver.recv(), if queued_background_search.is_none() && pending_background_search.is_none() => {
                 if let Some(request) = request {

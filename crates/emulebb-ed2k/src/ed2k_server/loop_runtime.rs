@@ -10,7 +10,7 @@ use super::server_events::Ed2kServerListEvent;
 use super::types::ServerSessionContext;
 use super::{
     Ed2kServerLoopOptions, clear_server_connection_state, configured_server_entries,
-    resolve_server_entry, run_one_server_session,
+    resolve_server_entry, run_one_server_session, session_driver::ServerSessionExit,
 };
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
 #[allow(clippy::cognitive_complexity)]
@@ -77,25 +77,40 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             attempted_any = true;
             match resolve_server_entry(&configured_server).await {
                 Ok(server) => {
-                    if let Err(error) =
-                        run_one_server_session(&server, &session_context, &mut search_inbox).await
+                    match run_one_server_session(&server, &session_context, &mut search_inbox).await
                     {
-                        clear_server_connection_state(&state).await;
-                        // eMule `CServerList::ServerStats`: a failed connect/session
-                        // increments the server's fail-count (the core drops a
-                        // non-static dead server at the threshold). A successful
-                        // login emits `ConnectSucceeded` from inside the session,
-                        // which resets the count.
-                        if let Some(sender) = session_context.server_list_events.as_ref() {
-                            let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
-                                endpoint: configured_server.base_endpoint_text(),
-                            });
+                        Ok(ServerSessionExit::ContinueOrder) => {}
+                        Ok(ServerSessionExit::RestartPreferredOrder) => {
+                            if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
+                                tokio::select! {
+                                    () = tokio::time::sleep(reconnect_delay) => {}
+                                    () = session_context.reconnect_signal.notified() => {
+                                        info!(
+                                            "ED2K server reconnect delay interrupted by explicit reconnect request"
+                                        );
+                                    }
+                                }
+                            }
+                            break;
                         }
-                        warn!(
-                            "ED2K server session ended for {} name={}: {error}",
-                            server.base_endpoint(),
-                            server.entry.display_name()
-                        );
+                        Err(error) => {
+                            clear_server_connection_state(&state).await;
+                            // eMule `CServerList::ServerStats`: a failed connect/session
+                            // increments the server's fail-count (the core drops a
+                            // non-static dead server at the threshold). A successful
+                            // login emits `ConnectSucceeded` from inside the session,
+                            // which resets the count.
+                            if let Some(sender) = session_context.server_list_events.as_ref() {
+                                let _ = sender.send(Ed2kServerListEvent::ConnectFailed {
+                                    endpoint: configured_server.base_endpoint_text(),
+                                });
+                            }
+                            warn!(
+                                "ED2K server session ended for {} name={}: {error}",
+                                server.base_endpoint(),
+                                server.entry.display_name()
+                            );
+                        }
                     }
                 }
                 Err(error) => {
