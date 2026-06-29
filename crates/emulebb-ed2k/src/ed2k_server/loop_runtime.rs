@@ -5,6 +5,7 @@ use std::{
 
 use tracing::{info, warn};
 
+use super::server_entry::ConfiguredServerEntry;
 use super::server_events::Ed2kServerListEvent;
 use super::types::ServerSessionContext;
 use super::{
@@ -26,6 +27,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         shutdown,
         public_ip,
         reconnect_signal,
+        target_server_endpoint,
         server_list_events,
     } = options;
     let reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
@@ -65,12 +67,15 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
 
     while !shutdown.load(Ordering::Relaxed) {
         let mut attempted_any = false;
-        for configured_server in &configured_servers {
+        let target_endpoint = target_server_endpoint.read().await.clone();
+        for configured_server in
+            ordered_configured_servers(&configured_servers, target_endpoint.as_deref())
+        {
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
             attempted_any = true;
-            match resolve_server_entry(configured_server).await {
+            match resolve_server_entry(&configured_server).await {
                 Ok(server) => {
                     if let Err(error) =
                         run_one_server_session(&server, &session_context, &mut search_inbox).await
@@ -130,5 +135,64 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         if !attempted_any && !shutdown.load(Ordering::Relaxed) {
             tokio::time::sleep(reconnect_delay).await;
         }
+    }
+}
+
+fn ordered_configured_servers(
+    configured_servers: &[ConfiguredServerEntry],
+    target_endpoint: Option<&str>,
+) -> Vec<ConfiguredServerEntry> {
+    let Some(target_endpoint) = target_endpoint else {
+        return configured_servers.to_vec();
+    };
+    let Some(target_index) = configured_servers.iter().position(|entry| {
+        entry
+            .base_endpoint_text()
+            .eq_ignore_ascii_case(target_endpoint)
+    }) else {
+        return configured_servers.to_vec();
+    };
+    let mut ordered = Vec::with_capacity(configured_servers.len());
+    ordered.push(configured_servers[target_index].clone());
+    ordered.extend(
+        configured_servers
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != target_index)
+            .map(|(_, entry)| entry.clone()),
+    );
+    ordered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(endpoint: &str) -> ConfiguredServerEntry {
+        ConfiguredServerEntry::from_endpoint_text(endpoint).unwrap()
+    }
+
+    #[test]
+    fn targeted_server_is_tried_first_without_dropping_fallbacks() {
+        let servers = vec![
+            server("192.0.2.1:4661"),
+            server("192.0.2.2:4661"),
+            server("192.0.2.3:4661"),
+        ];
+
+        let ordered = ordered_configured_servers(&servers, Some("192.0.2.2:4661"));
+
+        assert_eq!(ordered[0].base_endpoint_text(), "192.0.2.2:4661");
+        assert_eq!(ordered[1].base_endpoint_text(), "192.0.2.1:4661");
+        assert_eq!(ordered[2].base_endpoint_text(), "192.0.2.3:4661");
+    }
+
+    #[test]
+    fn unknown_target_keeps_configured_order() {
+        let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
+
+        let ordered = ordered_configured_servers(&servers, Some("192.0.2.99:4661"));
+
+        assert_eq!(ordered, servers);
     }
 }

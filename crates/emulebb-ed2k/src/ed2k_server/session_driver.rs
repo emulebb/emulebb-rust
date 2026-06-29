@@ -169,18 +169,18 @@ pub(super) async fn run_one_server_session(
                 return Ok(());
             }
             _ = context.reconnect_signal.notified() => {
-                // "upnp ready": the advertised external port changed, so drop the
-                // session and reconnect to re-login with the new HighID callback port.
+                // Drop the session and reconnect now: used both when advertised
+                // ports change and when REST/UI requests a different server.
                 fail_background_search_request(
                     &mut queued_background_search,
-                    "ED2K background session reconnecting (external port changed) before search dispatch",
+                    "ED2K background session reconnecting before search dispatch",
                 );
                 fail_pending_background_search(
                     &mut pending_background_search,
-                    "ED2K background session reconnecting (external port changed) before search completion",
+                    "ED2K background session reconnecting before search completion",
                 );
                 info!(
-                    "re-login requested for ED2K server {} (advertised external port changed); dropping session to reconnect",
+                    "re-login requested for ED2K server {}; dropping session to reconnect",
                     server.base_endpoint(),
                 );
                 clear_server_connection_state(&context.state).await;

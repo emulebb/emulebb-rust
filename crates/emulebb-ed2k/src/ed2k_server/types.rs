@@ -178,6 +178,8 @@ pub struct Ed2kServerLoopOptions {
     /// "Reconnect now" signal (shared with the advertised-ports sync task): fired
     /// when the external port changes so the session re-logs in promptly.
     pub reconnect_signal: Arc<tokio::sync::Notify>,
+    /// Optional explicit REST/UI target for the next server connection attempt.
+    pub target_server_endpoint: Arc<RwLock<Option<String>>>,
     /// Optional feedback channel to the core's server store (server discovery +
     /// connect/ping outcome). `None` disables server-list feedback.
     pub server_list_events: Option<Ed2kServerListEventSender>,
