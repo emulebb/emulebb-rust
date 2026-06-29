@@ -124,6 +124,29 @@ pub(crate) fn upload_request_outcome(
     emit(FAMILY, "upload_request_outcome", "info", keys, body);
 }
 
+/// `upload_payload_accounting` (schema extension): aggregate payload bytes sent
+/// for one served OP_REQUESTPARTS packet. Mirrors the MFC diagnostics event so
+/// live parity runs can compare file bytes versus protocol packet bytes.
+pub(crate) fn upload_payload_accounting(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    sent_file_bytes: u64,
+    sent_payload_bytes: u64,
+    sent_complete_file_bytes: u64,
+    sent_part_file_bytes: u64,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "outcome": "sent",
+        "sentFileBytes": sent_file_bytes,
+        "sentPayloadBytes": sent_payload_bytes,
+        "sentCompleteFileBytes": sent_complete_file_bytes,
+        "sentPartFileBytes": sent_part_file_bytes,
+    });
+    emit(FAMILY, "upload_payload_accounting", "info", keys, body);
+}
+
 /// `capacity_snapshot` (schema §3.5): the rate-aware upload-slot capacity gauge
 /// (master upload-slot summary `baseSlotTarget`/`effectiveSlotCap`/`activeSlots`).
 /// Rust has no periodic upload-queue tick (its slot scheduling is driven per

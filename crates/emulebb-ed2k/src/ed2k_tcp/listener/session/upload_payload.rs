@@ -45,6 +45,7 @@ struct UploadRequestDiag {
     skipped_ranges: usize,
     requested_bytes: u64,
     served_bytes: u64,
+    sent_payload_bytes: u64,
     payload_packets: usize,
     throttle_delay_ms: u64,
     first_skip_reason: Option<&'static str>,
@@ -95,6 +96,45 @@ fn emit_upload_request_outcome(
             diag.payload_packets,
             diag.throttle_delay_ms,
             diag.first_skip_reason,
+        );
+    }
+}
+
+fn emit_upload_payload_accounting(
+    peer_upload_identity: &Ed2kUploadPeerIdentity,
+    requested: &Ed2kHash,
+    shared_complete: bool,
+    diag: &UploadRequestDiag,
+) {
+    #[cfg(not(feature = "packet-diagnostics"))]
+    {
+        let _ = (peer_upload_identity, requested, shared_complete, diag);
+    }
+    #[cfg(feature = "packet-diagnostics")]
+    {
+        if diag.served_bytes == 0 {
+            return;
+        }
+        let peer = diag_sched::peer_label(peer_upload_identity.ip, peer_upload_identity.tcp_port);
+        let file_hash = requested.to_string();
+        let complete_bytes = if shared_complete {
+            diag.served_bytes
+        } else {
+            0
+        };
+        let part_file_bytes = if shared_complete {
+            0
+        } else {
+            diag.served_bytes
+        };
+        diag_sched::upload_payload_accounting(
+            &peer,
+            peer_upload_identity.user_hash,
+            &file_hash,
+            diag.served_bytes,
+            diag.sent_payload_bytes,
+            complete_bytes,
+            part_file_bytes,
         );
     }
 }
@@ -230,10 +270,11 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             request_diag.payload_packets += replies.len();
             for reply in replies {
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, reply.phase, &reply.packet);
+                let packet_len = u64::try_from(reply.packet.len()).unwrap_or(u64::MAX);
+                request_diag.sent_payload_bytes =
+                    request_diag.sent_payload_bytes.saturating_add(packet_len);
                 let reservation = transfer_runtime
-                    .reserve_upload_payload_budget(
-                        u64::try_from(reply.packet.len()).unwrap_or(u64::MAX),
-                    )
+                    .reserve_upload_payload_budget(packet_len)
                     .await;
                 if !reservation.delay.is_zero() {
                     let delay_ms = u64::try_from(reservation.delay.as_millis()).unwrap_or(u64::MAX);
@@ -281,6 +322,12 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         "partial"
     };
     emit_upload_request_outcome(&peer_upload_identity, &requested, outcome, &request_diag);
+    emit_upload_payload_accounting(
+        &peer_upload_identity,
+        &requested,
+        shared.verified_complete,
+        &request_diag,
+    );
 
     Ok(UploadPayloadOutcome::Continue { requested })
 }
