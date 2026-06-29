@@ -319,6 +319,8 @@ struct EncodedOfferFilesPayload {
 pub struct OfferFilesPublishStats {
     pub entries_sent: usize,
     pub total_entries: usize,
+    pub published_entries: usize,
+    pub pending_entries: usize,
     pub next_cursor: usize,
     pub wrapped: bool,
     pub skipped_duplicate_batch: bool,
@@ -409,6 +411,17 @@ fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8)]) -> u
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
+}
+
+fn offer_files_published_count(
+    shared_catalog: &[Ed2kSharedEntry],
+    already_published: &HashSet<[u8; 16]>,
+) -> usize {
+    shared_catalog
+        .iter()
+        .filter_map(popular_hash_offer_file)
+        .filter(|entry| already_published.contains(&entry.0))
+        .count()
 }
 
 fn offer_files_cursor_wrapped(
@@ -522,12 +535,27 @@ pub(super) async fn send_offer_files_advertisement(
     let wrapped =
         offer_files_cursor_wrapped(encoded.total_entries, current_cursor, encoded.next_cursor);
     let catalog_fingerprint = offer_files_entries_fingerprint(&encoded.entries);
+    let published_before = offer_files_published_count(
+        &shared_catalog_snapshot,
+        &session.offer_files_published_hashes,
+    );
+    let sent_new_entries = encoded
+        .entries
+        .iter()
+        .filter(|entry| !session.offer_files_published_hashes.contains(&entry.0))
+        .count();
+    let published_after = published_before
+        .saturating_add(sent_new_entries)
+        .min(encoded.total_entries);
+    let pending_after = encoded.total_entries.saturating_sub(published_after);
     if encoded.entries.is_empty() {
         #[cfg(feature = "packet-diagnostics")]
         log_shared_publish_offer_batch(session, current_cursor, &encoded, true, true);
         return Ok(OfferFilesPublishStats {
             entries_sent: 0,
             total_entries: encoded.total_entries,
+            published_entries: published_before,
+            pending_entries: encoded.total_entries.saturating_sub(published_before),
             next_cursor: encoded.next_cursor,
             wrapped: true,
             skipped_duplicate_batch: true,
@@ -541,6 +569,8 @@ pub(super) async fn send_offer_files_advertisement(
         return Ok(OfferFilesPublishStats {
             entries_sent: encoded.entries.len(),
             total_entries: encoded.total_entries,
+            published_entries: published_after,
+            pending_entries: pending_after,
             next_cursor: encoded.next_cursor,
             wrapped,
             skipped_duplicate_batch: true,
@@ -575,6 +605,8 @@ pub(super) async fn send_offer_files_advertisement(
     Ok(OfferFilesPublishStats {
         entries_sent: encoded.entries.len(),
         total_entries: encoded.total_entries,
+        published_entries: published_after,
+        pending_entries: pending_after,
         next_cursor: encoded.next_cursor,
         wrapped,
         skipped_duplicate_batch: false,

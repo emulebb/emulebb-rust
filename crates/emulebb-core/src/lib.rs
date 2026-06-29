@@ -4082,6 +4082,8 @@ impl EmulebbCore {
                                 self.shared_catalog_publish_dirty.load(Ordering::Acquire);
                             diagnostics.entries_sent = stats.entries_sent;
                             diagnostics.total_entries = stats.total_entries;
+                            diagnostics.published_entries = stats.published_entries;
+                            diagnostics.pending_entries = stats.pending_entries;
                             diagnostics.next_cursor = stats.next_cursor;
                             diagnostics.wrapped = stats.wrapped;
                             diagnostics.skipped_duplicate_batch = stats.skipped_duplicate_batch;
@@ -4092,6 +4094,8 @@ impl EmulebbCore {
                     tracing::debug!(
                         entries_sent = stats.entries_sent,
                         total_entries = stats.total_entries,
+                        published_entries = stats.published_entries,
+                        pending_entries = stats.pending_entries,
                         next_cursor = stats.next_cursor,
                         wrapped = stats.wrapped,
                         skipped_duplicate_batch = stats.skipped_duplicate_batch,
