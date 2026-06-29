@@ -115,18 +115,23 @@ impl Ed2kTransferRuntime {
 
     /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.
     pub(crate) async fn note_file_upload_request(&self, file_hash: &Ed2kHash) {
+        let now = unix_time_ms();
+        let _ = self
+            .metadata
+            .add_file_upload_request(&file_hash.to_string(), now);
         self.update_shared_publish_stats(file_hash, |entry| {
             entry.publish.session_request_count =
                 entry.publish.session_request_count.saturating_add(1);
             entry.publish.all_time_request_count =
                 entry.publish.all_time_request_count.saturating_add(1);
-            entry.publish.last_request_unix_ms = unix_time_ms();
+            entry.publish.last_request_unix_ms = entry.publish.last_request_unix_ms.max(now);
         })
         .await;
     }
 
     /// Record one accepted upload request for a shared file.
     pub(crate) async fn note_file_upload_accept(&self, file_hash: &Ed2kHash) {
+        let _ = self.metadata.add_file_upload_accept(&file_hash.to_string());
         self.update_shared_publish_stats(file_hash, |entry| {
             entry.publish.session_accept_count =
                 entry.publish.session_accept_count.saturating_add(1);

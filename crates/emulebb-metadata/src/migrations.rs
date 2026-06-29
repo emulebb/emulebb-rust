@@ -41,6 +41,8 @@
 //!   files with the same ED2K hash.
 //! - v11 -> v12: `shared_source_failures` table for stable skip of unchanged
 //!   shared-source paths whose ingest failed.
+//! - v12 -> v13: per-file upload demand counters on `known_files`, used by the
+//!   shared-file publish rank across restarts.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -215,6 +217,27 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
                 "#,
             )?;
             Ok(())
+        }
+        // v12 -> v13: durable upload demand counters for publish ranking.
+        13 => {
+            add_column_if_missing(
+                tx,
+                "known_files",
+                "all_time_upload_requests",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                tx,
+                "known_files",
+                "all_time_upload_accepts",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                tx,
+                "known_files",
+                "last_upload_request_ms",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
         }
         other => bail!("no metadata migration defined for schema version v{other}"),
     }

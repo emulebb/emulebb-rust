@@ -69,6 +69,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
             upload_priority: manifest.upload_priority.clone(),
             auto_upload_priority: manifest.auto_upload_priority,
             all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
         }]
     );
     assert_eq!(
@@ -98,6 +101,9 @@ fn transfer_manifest_roundtrips_sql_tables() {
             upload_priority: manifest.upload_priority.clone(),
             auto_upload_priority: manifest.auto_upload_priority,
             all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
             comment: manifest.comment.clone(),
             rating: manifest.rating,
         }]
@@ -140,6 +146,68 @@ fn transfer_manifest_roundtrips_sql_tables() {
     assert_eq!(store.completed_transfer_share_entries().unwrap(), vec![]);
     store.unmark_unshared_file(&manifest.file_hash).unwrap();
     assert_eq!(store.transfer_manifests().unwrap(), vec![manifest]);
+}
+
+#[test]
+fn upload_demand_counters_persist_on_known_files() {
+    let store = MetadataStore::in_memory().unwrap();
+    let manifest = MetadataTransferManifest {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        canonical_name: "Demand.Sample.bin".to_string(),
+        file_size: 1024,
+        piece_size: 1024,
+        completed: true,
+        md4_hashset_acquired: false,
+        md4_hashset: Vec::new(),
+        aich_hashset_acquired: false,
+        aich_root: None,
+        aich_hashset: Vec::new(),
+        verified_ranges: vec![MetadataTransferRange {
+            start: 0,
+            end: 1024,
+        }],
+        pieces: vec![MetadataTransferPiece {
+            piece_index: 0,
+            state: "Verified".to_string(),
+            bytes_written: 1024,
+            block_bitmap: None,
+        }],
+        sources: Vec::new(),
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        category_id: 0,
+        control_state: None,
+        transfer_row_removed: false,
+        delivered_path: None,
+        source_path: None,
+        source_mtime_ms: None,
+    };
+
+    store.upsert_transfer_manifest(&manifest).unwrap();
+    assert!(
+        store
+            .add_file_upload_request(&manifest.file_hash, 1_700_000_001_000)
+            .unwrap()
+    );
+    assert!(
+        store
+            .add_file_upload_request(&manifest.file_hash, 1_700_000_000_000)
+            .unwrap()
+    );
+    assert!(store.add_file_upload_accept(&manifest.file_hash).unwrap());
+
+    let publish = store.completed_transfer_publish_entries().unwrap();
+    assert_eq!(publish.len(), 1);
+    assert_eq!(publish[0].all_time_upload_requests, 2);
+    assert_eq!(publish[0].all_time_upload_accepts, 1);
+    assert_eq!(publish[0].last_upload_request_ms, 1_700_000_001_000);
+
+    let catalog = store.completed_transfer_catalog_entries().unwrap();
+    assert_eq!(catalog[0].all_time_upload_requests, 2);
+    assert_eq!(catalog[0].all_time_upload_accepts, 1);
+    assert_eq!(catalog[0].last_upload_request_ms, 1_700_000_001_000);
 }
 
 #[test]

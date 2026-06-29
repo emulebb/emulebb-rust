@@ -47,6 +47,9 @@ pub struct MetadataTransferCatalogEntry {
     pub upload_priority: String,
     pub auto_upload_priority: bool,
     pub all_time_uploaded_bytes: u64,
+    pub all_time_upload_requests: u64,
+    pub all_time_upload_accepts: u64,
+    pub last_upload_request_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,6 +68,9 @@ pub struct MetadataTransferPublishEntry {
     pub upload_priority: String,
     pub auto_upload_priority: bool,
     pub all_time_uploaded_bytes: u64,
+    pub all_time_upload_requests: u64,
+    pub all_time_upload_accepts: u64,
+    pub last_upload_request_ms: i64,
     pub comment: String,
     pub rating: u8,
 }

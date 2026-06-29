@@ -6,7 +6,7 @@ use emulebb_metadata::{
 
 use super::{
     Ed2kPieceState, Ed2kResumeManifest, Ed2kSharedEntry, Ed2kSharedRange, Ed2kSourceHint,
-    Ed2kTransferState,
+    Ed2kTransferState, catalog::Ed2kSharedPublishStats,
 };
 
 pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTransferManifest {
@@ -152,7 +152,12 @@ fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Resul
         auto_upload_priority: entry.auto_upload_priority,
         all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
         complete_parts: Vec::new(),
-        publish: Default::default(),
+        publish: Ed2kSharedPublishStats {
+            all_time_request_count: entry.all_time_upload_requests,
+            all_time_accept_count: entry.all_time_upload_accepts,
+            last_request_unix_ms: entry.last_upload_request_ms,
+            ..Default::default()
+        },
     })
 }
 
