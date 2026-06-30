@@ -60,7 +60,7 @@ use emulebb_index::{
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig, SnoopQueueFamilyCounts};
 use emulebb_kad_dht::{
     DhtConfig, DhtError, DhtNode, KeywordPublishEntry, PublishAttemptStats, ReceivedKadPacket,
-    RpcWorkClass,
+    RpcClassBudgetConfig, RpcWorkClass,
 };
 #[cfg(test)]
 use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResult, SourceResult};
@@ -860,6 +860,7 @@ impl EmulebbCore {
             obfuscation_enabled: network.config.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             nodes_text: configured_bootstrap_nodes_text.clone(),
+            class_budgets: kad_rpc_class_budgets(),
             // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
             bind_if_index: Some(kad_bind_if_index),
             ..DhtConfig::default()
@@ -4549,6 +4550,21 @@ const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 const KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP: usize = 3;
 const KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP: usize = 4;
 const KAD_NOTES_PUBLISH_IN_FLIGHT_CAP: usize = 1;
+/// Keep some DHT traversal capacity free for interactive searches, bootstrap
+/// refresh, and firewall/buddy maintenance while large-library publishing runs.
+const KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS: usize = 2;
+/// Store traversals need enough lookup packets to converge before the stock
+/// 140s store timeout. One packet/sec across several concurrent store lookups
+/// self-throttles large-library publishing without changing wire semantics.
+const KAD_PUBLISH_MAX_OUTBOUND_PPS: u32 = 2;
+
+fn kad_rpc_class_budgets() -> RpcClassBudgetConfig {
+    RpcClassBudgetConfig {
+        publish_max_outbound_pps: KAD_PUBLISH_MAX_OUTBOUND_PPS,
+        ..RpcClassBudgetConfig::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KadSharedPublishKind {
     Keyword,
@@ -4646,7 +4662,17 @@ fn diag_publish_kind(kind: KadSharedPublishKind) -> diag_kad_event::KadPublishKi
 }
 
 fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> usize {
-    runtime.dht.max_concurrent_searches().max(1)
+    kad_shared_file_publish_in_flight_budget_for(runtime.dht.max_concurrent_searches())
+}
+
+fn kad_shared_file_publish_in_flight_budget_for(max_concurrent_searches: usize) -> usize {
+    let kind_cap_total = KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP
+        + KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP
+        + KAD_NOTES_PUBLISH_IN_FLIGHT_CAP;
+    max_concurrent_searches
+        .saturating_sub(KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS)
+        .max(1)
+        .min(kind_cap_total)
 }
 
 async fn run_kad_shared_file_publish_loop(
@@ -8878,6 +8904,26 @@ mod tests {
         assert!(!counts.can_start(KadSharedPublishKind::Notes));
         counts.finished(KadSharedPublishKind::Notes);
         assert!(counts.can_start(KadSharedPublishKind::Notes));
+    }
+
+    #[test]
+    fn kad_shared_publish_budget_reserves_search_capacity() {
+        assert_eq!(kad_shared_file_publish_in_flight_budget_for(1), 1);
+        assert_eq!(kad_shared_file_publish_in_flight_budget_for(2), 1);
+        assert_eq!(kad_shared_file_publish_in_flight_budget_for(5), 3);
+    }
+
+    #[test]
+    fn kad_rpc_class_budgets_give_publish_traversals_room_to_converge() {
+        let budgets = kad_rpc_class_budgets();
+        assert_eq!(
+            budgets.publish_max_outbound_pps,
+            KAD_PUBLISH_MAX_OUTBOUND_PPS
+        );
+        assert!(
+            budgets.publish_max_outbound_pps
+                > RpcClassBudgetConfig::default().publish_max_outbound_pps
+        );
     }
 
     #[test]
