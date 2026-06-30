@@ -514,6 +514,17 @@ impl KadFirewallState {
             return None;
         }
 
+        let has_pending_helpers = round
+            .helper_outcomes
+            .values()
+            .any(|outcome| matches!(outcome, HelperOutcome::Pending));
+        if self.udp_verified && self.udp_open && has_pending_helpers {
+            self.last_error =
+                Some("UDP firewall-check timed out without enough helper replies".to_string());
+            self.active_round = None;
+            return None;
+        }
+
         self.last_error =
             Some("UDP firewall-check timed out without a positive result".to_string());
         finalize_round(

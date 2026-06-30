@@ -102,6 +102,38 @@ fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
 }
 
 #[test]
+fn udp_round_timeout_preserves_previous_verified_open_verdict() {
+    // MFC does not let ordinary no-answer timeouts overturn a prior successful
+    // UDP-open result; only explicit failed helper results should do that.
+    let mut state = KadFirewallState::default();
+    let helper = "203.0.113.32".parse().unwrap();
+
+    let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 44, 0).unwrap();
+    let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 44, 5).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r1_start));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper, 0, 41000, r1_reply),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+    assert!(state.udp_open);
+    assert!(state.udp_verified);
+
+    let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 45, 0).unwrap();
+    let r2_done = Utc.with_ymd_and_hms(2026, 3, 22, 22, 45, 30).unwrap();
+    assert!(state.begin_udp_check([helper], [41000], r2_start));
+
+    assert!(state.finish_udp_check(r2_done).is_none());
+    assert!(state.udp_open);
+    assert!(state.udp_verified);
+    assert!(!state.udp_check_in_progress());
+    assert!(!state.is_udp_firewalled());
+    assert_eq!(
+        state.last_error.as_deref(),
+        Some("UDP firewall-check timed out without enough helper replies")
+    );
+}
+
+#[test]
 fn is_udp_firewalled_assumes_open_until_verified_closed() {
     // Mirrors IsFirewalledUDP(true): unknown/unverified -> open (false).
     let mut state = KadFirewallState::default();
