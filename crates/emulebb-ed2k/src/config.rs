@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// eMule `MAX_PURGEQUEUETIME` (`Opcodes.h`) for stale waiting upload clients.
+const DEFAULT_UPLOAD_QUEUE_WAITING_TIMEOUT_SECS: u64 = 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Ed2kConfig {
@@ -184,7 +187,7 @@ impl Default for Ed2kUploadQueuePolicyConfig {
             elastic_underfill_bytes_per_sec: 0,
             elastic_underfill_secs: 10,
             waiting_capacity: 512,
-            waiting_timeout_secs: 180,
+            waiting_timeout_secs: DEFAULT_UPLOAD_QUEUE_WAITING_TIMEOUT_SECS,
             granted_timeout_secs: 30,
             upload_timeout_secs: 90,
         }
@@ -216,6 +219,8 @@ mod tests {
         // Download throttle is unlimited (0) by default, matching today's
         // unbounded aggregate inbound behavior.
         assert_eq!(config.download_limit_bytes_per_sec, 0);
+        // eMule MAX_PURGEQUEUETIME (Opcodes.h) = HR2MS(1).
+        assert_eq!(config.upload_queue.waiting_timeout_secs, 60 * 60);
         // eMule DeadServerRetry default is 1.
         assert_eq!(config.dead_server_retries, 1);
     }

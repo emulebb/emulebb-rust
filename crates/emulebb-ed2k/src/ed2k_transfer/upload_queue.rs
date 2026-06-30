@@ -23,6 +23,8 @@ pub(super) const LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE: i128 = 1_000;
 /// eMule default soft queue size (`PreferenceValidationSeams::kDefaultQueueSize`),
 /// the threshold the reask QUEUEFULL margin compares against.
 pub(crate) const DEFAULT_SOFT_QUEUE_SIZE: u32 = 10_000;
+/// eMule `MAX_PURGEQUEUETIME` (`Opcodes.h`) for stale waiting upload clients.
+const DEFAULT_WAITING_TIMEOUT_SECS: u64 = 60 * 60;
 
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +64,7 @@ impl Default for Ed2kUploadQueueConfig {
             elastic_underfill: Duration::from_secs(10),
             waiting_capacity: 512,
             soft_queue_size: DEFAULT_SOFT_QUEUE_SIZE,
-            waiting_timeout: Duration::from_secs(180),
+            waiting_timeout: Duration::from_secs(DEFAULT_WAITING_TIMEOUT_SECS),
             granted_timeout: Duration::from_secs(30),
             upload_timeout: Duration::from_secs(90),
         }
@@ -1164,5 +1166,18 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         is_emule_client: false,
         kad_port: 0,
         firewall_context: Ed2kUploadFirewallContext::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_waiting_timeout_matches_emule_purge_window() {
+        assert_eq!(
+            Ed2kUploadQueueConfig::default().waiting_timeout.as_secs(),
+            DEFAULT_WAITING_TIMEOUT_SECS
+        );
     }
 }
