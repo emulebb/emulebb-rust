@@ -24,6 +24,7 @@ use crate::ed2k_client_udp_obfuscation::deobfuscate_client_udp;
 const CLIENT_UDP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-client-udp-dump-";
 const OP_EMULEPROT_MARKER: u8 = 0xC5;
 const MAX_CLIENT_UDP_DUMP_HEX_BYTES: usize = 4 * 1024;
+const CLIENT_UDP_LIVE_SYNC_EVERY: u64 = 128;
 
 #[derive(Debug, Serialize)]
 struct ClientUdpDumpRecord<'a> {
@@ -242,6 +243,17 @@ fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
     let _ = std::io::Write::write_all(file, line.as_bytes());
     let _ = std::io::Write::write_all(file, b"\n");
     let _ = std::io::Write::flush(file);
+    maybe_sync_client_udp_dump(file);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn maybe_sync_client_udp_dump(file: &fs::File) {
+    static CLIENT_UDP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
+    if CLIENT_UDP_LIVE_SYNC_COUNTER.fetch_add(1, Ordering::Relaxed) % CLIENT_UDP_LIVE_SYNC_EVERY
+        == 0
+    {
+        let _ = file.sync_data();
+    }
 }
 
 #[cfg(test)]

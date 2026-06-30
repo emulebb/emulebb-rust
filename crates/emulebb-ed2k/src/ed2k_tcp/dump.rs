@@ -38,6 +38,7 @@ use super::{
 };
 
 const ED2K_TCP_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-tcp-dump-";
+const ED2K_TCP_LIVE_SYNC_EVERY: u64 = 128;
 
 #[derive(Debug, Serialize)]
 pub(super) struct Ed2kTcpDumpRecord<'a> {
@@ -326,6 +327,7 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     {
         let _ = writeln!(file, "{line}");
         let _ = file.flush();
+        maybe_sync_ed2k_tcp_dump(file);
     }
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`
@@ -335,6 +337,13 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     // fn are the feature-gated send/recv/meta builders). The mapping itself lives
     // in the sibling `diag_event` module to keep this file within budget.
     super::diag_event::emit_ed2k_tcp_diag_event(record);
+}
+
+fn maybe_sync_ed2k_tcp_dump(file: &fs::File) {
+    static ED2K_TCP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
+    if ED2K_TCP_LIVE_SYNC_COUNTER.fetch_add(1, Ordering::Relaxed) % ED2K_TCP_LIVE_SYNC_EVERY == 0 {
+        let _ = file.sync_data();
+    }
 }
 
 #[cfg(feature = "packet-diagnostics")]
