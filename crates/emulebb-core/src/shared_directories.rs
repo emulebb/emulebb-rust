@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,7 @@ pub struct SharedReloadDiagnostics {
     pub stat_failed_count: usize,
     pub skipped_failed_count: usize,
     pub skipped_intake_count: usize,
+    pub pruned_count: usize,
     pub stale_hash_count: usize,
     pub disk_count: usize,
 }
@@ -65,6 +67,7 @@ impl Default for SharedReloadDiagnostics {
             stat_failed_count: 0,
             skipped_failed_count: 0,
             skipped_intake_count: 0,
+            pruned_count: 0,
             stale_hash_count: 0,
             disk_count: 0,
         }
@@ -340,7 +343,6 @@ pub(crate) struct SharedScanResult {
 // consistent. `lib.rs` keeps only thin entry methods that delegate here.
 // ---------------------------------------------------------------------------
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -413,6 +415,9 @@ struct ReloadPlan {
     /// resolve their `Localshare`s for the reload result so an unchanged file
     /// still appears in the returned set.
     reused_shares: Vec<ReusedReloadShare>,
+    /// Persisted share-in-place hashes whose source path is no longer part of
+    /// the current filtered scan and must be removed from serving/publishing.
+    pruned_hashes: Vec<String>,
     /// Path-free reload counters for REST diagnostics and live-parity evidence.
     stats: ReloadPlanStats,
 }
@@ -428,6 +433,7 @@ struct ReloadPlanStats {
     stat_failed_count: usize,
     skipped_failed_count: usize,
     skipped_intake_count: usize,
+    pruned_count: usize,
     stale_hash_count: usize,
 }
 
@@ -451,6 +457,7 @@ impl ReloadPlanStats {
             stat_failed_count: self.stat_failed_count,
             skipped_failed_count: self.skipped_failed_count,
             skipped_intake_count: self.skipped_intake_count,
+            pruned_count: self.pruned_count,
             stale_hash_count: self.stale_hash_count,
             disk_count: 0,
         }
@@ -510,12 +517,14 @@ async fn plan_incremental_reload(
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
+        let mut scanned_source_keys = HashSet::with_capacity(file_paths.len());
         for path in file_paths {
             // Stat the scanned file with the same long-path normalization the
             // persisted index keys use. A file that cannot be stat-ed is treated
             // as needing a hash (the ingest path will surface the real error).
             match Ed2kTransferRuntime::scanned_source_identity(&path) {
                 Some((key, size, mtime_ms)) => {
+                    scanned_source_keys.insert(key.clone());
                     if unchanged_failure(&failures, &key, size, mtime_ms) {
                         stats.skipped_failed_count += 1;
                         continue;
@@ -576,6 +585,7 @@ async fn plan_incremental_reload(
                 }
                 None => {
                     let key = shared_source_key(&path);
+                    scanned_source_keys.insert(key.clone());
                     if unchanged_failure(&failures, &key, 0, None) {
                         stats.skipped_failed_count += 1;
                         continue;
@@ -592,9 +602,16 @@ async fn plan_incremental_reload(
                 }
             }
         }
+        let pruned_hashes = index
+            .iter()
+            .filter(|(key, _)| !scanned_source_keys.contains(*key))
+            .flat_map(|(_, entries)| entries.iter().map(|entry| entry.file_hash.clone()))
+            .collect::<Vec<_>>();
+        stats.pruned_count = pruned_hashes.len();
         ReloadPlan {
             to_hash,
             reused_shares,
+            pruned_hashes,
             stats,
         }
     })
@@ -670,6 +687,7 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         }
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
+    forget_stale_shares(core, &plan.pruned_hashes, "").await;
     for target in plan.to_hash {
         let share = core
             .share_local_file(LocalShareCreate {
@@ -799,6 +817,7 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     for reused in &plan.reused_shares {
         forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
     }
+    forget_stale_shares(&core, &plan.pruned_hashes, "").await;
 
     let to_hash = plan.to_hash;
     let _guard = HashingCountGuard(core.shared_hashing_count.clone());
@@ -954,6 +973,32 @@ mod tests {
         assert_eq!(retried.stats.planned_hash_count, 1);
         assert_eq!(retried.stats.new_count, 1);
         assert_eq!(retried.stats.skipped_failed_count, 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn incremental_reload_prunes_persisted_share_absent_from_scan() {
+        let root = scratch_dir("pruned-source");
+        let source = root.join("Pruned.Source.bin");
+        fs::write(&source, b"payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        let shared = core
+            .share_local_file(LocalShareCreate {
+                path: source.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+
+        let plan = plan_incremental_reload(&core, Vec::new()).await.unwrap();
+
+        assert_eq!(plan.pruned_hashes, vec![shared.hash.clone()]);
+        assert_eq!(plan.stats.pruned_count, 1);
+        forget_stale_shares(&core, &plan.pruned_hashes, "").await;
+        assert!(core.share(&shared.hash).await.is_none());
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
         fs::remove_dir_all(&root).ok();
     }
 
