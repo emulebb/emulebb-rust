@@ -40,8 +40,9 @@ use emulebb_ed2k::{
         run_outbound_buddy_link, set_hello_buddy_snapshot, set_publish_rust_identity,
     },
     ed2k_transfer::{
-        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSharedPublishDemandSignal,
-        Ed2kSourceHint, Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
+        ED2K_PART_SIZE, Ed2kCallbackIntent, Ed2kResumeManifest, Ed2kSharedEntry,
+        Ed2kSharedPublishDemandSignal, Ed2kSourceHint, Ed2kTransferRuntime,
+        Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
     long_path::long_path,
@@ -4850,25 +4851,7 @@ async fn publish_kad_due_shared_files(
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
-    let Some(shared_files) = kad_publishable_shared_files(&runtime.transfer_runtime).await? else {
-        let available_search_permits = runtime.dht.available_search_permits();
-        kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
-            diagnostics.phase = "metadataBusy".to_string();
-            diagnostics.running = true;
-            diagnostics.bootstrapped = true;
-            diagnostics.gate_allowed = false;
-            diagnostics.gate_block_reason = "metadataBusy".to_string();
-            diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
-            diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
-            diagnostics.in_flight_count = publish_tasks.len();
-            diagnostics.in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
-            active_counts.write_diagnostics(diagnostics, available_search_permits);
-            diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
-            diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
-            diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
-        });
-        return Ok(0);
-    };
+    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     let available_search_permits = runtime.dht.available_search_permits();
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -5635,11 +5618,36 @@ fn record_kad_publish_failure(
 
 async fn kad_publishable_shared_files(
     runtime: &Ed2kTransferRuntime,
-) -> Result<Option<Vec<MetadataTransferPublishEntry>>> {
-    runtime
-        .try_publish_entries()
+) -> Result<Vec<MetadataTransferPublishEntry>> {
+    let shared_catalog = runtime.shared_catalog();
+    let entries = shared_catalog
+        .read()
         .await
-        .map(|entries| entries.map(kad_publishable_shared_file_entries))
+        .iter()
+        .filter(|entry| entry.verified_complete && !entry.compatibility_hint)
+        .map(kad_publish_entry_from_shared_entry)
+        .collect::<Vec<_>>();
+    Ok(kad_publishable_shared_file_entries(entries))
+}
+
+fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTransferPublishEntry {
+    MetadataTransferPublishEntry {
+        file_hash: entry.file_hash.clone(),
+        canonical_name: entry.canonical_name.clone(),
+        file_size: entry.file_size,
+        aich_root: entry.aich_root.clone(),
+        upload_priority: entry.upload_priority.clone(),
+        auto_upload_priority: entry.auto_upload_priority,
+        session_uploaded_bytes: entry.publish.session_uploaded_bytes,
+        session_request_count: entry.publish.session_request_count,
+        session_accept_count: entry.publish.session_accept_count,
+        all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+        all_time_upload_requests: entry.publish.all_time_request_count,
+        all_time_upload_accepts: entry.publish.all_time_accept_count,
+        last_upload_request_ms: entry.publish.last_request_unix_ms,
+        comment: entry.comment.clone(),
+        rating: entry.rating,
+    }
 }
 
 fn kad_publishable_shared_file_entries(
@@ -5656,12 +5664,12 @@ fn kad_publishable_shared_file_entries(
                 upload_priority: &entry.upload_priority,
                 auto_upload_priority: entry.auto_upload_priority,
                 queued_count: 0,
-                session_request_count: 0,
-                session_accept_count: 0,
+                session_request_count: entry.session_request_count,
+                session_accept_count: entry.session_accept_count,
                 all_time_request_count: entry.all_time_upload_requests,
                 all_time_accept_count: entry.all_time_upload_accepts,
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
-                session_uploaded_bytes: 0,
+                session_uploaded_bytes: entry.session_uploaded_bytes,
                 last_request_unix_ms: entry.last_upload_request_ms,
                 last_publish_unix_ms: 0,
                 sequence,
@@ -8120,6 +8128,9 @@ mod tests {
             aich_root: None,
             upload_priority: "normal".to_string(),
             auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
@@ -8137,6 +8148,43 @@ mod tests {
         let publishable = kad_publishable_shared_file_entries(vec![shared.clone(), other.clone()]);
 
         assert_eq!(publishable, vec![other, shared]);
+    }
+
+    #[test]
+    fn kad_publish_entry_from_shared_catalog_preserves_live_rank_inputs() {
+        let mut entry = Ed2kSharedEntry {
+            file_hash: Ed2kHash::from_bytes([0x33; 16]).to_string(),
+            canonical_name: "ubuntu-python-sample.iso".to_string(),
+            file_size: 4096,
+            verified_complete: true,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: Some("ab".repeat(20)),
+            upload_priority: "high".to_string(),
+            auto_upload_priority: false,
+            comment: "synthetic note".to_string(),
+            rating: 5,
+            all_time_uploaded_bytes: 512,
+            complete_parts: Vec::new(),
+            publish: Default::default(),
+        };
+        entry.publish.session_uploaded_bytes = 128;
+        entry.publish.session_request_count = 3;
+        entry.publish.session_accept_count = 2;
+        entry.publish.all_time_request_count = 7;
+        entry.publish.all_time_accept_count = 4;
+        entry.publish.last_request_unix_ms = 1_700_000_000_000;
+
+        let publish = kad_publish_entry_from_shared_entry(&entry);
+
+        assert_eq!(publish.session_uploaded_bytes, 128);
+        assert_eq!(publish.session_request_count, 3);
+        assert_eq!(publish.session_accept_count, 2);
+        assert_eq!(publish.all_time_upload_requests, 7);
+        assert_eq!(publish.all_time_upload_accepts, 4);
+        assert_eq!(publish.comment, "synthetic note");
+        assert_eq!(publish.rating, 5);
     }
 
     #[test]
@@ -8720,6 +8768,9 @@ mod tests {
                 aich_root: None,
                 upload_priority: "normal".to_string(),
                 auto_upload_priority: false,
+                session_uploaded_bytes: 0,
+                session_request_count: 0,
+                session_accept_count: 0,
                 all_time_uploaded_bytes: 0,
                 all_time_upload_requests: 0,
                 all_time_upload_accepts: 0,
@@ -8735,6 +8786,9 @@ mod tests {
             aich_root: None,
             upload_priority: "normal".to_string(),
             auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
             all_time_uploaded_bytes: 0,
             all_time_upload_requests: 0,
             all_time_upload_accepts: 0,
@@ -8770,6 +8824,9 @@ mod tests {
                 aich_root: None,
                 upload_priority: "normal".to_string(),
                 auto_upload_priority: false,
+                session_uploaded_bytes: 0,
+                session_request_count: 0,
+                session_accept_count: 0,
                 all_time_uploaded_bytes: 0,
                 all_time_upload_requests: 0,
                 all_time_upload_accepts: 0,

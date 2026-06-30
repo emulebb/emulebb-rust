@@ -38,6 +38,12 @@ pub struct Ed2kSharedEntry {
     /// Whether upload priority is automatically managed.
     #[serde(default)]
     pub auto_upload_priority: bool,
+    /// Locally configured shared-file comment used for Kad note publishing.
+    #[serde(default)]
+    pub comment: String,
+    /// Locally configured shared-file rating used for Kad note publishing.
+    #[serde(default)]
+    pub rating: u8,
     /// Lifetime bytes uploaded for this file, used for the all-time share ratio.
     #[serde(default)]
     pub all_time_uploaded_bytes: u64,
@@ -94,6 +100,8 @@ impl Ed2kSharedEntry {
             aich_root: None,
             upload_priority: default_upload_priority(),
             auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
             all_time_uploaded_bytes: 0,
             complete_parts: Vec::new(),
             publish: Ed2kSharedPublishStats::default(),
@@ -123,6 +131,8 @@ impl Ed2kSharedEntry {
             aich_root: manifest.aich_root.clone(),
             upload_priority: manifest.upload_priority.clone(),
             auto_upload_priority: manifest.auto_upload_priority,
+            comment: manifest.comment.clone(),
+            rating: manifest.rating,
             all_time_uploaded_bytes: 0,
             complete_parts,
             publish: Ed2kSharedPublishStats::default(),
