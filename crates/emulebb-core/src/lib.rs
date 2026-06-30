@@ -1821,6 +1821,7 @@ impl EmulebbCore {
                     .map(|(comment, rating)| (comment.as_str(), *rating)),
             )
             .await?;
+        self.queue_ed2k_shared_catalog_publish();
         Ok(self.share(hash).await)
     }
 
@@ -9320,6 +9321,46 @@ mod tests {
         assert_eq!(removed.hash, share.hash);
         assert!(core.shares().await.is_empty());
         assert_eq!(core.shared_catalog_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn update_shared_file_queues_ed2k_republish() {
+        let runtime_dir = unique_runtime_dir("emulebb-core-update-shared-republish");
+        let transfer_root = runtime_dir.join("transfers");
+        let shared_path = runtime_dir.join("shared-metadata.bin");
+        fs::write(&shared_path, b"shared metadata update payload").unwrap();
+        let core =
+            EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+
+        let share = core
+            .share_local_file(LocalShareCreate {
+                path: shared_path.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        let queued_before = core.ed2k_publish_diagnostics().queued_count;
+
+        let updated = core
+            .update_shared_file(
+                &share.hash,
+                SharedFileUpdate {
+                    priority: Some("high".to_string()),
+                    comment: Some("synthetic note".to_string()),
+                    rating: Some(4),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.priority, "high");
+        assert_eq!(updated.comment, "synthetic note");
+        assert_eq!(updated.rating, 4);
+        assert_eq!(
+            core.ed2k_publish_diagnostics().queued_count,
+            queued_before.saturating_add(1)
+        );
     }
 
     #[tokio::test]
