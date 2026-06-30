@@ -19,6 +19,7 @@
 //! live-network ban. This tracker restores the per-file, per-kind due gating.
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 /// Master keyword republish interval: `KADEMLIAREPUBLISHTIMEK = HR2S(24)` (24h),
@@ -80,6 +81,7 @@ pub(crate) fn file_has_publishable_note(comment: &str, rating: u8) -> bool {
 #[derive(Debug, Clone, Copy, Default)]
 struct FilePublishState {
     last_source: Option<Instant>,
+    last_source_buddy_ip: Option<Ipv4Addr>,
     last_notes: Option<Instant>,
 }
 
@@ -112,10 +114,24 @@ impl KadPublishSchedule {
 
     /// Whether the file's source publish is due (never published, or the 5h
     /// source interval has elapsed since the last source publish).
-    pub(crate) fn source_due(&self, file_hash: &str, now: Instant) -> bool {
-        match self.files.get(file_hash).and_then(|s| s.last_source) {
+    pub(crate) fn source_due(
+        &self,
+        file_hash: &str,
+        now: Instant,
+        current_buddy_ip: Option<Ipv4Addr>,
+    ) -> bool {
+        match self.files.get(file_hash) {
             None => true,
-            Some(last) => now.duration_since(last) >= KAD_SOURCE_REPUBLISH_INTERVAL,
+            Some(state) if state.last_source.is_none() => true,
+            Some(state)
+                if current_buddy_ip.is_some() && state.last_source_buddy_ip != current_buddy_ip =>
+            {
+                true
+            }
+            Some(state) => {
+                now.duration_since(state.last_source.expect("checked above"))
+                    >= KAD_SOURCE_REPUBLISH_INTERVAL
+            }
         }
     }
 
@@ -127,11 +143,15 @@ impl KadPublishSchedule {
     }
 
     /// Record that the file's source was (re)published at `now`.
-    pub(crate) fn mark_source_published(&mut self, file_hash: &str, now: Instant) {
-        self.files
-            .entry(file_hash.to_string())
-            .or_default()
-            .last_source = Some(now);
+    pub(crate) fn mark_source_published(
+        &mut self,
+        file_hash: &str,
+        now: Instant,
+        buddy_ip: Option<Ipv4Addr>,
+    ) {
+        let state = self.files.entry(file_hash.to_string()).or_default();
+        state.last_source = Some(now);
+        state.last_source_buddy_ip = buddy_ip;
     }
 
     /// Whether the file's notes (comment/rating) publish is due (never published,
@@ -163,7 +183,7 @@ impl KadPublishSchedule {
     }
 
     pub(crate) fn hydrate_source_published(&mut self, file_hash: &str, at: Instant) {
-        self.mark_source_published(file_hash, at);
+        self.mark_source_published(file_hash, at, None);
     }
 
     pub(crate) fn hydrate_notes_published(&mut self, file_hash: &str, at: Instant) {
@@ -271,7 +291,7 @@ mod tests {
         let sched = KadPublishSchedule::new();
         let now = Instant::now();
         assert!(sched.keyword_due(HASH, KEYWORD, now));
-        assert!(sched.source_due(HASH, now));
+        assert!(sched.source_due(HASH, now, None));
     }
 
     #[test]
@@ -293,13 +313,28 @@ mod tests {
     fn source_gated_by_5h_interval() {
         let mut sched = KadPublishSchedule::new();
         let t0 = Instant::now();
-        sched.mark_source_published(HASH, t0);
+        sched.mark_source_published(HASH, t0, None);
 
         let almost = t0 + KAD_SOURCE_REPUBLISH_INTERVAL - Duration::from_secs(1);
-        assert!(!sched.source_due(HASH, almost));
+        assert!(!sched.source_due(HASH, almost, None));
 
         let due = t0 + KAD_SOURCE_REPUBLISH_INTERVAL;
-        assert!(sched.source_due(HASH, due));
+        assert!(sched.source_due(HASH, due, None));
+    }
+
+    #[test]
+    fn source_republishes_when_firewalled_buddy_ip_changes() {
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        let old_buddy = Ipv4Addr::new(198, 51, 100, 10);
+        let new_buddy = Ipv4Addr::new(198, 51, 100, 11);
+        sched.mark_source_published(HASH, t0, Some(old_buddy));
+
+        let almost = t0 + KAD_SOURCE_REPUBLISH_INTERVAL - Duration::from_secs(1);
+
+        assert!(!sched.source_due(HASH, almost, Some(old_buddy)));
+        assert!(sched.source_due(HASH, almost, Some(new_buddy)));
+        assert!(!sched.source_due(HASH, almost, None));
     }
 
     #[test]
@@ -308,14 +343,14 @@ mod tests {
         let mut sched = KadPublishSchedule::new();
         let t0 = Instant::now();
         sched.mark_keyword_published(HASH, KEYWORD, t0);
-        sched.mark_source_published(HASH, t0);
+        sched.mark_source_published(HASH, t0, None);
 
         // After 5h: source due again, keyword still gated.
         let t5h = t0 + KAD_SOURCE_REPUBLISH_INTERVAL;
-        assert!(sched.source_due(HASH, t5h));
+        assert!(sched.source_due(HASH, t5h, None));
         assert!(!sched.keyword_due(HASH, KEYWORD, t5h));
 
-        sched.mark_source_published(HASH, t5h);
+        sched.mark_source_published(HASH, t5h, None);
         // Keyword remains gated until 24h from its own publish.
         let t10h = t0 + 2 * KAD_SOURCE_REPUBLISH_INTERVAL;
         assert!(!sched.keyword_due(HASH, KEYWORD, t10h));

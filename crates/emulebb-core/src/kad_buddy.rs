@@ -21,7 +21,7 @@
 //! - `srchybrid/kademlia/kademlia/Kademlia.cpp` buddy timers
 //!   (`m_tNextFindBuddy`, find-buddy delayed 5 min after a firewall recheck).
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use emulebb_kad_proto::{Ed2kHash, NodeId};
@@ -155,6 +155,17 @@ impl KadBuddyState {
     #[must_use]
     pub fn has_outgoing_buddy(&self) -> bool {
         self.outgoing.is_some()
+    }
+
+    /// IP address of the buddy we acquired for ourselves, when present.
+    #[must_use]
+    pub fn outgoing_buddy_ip(&self) -> Option<Ipv4Addr> {
+        self.outgoing
+            .as_ref()
+            .and_then(|buddy| match buddy.udp_addr.ip() {
+                std::net::IpAddr::V4(ip) => Some(ip),
+                std::net::IpAddr::V6(_) => None,
+            })
     }
 
     /// Release any buddy relationships that are no longer warranted, mirroring

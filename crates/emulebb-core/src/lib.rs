@@ -4826,13 +4826,14 @@ fn mark_kad_file_publish_started(
     publish_kind: MetadataKadOutboundPublishKind,
     started_at: Instant,
     published_at_ms: i64,
+    buddy_ip: Option<Ipv4Addr>,
 ) {
     match publish_kind {
         MetadataKadOutboundPublishKind::Keyword => {
             unreachable!("keyword publishes must use mark_kad_keyword_publish_started");
         }
         MetadataKadOutboundPublishKind::Source => {
-            schedule.mark_source_published(file_hash, started_at);
+            schedule.mark_source_published(file_hash, started_at, buddy_ip);
         }
         MetadataKadOutboundPublishKind::Notes => {
             schedule.mark_notes_published(file_hash, started_at);
@@ -4983,6 +4984,11 @@ async fn publish_kad_due_shared_files(
         tcp_port: network.listen_port,
         obfuscation_enabled: network.config.obfuscation_enabled,
     };
+    let source_publish_buddy_ip = if gate.tcp_firewalled && !gate.udp_open {
+        runtime.kad_buddy.lock().await.outgoing_buddy_ip()
+    } else {
+        None
+    };
     let mut keyword_totals = PublishAttemptStats::default();
     let mut source_totals = PublishAttemptStats::default();
     let mut notes_totals = PublishAttemptStats::default();
@@ -5096,7 +5102,7 @@ async fn publish_kad_due_shared_files(
         });
         let due_keyword = due_keyword.cloned();
         let keyword_due = due_keyword.is_some();
-        let source_due = schedule.source_due(&entry.file_hash, now);
+        let source_due = schedule.source_due(&entry.file_hash, now, source_publish_buddy_ip);
         let notes_due =
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now);
@@ -5147,6 +5153,7 @@ async fn publish_kad_due_shared_files(
                     MetadataKadOutboundPublishKind::Source,
                     started_at,
                     Utc::now().timestamp_millis(),
+                    source_publish_buddy_ip,
                 );
                 available_publish_starts = available_publish_starts.saturating_sub(1);
                 active_counts.started(KadSharedPublishKind::Source);
@@ -5286,6 +5293,7 @@ async fn publish_kad_due_shared_files(
                     MetadataKadOutboundPublishKind::Notes,
                     started_at,
                     Utc::now().timestamp_millis(),
+                    None,
                 );
                 available_publish_starts = available_publish_starts.saturating_sub(1);
                 active_counts.started(KadSharedPublishKind::Notes);
@@ -8956,6 +8964,7 @@ mod tests {
             MetadataKadOutboundPublishKind::Source,
             started_at,
             published_at_ms,
+            None,
         );
         mark_kad_file_publish_started(
             &store,
@@ -8964,12 +8973,13 @@ mod tests {
             MetadataKadOutboundPublishKind::Notes,
             started_at,
             published_at_ms,
+            None,
         );
 
         for file_hash in &keyword_hashes {
             assert!(!schedule.keyword_due(file_hash, keyword, started_at));
         }
-        assert!(!schedule.source_due(&source_hash, started_at));
+        assert!(!schedule.source_due(&source_hash, started_at, None));
         assert!(!schedule.notes_due(&notes_hash, started_at));
 
         let persisted = store.load_kad_outbound_publish_schedule().unwrap();
