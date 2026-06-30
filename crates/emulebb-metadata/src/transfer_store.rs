@@ -758,6 +758,25 @@ impl super::MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        if let Some(known_file_id) = tx
+            .query_row(
+                "SELECT id FROM known_files WHERE ed2k_hash = ?1",
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            tx.execute(
+                "DELETE FROM shared_source_failures WHERE source_path IN (
+                    SELECT source_path FROM share_in_place_sources WHERE known_file_id = ?1
+                )",
+                params![known_file_id],
+            )?;
+            tx.execute(
+                "DELETE FROM share_in_place_sources WHERE known_file_id = ?1",
+                params![known_file_id],
+            )?;
+        }
         let changed = tx.execute(
             "DELETE FROM known_files WHERE ed2k_hash = ?1",
             params![hash],

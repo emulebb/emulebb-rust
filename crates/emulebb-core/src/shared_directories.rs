@@ -506,6 +506,15 @@ async fn plan_incremental_reload(
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     let failure_entries = load_shared_source_failures(core).await?;
+    let active_shared_hashes = {
+        let shared_catalog = core.ed2k_transfers.shared_catalog();
+        let catalog = shared_catalog.read().await;
+        catalog
+            .iter()
+            .filter(|entry| !entry.compatibility_hint)
+            .map(|entry| entry.file_hash.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+    };
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
             .into_iter()
@@ -538,6 +547,8 @@ async fn plan_incremental_reload(
                                 entry.file_size == size
                                     && entry.source_mtime_ms.is_some()
                                     && entry.source_mtime_ms == mtime_ms
+                                    && active_shared_hashes
+                                        .contains(&entry.file_hash.to_ascii_lowercase())
                             }) {
                                 stats.reused_count += 1;
                                 stats.stale_hash_count += entries.len().saturating_sub(1);
