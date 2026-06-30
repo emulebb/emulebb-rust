@@ -223,11 +223,13 @@ async fn run_kad_udp_firewall_check_round(
     }
 
     // Wait for the inbound KADEMLIA2_FIREWALLUDP replies to converge. The inbound
-    // handler records them against the active round; poll the shared state.
+    // handler records them against the active round; poll the active round itself
+    // rather than the sticky public verdict, which remains visible during normal
+    // rechecks for MFC parity.
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(KAD_UDP_FIREWALL_CHECK_RESULT_WAIT_SECS);
     while tokio::time::Instant::now() < deadline {
-        if kad_firewall.lock().await.udp_verified {
+        if !kad_firewall.lock().await.udp_check_in_progress() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

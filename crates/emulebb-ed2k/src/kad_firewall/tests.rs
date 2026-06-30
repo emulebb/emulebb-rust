@@ -49,14 +49,13 @@ fn udp_round_two_stays_open_for_a_consistently_open_node() {
     assert!(state.udp_verified);
     assert!(!state.is_udp_firewalled());
 
-    // Round 2 begins: the sticky verdict must be reset so the wait loop waits.
+    // Round 2 begins: the public verdict stays verified-open for MFC parity, but
+    // the active-round flag lets the driver wait without short-circuiting.
     let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 41, 0).unwrap();
     assert!(state.begin_udp_check([helper], [41000], r2_start));
-    assert!(
-        !state.udp_verified,
-        "round 2 must start unverified so the wait loop does not short-circuit"
-    );
-    assert!(!state.udp_open);
+    assert!(state.udp_verified);
+    assert!(state.udp_open);
+    assert!(state.udp_check_in_progress());
 
     // The helper's reply arrives within the round and is recorded as open.
     let r2_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 41, 5).unwrap();
@@ -69,6 +68,7 @@ fn udp_round_two_stays_open_for_a_consistently_open_node() {
     }
     assert!(state.udp_open);
     assert!(state.udp_verified);
+    assert!(!state.udp_check_in_progress());
     assert!(!state.is_udp_firewalled());
 }
 
