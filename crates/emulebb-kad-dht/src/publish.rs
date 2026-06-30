@@ -9,14 +9,16 @@ use crate::error::DhtError;
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::{
-    KAD_VERSION_AICH_KEYWORD_PUBLISH, SEARCHTOLERANCE, STORE_KEYWORD_TIMEOUT_SECS,
-    STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS, STORE_STOP_GRACE_SECS,
+    KAD_VERSION_AICH_KEYWORD_PUBLISH, KADEMLIA_VERSION2_47A, SEARCHTOLERANCE,
+    STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS,
+    STORE_STOP_GRACE_SECS,
 };
 use emulebb_kad_proto::{
-    Ed2kHash, KadPacket, NodeId, Tag,
+    Ed2kHash, KadPacket, NodeId, Tag, TagName,
     constants::K,
     opcode,
     packet::{PublishEntry, PublishKeyReq, PublishNotesReq, PublishSourceReq},
+    tag_name,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -454,12 +456,6 @@ pub async fn publish_source(
     )
     .await?;
 
-    let packet = KadPacket::PublishSourceReq(PublishSourceReq {
-        target,
-        publisher_id,
-        tags,
-    });
-
     for (index, contact) in publish_contacts.iter().enumerate() {
         tracing::debug!(
             "kad publish contact family=source step=send rank={}/{} contact_addr={} contact_id={} contact_version={} target={} file_hash={} publisher_id={}",
@@ -473,10 +469,39 @@ pub async fn publish_source(
             publisher_id,
         );
     }
-    let results = execute_publish_fanout(rpc, &publish_contacts, &packet, work_class).await;
+    let results =
+        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
+            build_source_publish_packet(target, publisher_id, &tags, contact.version)
+        })
+        .await;
     record_publish_results(&mut stats, "source", "publish_source", true, results);
 
     Ok(stats)
+}
+
+/// Build the oracle-style source publish body for a specific target contact.
+///
+/// eMule sends the file-size tag only to contacts at `KADEMLIA_VERSION2_47a` or
+/// newer. Older Kad2 peers still accept high-ID source publish without that tag.
+fn build_source_publish_packet(
+    target: NodeId,
+    publisher_id: NodeId,
+    tags: &[Tag],
+    contact_version: u8,
+) -> KadPacket {
+    let tags = if contact_version >= KADEMLIA_VERSION2_47A {
+        tags.to_vec()
+    } else {
+        tags.iter()
+            .filter(|tag| tag.name != TagName::Short(tag_name::FILESIZE))
+            .cloned()
+            .collect()
+    };
+    KadPacket::PublishSourceReq(PublishSourceReq {
+        target,
+        publisher_id,
+        tags,
+    })
 }
 
 /// Publish a note/rating for a file.

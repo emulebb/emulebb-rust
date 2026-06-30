@@ -1,6 +1,6 @@
 use super::{
     KeywordPublishEntry, PUBLISH_KEYWORD_LOOKUP_TIMEOUT, PUBLISH_NOTES_LOOKUP_TIMEOUT,
-    PUBLISH_SOURCE_LOOKUP_TIMEOUT, build_keyword_publish_packet,
+    PUBLISH_SOURCE_LOOKUP_TIMEOUT, build_keyword_publish_packet, build_source_publish_packet,
     publish_target_is_within_tolerance, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
@@ -152,6 +152,51 @@ fn build_keyword_publish_packet_skips_aich_for_v8_contacts() {
         panic!("expected publish key packet");
     };
     assert_eq!(request.entries[0].tags.len(), 1);
+}
+
+#[test]
+fn build_source_publish_packet_skips_filesize_for_pre_47a_contacts() {
+    let packet = build_source_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        NodeId::from_bytes([2; 16]),
+        &[
+            Tag::filesize(2_097_152),
+            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
+        ],
+        1,
+    );
+
+    let KadPacket::PublishSourceReq(request) = packet else {
+        panic!("expected publish source packet");
+    };
+    assert_eq!(
+        request.tags,
+        vec![Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3))]
+    );
+}
+
+#[test]
+fn build_source_publish_packet_keeps_filesize_for_47a_contacts() {
+    let packet = build_source_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        NodeId::from_bytes([2; 16]),
+        &[
+            Tag::filesize(2_097_152),
+            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
+        ],
+        2,
+    );
+
+    let KadPacket::PublishSourceReq(request) = packet else {
+        panic!("expected publish source packet");
+    };
+    assert_eq!(
+        request.tags,
+        vec![
+            Tag::filesize(2_097_152),
+            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3))
+        ]
+    );
 }
 
 #[test]
