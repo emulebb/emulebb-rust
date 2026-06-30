@@ -5102,6 +5102,61 @@ async fn publish_kad_due_shared_files(
         };
         let mut attempted_this_file = false;
 
+        // MFC can start keyword and source store searches independently in one
+        // Publish() tick. Rust has an additional global DHT start budget, so let
+        // source publish claim the first available start to avoid keyword work
+        // starving source visibility after a large-library restart.
+        if source_due {
+            if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
+                || available_publish_starts == 0
+                || publish_tasks.len() >= in_flight_budget
+                || !active_counts.can_start(KadSharedPublishKind::Source)
+            {
+                source_skipped_by_budget += 1;
+            } else {
+                source_attempted += 1;
+                attempted_this_file = true;
+                let source_tags =
+                    build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
+                let dht = runtime.dht.clone();
+                let file_hash_text = entry.file_hash.clone();
+                let fanout = network.kad_publish_contact_fanout;
+                let started_at = now;
+                mark_kad_file_publish_started(
+                    &runtime.metadata_store,
+                    schedule,
+                    &file_hash_text,
+                    MetadataKadOutboundPublishKind::Source,
+                    started_at,
+                    Utc::now().timestamp_millis(),
+                );
+                available_publish_starts = available_publish_starts.saturating_sub(1);
+                active_counts.started(KadSharedPublishKind::Source);
+                publish_tasks.spawn(async move {
+                    let result = dht
+                        .publish_source_with_class_and_fanout(
+                            file_hash,
+                            source_publish_identity,
+                            source_tags,
+                            RpcWorkClass::Publish,
+                            fanout,
+                        )
+                        .await;
+                    KadSharedPublishOutcome {
+                        kind: KadSharedPublishKind::Source,
+                        file_hashes: vec![file_hash_text],
+                        started_at,
+                        result: match result {
+                            Ok(stats) => Ok(stats),
+                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
+                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
+                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
+                        },
+                    }
+                });
+            }
+        }
+
         if let Some(keyword) = due_keyword.as_deref() {
             if keyword_attempted >= KAD_KEYWORD_PUBLISH_BUDGET
                 || available_publish_starts == 0
@@ -5169,57 +5224,6 @@ async fn publish_kad_due_shared_files(
                         }
                     });
                 }
-            }
-        }
-
-        if source_due {
-            if source_attempted >= KAD_SOURCE_PUBLISH_BUDGET
-                || available_publish_starts == 0
-                || publish_tasks.len() >= in_flight_budget
-                || !active_counts.can_start(KadSharedPublishKind::Source)
-            {
-                source_skipped_by_budget += 1;
-            } else {
-                source_attempted += 1;
-                attempted_this_file = true;
-                let source_tags =
-                    build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
-                let dht = runtime.dht.clone();
-                let file_hash_text = entry.file_hash.clone();
-                let fanout = network.kad_publish_contact_fanout;
-                let started_at = now;
-                mark_kad_file_publish_started(
-                    &runtime.metadata_store,
-                    schedule,
-                    &file_hash_text,
-                    MetadataKadOutboundPublishKind::Source,
-                    started_at,
-                    Utc::now().timestamp_millis(),
-                );
-                available_publish_starts = available_publish_starts.saturating_sub(1);
-                active_counts.started(KadSharedPublishKind::Source);
-                publish_tasks.spawn(async move {
-                    let result = dht
-                        .publish_source_with_class_and_fanout(
-                            file_hash,
-                            source_publish_identity,
-                            source_tags,
-                            RpcWorkClass::Publish,
-                            fanout,
-                        )
-                        .await;
-                    KadSharedPublishOutcome {
-                        kind: KadSharedPublishKind::Source,
-                        file_hashes: vec![file_hash_text],
-                        started_at,
-                        result: match result {
-                            Ok(stats) => Ok(stats),
-                            Err(DhtError::SearchBusy) => Err(KadSharedPublishError::Busy),
-                            Err(DhtError::SearchTimeout) => Err(KadSharedPublishError::TimedOut),
-                            Err(error) => Err(KadSharedPublishError::Failed(error.to_string())),
-                        },
-                    }
-                });
             }
         }
 
