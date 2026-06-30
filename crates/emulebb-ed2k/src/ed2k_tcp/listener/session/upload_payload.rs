@@ -20,6 +20,8 @@ use super::{
     upload_queue::{ListenerQueueDecision, ListenerUploadQueue},
 };
 
+const MAX_UPLOAD_REQUEST_RANGE_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
+
 pub(in crate::ed2k_tcp) struct UploadPayloadRequest<'a> {
     pub(in crate::ed2k_tcp) transfer_runtime: &'a Ed2kTransferRuntime,
     pub(in crate::ed2k_tcp) upload_queue: &'a mut ListenerUploadQueue,
@@ -265,6 +267,10 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         // (exactly the bytes asked for).
         if end <= start {
             request_diag.note_skip("emptyRange");
+            continue;
+        }
+        if end.saturating_sub(start) > MAX_UPLOAD_REQUEST_RANGE_BYTES {
+            request_diag.note_skip("rangeTooLarge");
             continue;
         }
         match upload_queue

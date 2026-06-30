@@ -173,20 +173,13 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
     );
 }
 
-/// FIX (memory-amplification DoS): an oversized OP_REQUESTPARTS range must be
-/// served block-by-block from bounded reads, not via one whole-range read.
+/// MFC parity: an oversized OP_REQUESTPARTS range is rejected before queuing.
 ///
 /// The seeded file has two parts but only part 0 is verified. The peer requests
-/// the whole verified part 0 as a single oversized range (`0..ED2K_PART_SIZE`,
-/// ~9.7 MB >> EMBLOCKSIZE) plus a range fully inside the unverified part 1.
-/// The pre-fix path allocated `vec![0u8; end - start]` and read the entire range
-/// in one shot; the chunked path walks the requested span in EMBLOCKSIZE reads,
-/// so the resident allocation per read is bounded to one block regardless of the
-/// peer-controlled range size. The whole verified part still serves exactly
-/// (every byte, contiguous, every wire fragment <= EMBLOCKSIZE) while the
-/// unverified range yields nothing (master serves only complete parts).
+/// one range just above MFC's `3 * EMBLOCKSIZE` cap plus one valid block. The
+/// oversized range must contribute no bytes, while the valid range still serves.
 #[tokio::test]
-async fn listener_serves_oversized_range_block_by_block_without_whole_range_read() {
+async fn listener_rejects_oversized_range_and_serves_valid_range() {
     // A two-ED2K-part file (PARTSIZE first part + a short trailing part), with
     // only part 0 stored/verified. Incompressible random bytes so the serve
     // takes the uncompressed OP_SENDINGPART path and fragment sizes are
@@ -253,61 +246,40 @@ async fn listener_serves_oversized_range_block_by_block_without_whole_range_read
         read_until_opcode(&mut stream, OP_EDONKEYPROT, super::OP_ACCEPTUPLOADREQ).await;
     assert_eq!(accept_upload.len(), 6);
 
-    // One batch with the whole verified part 0 (oversized, served exactly) plus
-    // a range fully inside the unverified part 1 (must serve nothing). The
-    // verified range ends exactly at the part boundary so every EMBLOCKSIZE walk
-    // step stays inside the verified region.
+    // One oversized range (must be skipped) plus one valid block (must serve).
     stream
         .write_all(
             &super::encode_request_parts_batch(
                 &file_hash,
-                &[
-                    (0, ED2K_PART_SIZE),
-                    (ED2K_PART_SIZE, ED2K_PART_SIZE + ED2K_EMBLOCK_SIZE),
-                ],
+                &[(0, ED2K_EMBLOCK_SIZE * 3 + 1), (0, ED2K_EMBLOCK_SIZE)],
             )
             .unwrap(),
         )
         .await
         .unwrap();
 
-    // Collect SENDINGPART fragments for the verified part 0. The serve must
-    // deliver every byte of part 0 contiguously; the unverified part-1 range
-    // contributes nothing (the loop completes once part 0 is whole). A bounded
-    // read per fragment is reflected by every wire fragment being <= EMBLOCKSIZE.
     let mut served_end = 0u64;
-    let mut max_fragment_len = 0u64;
-    while served_end < ED2K_PART_SIZE {
+    while served_end < ED2K_EMBLOCK_SIZE {
         let packet = read_packet(&mut stream).await;
-        if (packet[0], packet[5]) == (OP_EDONKEYPROT, super::OP_SENDINGPART) {
-            let (decoded_hash, start, end, bytes) =
-                super::decode_sending_part_payload(&packet[6..], false).unwrap();
-            assert_eq!(decoded_hash, file_hash);
-            assert_eq!(start, served_end, "fragments must be contiguous");
-            assert_eq!(end - start, bytes.len() as u64);
-            assert!(
-                end <= ED2K_PART_SIZE,
-                "serve overran into the unverified part"
-            );
-            max_fragment_len = max_fragment_len.max(end - start);
-            served_end = end;
-        }
+        assert_eq!(
+            (packet[0], packet[5]),
+            (OP_EDONKEYPROT, super::OP_SENDINGPART)
+        );
+        let (decoded_hash, start, end, bytes) =
+            super::decode_sending_part_payload(&packet[6..], false).unwrap();
+        assert_eq!(decoded_hash, file_hash);
+        assert_eq!(start, served_end);
+        assert_eq!(end - start, bytes.len() as u64);
+        assert!(end <= ED2K_EMBLOCK_SIZE);
+        served_end = end;
     }
+    assert_eq!(served_end, ED2K_EMBLOCK_SIZE);
 
-    // The whole verified part 0 was served, contiguously, and never overran into
-    // the unverified region.
-    assert_eq!(served_end, ED2K_PART_SIZE);
-    // No wire fragment exceeded one EMBLOCKSIZE — the per-read allocation is
-    // bounded to a single block (the DoS cap is enforced).
-    assert!(
-        max_fragment_len <= ED2K_EMBLOCK_SIZE,
-        "fragment {max_fragment_len} exceeded EMBLOCKSIZE {ED2K_EMBLOCK_SIZE}"
-    );
-
-    // Exactly the verified bytes were accounted, nothing for part 1.
+    // Only the valid block was accounted. The oversized range contributed no
+    // payload, matching MFC's reject-too-large admission.
     let upload_snapshot = transfer_runtime.upload_queue_snapshot().await;
     assert_eq!(upload_snapshot.len(), 1);
-    assert_eq!(upload_snapshot[0].uploaded_bytes, ED2K_PART_SIZE);
+    assert_eq!(upload_snapshot[0].uploaded_bytes, ED2K_EMBLOCK_SIZE);
 
     drop(stream);
     server.await.unwrap();
