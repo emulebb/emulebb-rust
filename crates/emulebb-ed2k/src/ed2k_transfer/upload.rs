@@ -12,8 +12,8 @@ use crate::config::Ed2kUploadQueuePolicyConfig;
 
 use super::{
     Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueCapacitySnapshot,
-    Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
-    Ed2kUploadThrottleReservation,
+    Ed2kUploadQueueSnapshotEntry, Ed2kUploadRangeAdmission, Ed2kUploadSessionHandle,
+    Ed2kUploadSessionStatus, Ed2kUploadThrottleReservation,
     upload_queue::{DEFAULT_CREDIT_SCORE_PERMILLE, credit_score_permille, upload_priority_score},
     upload_queue_config_from_policy, upload_queue_policy_from_config,
 };
@@ -111,6 +111,52 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .note_request_parts(handle, Instant::now())
+    }
+
+    pub(crate) async fn note_upload_range_request(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+    ) -> (Ed2kUploadSessionStatus, Ed2kUploadRangeAdmission) {
+        self.note_upload_range_request_at(handle, start, end, Instant::now())
+            .await
+    }
+
+    pub(crate) async fn note_upload_range_request_at(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+        now: Instant,
+    ) -> (Ed2kUploadSessionStatus, Ed2kUploadRangeAdmission) {
+        self.upload_queue
+            .lock()
+            .await
+            .note_requested_range(handle, start, end, now)
+    }
+
+    pub(crate) async fn note_upload_range_served(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+    ) -> Ed2kUploadSessionStatus {
+        self.note_upload_range_served_at(handle, start, end, Instant::now())
+            .await
+    }
+
+    pub(crate) async fn note_upload_range_served_at(
+        &self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+        now: Instant,
+    ) -> Ed2kUploadSessionStatus {
+        self.upload_queue
+            .lock()
+            .await
+            .note_served_range(handle, start, end, now)
     }
 
     /// Record one inbound OP_REQUESTPARTS demand signal for a shared file.

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     net::IpAddr,
     time::{Duration, Instant},
@@ -11,6 +11,7 @@ const LOW_FILE_PRIORITY_SCORE: i128 = 6;
 const HIGH_FILE_PRIORITY_SCORE: i128 = 9;
 const RELEASE_FILE_PRIORITY_SCORE: i128 = 18;
 const FRIEND_SLOT_SCORE_BONUS: i128 = 1_000_000_000;
+const UPLOAD_SESSION_SERVED_RANGE_HISTORY: usize = 128;
 pub(super) const DEFAULT_CREDIT_SCORE_PERMILLE: i128 = 1_000;
 
 /// Sentinel all-time upload ratio (permille) used for an unknown requested file:
@@ -189,6 +190,12 @@ pub(crate) enum Ed2kUploadSessionStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ed2kUploadRangeAdmission {
+    Accepted,
+    DuplicateDone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ed2kUploadSessionPhase {
     Waiting,
     Granted,
@@ -201,6 +208,12 @@ pub enum Ed2kUploadSessionPhaseSnapshot {
     Waiting,
     Granted,
     Uploading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ed2kUploadServedRange {
+    start: u64,
+    end: u64,
 }
 
 /// Read-only snapshot of one inbound upload queue session.
@@ -248,6 +261,7 @@ struct Ed2kUploadSessionEntry {
     score_modifiers: UploadScoreModifiers,
     uploaded_bytes: u64,
     upload_started_at: Option<Instant>,
+    served_ranges: VecDeque<Ed2kUploadServedRange>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +395,9 @@ impl Ed2kUploadQueueState {
             if session.phase == Ed2kUploadSessionPhase::Waiting {
                 self.replace_waiting_key(&existing_key, &key);
             }
+            if existing_key.file_hash != key.file_hash {
+                session.served_ranges.clear();
+            }
             session.connection_id = connection_id;
             session.last_activity = now;
             session.file_priority_score = file_priority_score;
@@ -421,6 +438,7 @@ impl Ed2kUploadQueueState {
                 score_modifiers,
                 uploaded_bytes: 0,
                 upload_started_at: None,
+                served_ranges: VecDeque::new(),
             },
         );
         self.trim_waiting_queue(now);
@@ -465,6 +483,83 @@ impl Ed2kUploadQueueState {
         ) {
             session.phase = Ed2kUploadSessionPhase::Uploading;
             return Ed2kUploadSessionStatus::Granted;
+        }
+        self.status_for_key(&handle.key, now)
+    }
+
+    pub(super) fn note_requested_range(
+        &mut self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+        now: Instant,
+    ) -> (Ed2kUploadSessionStatus, Ed2kUploadRangeAdmission) {
+        self.reap_expired_sessions(now);
+        let Some(session) = self.sessions.get_mut(&handle.key) else {
+            return (
+                Ed2kUploadSessionStatus::Stale,
+                Ed2kUploadRangeAdmission::Accepted,
+            );
+        };
+        if session.connection_id != handle.connection_id {
+            return (
+                Ed2kUploadSessionStatus::Stale,
+                Ed2kUploadRangeAdmission::Accepted,
+            );
+        }
+        session.last_activity = now;
+        if !matches!(
+            session.phase,
+            Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+        ) {
+            return (
+                self.status_for_key(&handle.key, now),
+                Ed2kUploadRangeAdmission::Accepted,
+            );
+        }
+        if session
+            .served_ranges
+            .iter()
+            .any(|range| range.start == start && range.end == end)
+        {
+            return (
+                Ed2kUploadSessionStatus::Granted,
+                Ed2kUploadRangeAdmission::DuplicateDone,
+            );
+        }
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::Accepted,
+        )
+    }
+
+    pub(super) fn note_served_range(
+        &mut self,
+        handle: &Ed2kUploadSessionHandle,
+        start: u64,
+        end: u64,
+        now: Instant,
+    ) -> Ed2kUploadSessionStatus {
+        self.reap_expired_sessions(now);
+        let Some(session) = self.sessions.get_mut(&handle.key) else {
+            return Ed2kUploadSessionStatus::Stale;
+        };
+        if session.connection_id != handle.connection_id {
+            return Ed2kUploadSessionStatus::Stale;
+        }
+        session.last_activity = now;
+        if start < end
+            && !session
+                .served_ranges
+                .iter()
+                .any(|range| range.start == start && range.end == end)
+        {
+            if session.served_ranges.len() == UPLOAD_SESSION_SERVED_RANGE_HISTORY {
+                session.served_ranges.pop_front();
+            }
+            session
+                .served_ranges
+                .push_back(Ed2kUploadServedRange { start, end });
         }
         self.status_for_key(&handle.key, now)
     }

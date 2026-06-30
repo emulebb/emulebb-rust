@@ -85,7 +85,7 @@ use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;
 use upload_queue::Ed2kUploadQueueState;
 pub(crate) use upload_queue::{
     Ed2kUploadFirewallContext, Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig,
-    Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
+    Ed2kUploadRangeAdmission, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
 };
 pub use upload_queue::{Ed2kUploadQueueCapacitySnapshot, Ed2kUploadThrottleReservation};
 pub use upload_queue::{Ed2kUploadQueueSnapshotEntry, Ed2kUploadSessionPhaseSnapshot};

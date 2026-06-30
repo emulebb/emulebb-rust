@@ -3,7 +3,10 @@ use emulebb_metadata::MetadataStore;
 
 use crate::{
     config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
-    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadSessionPhaseSnapshot, Ed2kUploadSessionStatus},
+    ed2k_transfer::{
+        Ed2kTransferRuntime, Ed2kUploadRangeAdmission, Ed2kUploadSessionPhaseSnapshot,
+        Ed2kUploadSessionStatus,
+    },
     paths::unique_test_dir,
 };
 
@@ -277,6 +280,70 @@ async fn upload_queue_snapshot_tracks_session_uploaded_bytes() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].uploaded_bytes, 98_304);
     assert_eq!(snapshot[0].upload_speed_bytes_per_sec, 49_152);
+}
+
+#[tokio::test]
+async fn upload_queue_detects_duplicate_completed_ranges_per_slot() {
+    let root = unique_test_dir("ed2k-upload-queue-duplicate-range");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x35; 16]);
+    let now = std::time::Instant::now();
+    let peer = upload_peer(1, 0x35, 0x0A00_0035);
+
+    let (handle, status) = runtime
+        .begin_upload_session_at(peer.clone(), &file_hash, now)
+        .await;
+    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+
+    assert_eq!(
+        runtime
+            .note_upload_range_request_at(&handle, 0, 1024, now + std::time::Duration::from_secs(1))
+            .await,
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::Accepted
+        )
+    );
+    assert_eq!(
+        runtime
+            .note_upload_range_served_at(&handle, 0, 1024, now + std::time::Duration::from_secs(2))
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .note_upload_range_request_at(&handle, 0, 1024, now + std::time::Duration::from_secs(3))
+            .await,
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::DuplicateDone
+        )
+    );
+
+    let next_file_hash = Ed2kHash::from_bytes([0x36; 16]);
+    let (next_handle, next_status) = runtime
+        .begin_upload_session_at(
+            peer,
+            &next_file_hash,
+            now + std::time::Duration::from_secs(4),
+        )
+        .await;
+    assert_eq!(next_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        runtime
+            .note_upload_range_request_at(
+                &next_handle,
+                0,
+                1024,
+                now + std::time::Duration::from_secs(5)
+            )
+            .await,
+        (
+            Ed2kUploadSessionStatus::Granted,
+            Ed2kUploadRangeAdmission::Accepted
+        )
+    );
 }
 
 #[tokio::test]

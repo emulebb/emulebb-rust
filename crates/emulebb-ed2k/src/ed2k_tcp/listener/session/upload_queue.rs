@@ -9,8 +9,8 @@ use crate::{
         ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL, Ed2kTransport,
     },
     ed2k_transfer::{
-        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadSessionHandle,
-        Ed2kUploadSessionStatus, diag_sched,
+        Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadRangeAdmission,
+        Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, diag_sched,
     },
 };
 
@@ -233,6 +233,39 @@ impl ListenerUploadQueue {
         self.send_status(transport, peer_addr, status).await
     }
 
+    pub(in crate::ed2k_tcp) async fn note_range_request(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        start: u64,
+        end: u64,
+    ) -> (ListenerQueueDecision, Ed2kUploadRangeAdmission) {
+        let Some(upload_session_handle) = self.session.as_ref() else {
+            return (
+                ListenerQueueDecision::Waiting,
+                Ed2kUploadRangeAdmission::Accepted,
+            );
+        };
+        let (status, admission) = transfer_runtime
+            .note_upload_range_request(upload_session_handle, start, end)
+            .await;
+        (Self::decision_from_status(status), admission)
+    }
+
+    pub(in crate::ed2k_tcp) async fn note_range_served(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        start: u64,
+        end: u64,
+    ) -> ListenerQueueDecision {
+        let Some(upload_session_handle) = self.session.as_ref() else {
+            return ListenerQueueDecision::Waiting;
+        };
+        let status = transfer_runtime
+            .note_upload_range_served(upload_session_handle, start, end)
+            .await;
+        Self::decision_from_status(status)
+    }
+
     pub(in crate::ed2k_tcp) async fn note_payload_sent(
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
@@ -292,6 +325,16 @@ impl ListenerUploadQueue {
             }
             Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
                 Ok(ListenerQueueDecision::Stale)
+            }
+        }
+    }
+
+    const fn decision_from_status(status: Ed2kUploadSessionStatus) -> ListenerQueueDecision {
+        match status {
+            Ed2kUploadSessionStatus::Granted => ListenerQueueDecision::Granted,
+            Ed2kUploadSessionStatus::Waiting { .. } => ListenerQueueDecision::Waiting,
+            Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
+                ListenerQueueDecision::Stale
             }
         }
     }

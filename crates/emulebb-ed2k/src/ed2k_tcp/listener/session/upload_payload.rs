@@ -7,7 +7,9 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::ed2k_transfer::diag_sched;
 use crate::{
     ed2k_tcp::{Ed2kTransport, OP_REQUESTPARTS_I64},
-    ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, Ed2kUploadPeerIdentity},
+    ed2k_transfer::{
+        ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadRangeAdmission,
+    },
 };
 
 use super::{
@@ -245,6 +247,24 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             request_diag.note_skip("emptyRange");
             continue;
         }
+        match upload_queue
+            .note_range_request(transfer_runtime, start, end)
+            .await
+        {
+            (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::Accepted) => {}
+            (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::DuplicateDone) => {
+                request_diag.note_skip("duplicateDone");
+                continue;
+            }
+            (ListenerQueueDecision::Waiting, _) => {
+                request_diag.note_skip("queueWaitingBeforeRange");
+                continue;
+            }
+            (ListenerQueueDecision::Stale, _) => {
+                request_diag.note_skip("queueStaleBeforeRange");
+                break;
+            }
+        }
         let mut fragment_start = start;
         let mut range_served = false;
         while fragment_start < end {
@@ -310,10 +330,19 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         if range_served {
             request_diag.served_ranges += 1;
         }
+        if range_served && fragment_start >= end {
+            let _ = upload_queue
+                .note_range_served(transfer_runtime, start, end)
+                .await;
+        }
     }
 
     let outcome = if request_diag.served_bytes == 0 {
-        "noPayload"
+        if request_diag.first_skip_reason == Some("duplicateDone") {
+            "duplicateDone"
+        } else {
+            "noPayload"
+        }
     } else if request_diag.served_bytes >= request_diag.requested_bytes
         && request_diag.skipped_ranges == 0
     {
