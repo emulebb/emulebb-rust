@@ -51,6 +51,7 @@ enum HelperOutcome {
 }
 
 const TCP_FIREWALL_RECHECK_LIMIT: usize = 4;
+const UDP_FIREWALL_CHECK_CLIENTS_TO_ASK: usize = 2;
 const EXTERNAL_PORT_DISCOVERY_REPORTERS: usize = 3;
 /// Unique helpers that must report the same off-list incoming UDP port before we
 /// trust it as our real external port (one report could be a NAT fluke).
@@ -514,11 +515,23 @@ impl KadFirewallState {
             return None;
         }
 
-        let has_pending_helpers = round
+        let explicit_failed_helpers = round
             .helper_outcomes
             .values()
-            .any(|outcome| matches!(outcome, HelperOutcome::Pending));
-        if self.udp_verified && self.udp_open && has_pending_helpers {
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    HelperOutcome::RemoteError | HelperOutcome::WrongPort
+                )
+            })
+            .count();
+        let has_incomplete_helpers = round.helper_outcomes.values().any(|outcome| {
+            matches!(
+                outcome,
+                HelperOutcome::Pending | HelperOutcome::RequestFailed
+            )
+        });
+        if has_incomplete_helpers && explicit_failed_helpers < UDP_FIREWALL_CHECK_CLIENTS_TO_ASK {
             self.last_error =
                 Some("UDP firewall-check timed out without enough helper replies".to_string());
             self.active_round = None;

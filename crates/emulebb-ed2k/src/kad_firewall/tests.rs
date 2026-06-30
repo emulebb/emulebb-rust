@@ -75,24 +75,27 @@ fn udp_round_two_stays_open_for_a_consistently_open_node() {
 #[test]
 fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
     // The companion to the open case: after an open round 1, a round 2 that gets
-    // no positive reply must genuinely time out as firewalled (not be skipped).
+    // two completed negative replies must genuinely time out as firewalled (not
+    // be skipped).
     let mut state = KadFirewallState::default();
-    let helper = "203.0.113.31".parse().unwrap();
+    let helper_a = "203.0.113.31".parse().unwrap();
+    let helper_b = "203.0.113.32".parse().unwrap();
 
     let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 42, 0).unwrap();
     let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 42, 5).unwrap();
-    assert!(state.begin_udp_check([helper], [41000], r1_start));
+    assert!(state.begin_udp_check([helper_a], [41000], r1_start));
     assert!(matches!(
-        state.record_firewall_udp_packet(helper, 0, 41000, r1_reply),
+        state.record_firewall_udp_packet(helper_a, 0, 41000, r1_reply),
         FirewallUdpPacketOutcome::Open(_)
     ));
     assert!(state.udp_open);
 
-    // Round 2: a negative reply, then the round times out -> firewalled.
+    // Round 2: two negative replies, then the round times out -> firewalled.
     let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 0).unwrap();
     let r2_done = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 30).unwrap();
-    assert!(state.begin_udp_check([helper], [41000], r2_start));
-    let _ = state.record_firewall_udp_packet(helper, 1, 41000, r2_done);
+    assert!(state.begin_udp_check([helper_a, helper_b], [41000], r2_start));
+    let _ = state.record_firewall_udp_packet(helper_a, 1, 41000, r2_done);
+    let _ = state.record_firewall_udp_packet(helper_b, 0, 42000, r2_done);
     let summary = state.finish_udp_check(r2_done).expect("summary");
 
     assert!(!summary.open);
@@ -102,11 +105,11 @@ fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
 }
 
 #[test]
-fn udp_round_timeout_preserves_previous_verified_open_verdict() {
+fn udp_round_timeout_preserves_previous_verified_open_verdict_without_replies() {
     // MFC does not let ordinary no-answer timeouts overturn a prior successful
     // UDP-open result; only explicit failed helper results should do that.
     let mut state = KadFirewallState::default();
-    let helper = "203.0.113.32".parse().unwrap();
+    let helper = "203.0.113.33".parse().unwrap();
 
     let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 44, 0).unwrap();
     let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 44, 5).unwrap();
@@ -131,6 +134,35 @@ fn udp_round_timeout_preserves_previous_verified_open_verdict() {
         state.last_error.as_deref(),
         Some("UDP firewall-check timed out without enough helper replies")
     );
+}
+
+#[test]
+fn udp_round_request_failure_plus_one_negative_preserves_previous_verified_open_verdict() {
+    // Live parity: a helper setup failure is equivalent to a cancelled test in
+    // MFC and must not combine with one negative reply to form a closed verdict.
+    let mut state = KadFirewallState::default();
+    let helper_a = "203.0.113.34".parse().unwrap();
+    let helper_b = "203.0.113.35".parse().unwrap();
+
+    let r1_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 46, 0).unwrap();
+    let r1_reply = Utc.with_ymd_and_hms(2026, 3, 22, 22, 46, 5).unwrap();
+    assert!(state.begin_udp_check([helper_a], [41000], r1_start));
+    assert!(matches!(
+        state.record_firewall_udp_packet(helper_a, 0, 41000, r1_reply),
+        FirewallUdpPacketOutcome::Open(_)
+    ));
+
+    let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 47, 0).unwrap();
+    let r2_done = Utc.with_ymd_and_hms(2026, 3, 22, 22, 47, 30).unwrap();
+    assert!(state.begin_udp_check([helper_a, helper_b], [41000], r2_start));
+    let _ = state.record_firewall_udp_packet(helper_a, 1, 41000, r2_done);
+    state.record_helper_request_failed(helper_b, "connect failed");
+
+    assert!(state.finish_udp_check(r2_done).is_none());
+    assert!(state.udp_open);
+    assert!(state.udp_verified);
+    assert!(!state.udp_check_in_progress());
+    assert!(!state.is_udp_firewalled());
 }
 
 #[test]
