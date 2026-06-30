@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -43,6 +45,7 @@ pub struct SharedReloadDiagnostics {
     pub missing_mtime_count: usize,
     pub stat_failed_count: usize,
     pub skipped_failed_count: usize,
+    pub skipped_intake_count: usize,
     pub stale_hash_count: usize,
     pub disk_count: usize,
 }
@@ -61,6 +64,7 @@ impl Default for SharedReloadDiagnostics {
             missing_mtime_count: 0,
             stat_failed_count: 0,
             skipped_failed_count: 0,
+            skipped_intake_count: 0,
             stale_hash_count: 0,
             disk_count: 0,
         }
@@ -126,6 +130,97 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
     }
 }
 
+const MAX_EMULE_FILE_SIZE: u64 = 0x4000000000;
+
+fn should_ignore_shared_file_candidate(path: &Path, metadata: &Metadata) -> bool {
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    metadata.len() == 0
+        || metadata.len() > MAX_EMULE_FILE_SIZE
+        || has_windows_ignored_file_attributes(metadata)
+        || should_ignore_shared_file_name(&file_name)
+}
+
+#[cfg(windows)]
+fn has_windows_ignored_file_attributes(metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+    const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x0000_0100;
+    metadata.file_attributes() & (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_TEMPORARY) != 0
+}
+
+#[cfg(not(windows))]
+fn has_windows_ignored_file_attributes(_: &Metadata) -> bool {
+    false
+}
+
+fn should_ignore_shared_file_name(file_name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "ehthumbs.db",
+        "desktop.ini",
+        ".ds_store",
+        ".localized",
+        "Icon\r",
+        ".directory",
+    ];
+    const PREFIXES: &[&str] = &["._", "~$", ".nfs", ".sb-", ".syncthing."];
+    const SUFFIXES: &[&str] = &[
+        ".lnk",
+        ".part",
+        ".crdownload",
+        ".download",
+        ".tmp",
+        ".temp",
+        "~",
+    ];
+
+    EXACT
+        .iter()
+        .any(|name| file_name.eq_ignore_ascii_case(name))
+        || PREFIXES
+            .iter()
+            .any(|prefix| starts_with_ascii_case_insensitive(file_name, prefix))
+        || SUFFIXES
+            .iter()
+            .any(|suffix| ends_with_ascii_case_insensitive(file_name, suffix))
+        || (starts_with_ascii_case_insensitive(file_name, "~lock.")
+            && ends_with_ascii_case_insensitive(file_name, "#")
+            && file_name.len() >= "~lock.".len() + "#".len())
+}
+
+fn should_ignore_shared_directory_name(directory_name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        ".fseventsd",
+        ".spotlight-v100",
+        ".temporaryitems",
+        ".trashes",
+        ".git",
+        ".svn",
+        ".hg",
+        "CVS",
+    ];
+    const PREFIXES: &[&str] = &["._", ".nfs", ".sb-", ".syncthing."];
+
+    EXACT
+        .iter()
+        .any(|name| directory_name.eq_ignore_ascii_case(name))
+        || PREFIXES
+            .iter()
+            .any(|prefix| starts_with_ascii_case_insensitive(directory_name, prefix))
+}
+
+fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn ends_with_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
 /// Enumerate the regular files under a shared-directory root.
 ///
 /// This walk is intentionally synchronous and recursive (via `walkdir`), so it
@@ -143,7 +238,7 @@ pub(crate) fn collect_shared_directory_files(
     root: &Path,
     recursive: bool,
     output: &mut Vec<PathBuf>,
-) -> Result<()> {
+) -> Result<usize> {
     // Operator-facing shared-directory boundary: walk the root through the
     // long-path helper so a shared tree deeper than the legacy MAX_PATH (260)
     // limit is still enumerated. The verbatim root flows into every entry path
@@ -152,14 +247,26 @@ pub(crate) fn collect_shared_directory_files(
     let root = long_path(root);
     let root = root.as_path();
     let max_depth = if recursive { usize::MAX } else { 1 };
+    let skipped_intake_count = Cell::new(0usize);
     for entry in WalkDir::new(root)
         .max_depth(max_depth)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            if should_ignore_shared_directory_name(&entry.file_name().to_string_lossy()) {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
+                return false;
+            }
+            true
+        })
     {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
                 tracing::warn!(
                     root = %root.display(),
                     error = %error,
@@ -169,10 +276,26 @@ pub(crate) fn collect_shared_directory_files(
             }
         };
         if entry.file_type().is_file() {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    skipped_intake_count.set(skipped_intake_count.get() + 1);
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        error = %error,
+                        "skipping unreadable shared file candidate",
+                    );
+                    continue;
+                }
+            };
+            if should_ignore_shared_file_candidate(entry.path(), &metadata) {
+                skipped_intake_count.set(skipped_intake_count.get() + 1);
+                continue;
+            }
             output.push(entry.into_path());
         }
     }
-    Ok(())
+    Ok(skipped_intake_count.get())
 }
 
 /// Async-safe wrapper around [`collect_shared_directory_files`] for every root.
@@ -182,16 +305,29 @@ pub(crate) fn collect_shared_directory_files(
 /// recursive filesystem walk on a runtime worker thread.
 pub(crate) async fn scan_shared_directory_roots(
     roots: Vec<SharedDirectoryRoot>,
-) -> Result<Vec<PathBuf>> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
+) -> Result<SharedScanResult> {
+    tokio::task::spawn_blocking(move || -> Result<SharedScanResult> {
         let mut file_paths = Vec::new();
+        let mut skipped_intake_count = 0;
         for root in roots {
-            collect_shared_directory_files(Path::new(&root.path), root.recursive, &mut file_paths)
-                .with_context(|| format!("failed to scan shared directory {}", root.path))?;
+            skipped_intake_count += collect_shared_directory_files(
+                Path::new(&root.path),
+                root.recursive,
+                &mut file_paths,
+            )
+            .with_context(|| format!("failed to scan shared directory {}", root.path))?;
         }
-        Ok(file_paths)
+        Ok(SharedScanResult {
+            file_paths,
+            skipped_intake_count,
+        })
     })
     .await?
+}
+
+pub(crate) struct SharedScanResult {
+    file_paths: Vec<PathBuf>,
+    skipped_intake_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,15 +368,15 @@ pub(crate) fn hashing_count_snapshot(core: &EmulebbCore) -> i64 {
 }
 
 /// Scan the configured shared roots and return the deduped, sorted file list.
-async fn scan_shared_files(core: &EmulebbCore) -> Result<Vec<PathBuf>> {
+async fn scan_shared_files(core: &EmulebbCore) -> Result<SharedScanResult> {
     let roots = core.state.lock().await.shared_directories.clone();
     // The recursive directory walk is synchronous and may be large, so the helper
     // runs it off the async executor via spawn_blocking to avoid stalling a tokio
     // worker thread.
-    let mut file_paths = scan_shared_directory_roots(roots).await?;
-    file_paths.sort();
-    file_paths.dedup();
-    Ok(file_paths)
+    let mut result = scan_shared_directory_roots(roots).await?;
+    result.file_paths.sort();
+    result.file_paths.dedup();
+    Ok(result)
 }
 
 /// Outcome of partitioning a freshly scanned shared-file list against the
@@ -291,6 +427,7 @@ struct ReloadPlanStats {
     missing_mtime_count: usize,
     stat_failed_count: usize,
     skipped_failed_count: usize,
+    skipped_intake_count: usize,
     stale_hash_count: usize,
 }
 
@@ -313,6 +450,7 @@ impl ReloadPlanStats {
             missing_mtime_count: self.missing_mtime_count,
             stat_failed_count: self.stat_failed_count,
             skipped_failed_count: self.skipped_failed_count,
+            skipped_intake_count: self.skipped_intake_count,
             stale_hash_count: self.stale_hash_count,
             disk_count: 0,
         }
@@ -504,14 +642,16 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     record_reload_diagnostics(core, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
     });
-    let file_paths = scan_shared_files(core).await?;
+    let scan = scan_shared_files(core).await?;
     record_reload_diagnostics(core, |diagnostics| {
         diagnostics.phase = "planning".to_string();
-        diagnostics.scanned_count = file_paths.len();
+        diagnostics.scanned_count = scan.file_paths.len();
+        diagnostics.skipped_intake_count = scan.skipped_intake_count;
     });
     // Incremental skip: only (re)hash files that are new or whose size/mtime
     // changed since the last index; unchanged files keep their persisted shares.
-    let plan = plan_incremental_reload(core, file_paths).await?;
+    let mut plan = plan_incremental_reload(core, scan.file_paths).await?;
+    plan.stats.skipped_intake_count = scan.skipped_intake_count;
     record_reload_diagnostics(core, |diagnostics| {
         *diagnostics = plan.stats.clone().into_diagnostics("hashing", true, false);
     });
@@ -623,16 +763,19 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
     record_reload_diagnostics(&core, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
     });
-    let file_paths = scan_shared_files(&core).await?;
-    let scanned = file_paths.len();
+    let scan = scan_shared_files(&core).await?;
+    let scanned = scan.file_paths.len();
+    let skipped_intake_count = scan.skipped_intake_count;
     record_reload_diagnostics(&core, |diagnostics| {
         diagnostics.phase = "planning".to_string();
         diagnostics.scanned_count = scanned;
+        diagnostics.skipped_intake_count = skipped_intake_count;
     });
     // Incremental skip: an unchanged file (same path + size + mtime as its
     // persisted manifest) is NOT re-hashed, so a restart over an unchanged
     // library finishes near-instantly and `hashingCount` stays ~0.
-    let plan = plan_incremental_reload(&core, file_paths).await?;
+    let mut plan = plan_incremental_reload(&core, scan.file_paths).await?;
+    plan.stats.skipped_intake_count = skipped_intake_count;
     record_reload_diagnostics(&core, |diagnostics| {
         *diagnostics = plan.stats.clone().into_diagnostics(
             "hashing",
@@ -824,8 +967,9 @@ mod tests {
         fs::write(nested.join("deep.dat"), b"c").unwrap();
 
         let mut output = Vec::new();
-        collect_shared_directory_files(&root, false, &mut output).unwrap();
+        let skipped = collect_shared_directory_files(&root, false, &mut output).unwrap();
 
+        assert_eq!(skipped, 0);
         assert_eq!(names(output), vec!["top-a.dat", "top-b.dat"]);
         fs::remove_dir_all(&root).ok();
     }
@@ -839,8 +983,9 @@ mod tests {
         fs::write(nested.join("deep.dat"), b"b").unwrap();
 
         let mut output = Vec::new();
-        collect_shared_directory_files(&root, true, &mut output).unwrap();
+        let skipped = collect_shared_directory_files(&root, true, &mut output).unwrap();
 
+        assert_eq!(skipped, 0);
         // Directories are skipped; only the two files are reported.
         assert_eq!(names(output), vec!["deep.dat", "top.dat"]);
         fs::remove_dir_all(&root).ok();
@@ -858,7 +1003,52 @@ mod tests {
         let mut output = Vec::new();
         let result = collect_shared_directory_files(&missing, true, &mut output);
 
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn shared_scan_ignores_mfc_intake_file_names_and_empty_files() {
+        let root = scratch_dir("ignored-files");
+        fs::write(root.join("alpha.bin"), b"a").unwrap();
+        fs::write(root.join("desktop.ini"), b"metadata").unwrap();
+        fs::write(root.join("download.part"), b"partial").unwrap();
+        fs::write(root.join("~$office.tmp"), b"lock").unwrap();
+        fs::write(root.join("empty.bin"), b"").unwrap();
+
+        let mut output = Vec::new();
+        let skipped = collect_shared_directory_files(&root, false, &mut output).unwrap();
+
+        assert_eq!(skipped, 4);
+        assert_eq!(names(output), vec!["alpha.bin"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recursive_shared_scan_prunes_mfc_ignored_directories() {
+        let root = scratch_dir("ignored-dirs");
+        fs::write(root.join("alpha.bin"), b"a").unwrap();
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("object.bin"), b"b").unwrap();
+        let nested = root.join("visible");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("beta.bin"), b"c").unwrap();
+
+        let mut output = Vec::new();
+        let skipped = collect_shared_directory_files(&root, true, &mut output).unwrap();
+
+        assert_eq!(skipped, 1);
+        assert_eq!(names(output), vec!["alpha.bin", "beta.bin"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn shared_file_name_policy_matches_mfc_affixes() {
+        assert!(should_ignore_shared_file_name(".DS_Store"));
+        assert!(should_ignore_shared_file_name("._resource"));
+        assert!(should_ignore_shared_file_name("download.crdownload"));
+        assert!(should_ignore_shared_file_name("~lock.document#"));
+        assert!(!should_ignore_shared_file_name("sample.data"));
     }
 }
