@@ -73,10 +73,9 @@ fn udp_round_two_stays_open_for_a_consistently_open_node() {
 }
 
 #[test]
-fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
-    // The companion to the open case: after an open round 1, a round 2 that gets
-    // two completed negative replies must genuinely time out as firewalled (not
-    // be skipped).
+fn udp_round_remote_errors_preserve_previous_verified_open_verdict() {
+    // MFC's Process_KADEMLIA2_FIREWALLUDP treats remote-error and wrong-port
+    // replies as cancelled tests, not completed negative votes.
     let mut state = KadFirewallState::default();
     let helper_a = "203.0.113.31".parse().unwrap();
     let helper_b = "203.0.113.32".parse().unwrap();
@@ -90,18 +89,19 @@ fn udp_round_two_finalizes_firewalled_for_a_genuinely_closed_node() {
     ));
     assert!(state.udp_open);
 
-    // Round 2: two negative replies, then the round times out -> firewalled.
+    // Round 2: one remote error and one wrong-port report, then timeout -> no
+    // closed verdict because both helper outcomes are cancelled.
     let r2_start = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 0).unwrap();
     let r2_done = Utc.with_ymd_and_hms(2026, 3, 22, 22, 43, 30).unwrap();
     assert!(state.begin_udp_check([helper_a, helper_b], [41000], r2_start));
     let _ = state.record_firewall_udp_packet(helper_a, 1, 41000, r2_done);
     let _ = state.record_firewall_udp_packet(helper_b, 0, 42000, r2_done);
-    let summary = state.finish_udp_check(r2_done).expect("summary");
 
-    assert!(!summary.open);
-    assert!(!state.udp_open);
+    assert!(state.finish_udp_check(r2_done).is_none());
+    assert!(state.udp_open);
     assert!(state.udp_verified);
-    assert!(state.is_udp_firewalled());
+    assert!(!state.udp_check_in_progress());
+    assert!(!state.is_udp_firewalled());
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn is_udp_firewalled_assumes_open_until_verified_closed() {
 }
 
 #[test]
-fn udp_round_times_out_as_firewalled_after_negative_results() {
+fn udp_round_times_out_as_firewalled_after_completed_failed_tests() {
     let mut state = KadFirewallState::default();
     let helper_a = "203.0.113.10".parse().unwrap();
     let helper_b = "203.0.113.11".parse().unwrap();
@@ -194,8 +194,8 @@ fn udp_round_times_out_as_firewalled_after_negative_results() {
     let completed_at = Utc.with_ymd_and_hms(2026, 3, 22, 22, 31, 20).unwrap();
 
     assert!(state.begin_udp_check([helper_a, helper_b], [41000], started_at));
-    let _ = state.record_firewall_udp_packet(helper_a, 1, 41000, completed_at);
-    let _ = state.record_firewall_udp_packet(helper_b, 0, 42000, completed_at);
+    state.record_helper_test_failed(helper_a, "helper disconnected during UDP probe");
+    state.record_helper_test_failed(helper_b, "helper disconnected during UDP probe");
     let summary = state.finish_udp_check(completed_at).expect("summary");
 
     assert!(!summary.open);
@@ -246,11 +246,11 @@ fn udp_round_does_not_trust_a_single_off_list_port() {
     // Two helpers report two *different* off-list ports: no corroboration.
     let _ = state.record_firewall_udp_packet(helper_a, 0, 53000, completed_at);
     let _ = state.record_firewall_udp_packet(helper_b, 0, 54000, completed_at);
-    let summary = state.finish_udp_check(completed_at).expect("summary");
+    let summary = state.finish_udp_check(completed_at);
 
-    assert!(!summary.open);
-    assert_eq!(summary.external_udp_port, None);
-    assert!(!state.udp_open);
+    assert!(summary.is_none());
+    assert!(!state.udp_verified);
+    assert!(!state.is_udp_firewalled());
 }
 
 #[test]

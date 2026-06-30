@@ -29,7 +29,7 @@ pub struct UdpFirewallCheckSummary {
     pub helpers_requested: usize,
     /// Number of helper peers that replied with a positive UDP check.
     pub helpers_succeeded: usize,
-    /// Number of helper peers that reported an error or wrong port.
+    /// Number of helper peers whose completed UDP probe produced a negative result.
     pub helpers_failed: usize,
     /// Timestamp when the round started.
     pub started_at: DateTime<Utc>,
@@ -44,8 +44,13 @@ pub struct UdpFirewallCheckSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HelperOutcome {
     Pending,
+    /// The TCP request could not be sent, so the helper did not actually run the test.
     RequestFailed,
+    /// The helper ran the test and explicitly completed it with a negative result.
+    TestFailed,
+    /// The helper reported a remote-side error; MFC treats this as cancelled.
     RemoteError,
+    /// The helper reported an unexpected port; MFC treats this as cancelled.
     WrongPort,
     Succeeded,
 }
@@ -401,6 +406,17 @@ impl KadFirewallState {
         }
     }
 
+    /// Mark one helper test as failed after the helper accepted the UDP probe request.
+    pub fn record_helper_test_failed(&mut self, helper_ip: IpAddr, error: &str) {
+        if let Some(round) = &mut self.active_round
+            && let Some(outcome) = round.helper_outcomes.get_mut(&helper_ip)
+        {
+            *outcome = HelperOutcome::TestFailed;
+            self.last_helper_ip = Some(helper_ip.to_string());
+            self.last_error = Some(error.to_string());
+        }
+    }
+
     /// Record an inbound `KADEMLIA2_FIREWALLUDP` packet for the current round.
     pub fn record_firewall_udp_packet(
         &mut self,
@@ -467,6 +483,8 @@ impl KadFirewallState {
             return FirewallUdpPacketOutcome::Recorded;
         }
 
+        // MFC treats wrong-port and remote-error FIREWALLUDP replies as cancelled
+        // tests (`bTestCancelled=true`), not completed negative votes.
         *outcome = if error_code == 0 {
             HelperOutcome::WrongPort
         } else {
@@ -518,20 +536,9 @@ impl KadFirewallState {
         let explicit_failed_helpers = round
             .helper_outcomes
             .values()
-            .filter(|outcome| {
-                matches!(
-                    outcome,
-                    HelperOutcome::RemoteError | HelperOutcome::WrongPort
-                )
-            })
+            .filter(|outcome| matches!(outcome, HelperOutcome::TestFailed))
             .count();
-        let has_incomplete_helpers = round.helper_outcomes.values().any(|outcome| {
-            matches!(
-                outcome,
-                HelperOutcome::Pending | HelperOutcome::RequestFailed
-            )
-        });
-        if has_incomplete_helpers && explicit_failed_helpers < UDP_FIREWALL_CHECK_CLIENTS_TO_ASK {
+        if explicit_failed_helpers < UDP_FIREWALL_CHECK_CLIENTS_TO_ASK {
             self.last_error =
                 Some("UDP firewall-check timed out without enough helper replies".to_string());
             self.active_round = None;
@@ -587,7 +594,7 @@ fn finalize_round(
     let helpers_failed = round
         .helper_outcomes
         .values()
-        .filter(|outcome| !matches!(outcome, HelperOutcome::Pending | HelperOutcome::Succeeded))
+        .filter(|outcome| matches!(outcome, HelperOutcome::TestFailed))
         .count();
 
     *udp_open = open;
