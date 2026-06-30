@@ -6121,6 +6121,7 @@ async fn handle_kad_local_store_packet(
             );
             match outcome {
                 FirewallUdpPacketOutcome::Open(summary) => {
+                    crate::diag_kad_event::firewall(false);
                     // An open result that discovered a distinct external UDP port
                     // is the most authoritative reachability fact; pin it over the
                     // UPnP mapping. (The driver loop also applies this on finish;
