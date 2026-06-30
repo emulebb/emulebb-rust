@@ -602,10 +602,21 @@ async fn plan_incremental_reload(
                 }
             }
         }
+        let kept_hashes = reused_shares
+            .iter()
+            .map(|share| share.file_hash.to_ascii_lowercase())
+            .chain(
+                to_hash
+                    .iter()
+                    .flat_map(|target| target.stale_hashes.iter())
+                    .map(|hash| hash.to_ascii_lowercase()),
+            )
+            .collect::<HashSet<_>>();
         let pruned_hashes = index
             .iter()
             .filter(|(key, _)| !scanned_source_keys.contains(*key))
             .flat_map(|(_, entries)| entries.iter().map(|entry| entry.file_hash.clone()))
+            .filter(|hash| !kept_hashes.contains(&hash.to_ascii_lowercase()))
             .collect::<Vec<_>>();
         stats.pruned_count = pruned_hashes.len();
         ReloadPlan {
@@ -999,6 +1010,43 @@ mod tests {
         forget_stale_shares(&core, &plan.pruned_hashes, "").await;
         assert!(core.share(&shared.hash).await.is_none());
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn incremental_reload_keeps_hash_when_duplicate_source_remains_scanned() {
+        let root = scratch_dir("duplicate-source");
+        let kept_source = root.join("Kept.Source.bin");
+        let missing_source = root.join("Missing.Source.bin");
+        fs::write(&kept_source, b"same payload").unwrap();
+        fs::write(&missing_source, b"same payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        let kept = core
+            .share_local_file(LocalShareCreate {
+                path: kept_source.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        let duplicate = core
+            .share_local_file(LocalShareCreate {
+                path: missing_source.display().to_string(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(kept.hash, duplicate.hash);
+
+        let plan = plan_incremental_reload(&core, vec![kept_source.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(plan.reused_shares.len(), 1);
+        assert_eq!(plan.reused_shares[0].file_hash, kept.hash);
+        assert!(plan.pruned_hashes.is_empty());
+        assert_eq!(plan.stats.pruned_count, 0);
         fs::remove_dir_all(&root).ok();
     }
 
