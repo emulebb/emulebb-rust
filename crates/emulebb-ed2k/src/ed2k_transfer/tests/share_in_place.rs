@@ -64,6 +64,19 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         .expect("a completed shared file must serve its verified range");
     assert_eq!(served.len() as u64, size);
     assert_eq!(served, fs::read(&source_path).unwrap());
+
+    // (5) A single upload request can serve multiple fragments through one
+    // verified reader, avoiding repeated manifest loads and file opens.
+    let mut reader = runtime
+        .open_verified_range_reader(&hash)
+        .await
+        .unwrap()
+        .expect("a completed shared file must open a verified range reader");
+    let source_bytes = fs::read(&source_path).unwrap();
+    let first = reader.read_range(0, 4096).await.unwrap().unwrap();
+    let second = reader.read_range(4096, 8192).await.unwrap().unwrap();
+    assert_eq!(first, source_bytes[0..4096]);
+    assert_eq!(second, source_bytes[4096..8192]);
 }
 
 /// Best-effort canonicalization for path comparison (the ingest path is stored

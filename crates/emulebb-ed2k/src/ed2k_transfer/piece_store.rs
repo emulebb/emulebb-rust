@@ -1,6 +1,6 @@
 //! Piece claim, persistence, and verified-range IO for ED2K transfers.
 
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
@@ -11,9 +11,36 @@ use crate::long_path::long_path;
 use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
-    Ed2kClaimedPart, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME,
-    PieceWriteOutcome, expected_piece_length,
+    Ed2kClaimedPart, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferRuntime, Ed2kTransferState,
+    PAYLOAD_FILE_NAME, PieceWriteOutcome, expected_piece_length,
 };
+
+/// Verified upload reader for one local file.
+///
+/// Holds a single open payload handle plus a verified-range snapshot so one
+/// `OP_REQUESTPARTS` serve can walk many `EMBLOCKSIZE` fragments without
+/// reopening the same file or reloading the manifest for every fragment.
+pub(crate) struct Ed2kVerifiedRangeReader {
+    file: tokio::fs::File,
+    verified_ranges: Vec<Ed2kSharedRange>,
+}
+
+impl Ed2kVerifiedRangeReader {
+    pub(crate) async fn read_range(&mut self, start: u64, end: u64) -> Result<Option<Vec<u8>>> {
+        if !self
+            .verified_ranges
+            .iter()
+            .any(|range| start >= range.start && end <= range.end)
+        {
+            return Ok(None);
+        }
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        self.file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut bytes = vec![0u8; usize::try_from(end.saturating_sub(start)).unwrap_or(0)];
+        self.file.read_exact(&mut bytes).await?;
+        Ok(Some(bytes))
+    }
+}
 
 impl Ed2kTransferRuntime {
     /// Mark a specific missing piece as requested.
@@ -469,39 +496,45 @@ impl Ed2kTransferRuntime {
         start: u64,
         end: u64,
     ) -> Result<Option<Vec<u8>>> {
+        let Some(mut reader) = self.open_verified_range_reader(file_hash).await? else {
+            return Ok(None);
+        };
+        reader.read_range(start, end).await
+    }
+
+    pub(crate) async fn open_verified_range_reader(
+        &self,
+        file_hash: &Ed2kHash,
+    ) -> Result<Option<Ed2kVerifiedRangeReader>> {
         let hash_hex = file_hash.to_string();
         // Read the manifest geometry (verified-range check + payload path) under
         // the manifest_io lock, then drop it before touching the payload file, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
-        let payload_path = {
+        let (payload_path, verified_ranges) = {
             let _guard = self.manifest_io.lock().await;
             let manifest = self.load_manifest_unlocked(&hash_hex).await?;
-            if !manifest
-                .verified_ranges
-                .iter()
-                .any(|range| start >= range.start && end <= range.end)
-            {
+            if manifest.verified_ranges.is_empty() {
                 return Ok(None);
             }
             // Share-in-place: serve upload bytes straight from the original
             // on-disk file (never copied into the piece store). A real download
             // reads from the internal piece store.
-            match manifest.source_path.as_deref() {
+            let payload_path: PathBuf = match manifest.source_path.as_deref() {
                 Some(source_path) => long_path(std::path::Path::new(source_path)),
                 None => self.transfer_dir(&hash_hex).join(PAYLOAD_FILE_NAME),
-            }
+            };
+            (payload_path, manifest.verified_ranges.clone())
         };
-        let mut file = tokio::fs::OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .read(true)
             .open(&payload_path)
             .await
             .with_context(|| format!("failed to open piece store {}", payload_path.display()))?;
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        file.seek(std::io::SeekFrom::Start(start)).await?;
-        let mut bytes = vec![0u8; usize::try_from(end.saturating_sub(start)).unwrap_or(0)];
-        file.read_exact(&mut bytes).await?;
-        Ok(Some(bytes))
+        Ok(Some(Ed2kVerifiedRangeReader {
+            file,
+            verified_ranges,
+        }))
     }
 }
 

@@ -229,6 +229,19 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         }
     }
     transfer_runtime.note_file_upload_accept(&requested).await;
+    let Some(mut verified_reader) = transfer_runtime
+        .open_verified_range_reader(&requested)
+        .await?
+    else {
+        request_diag.note_skip("noVerifiedReader");
+        emit_upload_request_outcome(
+            &peer_upload_identity,
+            &requested,
+            "noPayload",
+            &request_diag,
+        );
+        return Ok(UploadPayloadOutcome::Continue { requested });
+    };
 
     for (start, end) in ranges {
         // FIX (memory-amplification DoS): never read or buffer a whole
@@ -269,8 +282,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         let mut range_served = false;
         while fragment_start < end {
             let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
-            let Some(bytes) = transfer_runtime
-                .read_verified_range(&requested, fragment_start, fragment_end)
+            let Some(bytes) = verified_reader
+                .read_range(fragment_start, fragment_end)
                 .await?
             else {
                 // A fragment that is not (fully) verified ends serving of this
