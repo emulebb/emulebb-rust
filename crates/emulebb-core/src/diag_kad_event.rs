@@ -60,6 +60,14 @@ impl KadPublishKind {
             Self::Notes => "notes_published",
         }
     }
+
+    fn failure_milestone(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword_publish_failed",
+            Self::Source => "source_publish_failed",
+            Self::Notes => "notes_publish_failed",
+        }
+    }
 }
 
 /// Outbound-publish milestone (uniform-diagnostics-v2 §3.3): we STORE one shared
@@ -84,6 +92,32 @@ pub(crate) fn publish(kind: KadPublishKind, file_hash: &str, stats: PublishAttem
         FAMILY,
         kind.event(),
         "info",
+        json!({ "fileHash": file_hash }),
+        body,
+    );
+}
+
+/// Outbound-publish failure milestone. This keeps live parity runs explainable
+/// when a store search is admitted but fails before any contact ACKs are counted.
+pub(crate) fn publish_failure(
+    kind: KadPublishKind,
+    file_hash: &str,
+    failure_class: &str,
+    elapsed_ms: u64,
+    error: &str,
+) {
+    let body = json!({
+        "milestone": kind.failure_milestone(),
+        "action": "publish",
+        "publishKind": kind.publish_kind(),
+        "failureClass": failure_class,
+        "elapsedMs": elapsed_ms,
+        "error": error,
+    });
+    emit(
+        FAMILY,
+        kind.event(),
+        "low",
         json!({ "fileHash": file_hash }),
         body,
     );

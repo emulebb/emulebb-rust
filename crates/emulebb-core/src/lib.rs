@@ -4636,6 +4636,14 @@ fn kad_shared_publish_kind_cap(kind: KadSharedPublishKind) -> usize {
     }
 }
 
+fn diag_publish_kind(kind: KadSharedPublishKind) -> diag_kad_event::KadPublishKind {
+    match kind {
+        KadSharedPublishKind::Keyword => diag_kad_event::KadPublishKind::Keyword,
+        KadSharedPublishKind::Source => diag_kad_event::KadPublishKind::Source,
+        KadSharedPublishKind::Notes => diag_kad_event::KadPublishKind::Notes,
+    }
+}
+
 fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> usize {
     runtime.dht.max_concurrent_searches().max(1)
 }
@@ -5474,6 +5482,13 @@ async fn drain_completed_kad_publish_tasks(
             },
             Err(KadSharedPublishError::Busy) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Busy);
+                diag_kad_event::publish_failure(
+                    diag_publish_kind(outcome.kind),
+                    &primary_file_hash,
+                    "busy",
+                    elapsed_ms,
+                    "",
+                );
                 tracing::debug!(
                     file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
@@ -5483,6 +5498,13 @@ async fn drain_completed_kad_publish_tasks(
             }
             Err(KadSharedPublishError::TimedOut) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::TimedOut);
+                diag_kad_event::publish_failure(
+                    diag_publish_kind(outcome.kind),
+                    &primary_file_hash,
+                    "timedOut",
+                    elapsed_ms,
+                    "",
+                );
                 tracing::debug!(
                     file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
@@ -5492,6 +5514,13 @@ async fn drain_completed_kad_publish_tasks(
             }
             Err(KadSharedPublishError::Failed(error)) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Other);
+                diag_kad_event::publish_failure(
+                    diag_publish_kind(outcome.kind),
+                    &primary_file_hash,
+                    "failed",
+                    elapsed_ms,
+                    &error,
+                );
                 tracing::debug!(
                     file_hash = %primary_file_hash,
                     kind = outcome.kind.label(),
