@@ -5001,7 +5001,7 @@ async fn publish_kad_due_shared_files(
     )
     .await;
     let mut available_publish_starts = runtime.dht.available_search_permits();
-    if available_publish_starts == 0 && publish_tasks.len() < in_flight_budget {
+    if available_publish_starts == 0 && publish_tasks.is_empty() {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "dhtSearchBusy".to_string();
             diagnostics.running = true;
