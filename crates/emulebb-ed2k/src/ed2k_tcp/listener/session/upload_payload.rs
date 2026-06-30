@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Instant};
 
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
@@ -50,6 +50,8 @@ struct UploadRequestDiag {
     sent_payload_bytes: u64,
     payload_packets: usize,
     throttle_delay_ms: u64,
+    verified_reader_open_ms: u64,
+    payload_read_ms: u64,
     first_skip_reason: Option<&'static str>,
 }
 
@@ -97,6 +99,8 @@ fn emit_upload_request_outcome(
             diag.served_bytes,
             diag.payload_packets,
             diag.throttle_delay_ms,
+            diag.verified_reader_open_ms,
+            diag.payload_read_ms,
             diag.first_skip_reason,
         );
     }
@@ -229,6 +233,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         }
     }
     transfer_runtime.note_file_upload_accept(&requested).await;
+    let verified_reader_open_start = Instant::now();
     let Some(mut verified_reader) = transfer_runtime
         .open_verified_range_reader(&requested)
         .await?
@@ -242,6 +247,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         );
         return Ok(UploadPayloadOutcome::Continue { requested });
     };
+    request_diag.verified_reader_open_ms =
+        u64::try_from(verified_reader_open_start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     for (start, end) in ranges {
         // FIX (memory-amplification DoS): never read or buffer a whole
@@ -282,10 +289,14 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         let mut range_served = false;
         while fragment_start < end {
             let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
-            let Some(bytes) = verified_reader
+            let payload_read_start = Instant::now();
+            let read_result = verified_reader
                 .read_range(fragment_start, fragment_end)
-                .await?
-            else {
+                .await?;
+            request_diag.payload_read_ms = request_diag.payload_read_ms.saturating_add(
+                u64::try_from(payload_read_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            let Some(bytes) = read_result else {
                 // A fragment that is not (fully) verified ends serving of this
                 // range; the master likewise serves only complete parts.
                 request_diag.note_skip("unverifiedRange");
