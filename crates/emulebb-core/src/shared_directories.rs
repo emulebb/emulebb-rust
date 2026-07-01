@@ -592,15 +592,6 @@ async fn plan_incremental_reload(
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
     let failure_entries = load_shared_source_failures(core).await?;
-    let active_shared_hashes = {
-        let shared_catalog = core.ed2k_transfers.shared_catalog();
-        let catalog = shared_catalog.read().await;
-        catalog
-            .iter()
-            .filter(|entry| !entry.compatibility_hint)
-            .map(|entry| entry.file_hash.to_ascii_lowercase())
-            .collect::<HashSet<_>>()
-    };
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
             .into_iter()
@@ -633,8 +624,6 @@ async fn plan_incremental_reload(
                                 entry.file_size == size
                                     && entry.source_mtime_ms.is_some()
                                     && entry.source_mtime_ms == mtime_ms
-                                    && active_shared_hashes
-                                        .contains(&entry.file_hash.to_ascii_lowercase())
                             }) {
                                 stats.reused_count += 1;
                                 stats.stale_hash_count += entries.len().saturating_sub(1);
@@ -1107,6 +1096,60 @@ mod tests {
         forget_stale_shares(&core, &plan.pruned_hashes, "").await;
         assert!(core.share(&shared.hash).await.is_none());
         assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn incremental_reload_reuses_imported_share_not_yet_active() {
+        let root = scratch_dir("imported-source");
+        let source = root.join("Imported.Source.bin");
+        fs::write(&source, b"imported payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+        let file_hash = "00112233445566778899aabbccddeeff".to_string();
+        core.metadata_store
+            .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
+                file_hash: file_hash.clone(),
+                canonical_name: "Imported.Source.bin".to_string(),
+                file_size: size,
+                piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+                completed: true,
+                md4_hashset_acquired: true,
+                md4_hashset: Vec::new(),
+                aich_hashset_acquired: false,
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                verified_ranges: vec![emulebb_metadata::MetadataTransferRange {
+                    start: 0,
+                    end: size,
+                }],
+                pieces: Vec::new(),
+                sources: Vec::new(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+                category_id: 0,
+                control_state: None,
+                transfer_row_removed: false,
+                delivered_path: None,
+                source_path: Some(source.display().to_string()),
+                source_mtime_ms: mtime_ms,
+            })
+            .unwrap();
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 0);
+
+        let plan = plan_incremental_reload(&core, vec![source.clone()])
+            .await
+            .unwrap();
+
+        assert!(plan.to_hash.is_empty());
+        assert_eq!(plan.reused_shares.len(), 1);
+        assert_eq!(plan.reused_shares[0].file_hash, file_hash);
+        assert_eq!(plan.stats.planned_hash_count, 0);
+        assert_eq!(plan.stats.reused_count, 1);
         fs::remove_dir_all(&root).ok();
     }
 
