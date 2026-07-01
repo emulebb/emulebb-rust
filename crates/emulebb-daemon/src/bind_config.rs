@@ -16,30 +16,29 @@ impl DaemonConfig {
         &self,
         interfaces: &[NetworkInterface],
     ) -> Result<Ipv4Addr> {
-        if let Some(candidate) = self.p2p_bind_ip {
-            if let Some(bind_interface) = self
-                .p2p_bind_interface
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                && let Err(error) =
-                    ensure_p2p_bind_ip_on_interface(interfaces, bind_interface, candidate)
-                && !self.vpn_guard_blocks_p2p()
-            {
-                return Err(error);
-            }
-            return Ok(candidate);
-        }
-
-        let Some(bind_interface) = self
+        let bind_interface = self
             .p2p_bind_interface
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
-        };
-        resolve_p2p_bind_interface_ip(interfaces, bind_interface)
+            .filter(|value| !value.is_empty());
+        if let Some(bind_interface) = bind_interface {
+            match resolve_p2p_bind_interface_ip(interfaces, bind_interface) {
+                Ok(bind_ip) => return Ok(bind_ip),
+                Err(error) => {
+                    if let Some(candidate) = self.p2p_bind_ip
+                        && self.vpn_guard_blocks_p2p()
+                    {
+                        return Ok(candidate);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        if let Some(candidate) = self.p2p_bind_ip {
+            return Ok(candidate);
+        }
+        bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
     }
 
     pub(crate) fn vpn_binding_confirmed(
@@ -53,23 +52,6 @@ impl DaemonConfig {
     fn vpn_guard_blocks_p2p(&self) -> bool {
         self.vpn_guard.enabled && self.vpn_guard.mode.eq_ignore_ascii_case("block")
     }
-}
-
-pub(crate) fn ensure_p2p_bind_ip_on_interface(
-    interfaces: &[NetworkInterface],
-    bind_interface: &str,
-    bind_ip: Ipv4Addr,
-) -> Result<()> {
-    let iface = find_unique_interface(interfaces, bind_interface)?;
-    let bind_ip_text = bind_ip.to_string();
-    if iface
-        .addresses
-        .iter()
-        .any(|address| address.address == bind_ip_text)
-    {
-        return Ok(());
-    }
-    bail!("p2pBindIp {bind_ip} is not assigned to p2pBindInterface {bind_interface:?}");
 }
 
 pub(crate) fn resolve_p2p_bind_interface_ip(

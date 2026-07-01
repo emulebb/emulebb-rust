@@ -706,7 +706,7 @@ fn p2p_bind_ip_and_interface_accept_matching_pair() {
 }
 
 #[test]
-fn p2p_bind_ip_and_interface_reject_mismatched_pair() {
+fn p2p_bind_ip_and_interface_prefers_current_interface_ip() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(
         temp.path().to_path_buf(),
@@ -714,16 +714,14 @@ fn p2p_bind_ip_and_interface_reject_mismatched_pair() {
     );
     config.p2p_bind_interface = Some("hide.me".to_string());
 
-    let error = config
+    let bind_ip = config
         .resolve_p2p_bind_ip_from_interfaces(&[
             iface("Ethernet", "192.0.2.10"),
             iface("hide.me", "10.44.55.66"),
         ])
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-    assert!(error.contains("p2pBindIp"));
-    assert!(error.contains("not assigned to p2pBindInterface"));
+    assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
 }
 
 #[test]
