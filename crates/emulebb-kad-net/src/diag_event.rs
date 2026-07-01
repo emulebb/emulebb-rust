@@ -134,12 +134,13 @@ pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
 }
 
 /// `family:"bad_peer"` abuse event (uniform-diagnostics-v2 §3.4): a Kad UDP peer
-/// was dropped by the public-network anti-flood guard. `behavior` is the abuse
-/// classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason` the
-/// drop classification (e.g. the tracker bucket/action label). `repeat_count` is
-/// the observed packet count in the tracker window; `window_seconds` the window.
-/// Only `peer` is known at the Kad UDP layer, so `peerHash`/`fileHash`/`searchId`
-/// are omitted (not faked). No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+/// was dropped or banned by the public-network anti-flood guard. `behavior` is
+/// the abuse classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason`
+/// the tracker classification (e.g. the tracker bucket/action label).
+/// `repeat_count` is the observed packet count in the tracker window;
+/// `window_seconds` the window. Only `peer` is known at the Kad UDP layer, so
+/// `peerHash`/`fileHash`/`searchId` are omitted (not faked). No-op when
+/// `EMULEBB_RUST_LOG_DIR` is unset.
 pub fn bad_peer_kad_drop(
     event: &'static str,
     severity: &'static str,
@@ -156,12 +157,20 @@ pub fn bad_peer_kad_drop(
         serde_json::json!({ "peer": peer.to_string() }),
         serde_json::json!({
             "behavior": behavior,
-            "action": "drop",
+            "action": bad_peer_action_for_behavior(behavior),
             "reason": reason,
             "repeatCount": repeat_count,
             "windowSeconds": window_seconds,
         }),
     );
+}
+
+fn bad_peer_action_for_behavior(behavior: &str) -> &'static str {
+    if behavior == "anti_flood_ban" {
+        "ban"
+    } else {
+        "drop"
+    }
 }
 
 fn diag_event_writer() -> Option<&'static DiagEventWriter> {
@@ -212,8 +221,8 @@ fn read_env_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAG_EVENT_FILE_PREFIX, DiagEventRecord, bad_peer_kad_drop, encode_record_line,
-        kad_event_bootstrap_contact_added,
+        DIAG_EVENT_FILE_PREFIX, DiagEventRecord, bad_peer_action_for_behavior, bad_peer_kad_drop,
+        encode_record_line, kad_event_bootstrap_contact_added,
     };
     use serde_json::json;
 
@@ -242,6 +251,13 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
         assert_eq!(decoded["schema"], "diag_event_v1");
         assert_eq!(decoded["family"], "kad_udp");
+    }
+
+    #[test]
+    fn bad_peer_action_matches_behavior() {
+        assert_eq!(bad_peer_action_for_behavior("anti_flood_ban"), "ban");
+        assert_eq!(bad_peer_action_for_behavior("anti_flood_drop"), "drop");
+        assert_eq!(bad_peer_action_for_behavior("other_bad_peer"), "drop");
     }
 
     #[test]
