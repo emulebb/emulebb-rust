@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
+use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, PreferencesUpdate, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent, ipfilter,
     ipfilter::IpFilter,
@@ -42,6 +42,7 @@ pub struct DaemonConfig {
     pub ed2k: Ed2kConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
+    pub preferences: DaemonPreferencesConfig,
     pub vpn_guard: VpnGuardSettings,
     pub ip_filter: IpFilterSettings,
 }
@@ -126,6 +127,15 @@ pub struct RestListenerConfig {
     pub api_key: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DaemonPreferencesConfig {
+    pub auto_connect: Option<bool>,
+    pub reconnect: Option<bool>,
+    pub network_kademlia: Option<bool>,
+    pub network_ed2k: Option<bool>,
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
@@ -138,6 +148,7 @@ impl Default for DaemonConfig {
             ed2k: Ed2kConfig::default(),
             nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
+            preferences: DaemonPreferencesConfig::default(),
             vpn_guard: VpnGuardSettings::default(),
             ip_filter: IpFilterSettings::default(),
         }
@@ -190,6 +201,25 @@ impl Default for RestListenerConfig {
             bind_addr: None,
             api_key: "change-me".to_string(),
         }
+    }
+}
+
+impl DaemonPreferencesConfig {
+    fn to_update(&self) -> Option<PreferencesUpdate> {
+        if self.auto_connect.is_none()
+            && self.reconnect.is_none()
+            && self.network_kademlia.is_none()
+            && self.network_ed2k.is_none()
+        {
+            return None;
+        }
+        Some(PreferencesUpdate {
+            auto_connect: self.auto_connect,
+            reconnect: self.reconnect,
+            network_kademlia: self.network_kademlia,
+            network_ed2k: self.network_ed2k,
+            ..PreferencesUpdate::default()
+        })
     }
 }
 
@@ -470,6 +500,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         )?
         .with_incoming_dir(incoming_dir),
     );
+    if let Some(update) = config.preferences.to_update() {
+        core.update_preferences(update)
+            .await
+            .context("failed to apply daemon preference overrides")?;
+    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(

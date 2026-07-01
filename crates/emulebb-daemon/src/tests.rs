@@ -85,6 +85,12 @@ p2pBindInterface = "Ethernet"
 bindAddr = "192.0.2.10:13301"
 apiKey = "secret"
 
+[preferences]
+autoConnect = true
+reconnect = true
+networkKademlia = true
+networkEd2k = true
+
 [kad]
 listenPort = 41002
 bootstrapNodes = ["192.0.2.30:41002"]
@@ -140,6 +146,15 @@ externalIpOverride = "203.0.113.10"
         config.rest.bind_addr,
         Some("192.0.2.10:13301".parse().unwrap())
     );
+    assert_eq!(config.preferences.auto_connect, Some(true));
+    assert_eq!(config.preferences.reconnect, Some(true));
+    assert_eq!(config.preferences.network_kademlia, Some(true));
+    assert_eq!(config.preferences.network_ed2k, Some(true));
+    let preference_update = config.preferences.to_update().unwrap();
+    assert_eq!(preference_update.auto_connect, Some(true));
+    assert_eq!(preference_update.reconnect, Some(true));
+    assert_eq!(preference_update.network_kademlia, Some(true));
+    assert_eq!(preference_update.network_ed2k, Some(true));
     assert_eq!(config.kad.listen_port, Some(41002));
     assert_eq!(config.kad.bootstrap_nodes, ["192.0.2.30:41002"]);
     assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
