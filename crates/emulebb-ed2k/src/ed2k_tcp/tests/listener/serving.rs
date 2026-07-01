@@ -105,55 +105,64 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
         read_until_opcode(&mut stream, OP_EDONKEYPROT, super::OP_ACCEPTUPLOADREQ).await;
     assert_eq!(accept_upload.len(), 6);
 
-    stream
-        .write_all(
-            &super::encode_request_parts_batch(&file_hash, &[(0, payload.len() as u64)]).unwrap(),
-        )
-        .await
-        .unwrap();
-
     let mut reconstructed = Vec::new();
     let mut saw_compressed = false;
-    let mut pending = None;
+    let mut request_start = 0u64;
     while reconstructed.len() < payload.len() {
-        let packet = read_packet(&mut stream).await;
-        match (packet[0], packet[5]) {
-            (OP_EMULEPROT, super::OP_COMPRESSEDPART) => {
-                saw_compressed = true;
-                let (decoded_hash, start, advertised_len, fragment) =
-                    super::decode_compressed_part_fragment(&packet[6..], false).unwrap();
-                assert_eq!(decoded_hash, file_hash);
-                // The serve walks the requested range in EMBLOCKSIZE blocks, each
-                // its own complete zlib stream that may span several wire
-                // fragments (all sharing the same `start`). A new block opens
-                // (pending == None) at the next contiguous offset.
-                if pending.is_none() {
-                    assert_eq!(start, reconstructed.len() as u64);
+        let request_end = request_start
+            .saturating_add(ED2K_EMBLOCK_SIZE * 3)
+            .min(payload.len() as u64);
+        stream
+            .write_all(
+                &super::encode_request_parts_batch(&file_hash, &[(request_start, request_end)])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let mut pending = None;
+        while reconstructed.len() < request_end as usize {
+            let packet = read_packet(&mut stream).await;
+            match (packet[0], packet[5]) {
+                (OP_EMULEPROT, super::OP_COMPRESSEDPART) => {
+                    saw_compressed = true;
+                    let (decoded_hash, start, advertised_len, fragment) =
+                        super::decode_compressed_part_fragment(&packet[6..], false).unwrap();
+                    assert_eq!(decoded_hash, file_hash);
+                    // The serve walks the requested range in EMBLOCKSIZE blocks,
+                    // each its own complete zlib stream that may span several
+                    // wire fragments (all sharing the same `start`). A new block
+                    // opens (pending == None) at the next contiguous offset.
+                    if pending.is_none() {
+                        assert_eq!(start, reconstructed.len() as u64);
+                    }
+                    let block_end = (start + ED2K_EMBLOCK_SIZE).min(request_end);
+                    let pending_stream =
+                        pending.get_or_insert_with(|| super::PendingCompressedPart {
+                            piece_index: 0,
+                            start,
+                            end: block_end,
+                            advertised_compressed_len: advertised_len,
+                            compressed_received: 0,
+                            uncompressed_written: 0,
+                            inflater: Decompress::new(true),
+                        });
+                    let (bytes, finished) =
+                        super::inflate_compressed_part_fragment(pending_stream, fragment).unwrap();
+                    reconstructed.extend_from_slice(&bytes);
+                    if finished {
+                        pending = None;
+                    }
                 }
-                let block_end = (start + ED2K_EMBLOCK_SIZE).min(payload.len() as u64);
-                let pending_stream = pending.get_or_insert_with(|| super::PendingCompressedPart {
-                    piece_index: 0,
-                    start,
-                    end: block_end,
-                    advertised_compressed_len: advertised_len,
-                    compressed_received: 0,
-                    uncompressed_written: 0,
-                    inflater: Decompress::new(true),
-                });
-                let (bytes, finished) =
-                    super::inflate_compressed_part_fragment(pending_stream, fragment).unwrap();
-                reconstructed.extend_from_slice(&bytes);
-                if finished {
-                    pending = None;
+                (OP_EDONKEYPROT, super::OP_SENDINGPART) => {
+                    let (_, _, _, bytes) =
+                        super::decode_sending_part_payload(&packet[6..], false).unwrap();
+                    reconstructed.extend_from_slice(&bytes);
                 }
+                _ => {}
             }
-            (OP_EDONKEYPROT, super::OP_SENDINGPART) => {
-                let (_, _, _, bytes) =
-                    super::decode_sending_part_payload(&packet[6..], false).unwrap();
-                reconstructed.extend_from_slice(&bytes);
-            }
-            _ => {}
         }
+        request_start = request_end;
     }
 
     assert!(saw_compressed);
@@ -332,19 +341,30 @@ async fn listener_obfuscated_upload_session_serves_verified_file_via_compressed_
         .unwrap();
     wait_for_transport_upload_accept(&mut transport).await;
 
-    request_transport_upload_parts(
-        &mut transport,
-        &file.file_hash,
-        &[(0, file.payload.len() as u64)],
-    )
-    .await;
-    let (reconstructed, saw_compressed) = read_transport_upload_bytes(
-        &mut transport,
-        &file.file_hash,
-        0,
-        file.payload.len() as u64,
-    )
-    .await;
+    let mut reconstructed = Vec::new();
+    let mut saw_compressed = false;
+    let mut request_start = 0u64;
+    while reconstructed.len() < file.payload.len() {
+        let request_end = request_start
+            .saturating_add(ED2K_EMBLOCK_SIZE * 3)
+            .min(file.payload.len() as u64);
+        request_transport_upload_parts(
+            &mut transport,
+            &file.file_hash,
+            &[(request_start, request_end)],
+        )
+        .await;
+        let (bytes, compressed) = read_transport_upload_bytes(
+            &mut transport,
+            &file.file_hash,
+            request_start,
+            request_end,
+        )
+        .await;
+        reconstructed.extend_from_slice(&bytes);
+        saw_compressed |= compressed;
+        request_start = request_end;
+    }
 
     assert!(saw_compressed);
     assert_eq!(reconstructed, file.payload);
