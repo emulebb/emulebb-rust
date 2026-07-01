@@ -9,7 +9,7 @@ use std::fs;
 use emulebb_kad_proto::Ed2kHash;
 use std::str::FromStr;
 
-use super::super::{Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
+use super::super::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, PAYLOAD_FILE_NAME};
 use super::write_repeating_pattern_file;
 use crate::paths::unique_test_dir;
 
@@ -77,6 +77,30 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     let second = reader.read_range(4096, 8192).await.unwrap().unwrap();
     assert_eq!(first, source_bytes[0..4096]);
     assert_eq!(second, source_bytes[4096..8192]);
+
+    // (6) Upload read-ahead is bounded to one protocol request window: the
+    // first fragment primes the cache, and the next two contiguous EMBLOCKSIZE
+    // fragments reuse it without another disk read.
+    let mut reader = runtime
+        .open_verified_range_reader(&hash)
+        .await
+        .unwrap()
+        .expect("a completed shared file must open a verified range reader");
+    for index in 0..3u64 {
+        let start = index * ED2K_EMBLOCK_SIZE;
+        let end = start + ED2K_EMBLOCK_SIZE;
+        let served = reader.read_range(start, end).await.unwrap().unwrap();
+        assert_eq!(
+            served,
+            source_bytes[start as usize..end as usize],
+            "fragment {index} must match the original source bytes",
+        );
+    }
+    assert_eq!(
+        reader.disk_read_count(),
+        1,
+        "three contiguous upload fragments should be covered by one read-ahead"
+    );
 }
 
 /// Best-effort canonicalization for path comparison (the ingest path is stored

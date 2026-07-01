@@ -11,9 +11,11 @@ use crate::long_path::long_path;
 use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
-    Ed2kClaimedPart, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferRuntime, Ed2kTransferState,
-    PAYLOAD_FILE_NAME, PieceWriteOutcome, expected_piece_length,
+    ED2K_EMBLOCK_SIZE, Ed2kClaimedPart, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferRuntime,
+    Ed2kTransferState, PAYLOAD_FILE_NAME, PieceWriteOutcome, expected_piece_length,
 };
+
+const UPLOAD_READ_AHEAD_BYTES: u64 = ED2K_EMBLOCK_SIZE * 3;
 
 /// Verified upload reader for one local file.
 ///
@@ -23,22 +25,55 @@ use super::{
 pub(crate) struct Ed2kVerifiedRangeReader {
     file: tokio::fs::File,
     verified_ranges: Vec<Ed2kSharedRange>,
+    cache_start: u64,
+    cache: Vec<u8>,
+    #[cfg(test)]
+    disk_read_count: usize,
 }
 
 impl Ed2kVerifiedRangeReader {
     pub(crate) async fn read_range(&mut self, start: u64, end: u64) -> Result<Option<Vec<u8>>> {
-        if !self
+        let Some(verified_range) = self
             .verified_ranges
             .iter()
-            .any(|range| start >= range.start && end <= range.end)
-        {
+            .find(|range| start >= range.start && end <= range.end)
+        else {
             return Ok(None);
+        };
+        if let Some(bytes) = self.read_cached_range(start, end) {
+            return Ok(Some(bytes));
         }
+
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let requested_len = end.saturating_sub(start);
+        let read_end = start
+            .saturating_add(requested_len.max(UPLOAD_READ_AHEAD_BYTES))
+            .min(verified_range.end);
         self.file.seek(std::io::SeekFrom::Start(start)).await?;
-        let mut bytes = vec![0u8; usize::try_from(end.saturating_sub(start)).unwrap_or(0)];
-        self.file.read_exact(&mut bytes).await?;
-        Ok(Some(bytes))
+        self.cache_start = start;
+        self.cache = vec![0u8; usize::try_from(read_end.saturating_sub(start)).unwrap_or(0)];
+        self.file.read_exact(&mut self.cache).await?;
+        #[cfg(test)]
+        {
+            self.disk_read_count = self.disk_read_count.saturating_add(1);
+        }
+        Ok(self.read_cached_range(start, end))
+    }
+
+    fn read_cached_range(&self, start: u64, end: u64) -> Option<Vec<u8>> {
+        let cache_len = u64::try_from(self.cache.len()).unwrap_or(u64::MAX);
+        let cache_end = self.cache_start.saturating_add(cache_len);
+        if start < self.cache_start || end > cache_end {
+            return None;
+        }
+        let offset = usize::try_from(start.saturating_sub(self.cache_start)).ok()?;
+        let len = usize::try_from(end.saturating_sub(start)).ok()?;
+        Some(self.cache.get(offset..offset.saturating_add(len))?.to_vec())
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn disk_read_count(&self) -> usize {
+        self.disk_read_count
     }
 }
 
@@ -534,6 +569,10 @@ impl Ed2kTransferRuntime {
         Ok(Some(Ed2kVerifiedRangeReader {
             file,
             verified_ranges,
+            cache_start: 0,
+            cache: Vec::new(),
+            #[cfg(test)]
+            disk_read_count: 0,
         }))
     }
 }
