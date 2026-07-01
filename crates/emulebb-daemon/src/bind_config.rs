@@ -73,9 +73,19 @@ fn find_unique_interface<'a>(
     interfaces: &'a [NetworkInterface],
     bind_interface: &str,
 ) -> Result<&'a NetworkInterface> {
-    let mut matches = interfaces
+    let exact_matches = interfaces
         .iter()
-        .filter(|iface| iface.name.trim().eq_ignore_ascii_case(bind_interface));
+        .filter(|iface| iface.name.trim().eq_ignore_ascii_case(bind_interface))
+        .collect::<Vec<_>>();
+    let matches = if exact_matches.is_empty() {
+        interfaces
+            .iter()
+            .filter(|iface| interface_token_matches(iface, bind_interface))
+            .collect::<Vec<_>>()
+    } else {
+        exact_matches
+    };
+    let mut matches = matches.into_iter();
     let Some(iface) = matches.next() else {
         bail!("p2pBindInterface {bind_interface:?} did not resolve to an IPv4 address");
     };
@@ -83,4 +93,16 @@ fn find_unique_interface<'a>(
         bail!("p2pBindInterface {bind_interface:?} is ambiguous");
     }
     Ok(iface)
+}
+
+fn interface_token_matches(iface: &NetworkInterface, bind_interface: &str) -> bool {
+    let token = bind_interface.trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return false;
+    }
+    iface.name.to_ascii_lowercase().contains(&token)
+        || iface
+            .description
+            .as_deref()
+            .is_some_and(|description| description.to_ascii_lowercase().contains(&token))
 }

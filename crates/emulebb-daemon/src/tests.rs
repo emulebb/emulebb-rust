@@ -52,6 +52,13 @@ fn iface_with_vpn(name: &str, ip: &str, is_vpn_candidate: bool) -> NetworkInterf
     }
 }
 
+fn iface_with_description(name: &str, description: &str, ip: &str) -> NetworkInterface {
+    NetworkInterface {
+        description: Some(description.to_string()),
+        ..iface(name, ip)
+    }
+}
+
 #[test]
 fn load_requires_explicit_config_path() {
     let error = DaemonConfig::load(None).unwrap_err().to_string();
@@ -667,6 +674,23 @@ fn p2p_bind_interface_matches_name_case_insensitively() {
 
     let bind_ip = config
         .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
+        .unwrap();
+
+    assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
+}
+
+#[test]
+fn p2p_bind_interface_matches_name_or_description_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(temp.path().to_path_buf(), None);
+    config.p2p_bind_interface = Some("hide.me".to_string());
+
+    let bind_ip = config
+        .resolve_p2p_bind_ip_from_interfaces(&[iface_with_description(
+            "Ethernet 7",
+            "hide.me VPN Adapter",
+            "10.44.55.66",
+        )])
         .unwrap();
 
     assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
