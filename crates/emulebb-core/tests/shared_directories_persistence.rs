@@ -95,6 +95,60 @@ async fn shared_directory_reload_honors_recursive_flag() {
 }
 
 #[tokio::test]
+async fn shared_directory_model_expands_recursive_items_like_mfc() {
+    let runtime_dir = unique_test_dir("shared-directory-recursive-items");
+    let transfer_root = runtime_dir.join("transfers");
+    let metadata_path = runtime_dir.join("metadata.sqlite");
+    let shared_root = runtime_dir.join("shared-root");
+    let nested_root = shared_root.join("nested");
+    fs::create_dir_all(&nested_root).unwrap();
+
+    let core = EmulebbCore::new(
+        "test",
+        FileIndex::open(&metadata_path).unwrap(),
+        &transfer_root,
+    )
+    .unwrap();
+    let directories = core
+        .set_shared_directories(SharedDirectoriesUpdate {
+            roots: vec![SharedDirectoryRootUpdate::Object {
+                path: shared_root.display().to_string(),
+                recursive: true,
+            }],
+            confirm_replace_roots: true,
+        })
+        .await
+        .unwrap();
+
+    let expected_root = fs::canonicalize(&shared_root)
+        .unwrap()
+        .display()
+        .to_string();
+    let expected_nested = fs::canonicalize(&nested_root)
+        .unwrap()
+        .display()
+        .to_string();
+
+    assert_eq!(directories.roots.len(), 1);
+    assert_eq!(directories.roots[0].path, expected_root);
+    assert!(directories.roots[0].recursive);
+    assert!(!directories.roots[0].monitor_owned);
+
+    assert_eq!(
+        directories
+            .items
+            .iter()
+            .map(|item| (item.path.as_str(), item.monitor_owned))
+            .collect::<Vec<_>>(),
+        vec![
+            (expected_root.as_str(), false),
+            (expected_nested.as_str(), true)
+        ]
+    );
+    assert_eq!(directories.monitor_owned, vec![expected_nested]);
+}
+
+#[tokio::test]
 async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     let runtime_dir = unique_test_dir("shared-directory-tree-restart");
     let transfer_root = runtime_dir.join("transfers");

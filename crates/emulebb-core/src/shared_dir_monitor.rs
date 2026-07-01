@@ -1,6 +1,5 @@
 //! Live shared-directory monitoring (auto-pickup) for the configured shared
-//! roots -- the runtime that makes [`SharedDirectoryRoot::monitor_owned`] real
-//! (eMule's `CSharedFileList` directory auto-monitor parity).
+//! roots (eMule's `CSharedFileList` directory auto-monitor parity).
 //!
 //! # Design
 //!
@@ -138,18 +137,9 @@ pub(crate) struct SharedDirMonitor {
     #[allow(dead_code)]
     debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, FileIdMap>,
     consumer: tokio::task::JoinHandle<()>,
-    /// The roots actually being watched (used to report which roots became
-    /// `monitor_owned`).
-    watched_roots: Vec<String>,
 }
 
 impl SharedDirMonitor {
-    /// Paths of the roots that are actually being watched, so the caller can mark
-    /// exactly those `monitor_owned = true`.
-    pub(crate) fn watched_roots(&self) -> &[String] {
-        &self.watched_roots
-    }
-
     /// Stop the monitor: drop it so the debouncer's `Drop` stops the OS watcher
     /// thread and the [`SharedDirMonitor`] `Drop` aborts the consumer task.
     pub(crate) fn stop(self) {
@@ -221,7 +211,7 @@ where
         }
     };
 
-    let mut watched_roots = Vec::new();
+    let mut watched_root_count = 0usize;
     for root in roots {
         if !root.accessible {
             continue;
@@ -236,7 +226,7 @@ where
             Ok(()) => {
                 // Keep the file-id cache in sync so rename stitching works.
                 debouncer.cache().add_root(path, mode);
-                watched_roots.push(root.path.clone());
+                watched_root_count += 1;
                 tracing::info!(
                     root = %root.path,
                     recursive = root.recursive,
@@ -257,7 +247,7 @@ where
         }
     }
 
-    if watched_roots.is_empty() {
+    if watched_root_count == 0 {
         // No root could be watched -- nothing to consume; drop the debouncer.
         drop(debouncer);
         return None;
@@ -267,7 +257,6 @@ where
     Some(SharedDirMonitor {
         debouncer,
         consumer,
-        watched_roots,
     })
 }
 
@@ -324,9 +313,8 @@ use crate::{EmulebbCore, LocalShareCreate};
 /// roots. Tears down any previous monitor first, then watches each accessible
 /// root (recursive per `root.recursive`). On a settled create/modify the file is
 /// auto-shared via [`EmulebbCore::share_local_file`]; on a settled
-/// remove/rename-away it is dropped from the shared catalog. The roots actually
-/// watched are marked `monitor_owned = true`. Tolerant of a per-root watch
-/// failure (logged; that root degrades to scan-on-demand).
+/// remove/rename-away it is dropped from the shared catalog. Tolerant of a
+/// per-root watch failure (logged; that root degrades to scan-on-demand).
 pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
     // Drop any existing monitor before rebuilding the watch set.
     stop_shared_directory_monitor(core);
@@ -350,20 +338,6 @@ pub(crate) async fn start_shared_directory_monitor(core: &EmulebbCore) {
             }
         }
     });
-
-    let watched_roots = monitor
-        .as_ref()
-        .map(|monitor| monitor.watched_roots().to_vec())
-        .unwrap_or_default();
-
-    // Mark exactly the roots we are actually watching as monitor_owned, so the
-    // metadata-only flag finally reflects a real running watch.
-    if !watched_roots.is_empty() {
-        let mut state = core.state.lock().await;
-        for root in state.shared_directories.iter_mut() {
-            root.monitor_owned = watched_roots.iter().any(|watched| watched == &root.path);
-        }
-    }
 
     *core.shared_dir_monitor.lock().unwrap() = monitor;
 }

@@ -105,7 +105,7 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
     SharedDirectoryRoot {
         path: root.path,
         recursive: root.recursive,
-        monitor_owned: root.monitor_owned,
+        monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
     }
@@ -130,6 +130,92 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
         monitor_owned: root.monitor_owned,
         shareable: accessible,
         accessible,
+    }
+}
+
+/// Build the MFC-compatible `items` view from configured roots.
+///
+/// Configured roots remain user-owned. Recursive child directories are derived
+/// monitor-owned items, matching MFC's `shareddir.dat` + monitored expansion
+/// model without persisting those child directories as real roots.
+pub(crate) async fn shared_directory_items(
+    roots: Vec<SharedDirectoryRoot>,
+) -> Vec<SharedDirectoryRoot> {
+    match tokio::task::spawn_blocking(move || expand_shared_directory_items(roots)).await {
+        Ok(items) => items,
+        Err(error) => {
+            tracing::warn!(%error, "failed to expand shared-directory items");
+            Vec::new()
+        }
+    }
+}
+
+fn expand_shared_directory_items(roots: Vec<SharedDirectoryRoot>) -> Vec<SharedDirectoryRoot> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        let refreshed = refresh_shared_directory_row(&root);
+        push_shared_directory_item(&mut items, &mut seen, refreshed.clone());
+        if !refreshed.accessible || !refreshed.recursive {
+            continue;
+        }
+        let walk_root = long_path(Path::new(&refreshed.path));
+        for entry in WalkDir::new(&walk_root)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                if !entry.file_type().is_dir() {
+                    return true;
+                }
+                !should_ignore_shared_directory_name(&entry.file_name().to_string_lossy())
+            })
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %walk_root.display(),
+                        error = %error,
+                        "skipping unreadable shared-directory item",
+                    );
+                    continue;
+                }
+            };
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(&walk_root)
+                .map(|relative| Path::new(&refreshed.path).join(relative))
+                .unwrap_or_else(|_| entry.path().to_path_buf())
+                .display()
+                .to_string();
+            push_shared_directory_item(
+                &mut items,
+                &mut seen,
+                SharedDirectoryRoot {
+                    path,
+                    recursive: false,
+                    monitor_owned: true,
+                    shareable: true,
+                    accessible: true,
+                },
+            );
+        }
+    }
+    items
+}
+
+fn push_shared_directory_item(
+    items: &mut Vec<SharedDirectoryRoot>,
+    seen: &mut HashSet<String>,
+    item: SharedDirectoryRoot,
+) {
+    let key = item.path.to_ascii_lowercase();
+    if seen.insert(key) {
+        items.push(item);
     }
 }
 

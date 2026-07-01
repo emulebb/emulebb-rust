@@ -210,7 +210,7 @@ pub use shared_directories::{
 };
 use shared_directories::{
     refresh_shared_directory_row, reload_diagnostics_snapshot, shared_directory_from_index,
-    shared_directory_to_index, shared_directory_update_parts,
+    shared_directory_items, shared_directory_to_index, shared_directory_update_parts,
 };
 
 mod rest_model;
@@ -1857,10 +1857,16 @@ impl EmulebbCore {
             .iter()
             .map(refresh_shared_directory_row)
             .collect::<Vec<_>>();
+        let items = shared_directory_items(roots.clone()).await;
+        let monitor_owned = items
+            .iter()
+            .filter(|item| item.monitor_owned)
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
         SharedDirectories {
-            roots: roots.clone(),
-            items: roots,
-            monitor_owned: Vec::new(),
+            roots,
+            items,
+            monitor_owned,
             // Files still pending the initial hash in the background reload worker.
             hashing_count: shared_directories::hashing_count_snapshot(self),
             reload: reload_diagnostics_snapshot(self),
