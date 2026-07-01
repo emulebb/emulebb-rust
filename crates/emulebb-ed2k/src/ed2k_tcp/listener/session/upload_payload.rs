@@ -42,6 +42,16 @@ pub(in crate::ed2k_tcp) enum UploadPayloadOutcome {
     Close,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum UploadRangePlan {
+    Accepted,
+    DuplicateDone,
+    Empty,
+    QueueStale,
+    QueueWaiting,
+    TooLarge,
+}
+
 #[derive(Default)]
 struct UploadRequestDiag {
     requested_ranges: usize,
@@ -258,7 +268,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     request_diag.verified_reader_open_ms =
         u64::try_from(verified_reader_open_start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    for (start, end) in ranges {
+    let mut range_plan = Vec::with_capacity(ranges.len());
+    let mut accepted_ranges = Vec::with_capacity(ranges.len());
+    for &(start, end) in &ranges {
         // FIX (memory-amplification DoS): never read or buffer a whole
         // peer-requested range at once. The range size is peer-controlled and
         // uncapped (a complete file is one verified `[0, file_size]` span, so a
@@ -272,38 +284,89 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         // legitimate <=EMBLOCKSIZE request is served in a single fragment
         // (exactly the bytes asked for).
         if end <= start {
-            request_diag.note_skip("emptyRange");
+            range_plan.push(UploadRangePlan::Empty);
             continue;
         }
         if end.saturating_sub(start) > MAX_UPLOAD_REQUEST_RANGE_BYTES {
-            request_diag.note_skip("rangeTooLarge");
+            range_plan.push(UploadRangePlan::TooLarge);
             continue;
         }
-        match upload_queue
+        let plan = match upload_queue
             .note_range_request(transfer_runtime, start, end)
             .await
         {
-            (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::Accepted) => {}
+            (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::Accepted) => {
+                if accepted_ranges
+                    .iter()
+                    .any(|&(accepted_start, accepted_end)| {
+                        accepted_start == start && accepted_end == end
+                    })
+                {
+                    UploadRangePlan::DuplicateDone
+                } else {
+                    accepted_ranges.push((start, end));
+                    UploadRangePlan::Accepted
+                }
+            }
             (ListenerQueueDecision::Granted, Ed2kUploadRangeAdmission::DuplicateDone) => {
+                UploadRangePlan::DuplicateDone
+            }
+            (ListenerQueueDecision::Waiting, _) => UploadRangePlan::QueueWaiting,
+            (ListenerQueueDecision::Stale, _) => UploadRangePlan::QueueStale,
+        };
+        range_plan.push(plan);
+        if plan == UploadRangePlan::QueueStale {
+            break;
+        }
+    }
+
+    for (range_index, &(start, end)) in ranges.iter().enumerate() {
+        match range_plan
+            .get(range_index)
+            .copied()
+            .unwrap_or(UploadRangePlan::QueueStale)
+        {
+            UploadRangePlan::Accepted => {}
+            UploadRangePlan::DuplicateDone => {
                 request_diag.note_skip("duplicateDone");
                 continue;
             }
-            (ListenerQueueDecision::Waiting, _) => {
+            UploadRangePlan::Empty => {
+                request_diag.note_skip("emptyRange");
+                continue;
+            }
+            UploadRangePlan::QueueStale => {
+                request_diag.note_skip("queueStaleBeforeRange");
+                break;
+            }
+            UploadRangePlan::QueueWaiting => {
                 request_diag.note_skip("queueWaitingBeforeRange");
                 continue;
             }
-            (ListenerQueueDecision::Stale, _) => {
-                request_diag.note_skip("queueStaleBeforeRange");
-                break;
+            UploadRangePlan::TooLarge => {
+                request_diag.note_skip("rangeTooLarge");
+                continue;
             }
         }
         let mut fragment_start = start;
         let mut range_served = false;
         while fragment_start < end {
             let fragment_end = fragment_start.saturating_add(ED2K_EMBLOCK_SIZE).min(end);
+            let next_range_is_contiguous_accepted = ranges
+                .get(range_index + 1)
+                .zip(range_plan.get(range_index + 1))
+                .is_some_and(|(&(next_start, _), plan)| {
+                    *plan == UploadRangePlan::Accepted && next_start == fragment_end
+                });
+            let more_fragments_in_range = fragment_end < end;
+            let read_ahead_bytes = if more_fragments_in_range || next_range_is_contiguous_accepted {
+                MAX_UPLOAD_REQUEST_RANGE_BYTES
+            } else {
+                fragment_end.saturating_sub(fragment_start)
+            };
             let payload_read_start = Instant::now();
             let read_result = verified_reader
-                .read_range(fragment_start, fragment_end)
+                .read_range_with_read_ahead(fragment_start, fragment_end, read_ahead_bytes)
                 .await?;
             request_diag.payload_read_ms = request_diag.payload_read_ms.saturating_add(
                 u64::try_from(payload_read_start.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -82,7 +82,34 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     assert_eq!(reader.cache_hit_count(), 0);
     assert_eq!(reader.disk_read_bytes(), 8192);
 
-    // (6) Upload read-ahead is bounded to one protocol request window: the
+    // (6) A caller can suppress read-ahead for an accepted block when the rest
+    // of the OP_REQUESTPARTS ranges were already served and should not drive
+    // speculative disk IO.
+    let mut reader = runtime
+        .open_verified_range_reader(&hash)
+        .await
+        .unwrap()
+        .expect("a completed shared file must open a verified range reader");
+    let first = reader
+        .read_range_with_read_ahead(0, ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = reader
+        .read_range_with_read_ahead(ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE * 2, ED2K_EMBLOCK_SIZE)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, source_bytes[0..ED2K_EMBLOCK_SIZE as usize]);
+    assert_eq!(
+        second,
+        source_bytes[ED2K_EMBLOCK_SIZE as usize..(ED2K_EMBLOCK_SIZE * 2) as usize]
+    );
+    assert_eq!(reader.cache_miss_count(), 2);
+    assert_eq!(reader.cache_hit_count(), 0);
+    assert_eq!(reader.disk_read_bytes(), ED2K_EMBLOCK_SIZE * 2);
+
+    // (7) Upload read-ahead is bounded to one protocol request window: the
     // first fragment primes the cache, and the next two contiguous EMBLOCKSIZE
     // fragments reuse it without another disk read.
     let mut reader = runtime

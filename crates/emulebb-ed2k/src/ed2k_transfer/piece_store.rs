@@ -36,6 +36,16 @@ pub(crate) struct Ed2kVerifiedRangeReader {
 
 impl Ed2kVerifiedRangeReader {
     pub(crate) async fn read_range(&mut self, start: u64, end: u64) -> Result<Option<Vec<u8>>> {
+        self.read_range_with_read_ahead(start, end, UPLOAD_READ_AHEAD_BYTES)
+            .await
+    }
+
+    pub(crate) async fn read_range_with_read_ahead(
+        &mut self,
+        start: u64,
+        end: u64,
+        read_ahead_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
         let Some(verified_range) = self
             .verified_ranges
             .iter()
@@ -51,7 +61,7 @@ impl Ed2kVerifiedRangeReader {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let requested_len = end.saturating_sub(start);
         let read_len = if requested_len >= ED2K_EMBLOCK_SIZE {
-            requested_len.max(UPLOAD_READ_AHEAD_BYTES)
+            requested_len.max(read_ahead_bytes)
         } else {
             requested_len
         };

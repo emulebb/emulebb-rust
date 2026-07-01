@@ -295,6 +295,53 @@ async fn listener_rejects_oversized_range_and_serves_valid_range() {
 }
 
 #[tokio::test]
+async fn listener_skips_duplicate_range_within_single_upload_request() {
+    let mut lcg = 0xA5A5_1234u32;
+    let payload = (0..ED2K_EMBLOCK_SIZE)
+        .map(|_| {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (lcg >> 24) as u8
+        })
+        .collect::<Vec<_>>();
+
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-upload-listener-duplicate-range",
+        listener_hello_identity(),
+        [0x42; 16],
+        0xCC33_2211,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file("duplicate-range.bin", payload)
+        .await;
+    let server = runtime.spawn_listener_connections(1);
+
+    let mut stream =
+        connect_peer_and_exchange_hello(runtime.peer_addr, peer_hello_identity()).await;
+    request_upload_file(&mut stream, &file.file_hash).await;
+    wait_for_upload_accept(&mut stream).await;
+
+    request_upload_parts(
+        &mut stream,
+        &file.file_hash,
+        &[(0, ED2K_EMBLOCK_SIZE), (0, ED2K_EMBLOCK_SIZE)],
+    )
+    .await;
+    let uploaded = read_upload_bytes(&mut stream, &file.file_hash, 0, ED2K_EMBLOCK_SIZE).await;
+    assert_eq!(uploaded, file.payload);
+    let duplicate_payload =
+        tokio::time::timeout(Duration::from_millis(250), read_packet(&mut stream)).await;
+    assert!(duplicate_payload.is_err());
+
+    let upload_snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+    assert_eq!(upload_snapshot.len(), 1);
+    assert_eq!(upload_snapshot[0].uploaded_bytes, ED2K_EMBLOCK_SIZE);
+
+    drop(stream);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn listener_obfuscated_upload_session_serves_verified_file_via_compressed_parts() {
     let mut payload = Vec::new();
     for index in 0..12_000u32 {
