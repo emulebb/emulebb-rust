@@ -1763,6 +1763,7 @@ impl EmulebbCore {
                 .transfer_dir_path(&entry.file_hash)
                 .display()
                 .to_string(),
+            source_path: entry.source_path.clone(),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
             all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
@@ -7119,6 +7120,7 @@ fn local_share_from_summary(
         part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
+        source_path: summary.source_path,
         priority: "normal".to_string(),
         auto_upload_priority: false,
         all_time_uploaded_bytes: 0,

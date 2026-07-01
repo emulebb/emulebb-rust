@@ -410,6 +410,9 @@ pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
 }
 
 pub(crate) fn managed_shared_file_path(share: &LocalShare) -> String {
+    if let Some(source_path) = share.source_path.as_ref().filter(|path| !path.is_empty()) {
+        return source_path.clone();
+    }
     let path = FsPath::new(&share.transfer_dir);
     if path.is_dir() {
         path.join("pieces.bin").display().to_string()
@@ -470,6 +473,7 @@ mod tests {
                 .to_string(),
             aich_root: String::new(),
             transfer_dir: "transfers".to_string(),
+            source_path: Some("shared/Synthetic.Shared.bin".to_string()),
             priority: "normal".to_string(),
             auto_upload_priority: false,
             all_time_uploaded_bytes: 4096,
@@ -485,6 +489,8 @@ mod tests {
         assert_eq!(response.all_time_requests, 7);
         assert_eq!(response.all_time_accepts, 5);
         assert_eq!(response.all_time_transferred, 4096);
+        assert_eq!(response.path, "shared/Synthetic.Shared.bin");
+        assert_eq!(response.directory, "shared");
     }
 
     #[test]

@@ -140,6 +140,7 @@ impl Ed2kTransferRuntime {
             aich_root: manifest.aich_root.unwrap_or_default(),
             aich_hashset_count: manifest.aich_hashset.len(),
             transfer_dir: transfer_dir.display().to_string(),
+            source_path: manifest.source_path,
         })
     }
 }

@@ -633,6 +633,13 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
+                   COALESCE(transfers.source_path, (
+                       SELECT share_in_place_sources.source_path
+                       FROM share_in_place_sources
+                       WHERE share_in_place_sources.known_file_id = known_files.id
+                       ORDER BY share_in_place_sources.source_path
+                       LIMIT 1
+                   )),
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -658,14 +665,15 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
-                aich_root: row.get(4)?,
-                upload_priority: row.get(5)?,
-                auto_upload_priority: row.get::<_, i64>(6)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(7)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(8)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(9)? as u64,
-                comment: row.get(10)?,
-                rating: row.get::<_, i64>(11)? as u8,
+                source_path: row.get(4)?,
+                aich_root: row.get(5)?,
+                upload_priority: row.get(6)?,
+                auto_upload_priority: row.get::<_, i64>(7)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                comment: row.get(11)?,
+                rating: row.get::<_, i64>(12)? as u8,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -695,6 +703,13 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
+                   COALESCE(transfers.source_path, (
+                       SELECT share_in_place_sources.source_path
+                       FROM share_in_place_sources
+                       WHERE share_in_place_sources.known_file_id = known_files.id
+                       ORDER BY share_in_place_sources.source_path
+                       LIMIT 1
+                   )),
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
                        ELSE lower(hex(known_files.aich_root))
@@ -721,14 +736,15 @@ impl super::MetadataStore {
                 canonical_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
-                aich_root: row.get(4)?,
-                upload_priority: row.get(5)?,
-                auto_upload_priority: row.get::<_, i64>(6)? != 0,
-                all_time_uploaded_bytes: row.get::<_, i64>(7)? as u64,
-                all_time_upload_requests: row.get::<_, i64>(8)? as u64,
-                all_time_upload_accepts: row.get::<_, i64>(9)? as u64,
-                comment: row.get(10)?,
-                rating: row.get::<_, i64>(11)? as u8,
+                source_path: row.get(4)?,
+                aich_root: row.get(5)?,
+                upload_priority: row.get(6)?,
+                auto_upload_priority: row.get::<_, i64>(7)? != 0,
+                all_time_uploaded_bytes: row.get::<_, i64>(8)? as u64,
+                all_time_upload_requests: row.get::<_, i64>(9)? as u64,
+                all_time_upload_accepts: row.get::<_, i64>(10)? as u64,
+                comment: row.get(11)?,
+                rating: row.get::<_, i64>(12)? as u8,
             })
         })?;
         let entries = rows.collect::<Result<Vec<_>, _>>()?;

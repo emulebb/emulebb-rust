@@ -177,6 +177,7 @@ pub struct Ed2kLocalIngestSummary {
     pub aich_root: String,
     pub aich_hashset_count: usize,
     pub transfer_dir: String,
+    pub source_path: Option<String>,
 }
 
 /// One persisted share-in-place entry used by the incremental shared-directory
