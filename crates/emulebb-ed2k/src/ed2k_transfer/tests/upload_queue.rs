@@ -283,6 +283,63 @@ async fn upload_queue_snapshot_tracks_session_uploaded_bytes() {
 }
 
 #[tokio::test]
+async fn upload_queue_capacity_snapshot_classifies_active_sessions() {
+    let root = unique_test_dir("ed2k-upload-queue-capacity-composition");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime
+        .apply_upload_queue_policy(&Ed2kUploadQueuePolicyConfig {
+            active_slots: 2,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill_secs: 10,
+            waiting_capacity: 8,
+            waiting_timeout_secs: 180,
+            granted_timeout_secs: 30,
+            upload_timeout_secs: 90,
+        })
+        .await;
+    let file_hash = Ed2kHash::from_bytes([0x3A; 16]);
+    let now = std::time::Instant::now();
+
+    let (_granted_handle, granted_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x15, 0x0A00_0015), &file_hash, now)
+        .await;
+    let (uploading_handle, uploading_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0x16, 0x0A00_0016), &file_hash, now)
+        .await;
+    let (_waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(upload_peer(3, 0x17, 0x0A00_0017), &file_hash, now)
+        .await;
+    assert_eq!(granted_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(uploading_status, Ed2kUploadSessionStatus::Granted);
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    assert_eq!(
+        runtime.note_upload_request_parts(&uploading_handle).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert_eq!(
+        runtime
+            .note_upload_payload_sent_at(
+                &uploading_handle,
+                32_768,
+                now + std::time::Duration::from_secs(1),
+            )
+            .await,
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    let capacity = runtime.upload_queue_capacity_snapshot().await;
+    assert_eq!(capacity.active_sessions, 2);
+    assert_eq!(capacity.waiting_sessions, 1);
+    assert_eq!(capacity.active_granted_sessions, 1);
+    assert_eq!(capacity.active_uploading_sessions, 1);
+    assert_eq!(capacity.active_never_uploaded_sessions, 1);
+    assert_eq!(capacity.active_productive_sessions, 1);
+}
+
+#[tokio::test]
 async fn upload_queue_detects_duplicate_completed_ranges_per_slot() {
     let root = unique_test_dir("ed2k-upload-queue-duplicate-range");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

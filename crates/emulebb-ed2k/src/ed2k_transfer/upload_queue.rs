@@ -283,6 +283,10 @@ pub struct Ed2kUploadQueueCapacitySnapshot {
     pub active_slots: usize,
     pub active_sessions: usize,
     pub waiting_sessions: usize,
+    pub active_granted_sessions: usize,
+    pub active_uploading_sessions: usize,
+    pub active_never_uploaded_sessions: usize,
+    pub active_productive_sessions: usize,
     pub upload_rate_bytes_per_sec: u64,
     pub upload_limit_bytes_per_sec: u64,
     pub elastic_underfill_bytes_per_sec: u64,
@@ -351,6 +355,10 @@ impl Ed2kUploadQueueState {
             active_slots: self.effective_active_slot_limit(now),
             active_sessions: self.active_session_count(),
             waiting_sessions: self.waiting_session_count(),
+            active_granted_sessions: self.active_granted_session_count(),
+            active_uploading_sessions: self.active_uploading_session_count(),
+            active_never_uploaded_sessions: self.active_never_uploaded_session_count(),
+            active_productive_sessions: self.active_productive_session_count(),
             upload_rate_bytes_per_sec: self.upload_rate_bytes_per_sec(now),
             upload_limit_bytes_per_sec: self.config.upload_limit_bytes_per_sec,
             elastic_underfill_bytes_per_sec: self.config.elastic_underfill_bytes_per_sec,
@@ -368,6 +376,10 @@ impl Ed2kUploadQueueState {
             snapshot.active_slots,
             snapshot.active_sessions,
             snapshot.waiting_sessions,
+            snapshot.active_granted_sessions,
+            snapshot.active_uploading_sessions,
+            snapshot.active_never_uploaded_sessions,
+            snapshot.active_productive_sessions,
             snapshot.upload_rate_bytes_per_sec,
             snapshot.upload_limit_bytes_per_sec,
             snapshot.elastic_underfill_bytes_per_sec,
@@ -1056,6 +1068,44 @@ impl Ed2kUploadQueueState {
         self.sessions
             .values()
             .filter(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+            .count()
+    }
+
+    fn active_granted_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.phase == Ed2kUploadSessionPhase::Granted)
+            .count()
+    }
+
+    fn active_uploading_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.phase == Ed2kUploadSessionPhase::Uploading)
+            .count()
+    }
+
+    fn active_never_uploaded_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| {
+                matches!(
+                    session.phase,
+                    Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+                ) && session.uploaded_bytes == 0
+            })
+            .count()
+    }
+
+    fn active_productive_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| {
+                matches!(
+                    session.phase,
+                    Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
+                ) && session.uploaded_bytes != 0
+            })
             .count()
     }
 
