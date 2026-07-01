@@ -859,6 +859,7 @@ impl EmulebbCore {
             bind_addr: Some(network.kad_bind_addr),
             obfuscation_enabled: network.config.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
+            max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
             nodes_text: configured_bootstrap_nodes_text.clone(),
             class_budgets: kad_rpc_class_budgets(),
             // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).
@@ -4558,11 +4559,16 @@ const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 const KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP: usize = 3;
 const KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP: usize = 4;
 const KAD_NOTES_PUBLISH_IN_FLIGHT_CAP: usize = 1;
+const KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL: usize = KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP
+    + KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP
+    + KAD_NOTES_PUBLISH_IN_FLIGHT_CAP;
 /// Keep one DHT traversal permit free for interactive searches, bootstrap
 /// refresh, and firewall/buddy maintenance while large-library publishing runs.
-/// With the default five concurrent searches this lets source publishing reach
-/// the master's `KADEMLIATOTALSTORESRC = 4` active store cap.
+/// The live DHT cap is raised to this total plus the MFC store caps so shared
+/// publishing can reach `3 keyword + 4 source + 1 notes` concurrently.
 const KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS: usize = 1;
+const KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP: usize =
+    KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL + KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS;
 /// Store traversals need enough lookup packets to converge before the stock
 /// 140s store timeout. One packet/sec across several concurrent store lookups
 /// self-throttles large-library publishing without changing wire semantics.
@@ -4676,13 +4682,10 @@ fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> 
 }
 
 fn kad_shared_file_publish_in_flight_budget_for(max_concurrent_searches: usize) -> usize {
-    let kind_cap_total = KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP
-        + KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP
-        + KAD_NOTES_PUBLISH_IN_FLIGHT_CAP;
     max_concurrent_searches
         .saturating_sub(KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS)
         .max(1)
-        .min(kind_cap_total)
+        .min(KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL)
 }
 
 async fn run_kad_shared_file_publish_loop(
@@ -8930,6 +8933,10 @@ mod tests {
         assert_eq!(kad_shared_file_publish_in_flight_budget_for(1), 1);
         assert_eq!(kad_shared_file_publish_in_flight_budget_for(2), 1);
         assert_eq!(kad_shared_file_publish_in_flight_budget_for(5), 4);
+        assert_eq!(
+            kad_shared_file_publish_in_flight_budget_for(KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP),
+            KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL
+        );
     }
 
     #[test]
