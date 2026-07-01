@@ -162,13 +162,16 @@ async fn resolve_publish_contacts(
     .await;
 
     if traversal.closest.is_empty() {
-        return Err(DhtError::PublishFailed);
+        return Err(DhtError::PublishNoClosestContacts);
     }
+    let closest_contacts_considered = traversal.closest.len() as u32;
 
     let publish_contacts =
         select_publish_contacts(target, &traversal.closest, publish_contact_fanout);
     if publish_contacts.is_empty() {
-        return Err(DhtError::PublishFailed);
+        return Err(DhtError::PublishNoAcceptedContacts {
+            closest_contacts_considered,
+        });
     }
     for contact in &publish_contacts {
         register_publish_contact(rpc, contact);
@@ -178,7 +181,7 @@ async fn resolve_publish_contacts(
     Ok((
         publish_contacts,
         PublishAttemptStats {
-            closest_contacts_considered: traversal.closest.len() as u32,
+            closest_contacts_considered,
             attempted_contacts,
             ..PublishAttemptStats::default()
         },

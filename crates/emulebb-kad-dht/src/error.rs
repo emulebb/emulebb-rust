@@ -12,6 +12,12 @@ pub enum DhtError {
     SearchTimeout,
     #[error("publish failed - no node accepted")]
     PublishFailed,
+    #[error("publish failed - no closest contacts")]
+    PublishNoClosestContacts,
+    #[error(
+        "publish failed - no contact within tolerance (closest contacts considered: {closest_contacts_considered})"
+    )]
+    PublishNoAcceptedContacts { closest_contacts_considered: u32 },
     #[error("search capacity is busy")]
     SearchBusy,
     #[error("routing error: {0}")]
@@ -35,6 +41,14 @@ mod tests {
         assert!(DhtError::MissingBindAddr.to_string().is_ascii());
         assert!(DhtError::BootstrapFailed.to_string().is_ascii());
         assert!(DhtError::PublishFailed.to_string().is_ascii());
+        assert!(DhtError::PublishNoClosestContacts.to_string().is_ascii());
+        assert!(
+            DhtError::PublishNoAcceptedContacts {
+                closest_contacts_considered: 3
+            }
+            .to_string()
+            .is_ascii()
+        );
         assert!(DhtError::SearchBusy.to_string().is_ascii());
     }
 }
