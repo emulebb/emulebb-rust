@@ -54,6 +54,9 @@ struct UploadRequestDiag {
     throttle_delay_ms: u64,
     verified_reader_open_ms: u64,
     payload_read_ms: u64,
+    read_cache_hits: usize,
+    read_cache_misses: usize,
+    read_disk_bytes: u64,
     first_skip_reason: Option<&'static str>,
 }
 
@@ -103,6 +106,9 @@ fn emit_upload_request_outcome(
             diag.throttle_delay_ms,
             diag.verified_reader_open_ms,
             diag.payload_read_ms,
+            diag.read_cache_hits,
+            diag.read_cache_misses,
+            diag.read_disk_bytes,
             diag.first_skip_reason,
         );
     }
@@ -366,6 +372,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 .await;
         }
     }
+    request_diag.read_cache_hits = verified_reader.cache_hit_count();
+    request_diag.read_cache_misses = verified_reader.cache_miss_count();
+    request_diag.read_disk_bytes = verified_reader.disk_read_bytes();
 
     let outcome = if request_diag.served_bytes == 0 {
         if request_diag.first_skip_reason == Some("duplicateDone") {

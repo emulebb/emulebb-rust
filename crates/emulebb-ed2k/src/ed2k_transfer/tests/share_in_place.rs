@@ -77,6 +77,8 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
     let second = reader.read_range(4096, 8192).await.unwrap().unwrap();
     assert_eq!(first, source_bytes[0..4096]);
     assert_eq!(second, source_bytes[4096..8192]);
+    assert_eq!(reader.cache_miss_count(), 1);
+    assert_eq!(reader.cache_hit_count(), 1);
 
     // (6) Upload read-ahead is bounded to one protocol request window: the
     // first fragment primes the cache, and the next two contiguous EMBLOCKSIZE
@@ -101,6 +103,9 @@ async fn ingest_shares_complete_file_in_place_without_copying_to_piece_store() {
         1,
         "three contiguous upload fragments should be covered by one read-ahead"
     );
+    assert_eq!(reader.cache_miss_count(), 1);
+    assert_eq!(reader.cache_hit_count(), 2);
+    assert_eq!(reader.disk_read_bytes(), ED2K_EMBLOCK_SIZE * 3);
 }
 
 /// Best-effort canonicalization for path comparison (the ingest path is stored

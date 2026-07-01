@@ -27,6 +27,9 @@ pub(crate) struct Ed2kVerifiedRangeReader {
     verified_ranges: Vec<Ed2kSharedRange>,
     cache_start: u64,
     cache: Vec<u8>,
+    cache_hit_count: usize,
+    cache_miss_count: usize,
+    disk_read_bytes: u64,
     #[cfg(test)]
     disk_read_count: usize,
 }
@@ -41,6 +44,7 @@ impl Ed2kVerifiedRangeReader {
             return Ok(None);
         };
         if let Some(bytes) = self.read_cached_range(start, end) {
+            self.cache_hit_count = self.cache_hit_count.saturating_add(1);
             return Ok(Some(bytes));
         }
 
@@ -53,6 +57,10 @@ impl Ed2kVerifiedRangeReader {
         self.cache_start = start;
         self.cache = vec![0u8; usize::try_from(read_end.saturating_sub(start)).unwrap_or(0)];
         self.file.read_exact(&mut self.cache).await?;
+        self.cache_miss_count = self.cache_miss_count.saturating_add(1);
+        self.disk_read_bytes = self
+            .disk_read_bytes
+            .saturating_add(u64::try_from(self.cache.len()).unwrap_or(u64::MAX));
         #[cfg(test)]
         {
             self.disk_read_count = self.disk_read_count.saturating_add(1);
@@ -74,6 +82,18 @@ impl Ed2kVerifiedRangeReader {
     #[cfg(test)]
     pub(crate) const fn disk_read_count(&self) -> usize {
         self.disk_read_count
+    }
+
+    pub(crate) const fn cache_hit_count(&self) -> usize {
+        self.cache_hit_count
+    }
+
+    pub(crate) const fn cache_miss_count(&self) -> usize {
+        self.cache_miss_count
+    }
+
+    pub(crate) const fn disk_read_bytes(&self) -> u64 {
+        self.disk_read_bytes
     }
 }
 
@@ -571,6 +591,9 @@ impl Ed2kTransferRuntime {
             verified_ranges,
             cache_start: 0,
             cache: Vec::new(),
+            cache_hit_count: 0,
+            cache_miss_count: 0,
+            disk_read_bytes: 0,
             #[cfg(test)]
             disk_read_count: 0,
         }))

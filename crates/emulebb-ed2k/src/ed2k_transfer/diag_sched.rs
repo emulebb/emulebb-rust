@@ -107,6 +107,9 @@ pub(crate) fn upload_request_outcome(
     throttle_delay_ms: u64,
     verified_reader_open_ms: u64,
     payload_read_ms: u64,
+    read_cache_hits: usize,
+    read_cache_misses: usize,
+    read_disk_bytes: u64,
     first_skip_reason: Option<&str>,
 ) {
     let keys = upload_keys(peer, peer_hash, file_hash);
@@ -121,6 +124,9 @@ pub(crate) fn upload_request_outcome(
         "throttleDelayMs": throttle_delay_ms,
         "verifiedReaderOpenMs": verified_reader_open_ms,
         "payloadReadMs": payload_read_ms,
+        "readCacheHits": read_cache_hits,
+        "readCacheMisses": read_cache_misses,
+        "readDiskBytes": read_disk_bytes,
     });
     if let (Value::Object(fields), Some(reason)) = (&mut body, first_skip_reason) {
         fields.insert("firstSkipReason".to_string(), json!(reason));
