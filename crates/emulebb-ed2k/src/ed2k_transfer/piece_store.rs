@@ -50,9 +50,12 @@ impl Ed2kVerifiedRangeReader {
 
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let requested_len = end.saturating_sub(start);
-        let read_end = start
-            .saturating_add(requested_len.max(UPLOAD_READ_AHEAD_BYTES))
-            .min(verified_range.end);
+        let read_len = if requested_len >= ED2K_EMBLOCK_SIZE {
+            requested_len.max(UPLOAD_READ_AHEAD_BYTES)
+        } else {
+            requested_len
+        };
+        let read_end = start.saturating_add(read_len).min(verified_range.end);
         self.file.seek(std::io::SeekFrom::Start(start)).await?;
         self.cache_start = start;
         self.cache = vec![0u8; usize::try_from(read_end.saturating_sub(start)).unwrap_or(0)];
