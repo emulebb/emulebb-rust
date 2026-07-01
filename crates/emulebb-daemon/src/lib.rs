@@ -254,10 +254,20 @@ impl DaemonConfig {
         &self,
         metadata: &MetadataStore,
     ) -> Result<Option<Ed2kNetworkConfig>> {
+        let detected_interfaces =
+            detect_interfaces().context("failed to enumerate local interfaces")?;
+        self.ed2k_network_config_from_interfaces(metadata, &detected_interfaces)
+    }
+
+    pub(crate) fn ed2k_network_config_from_interfaces(
+        &self,
+        metadata: &MetadataStore,
+        detected_interfaces: &[emulebb_ed2k::NetworkInterface],
+    ) -> Result<Option<Ed2kNetworkConfig>> {
         if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
             return Ok(None);
         }
-        let bind_ip = self.resolve_p2p_bind_ip()?;
+        let bind_ip = self.resolve_p2p_bind_ip_from_interfaces(detected_interfaces)?;
         let listen_port = self.resolve_ed2k_listen_port()?;
         let user_hash = match self.ed2k_user_hash.as_deref() {
             Some(value) => {
@@ -269,7 +279,6 @@ impl DaemonConfig {
         };
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
-        let detected_interfaces = detect_interfaces().unwrap_or_default();
         let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, &detected_interfaces);
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
@@ -294,7 +303,7 @@ impl DaemonConfig {
             kad_routing_maintenance_enabled: self.kad.routing_maintenance_enabled,
             nat_config: self.nat_config(bind_ip),
             config: self.ed2k.clone(),
-            p2p_bind_ip: self.p2p_bind_ip,
+            p2p_bind_ip: Some(bind_ip),
             p2p_bind_interface: self.p2p_bind_interface.clone(),
             vpn_guard: VpnGuardConfig {
                 enabled: self.vpn_guard.enabled,

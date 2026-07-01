@@ -725,6 +725,35 @@ fn p2p_bind_ip_and_interface_prefers_current_interface_ip() {
 }
 
 #[test]
+fn ed2k_network_config_stores_resolved_interface_bind_ip() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = config_with_server(
+        temp.path().to_path_buf(),
+        Some("192.0.2.10".parse().unwrap()),
+    );
+    config.p2p_bind_interface = Some("hide.me".to_string());
+    config.nat.enabled = false;
+
+    let network = config
+        .ed2k_network_config_from_interfaces(
+            &metadata_store(&config),
+            &[
+                iface("Ethernet", "192.0.2.10"),
+                iface("hide.me", "10.44.55.66"),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(network.bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
+    assert_eq!(
+        network.p2p_bind_ip,
+        Some("10.44.55.66".parse::<Ipv4Addr>().unwrap())
+    );
+    assert!(network.vpn_interface_bound);
+}
+
+#[test]
 fn p2p_bind_ip_and_interface_mismatch_starts_when_vpn_guard_blocks_p2p() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(

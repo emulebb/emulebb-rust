@@ -2,16 +2,11 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
 use emulebb_core::vpn_guard::binding_confirmed;
-use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, detect_interfaces};
+use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface};
 
 use crate::DaemonConfig;
 
 impl DaemonConfig {
-    pub(crate) fn resolve_p2p_bind_ip(&self) -> Result<Ipv4Addr> {
-        let interfaces = detect_interfaces().context("failed to enumerate local interfaces")?;
-        self.resolve_p2p_bind_ip_from_interfaces(&interfaces)
-    }
-
     pub(crate) fn resolve_p2p_bind_ip_from_interfaces(
         &self,
         interfaces: &[NetworkInterface],
