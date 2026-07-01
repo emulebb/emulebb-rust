@@ -4558,9 +4558,11 @@ const KAD_NOTES_PUBLISH_BUDGET: usize = 1;
 const KAD_KEYWORD_PUBLISH_IN_FLIGHT_CAP: usize = 3;
 const KAD_SOURCE_PUBLISH_IN_FLIGHT_CAP: usize = 4;
 const KAD_NOTES_PUBLISH_IN_FLIGHT_CAP: usize = 1;
-/// Keep some DHT traversal capacity free for interactive searches, bootstrap
+/// Keep one DHT traversal permit free for interactive searches, bootstrap
 /// refresh, and firewall/buddy maintenance while large-library publishing runs.
-const KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS: usize = 2;
+/// With the default five concurrent searches this lets source publishing reach
+/// the master's `KADEMLIATOTALSTORESRC = 4` active store cap.
+const KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS: usize = 1;
 /// Store traversals need enough lookup packets to converge before the stock
 /// 140s store timeout. One packet/sec across several concurrent store lookups
 /// self-throttles large-library publishing without changing wire semantics.
@@ -8927,7 +8929,7 @@ mod tests {
     fn kad_shared_publish_budget_reserves_search_capacity() {
         assert_eq!(kad_shared_file_publish_in_flight_budget_for(1), 1);
         assert_eq!(kad_shared_file_publish_in_flight_budget_for(2), 1);
-        assert_eq!(kad_shared_file_publish_in_flight_budget_for(5), 3);
+        assert_eq!(kad_shared_file_publish_in_flight_budget_for(5), 4);
     }
 
     #[test]
