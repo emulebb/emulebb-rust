@@ -412,6 +412,82 @@ fn test_find_node_lookup_converged_waits_for_unfinished_closer_candidate() {
 }
 
 #[test]
+fn test_store_lookup_done_once_publish_fanout_has_responded() {
+    let mut candidates = (1u8..=K as u8)
+        .map(|n| TraversalCandidate {
+            contact: TraversalContact {
+                id: NodeId::from_bytes([n; 16]),
+                addr: format!("127.0.0.1:{}", 4600 + u16::from(n))
+                    .parse()
+                    .unwrap(),
+                tcp_port: 0,
+                version: 9,
+            },
+            state: CandidateState::Responded,
+            distance: NodeId::from_bytes([n; 16]),
+        })
+        .collect::<Vec<_>>();
+    candidates.insert(
+        0,
+        TraversalCandidate {
+            contact: TraversalContact {
+                id: NodeId::from_bytes([0; 16]),
+                addr: "127.0.0.1:4701".parse().unwrap(),
+                tcp_port: 0,
+                version: 9,
+            },
+            state: CandidateState::Pending,
+            distance: NodeId::from_bytes([0; 16]),
+        },
+    );
+
+    assert!(lookup_phase_done(&candidates, &TraversalKind::Store, K));
+}
+
+#[test]
+fn test_keyword_lookup_still_waits_for_unfinished_closest_frontier() {
+    let mut candidates = (1u8..=K as u8)
+        .map(|n| TraversalCandidate {
+            contact: TraversalContact {
+                id: NodeId::from_bytes([n; 16]),
+                addr: format!("127.0.0.1:{}", 4600 + u16::from(n))
+                    .parse()
+                    .unwrap(),
+                tcp_port: 0,
+                version: 9,
+            },
+            state: CandidateState::Responded,
+            distance: NodeId::from_bytes([n; 16]),
+        })
+        .collect::<Vec<_>>();
+    candidates.insert(
+        0,
+        TraversalCandidate {
+            contact: TraversalContact {
+                id: NodeId::from_bytes([0; 16]),
+                addr: "127.0.0.1:4701".parse().unwrap(),
+                tcp_port: 0,
+                version: 9,
+            },
+            state: CandidateState::Pending,
+            distance: NodeId::from_bytes([0; 16]),
+        },
+    );
+
+    assert!(!lookup_phase_done(
+        &candidates,
+        &TraversalKind::Keyword {
+            request: SearchKeyReq {
+                target: NodeId::ZERO,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+        },
+        K
+    ));
+}
+
+#[test]
 fn test_select_phase2_contacts_caps_fanout_at_oracle_k() {
     let target = NodeId::ZERO;
     let responded: Vec<TraversalContact> = (1u8..=20)

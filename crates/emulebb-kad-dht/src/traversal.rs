@@ -553,6 +553,12 @@ fn lookup_phase_done(
         return true;
     }
 
+    if matches!(search_kind, TraversalKind::Store)
+        && store_lookup_has_publish_fanout(candidates, closest_limit)
+    {
+        return true;
+    }
+
     candidates.iter().take(closest_limit).all(|candidate| {
         matches!(
             candidate.state,
@@ -561,6 +567,18 @@ fn lookup_phase_done(
     }) && !candidates
         .iter()
         .any(|candidate| candidate.state == CandidateState::Inflight)
+}
+
+fn store_lookup_has_publish_fanout(
+    candidates: &[TraversalCandidate],
+    closest_limit: usize,
+) -> bool {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.state == CandidateState::Responded)
+        .take(closest_limit)
+        .count()
+        >= closest_limit
 }
 
 fn build_lookup_phase_result(
