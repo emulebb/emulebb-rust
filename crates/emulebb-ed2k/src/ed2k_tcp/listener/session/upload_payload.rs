@@ -252,8 +252,8 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     }
     transfer_runtime.note_file_upload_accept(&requested).await;
     let verified_reader_open_start = Instant::now();
-    let Some(mut verified_reader) = transfer_runtime
-        .open_verified_range_reader(&requested)
+    let Some(mut verified_reader) = upload_queue
+        .take_verified_reader(transfer_runtime, &requested)
         .await?
     else {
         request_diag.note_skip("noVerifiedReader");
@@ -267,6 +267,9 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     };
     request_diag.verified_reader_open_ms =
         u64::try_from(verified_reader_open_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let reader_cache_hits_before = verified_reader.cache_hit_count();
+    let reader_cache_misses_before = verified_reader.cache_miss_count();
+    let reader_disk_bytes_before = verified_reader.disk_read_bytes();
 
     let mut range_plan = Vec::with_capacity(ranges.len());
     let mut accepted_ranges = Vec::with_capacity(ranges.len());
@@ -435,9 +438,15 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 .await;
         }
     }
-    request_diag.read_cache_hits = verified_reader.cache_hit_count();
-    request_diag.read_cache_misses = verified_reader.cache_miss_count();
-    request_diag.read_disk_bytes = verified_reader.disk_read_bytes();
+    request_diag.read_cache_hits = verified_reader
+        .cache_hit_count()
+        .saturating_sub(reader_cache_hits_before);
+    request_diag.read_cache_misses = verified_reader
+        .cache_miss_count()
+        .saturating_sub(reader_cache_misses_before);
+    request_diag.read_disk_bytes = verified_reader
+        .disk_read_bytes()
+        .saturating_sub(reader_disk_bytes_before);
 
     let outcome = if request_diag.served_bytes == 0 {
         if request_diag.first_skip_reason == Some("duplicateDone") {
@@ -459,6 +468,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         shared.verified_complete,
         &request_diag,
     );
+    upload_queue.store_verified_reader(&requested, verified_reader);
 
     Ok(UploadPayloadOutcome::Continue { requested })
 }

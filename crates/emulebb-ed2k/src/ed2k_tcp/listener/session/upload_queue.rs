@@ -10,7 +10,7 @@ use crate::{
     },
     ed2k_transfer::{
         Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadRangeAdmission,
-        Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, diag_sched,
+        Ed2kUploadSessionHandle, Ed2kUploadSessionStatus, Ed2kVerifiedRangeReader, diag_sched,
     },
 };
 
@@ -39,6 +39,7 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // session key, not the ephemeral socket source port).
     diag_peer: Option<String>,
     diag_peer_hash: Option<[u8; 16]>,
+    verified_reader: Option<(Ed2kHash, Ed2kVerifiedRangeReader)>,
 }
 
 impl ListenerUploadQueue {
@@ -51,6 +52,7 @@ impl ListenerUploadQueue {
             last_queue_rank_sent_at: None,
             diag_peer: None,
             diag_peer_hash: None,
+            verified_reader: None,
         }
     }
 
@@ -155,6 +157,7 @@ impl ListenerUploadQueue {
             if status != Ed2kUploadSessionStatus::Rejected {
                 self.session = Some(session_handle);
                 self.file_hash = Some(*requested);
+                self.verified_reader = None;
             }
             status
         };
@@ -214,8 +217,32 @@ impl ListenerUploadQueue {
             self.session = Some(session_handle);
             self.file_hash = Some(*requested);
             self.granted_sent = false;
+            self.verified_reader = None;
         }
         self.send_status(transport, peer_addr, status).await
+    }
+
+    pub(in crate::ed2k_tcp) async fn take_verified_reader(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        requested: &Ed2kHash,
+    ) -> Result<Option<Ed2kVerifiedRangeReader>> {
+        if let Some((cached_hash, reader)) = self.verified_reader.take() {
+            if cached_hash == *requested {
+                return Ok(Some(reader));
+            }
+        }
+        transfer_runtime.open_verified_range_reader(requested).await
+    }
+
+    pub(in crate::ed2k_tcp) fn store_verified_reader(
+        &mut self,
+        requested: &Ed2kHash,
+        reader: Ed2kVerifiedRangeReader,
+    ) {
+        if self.file_hash.as_ref() == Some(requested) && self.session.is_some() {
+            self.verified_reader = Some((*requested, reader));
+        }
     }
 
     pub(in crate::ed2k_tcp) async fn note_request_parts(
@@ -305,6 +332,7 @@ impl ListenerUploadQueue {
         self.last_queue_rank_sent_at = None;
         self.diag_peer = None;
         self.diag_peer_hash = None;
+        self.verified_reader = None;
     }
 
     async fn send_status(
@@ -398,12 +426,16 @@ impl ListenerUploadQueue {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        fs,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        str::FromStr,
+    };
 
     use emulebb_kad_proto::Ed2kHash;
 
     use super::ListenerUploadQueue;
-    use crate::ed2k_transfer::Ed2kTransferRuntime;
+    use crate::ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime};
     use crate::paths::unique_test_dir;
 
     /// FIX 5 invariant: the upload slot must be reclaimed on EVERY exit path.
@@ -477,5 +509,64 @@ mod tests {
         // nothing (the post-loop unconditional release still guarantees cleanup).
         queue.release(&runtime).await;
         assert_eq!(queue.slot_file_hash(), None);
+    }
+
+    #[tokio::test]
+    async fn verified_reader_cache_survives_repeated_parts_requests_for_slot_file() {
+        let root = unique_test_dir("ed2k-listener-upload-reader-cache");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let library = root.join("library");
+        fs::create_dir_all(&library).unwrap();
+        let source_path = library.join("shared-upload-cache.bin");
+        let file_len = usize::try_from(ED2K_EMBLOCK_SIZE * 3).unwrap();
+        let bytes = (0..file_len)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&source_path, &bytes).unwrap();
+        let summary = runtime
+            .ingest_local_file(&source_path, "shared-upload-cache.bin")
+            .await
+            .unwrap();
+        let hash = Ed2kHash::from_str(&summary.file_hash).unwrap();
+
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 4662);
+        let identity = super::super::upload_peer_identity_from_socket(peer_addr);
+        let mut queue = ListenerUploadQueue::new();
+        let _reply = queue.start_upload_reply(&runtime, identity, &hash).await;
+
+        let mut reader = queue
+            .take_verified_reader(&runtime, &hash)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = reader
+            .read_range_with_read_ahead(0, ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE * 3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, bytes[0..ED2K_EMBLOCK_SIZE as usize]);
+        assert_eq!(reader.disk_read_count(), 1);
+        queue.store_verified_reader(&hash, reader);
+
+        let mut reader = queue
+            .take_verified_reader(&runtime, &hash)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = reader
+            .read_range(ED2K_EMBLOCK_SIZE, ED2K_EMBLOCK_SIZE * 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second,
+            bytes[ED2K_EMBLOCK_SIZE as usize..(ED2K_EMBLOCK_SIZE * 2) as usize]
+        );
+        assert_eq!(
+            reader.disk_read_count(),
+            1,
+            "second OP_REQUESTPARTS should reuse the cached read-ahead window"
+        );
+        assert_eq!(reader.cache_hit_count(), 1);
     }
 }

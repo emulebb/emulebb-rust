@@ -80,6 +80,7 @@ pub use model::{
     Ed2kCallbackIntent, Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kReloadIndexEntry,
     Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferJob, Ed2kTransferState,
 };
+pub(crate) use piece_store::Ed2kVerifiedRangeReader;
 use source_exchange::SourceExchangeState;
 use upload_queue::DEFAULT_SOFT_QUEUE_SIZE;
 use upload_queue::Ed2kUploadQueueState;
