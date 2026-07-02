@@ -22,7 +22,7 @@ const FAMILY: &str = "sched";
 /// Build the §3.5 `keys` object for an upload-slot event. `peer` is the stable
 /// `ip:port` advertised peer endpoint (matching the upload-queue session key, so
 /// the harness aligns slot events across both clients by the same identity).
-fn upload_keys(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) -> Value {
+pub(crate) fn upload_keys(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) -> Value {
     let mut keys = Map::new();
     keys.insert("peer".to_string(), json!(peer));
     if let Some(user_hash) = peer_hash {

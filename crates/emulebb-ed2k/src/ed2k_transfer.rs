@@ -35,6 +35,7 @@ mod block_bitmap;
 mod callback;
 mod catalog;
 mod deliver;
+pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
 mod download_activity;
 mod download_coordinator;

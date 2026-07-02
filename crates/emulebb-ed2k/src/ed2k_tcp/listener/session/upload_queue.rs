@@ -40,6 +40,10 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     diag_peer: Option<String>,
     diag_peer_hash: Option<[u8; 16]>,
     verified_reader: Option<(Ed2kHash, Ed2kVerifiedRangeReader)>,
+    // Per-connection ledger of requested upload blocks (fileHash, start, end,
+    // count, first-seen) for MFC repeat_block_request parity. Bounded and pruned
+    // to the observation window; a peer requests few distinct blocks at a time.
+    block_request_ledger: Vec<([u8; 16], u64, u64, u32, std::time::Instant)>,
 }
 
 impl ListenerUploadQueue {
@@ -53,7 +57,42 @@ impl ListenerUploadQueue {
             diag_peer: None,
             diag_peer_hash: None,
             verified_reader: None,
+            block_request_ledger: Vec::new(),
         }
+    }
+
+    /// Records one requested upload block and returns the repeat count when this
+    /// exact `(file, block range)` was already requested on this connection within
+    /// the `REPEAT_BLOCK_WINDOW_SECS` window (MFC repeat_block_request parity). The
+    /// block is still served; this only surfaces the behavior for diagnostics. The
+    /// ledger is pruned to the window and capped so a peer requesting many distinct
+    /// blocks cannot grow it without bound.
+    pub(in crate::ed2k_tcp) fn note_block_request(
+        &mut self,
+        file_hash: &Ed2kHash,
+        start: u64,
+        end: u64,
+    ) -> Option<u32> {
+        use crate::ed2k_transfer::diag_bad_peer::REPEAT_BLOCK_WINDOW_SECS;
+        const MAX_LEDGER_ENTRIES: usize = 512;
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(REPEAT_BLOCK_WINDOW_SECS);
+        self.block_request_ledger
+            .retain(|(_, _, _, _, first)| now.duration_since(*first) < window);
+        let hash = file_hash.0;
+        if let Some(entry) = self
+            .block_request_ledger
+            .iter_mut()
+            .find(|(h, s, e, _, _)| *h == hash && *s == start && *e == end)
+        {
+            entry.3 = entry.3.saturating_add(1);
+            return Some(entry.3);
+        }
+        if self.block_request_ledger.len() >= MAX_LEDGER_ENTRIES {
+            self.block_request_ledger.remove(0);
+        }
+        self.block_request_ledger.push((hash, start, end, 1, now));
+        None
     }
 
     /// Capture the advertised peer identity for the `sched` diag emits.
@@ -437,6 +476,22 @@ mod tests {
     use super::ListenerUploadQueue;
     use crate::ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime};
     use crate::paths::unique_test_dir;
+
+    #[test]
+    fn note_block_request_flags_repeat_within_window() {
+        let mut queue = ListenerUploadQueue::new();
+        let file = Ed2kHash([7u8; 16]);
+        // First request for a block is not a repeat.
+        assert_eq!(queue.note_block_request(&file, 0, 180_000), None);
+        // The same block again on this connection climbs the repeat count.
+        assert_eq!(queue.note_block_request(&file, 0, 180_000), Some(2));
+        assert_eq!(queue.note_block_request(&file, 0, 180_000), Some(3));
+        // A different block on the same file is tracked independently.
+        assert_eq!(queue.note_block_request(&file, 180_000, 360_000), None);
+        // A different file is independent too.
+        let other = Ed2kHash([9u8; 16]);
+        assert_eq!(queue.note_block_request(&other, 0, 180_000), None);
+    }
 
     /// FIX 5 invariant: the upload slot must be reclaimed on EVERY exit path.
     /// `handle_connection` now always falls through to `release` (the loop body

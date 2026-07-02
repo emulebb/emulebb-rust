@@ -179,6 +179,25 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     let is_i64 = opcode == OP_REQUESTPARTS_I64;
     let (requested, ranges) = decode_request_parts_payload(payload, is_i64)?;
     let mut request_diag = UploadRequestDiag::from_ranges(&ranges);
+    // MFC repeat_block_request parity: surface a peer re-requesting the exact same
+    // block within the observation window. Observe-only -- the ranges are still
+    // served below; this only emits the bad_peer diagnostic so rust/MFC bad-peer
+    // traces line up. Empty (0,0) padding slots are skipped.
+    for &(start, end) in &ranges {
+        if end > start
+            && let Some(repeat_count) = upload_queue.note_block_request(&requested, start, end)
+        {
+            crate::ed2k_transfer::diag_bad_peer::repeat_block_request(
+                &peer_addr.to_string(),
+                peer_upload_identity.user_hash,
+                &hex::encode(requested.0),
+                start,
+                end,
+                start / crate::ed2k_transfer::ED2K_PART_SIZE,
+                repeat_count,
+            );
+        }
+    }
     transfer_runtime.note_file_upload_request(&requested).await;
     // Only a cryptographically verified peer may be credited: the credit store is
     // keyed on the user hash and feeds the upload score, so an unverified hash is
