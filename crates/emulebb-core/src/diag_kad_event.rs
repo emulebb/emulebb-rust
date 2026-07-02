@@ -61,6 +61,22 @@ impl KadPublishKind {
         }
     }
 
+    fn no_ack_milestone(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword_publish_no_ack",
+            Self::Source => "source_publish_no_ack",
+            Self::Notes => "notes_publish_no_ack",
+        }
+    }
+
+    fn no_contacts_milestone(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword_publish_no_contacts",
+            Self::Source => "source_publish_no_contacts",
+            Self::Notes => "notes_publish_no_contacts",
+        }
+    }
+
     fn failure_milestone(self) -> &'static str {
         match self {
             Self::Keyword => "keyword_publish_failed",
@@ -78,10 +94,13 @@ impl KadPublishKind {
 /// `keys.fileHash` is the published file's eD2k hash. The body carries the store
 /// outcome counts so the harness can see reach (target node count) and ack/fail.
 pub(crate) fn publish(kind: KadPublishKind, file_hash: &str, stats: PublishAttemptStats) {
+    let outcome = publish_outcome(stats);
     let body = json!({
-        "milestone": kind.milestone(),
+        "milestone": publish_milestone(kind, outcome),
         "action": "publish",
         "publishKind": kind.publish_kind(),
+        "outcome": outcome.label(),
+        "acknowledged": outcome == KadPublishOutcome::Acked,
         "closestContactsConsidered": stats.closest_contacts_considered,
         "attemptedContacts": stats.attempted_contacts,
         "ackedContacts": stats.acked_contacts,
@@ -91,10 +110,52 @@ pub(crate) fn publish(kind: KadPublishKind, file_hash: &str, stats: PublishAttem
     emit(
         FAMILY,
         kind.event(),
-        "info",
+        publish_severity(outcome),
         json!({ "fileHash": file_hash }),
         body,
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KadPublishOutcome {
+    Acked,
+    NoAck,
+    NoContacts,
+}
+
+impl KadPublishOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Acked => "acked",
+            Self::NoAck => "noAck",
+            Self::NoContacts => "noContacts",
+        }
+    }
+}
+
+fn publish_outcome(stats: PublishAttemptStats) -> KadPublishOutcome {
+    if stats.acked_contacts > 0 {
+        KadPublishOutcome::Acked
+    } else if stats.attempted_contacts > 0 {
+        KadPublishOutcome::NoAck
+    } else {
+        KadPublishOutcome::NoContacts
+    }
+}
+
+fn publish_milestone(kind: KadPublishKind, outcome: KadPublishOutcome) -> &'static str {
+    match outcome {
+        KadPublishOutcome::Acked => kind.milestone(),
+        KadPublishOutcome::NoAck => kind.no_ack_milestone(),
+        KadPublishOutcome::NoContacts => kind.no_contacts_milestone(),
+    }
+}
+
+const fn publish_severity(outcome: KadPublishOutcome) -> &'static str {
+    match outcome {
+        KadPublishOutcome::Acked => "info",
+        KadPublishOutcome::NoAck | KadPublishOutcome::NoContacts => "low",
+    }
 }
 
 /// Outbound-publish failure milestone. This keeps live parity runs explainable
@@ -278,5 +339,42 @@ mod tests {
         assert_eq!(KadPublishKind::Source.publish_kind(), "source");
         assert_eq!(KadPublishKind::Notes.publish_kind(), "notes");
         assert_eq!(KadPublishKind::Keyword.milestone(), "keyword_published");
+    }
+
+    #[test]
+    fn publish_outcome_classifies_zero_ack_fanouts() {
+        let acked = PublishAttemptStats {
+            attempted_contacts: 8,
+            acked_contacts: 1,
+            ..PublishAttemptStats::default()
+        };
+        let no_ack = PublishAttemptStats {
+            attempted_contacts: 8,
+            acked_contacts: 0,
+            timed_out_contacts: 8,
+            ..PublishAttemptStats::default()
+        };
+        let no_contacts = PublishAttemptStats::default();
+
+        assert_eq!(publish_outcome(acked), KadPublishOutcome::Acked);
+        assert_eq!(
+            publish_milestone(KadPublishKind::Keyword, publish_outcome(acked)),
+            "keyword_published"
+        );
+        assert_eq!(publish_severity(publish_outcome(acked)), "info");
+
+        assert_eq!(publish_outcome(no_ack), KadPublishOutcome::NoAck);
+        assert_eq!(
+            publish_milestone(KadPublishKind::Keyword, publish_outcome(no_ack)),
+            "keyword_publish_no_ack"
+        );
+        assert_eq!(publish_severity(publish_outcome(no_ack)), "low");
+
+        assert_eq!(publish_outcome(no_contacts), KadPublishOutcome::NoContacts);
+        assert_eq!(
+            publish_milestone(KadPublishKind::Source, publish_outcome(no_contacts)),
+            "source_publish_no_contacts"
+        );
+        assert_eq!(publish_severity(publish_outcome(no_contacts)), "low");
     }
 }
