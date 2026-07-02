@@ -172,6 +172,10 @@ pub struct Ed2kTransferRuntime {
     /// to surface sourcesTransferring/partsAvailable and live transfer-source
     /// detail. In-memory only (live session state, never persisted).
     download_sources: Arc<StdMutex<HashMap<String, HashMap<String, Ed2kSourceActivity>>>>,
+    /// Cross-connection same-file upload-churn ledger keyed by (peer key, file
+    /// hash) -> (count, first-seen) for MFC repeat_file_request parity. Bounded and
+    /// window-pruned; observe-only.
+    upload_file_churn: Arc<StdMutex<HashMap<(String, String), (u32, Instant)>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received
@@ -320,6 +324,7 @@ impl Ed2kTransferRuntime {
             aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
+            upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,

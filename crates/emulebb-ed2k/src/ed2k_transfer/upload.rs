@@ -56,6 +56,26 @@ impl Ed2kTransferRuntime {
             .await
     }
 
+    /// Records a peer (re)starting an upload session for a file, returning the
+    /// repeat count when the same `(peer, file)` restarted within the churn window
+    /// (MFC repeat_file_request parity). `peer_key` is the peer user-hash hex when
+    /// known, else its IP -- matching the master PeerBehaviorKey fallback. Bounded
+    /// and window-pruned so it cannot grow without bound.
+    pub(crate) fn record_upload_file_churn(&self, peer_key: &str, file_hash: &str) -> Option<u32> {
+        const MAX_ENTRIES: usize = 4096;
+        let window = std::time::Duration::from_secs(super::diag_bad_peer::REPEAT_FILE_WINDOW_SECS);
+        let now = Instant::now();
+        let mut ledger = self.upload_file_churn.lock().unwrap();
+        ledger.retain(|_, (_, first)| now.duration_since(*first) < window);
+        let key = (peer_key.to_string(), file_hash.to_string());
+        if !ledger.contains_key(&key) && ledger.len() >= MAX_ENTRIES {
+            return None;
+        }
+        let entry = ledger.entry(key).or_insert((0, now));
+        entry.0 = entry.0.saturating_add(1);
+        (entry.0 > 1).then_some(entry.0)
+    }
+
     pub(crate) async fn begin_upload_session_at(
         &self,
         peer: Ed2kUploadPeerIdentity,
@@ -66,6 +86,24 @@ impl Ed2kTransferRuntime {
             .next_upload_connection_id
             .fetch_add(1, Ordering::Relaxed);
         let credit_score_permille = self.peer_credit_score_permille(&peer);
+        // MFC repeat_file_request parity: surface a peer that keeps (re)starting an
+        // upload session for the same file (same-file churn, e.g. dropping and
+        // reconnecting). Observe-only; the session proceeds regardless.
+        {
+            let peer_key = match peer.user_hash {
+                Some(hash) => hex::encode(hash),
+                None => peer.ip.to_string(),
+            };
+            let file_hex = file_hash.to_string();
+            if let Some(repeat) = self.record_upload_file_churn(&peer_key, &file_hex) {
+                super::diag_bad_peer::repeat_file_request(
+                    &format!("{}:{}", peer.ip, peer.tcp_port),
+                    peer.user_hash,
+                    &file_hex,
+                    repeat,
+                );
+            }
+        }
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let file_priority_score = self.file_priority_score(file_hash);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);

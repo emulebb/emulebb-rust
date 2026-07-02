@@ -15,6 +15,10 @@ use super::diag_sched::upload_keys;
 /// ledger window (`windowSeconds: 3600`).
 pub(crate) const REPEAT_BLOCK_WINDOW_SECS: u64 = 3600;
 
+/// Observation window for repeat same-file upload churn, matching the MFC
+/// bad-peer ledger window (`windowSeconds: 3600`).
+pub(crate) const REPEAT_FILE_WINDOW_SECS: u64 = 3600;
+
 /// `repeat_block_request`: a peer re-requested the exact same upload block within
 /// the observation window. Mirrors MFC `LogUploadBlockRequestBehavior` ->
 /// `repeat_block_request` (oracle `CSharedFileList`). Observe-only: the block is
@@ -41,4 +45,26 @@ pub(crate) fn repeat_block_request(
         "partIndex": part_index,
     });
     emit("bad_peer", "repeat_block_request", "medium", keys, body);
+}
+
+/// `repeat_file_request`: the same peer (re)started an upload session for the same
+/// file more than once within the observation window. Mirrors MFC
+/// `TrackUploadFileBehavior` -> `repeat_file_request` (oracle `CUploadQueue`).
+/// Observe-only: the upload proceeds; this only surfaces same-file churn (a peer
+/// that keeps dropping and reconnecting for one file) so bad-peer traces line up.
+pub(crate) fn repeat_file_request(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    repeat_count: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "observe",
+        "behavior": "repeat_file_request",
+        "reason": "Repeated same-file upload churn",
+        "repeatCount": repeat_count,
+        "windowSeconds": REPEAT_FILE_WINDOW_SECS,
+    });
+    emit("bad_peer", "repeat_file_request", "medium", keys, body);
 }

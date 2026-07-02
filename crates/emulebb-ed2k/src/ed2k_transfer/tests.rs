@@ -68,6 +68,25 @@ async fn download_activity_reports_average_speed_until_stale() {
 }
 
 #[tokio::test]
+async fn record_upload_file_churn_flags_same_file_repeat() {
+    let root = unique_test_dir("ed2k-transfer-file-churn");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let file = "00112233445566778899aabbccddeeff";
+    let peer = "aabbccddeeff00112233445566778899";
+    // First (peer, file) session start is not churn.
+    assert_eq!(runtime.record_upload_file_churn(peer, file), None);
+    // The same peer re-starting the same file (e.g. after a reconnect) is churn.
+    assert_eq!(runtime.record_upload_file_churn(peer, file), Some(2));
+    assert_eq!(runtime.record_upload_file_churn(peer, file), Some(3));
+    // A different file for the same peer is tracked independently.
+    let other_file = "ffffffffffffffffffffffffffffffff";
+    assert_eq!(runtime.record_upload_file_churn(peer, other_file), None);
+    // A different peer is independent too.
+    let other_peer = "00000000000000000000000000000000";
+    assert_eq!(runtime.record_upload_file_churn(other_peer, file), None);
+}
+
+#[tokio::test]
 async fn stale_download_sources_are_evicted_on_next_write() {
     // A long-running transfer must not accumulate one inner-map entry per
     // endpoint ever observed: a later write opportunistically drops entries
