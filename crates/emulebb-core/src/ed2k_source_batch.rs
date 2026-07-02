@@ -282,6 +282,7 @@ mod tests {
             unshared_hashes: HashSet::new(),
             monitor_shared_hashes: HashMap::new(),
             kad_running: false,
+            last_source_count_emit_at: None,
         }
     }
 

@@ -98,3 +98,24 @@ pub(crate) fn source_swapped(
     });
     emit(FAMILY, "source_swapped", "info", Value::Object(keys), body);
 }
+
+/// `source_count` (schema §3.5): periodic download-source picture snapshot, for
+/// parity with MFC `DiagEventLogDownloadSourceCount`. Field mapping to rust's
+/// source registry: `sourceCount` = total live candidates; `validSourceCount` =
+/// leased (actively engaged) sources; `nnpSourceCount` is 0 (rust does not keep a
+/// NoNeededParts aggregate on the registry); `a4afFileCount` = A4AF-lite candidate
+/// count (source-based). Keys are empty, matching MFC.
+pub(crate) fn source_count(
+    source_count: usize,
+    valid_source_count: usize,
+    nnp_source_count: usize,
+    a4af_file_count: usize,
+) {
+    let body = json!({
+        "sourceCount": source_count,
+        "validSourceCount": valid_source_count,
+        "nnpSourceCount": nnp_source_count,
+        "a4afFileCount": a4af_file_count,
+    });
+    emit(FAMILY, "source_count", "info", Value::Object(Map::new()), body);
+}

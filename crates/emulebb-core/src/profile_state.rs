@@ -81,6 +81,7 @@ pub(crate) fn load_core_state(
         unshared_hashes: metadata.load_unshared_file_hashes()?.into_iter().collect(),
         monitor_shared_hashes: HashMap::new(),
         kad_running: false,
+        last_source_count_emit_at: None,
     })
 }
 

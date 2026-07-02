@@ -38,4 +38,8 @@ pub(crate) struct CoreState {
     pub(crate) unshared_hashes: HashSet<String>,
     pub(crate) monitor_shared_hashes: HashMap<PathBuf, String>,
     pub(crate) kad_running: bool,
+    /// Last time the periodic `sched:source_count` snapshot was emitted, so the
+    /// download-source picture is throttled to roughly the MFC snapshot cadence
+    /// instead of firing on every source-acquisition round.
+    pub(crate) last_source_count_emit_at: Option<Instant>,
 }

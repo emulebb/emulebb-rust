@@ -3361,6 +3361,20 @@ impl EmulebbCore {
                 crate::diag_sched::source_dropped(file_hash, source);
             }
         }
+        // Periodic download-source snapshot (MFC sched:source_count parity),
+        // throttled to roughly the master snapshot cadence rather than firing on
+        // every acquisition round. Field mapping is documented on the emitter.
+        const SOURCE_COUNT_EMIT_INTERVAL: Duration = Duration::from_secs(8);
+        if state
+            .last_source_count_emit_at
+            .is_none_or(|last| now.duration_since(last) >= SOURCE_COUNT_EMIT_INTERVAL)
+        {
+            let source_count = state.download_source_registry.candidate_count();
+            let valid_source_count = state.download_source_registry.leased_peer_count();
+            let a4af_file_count = state.download_source_registry.a4af_candidate_count();
+            crate::diag_sched::source_count(source_count, valid_source_count, 0, a4af_file_count);
+            state.last_source_count_emit_at = Some(now);
+        }
         (acquired, deferred, deferred_retry_delay)
     }
 
