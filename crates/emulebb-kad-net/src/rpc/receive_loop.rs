@@ -154,20 +154,17 @@ impl RpcManager {
                                 from.ip(),
                                 opcode_name(response_opcode),
                             );
-                            // bad_peer: packet from an IP previously flood-banned
-                            // by the anti-flood limiter (uniform-diagnostics-v2
-                            // §3.4). repeatCount/windowSeconds are unknown here
-                            // (the ban verdict happened on an earlier packet), so
-                            // they are reported as 0 rather than faked.
-                            crate::diag_event::bad_peer_kad_drop(
-                                "anti_flood_ban",
-                                "high",
-                                "anti_flood_ban",
-                                "packet from flood-banned IP",
-                                from,
-                                0,
-                                0,
-                            );
+                            // WHY: the ban verdict is already emitted once as a
+                            // high-severity anti_flood_ban when the limiter trips
+                            // (the MassiveDrop branch below). A flood-banned IP keeps
+                            // sending, so re-emitting a high-severity event for every
+                            // dropped packet spammed the diagnostics (hundreds/min for
+                            // a single IP) and inflated the high-severity count.
+                            // Subsequent drops are still counted via
+                            // record_tracker_action above and debug-logged; stock
+                            // eMule likewise drops silently once an IP is banned, so
+                            // suppressing the per-packet event keeps diagnostics at
+                            // parity (uniform-diagnostics-v2 §3.4).
                             continue;
                         }
 
