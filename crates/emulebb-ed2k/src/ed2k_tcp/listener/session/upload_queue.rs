@@ -14,7 +14,9 @@ use crate::{
     },
 };
 
-use super::super::super::codec::{encode_accept_upload_req, encode_queue_ranking};
+use super::super::super::codec::{
+    encode_accept_upload_req, encode_out_of_part_reqs, encode_queue_ranking,
+};
 use super::super::super::dump::dump_ed2k_tcp_listener_send;
 
 pub(in crate::ed2k_tcp) enum ListenerQueuePoll {
@@ -166,6 +168,23 @@ impl ListenerUploadQueue {
                 Ok(ListenerQueuePoll::Continue)
             }
             Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
+                // WHY: if this peer was actively granted an upload slot and the queue
+                // is now recycling it (Stale), tell the downloader to go back to
+                // OnQueue with OP_OUTOFPARTREQS before the socket closes -- mirroring
+                // MFC CUpDownClient::SendOutOfPartReqsAndAddToWaitingQueue. Without it
+                // the downloader is dropped silently and reconnects immediately (churn)
+                // instead of re-queueing with the stock out-of-part-reqs cooldown. A
+                // never-granted (Rejected) peer gets nothing, matching the master.
+                if self.granted_sent {
+                    let packet = encode_out_of_part_reqs();
+                    dump_ed2k_tcp_listener_send(
+                        peer_addr,
+                        transport.mode,
+                        "out_of_part_reqs",
+                        &packet,
+                    );
+                    let _ = transport.write_all(&packet).await;
+                }
                 Ok(ListenerQueuePoll::Close)
             }
         }

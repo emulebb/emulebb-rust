@@ -46,8 +46,9 @@ const MAX_CLIENT_MSG_LEN: usize = 450;
 use super::{
     MAX_PEER_DECOMPRESSED_PACKET_LEN, OP_ACCEPTUPLOADREQ, OP_ASKSHAREDDENIEDANS,
     OP_ASKSHAREDFILESANSWER, OP_EDONKEYPROT, OP_EMULEPROT, OP_FILEDESC, OP_FILEREQANSNOFIL,
-    OP_PACKEDPROT, OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING, OP_REQFILENAMEANSWER,
-    OP_REQUESTFILENAME, OP_SETREQFILEID, OP_STARTUPLOADREQ, TCP_PACKET_HEADER_LEN,
+    OP_OUTOFPARTREQS, OP_PACKEDPROT, OP_PORTTEST, OP_PUBLICIP_ANSWER, OP_QUEUERANKING,
+    OP_REQFILENAMEANSWER, OP_REQUESTFILENAME, OP_SETREQFILEID, OP_STARTUPLOADREQ,
+    TCP_PACKET_HEADER_LEN,
 };
 pub(super) use hashset::{
     decode_hashset_answer, decode_hashset_answer2, decode_hashset_request2, encode_hashset_answer,
@@ -317,6 +318,10 @@ pub(super) fn decode_preview_answer_payload(payload: &[u8]) -> Result<PreviewAns
 
 pub(super) fn encode_accept_upload_req() -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ, &[])
+}
+
+pub(super) fn encode_out_of_part_reqs() -> Vec<u8> {
+    encode_packet(OP_EDONKEYPROT, OP_OUTOFPARTREQS, &[])
 }
 
 pub(super) fn encode_queue_ranking(rank: u16) -> Vec<u8> {
