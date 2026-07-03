@@ -93,12 +93,21 @@ impl KadPublishKind {
 ///
 /// `keys.fileHash` is the published file's eD2k hash. The body carries the store
 /// outcome counts so the harness can see reach (target node count) and ack/fail.
-pub(crate) fn publish(kind: KadPublishKind, file_hash: &str, stats: PublishAttemptStats) {
+pub(crate) fn publish(
+    kind: KadPublishKind,
+    file_hash: &str,
+    file_count: usize,
+    stats: PublishAttemptStats,
+) {
     let outcome = publish_outcome(stats);
+    // `fileCount` mirrors the MFC oracle body key (files carried by this publish:
+    // the keyword's file batch, or 1 for a single source/notes STORE). rust also
+    // emits the richer contact stats as a superset.
     let body = json!({
         "milestone": publish_milestone(kind, outcome),
         "action": "publish",
         "publishKind": kind.publish_kind(),
+        "fileCount": file_count,
         "outcome": outcome.label(),
         "acknowledged": outcome == KadPublishOutcome::Acked,
         "closestContactsConsidered": stats.closest_contacts_considered,
@@ -324,9 +333,9 @@ mod tests {
             acked_contacts: 5,
             timed_out_contacts: 3,
         };
-        publish(KadPublishKind::Keyword, "abc123", stats);
-        publish(KadPublishKind::Source, "abc123", stats);
-        publish(KadPublishKind::Notes, "abc123", stats);
+        publish(KadPublishKind::Keyword, "abc123", 7, stats);
+        publish(KadPublishKind::Source, "abc123", 1, stats);
+        publish(KadPublishKind::Notes, "abc123", 1, stats);
         publish_round(4, 2, 9, 1, 4, 1, 2);
     }
 

@@ -5499,6 +5499,7 @@ async fn drain_completed_kad_publish_tasks(
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Keyword,
                         &primary_file_hash,
+                        outcome.file_hashes.len(),
                         stats,
                     );
                     *keyword_published += outcome.file_hashes.len();
@@ -5509,6 +5510,7 @@ async fn drain_completed_kad_publish_tasks(
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Source,
                         &primary_file_hash,
+                        1,
                         stats,
                     );
                     *source_published += 1;
@@ -5519,6 +5521,7 @@ async fn drain_completed_kad_publish_tasks(
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Notes,
                         &primary_file_hash,
+                        1,
                         stats,
                     );
                     *notes_published += 1;
