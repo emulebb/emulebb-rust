@@ -47,6 +47,18 @@ pub(crate) fn upload_slot_opened(peer: &str, peer_hash: Option<[u8; 16]>, file_h
 
 /// `upload_slot_closed` (schema §3.5): an upload slot/queue entry is released on
 /// disconnect or explicit cancel.
+/// `out_of_part_reqs` (schema extension): rust recycled a *granted* upload slot
+/// and sent OP_OUTOFPARTREQS to send the downloader back to the waiting queue
+/// (rather than dropping it into a churn-reconnect), mirroring MFC
+/// `CUpDownClient::SendOutOfPartReqsAndAddToWaitingQueue`. Emitting it as a
+/// diag_event lets the graceful-requeue rate diff rust vs MFC — the check for
+/// whether slot recycling is quietly shedding upload demand.
+pub(crate) fn out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({ "action": "requeue", "signal": "out_of_part_reqs" });
+    emit(FAMILY, "out_of_part_reqs", "low", keys, body);
+}
+
 pub(crate) fn upload_slot_closed(
     peer: &str,
     peer_hash: Option<[u8; 16]>,

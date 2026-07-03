@@ -207,6 +207,16 @@ impl ListenerUploadQueue {
                         &packet,
                     );
                     let _ = transport.write_all(&packet).await;
+                    #[cfg(feature = "packet-diagnostics")]
+                    if let (Some(peer), Some(file_hash)) =
+                        (self.diag_peer.as_deref(), self.file_hash.as_ref())
+                    {
+                        diag_sched::out_of_part_reqs(
+                            peer,
+                            self.diag_peer_hash,
+                            &file_hash.to_string(),
+                        );
+                    }
                 }
                 Ok(ListenerQueuePoll::Close)
             }
