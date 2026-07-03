@@ -310,13 +310,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             format!("file_hash={file_hash_hex}"),
                         );
                         // Parity with MFC CUpDownClient::CheckDownloadTimeout: a
-                        // requested source that sent NO payload before the
-                        // first-payload deadline is surfaced as a bad_peer
-                        // download_first_payload_timeout (action cancel_transfer).
-                        // Gated on session_payload_down == 0 (= GetSessionPayloadDown()==0)
-                        // so a mid-transfer idle timeout is not mis-reported.
+                        // requested source that stalled past the part-response
+                        // deadline is surfaced as a bad_peer event — split on
+                        // session_payload_down (= GetSessionPayloadDown()): 0 => it
+                        // sent no payload at all (download_first_payload_timeout),
+                        // >0 => it stalled mid-transfer (download_idle_timeout).
                         if session_state.session_payload_down == 0 {
                             diag_bad_peer::download_first_payload_timeout(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                            );
+                        } else {
+                            diag_bad_peer::download_idle_timeout(
                                 &peer_addr.to_string(),
                                 session_state.peer_user_hash,
                                 file_hash_hex,
@@ -874,6 +880,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         Some(transport.mode),
                         "out_of_part_requests",
                         format!("file_hash={file_hash_hex}"),
+                    );
+                    diag_bad_peer::download_out_of_part_reqs(
+                        &peer_addr.to_string(),
+                        session_state.peer_user_hash,
+                        file_hash_hex,
                     );
                     // No Needed Parts (eMuleBB DS_NONEEDEDPARTS): the driver may swap
                     // this source to another wanted file it serves (A4AF-lite

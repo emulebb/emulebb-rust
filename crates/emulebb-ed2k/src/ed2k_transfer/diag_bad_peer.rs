@@ -90,3 +90,32 @@ pub(crate) fn download_first_payload_timeout(
     });
     emit("bad_peer", "download_first_payload_timeout", "medium", keys, body);
 }
+
+/// `download_idle_timeout`: a download source that HAD sent payload this session
+/// then stalled past the part-response deadline (`session_payload_down > 0`), so we
+/// drop / requeue it. Mirrors MFC `CUpDownClient::CheckDownloadTimeout` -> bad_peer
+/// `download_idle_timeout` (`action:"cancel_transfer"`), the mid-transfer-stall
+/// counterpart to `download_first_payload_timeout` (no payload at all).
+pub(crate) fn download_idle_timeout(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cancel_transfer",
+        "reason": "Download idle timeout",
+    });
+    emit("bad_peer", "download_idle_timeout", "medium", keys, body);
+}
+
+/// `download_out_of_part_reqs`: a download source reported No Needed Parts for our
+/// file (it sent `OP_OUTOFPARTREQS`). Mirrors MFC `CUpDownClient` -> bad_peer
+/// `download_out_of_part_reqs` (severity `low`, `action:"state_on_queue"`). rust's
+/// driver may A4AF-swap the source rather than drop it, matching the oracle's
+/// on-queue disposition. (The oracle's escalated quarantine/cooldown variants for
+/// repeated OP_OutOfPartReqs abuse are a separate anti-abuse detector rust lacks.)
+pub(crate) fn download_out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "state_on_queue",
+        "reason": "Remote sent OP_OutOfPartReqs",
+    });
+    emit("bad_peer", "download_out_of_part_reqs", "low", keys, body);
+}
