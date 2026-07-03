@@ -3322,8 +3322,10 @@ impl EmulebbCore {
         for source in sources {
             let endpoint = source_endpoint_key(source);
             if state.active_download_peer_endpoints.contains(&endpoint) {
+                // Candidate already engaged this round: a dedup skip, NOT a source
+                // drop. The MFC oracle emits source_dropped only on genuine srclist
+                // removal, so these skips are not surfaced (they inflated the count).
                 deferred = deferred.saturating_add(1);
-                crate::diag_sched::source_dropped(file_hash, source);
                 continue;
             }
             let file_source_count = state
@@ -3333,9 +3335,11 @@ impl EmulebbCore {
                 .ed2k_transfers
                 .can_engage_file_source(file_source_count)
             {
+                // Soft cap reached: the file has enough live sources, so this
+                // candidate is left un-engaged (lease released, candidate retained).
+                // Not a drop — no source_dropped (oracle emits it only on removal).
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
-                crate::diag_sched::source_dropped(file_hash, source);
                 continue;
             }
             let registry_lease = state.download_source_registry.lease_best_for_file(
@@ -3356,9 +3360,10 @@ impl EmulebbCore {
                     deferred_retry_delay =
                         Some(deferred_retry_delay.map_or(delay, |current| current.min(delay)));
                 }
+                // Lease unavailable (busy/cooldown): candidate stays for a later
+                // retry, so this is a deferral, not a drop — no source_dropped.
                 state.download_source_registry.release_peer(source);
                 deferred = deferred.saturating_add(1);
-                crate::diag_sched::source_dropped(file_hash, source);
             }
         }
         // Periodic download-source snapshot (MFC sched:source_count parity),

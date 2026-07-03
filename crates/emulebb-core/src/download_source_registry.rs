@@ -64,7 +64,18 @@ impl DownloadSourceRegistry {
     /// actively worked and its lease is released through its own lifecycle.
     pub(crate) fn prune_stale_candidates(&mut self, now: Instant) {
         self.peers.retain(|_, candidates| {
-            candidates.retain(|candidate| !is_stale(candidate, now));
+            candidates.retain(|candidate| {
+                if is_stale(candidate, now) {
+                    // Genuine source removal: the candidate aged out of the liveness
+                    // window and is dropped from tracking. This is the rust analogue
+                    // of the MFC oracle source_dropped (source removed from a part
+                    // file's srclist) — the only place it should fire.
+                    crate::diag_sched::source_dropped(&candidate.file_hash, &candidate.source);
+                    false
+                } else {
+                    true
+                }
+            });
             !candidates.is_empty()
         });
     }
