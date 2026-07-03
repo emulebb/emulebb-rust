@@ -188,6 +188,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // connection binds; a later hello presenting a DIFFERENT hash is credit-farming
     // impersonation (rust attributes credit by user hash) and is banned + dropped.
     let mut bound_user_hash: Option<[u8; 16]> = None;
+    // Phase C file-request-flood guard: count requests for files we do not serve;
+    // a flood of these is a share-probe and the peer is banned (MFC file_request_flood).
+    let mut failed_file_req_count: u32 = 0;
 
     // Run the session loop inside a fallible async scope so that EVERY exit
     // path -- a clean `break`, a propagated `?` I/O error, or any other early
@@ -456,12 +459,30 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         .start_upload_reply(transfer_runtime, peer_identity, &requested)
                         .await
                 } else {
+                    // Phase C: an upload request for a file we do not serve is a failed
+                    // file-id request; a flood is a share-probe.
+                    failed_file_req_count += 1;
                     encode_file_req_ans_nofil(&requested)
                 };
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "start_upload", &reply);
                 transport.write_all(&reply).await.with_context(|| {
                     format!("failed to send OP_STARTUPLOADREQ response to {peer_addr}")
                 })?;
+                if failed_file_req_count >= crate::ed2k_transfer::diag_bad_peer::FAILED_FILE_REQ_FLOOD_THRESHOLD
+                {
+                    let ban_ip = match peer_addr {
+                        SocketAddr::V4(v4) => Some(*v4.ip()),
+                        SocketAddr::V6(_) => None,
+                    };
+                    transfer_runtime.ban_client(ban_ip, peer_upload_identity.user_hash);
+                    crate::ed2k_transfer::diag_bad_peer::file_request_flood(
+                        &peer_addr.to_string(),
+                        peer_upload_identity.user_hash,
+                        failed_file_req_count,
+                    );
+                    debug!("banning {peer_addr}: failed file-id request flood");
+                    break Ok(());
+                }
             }
             (OP_EDONKEYPROT, OP_CANCELTRANSFER) => {
                 upload_queue.note_close_reason("peer_cancelled");

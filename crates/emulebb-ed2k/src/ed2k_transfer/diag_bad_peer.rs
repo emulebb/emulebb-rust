@@ -52,6 +52,23 @@ pub(crate) fn packet_unknown_client_tcp_packet(
     );
 }
 
+/// Failed file-id requests before a peer is treated as a probe flooder and banned
+/// (MFC `m_fFailedFileIdReqs == 6`).
+pub(crate) const FAILED_FILE_REQ_FLOOD_THRESHOLD: u32 = 6;
+
+/// `file_request_flood`: a peer repeatedly requested files we do not serve (failed
+/// file-id requests) — a share-probe flood. Banned (IP + hash) and dropped. Mirrors
+/// MFC `file_request_flood` (severity high, `action:"ban"`).
+pub(crate) fn file_request_flood(peer: &str, peer_hash: Option<[u8; 16]>, failed_requests: u32) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "ban",
+        "reason": "FileReq flood",
+        "failedFileIdRequests": failed_requests,
+    });
+    emit("bad_peer", "file_request_flood", "high", keys, body);
+}
+
 /// `identity_userhash_changed`: a peer advertised a DIFFERENT user hash on the same
 /// connection after one was already bound — credit-farming / impersonation, since
 /// rust attributes upload/download credit by user hash. The peer is banned (IP +
