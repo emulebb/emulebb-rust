@@ -650,6 +650,7 @@ fn log_shared_publish_offer_batch(
         encoded.total_entries,
         cursor_before,
         encoded.next_cursor,
+        MAX_OFFER_FILES_PER_ADVERTISEMENT,
         wrapped,
         skipped_duplicate_batch,
         file_hashes,

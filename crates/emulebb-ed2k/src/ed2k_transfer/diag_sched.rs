@@ -233,14 +233,21 @@ pub(crate) fn shared_publish_offer_batch(
     total_entries: usize,
     cursor_before: usize,
     next_cursor: usize,
+    offer_limit: usize,
     wrapped: bool,
     skipped_duplicate_batch: bool,
     file_hashes: Vec<String>,
 ) {
     let keys = json!({ "server": server });
+    // `offerLimit` (per-batch cap) and `pendingBefore` (entries still to advertise
+    // when this batch started) mirror the MFC oracle body; cursorBefore/nextCursor
+    // are rust's extra cursor detail (allowed superset).
+    let pending_before = total_entries.saturating_sub(cursor_before);
     let body = json!({
         "entriesSent": entries_sent,
         "totalEntries": total_entries,
+        "pendingBefore": pending_before,
+        "offerLimit": offer_limit,
         "cursorBefore": cursor_before,
         "nextCursor": next_cursor,
         "wrapped": wrapped,
