@@ -119,3 +119,33 @@ pub(crate) fn download_out_of_part_reqs(peer: &str, peer_hash: Option<[u8; 16]>,
     });
     emit("bad_peer", "download_out_of_part_reqs", "low", keys, body);
 }
+
+/// `upload_duplicate_done_block_rejected`: a peer re-requested an upload block that
+/// is already complete/served this session, so we reject the range. Mirrors MFC
+/// `upload_duplicate_done_block_rejected` (`action:"reject_block_request"`). This is
+/// distinct from `repeat_block_request` (observe-only): here the duplicate range is
+/// dropped rather than re-served. `part_index` is `start_offset / ED2K_PART_SIZE`.
+pub(crate) fn upload_duplicate_done_block_rejected(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    start_offset: u64,
+    end_offset: u64,
+    part_index: u64,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "reject_block_request",
+        "reason": "Duplicate completed block request",
+        "startOffset": start_offset,
+        "endOffset": end_offset,
+        "partIndex": part_index,
+    });
+    emit(
+        "bad_peer",
+        "upload_duplicate_done_block_rejected",
+        "medium",
+        keys,
+        body,
+    );
+}
