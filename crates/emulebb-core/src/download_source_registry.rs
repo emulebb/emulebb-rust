@@ -115,6 +115,23 @@ impl DownloadSourceRegistry {
             .sum()
     }
 
+    /// Number of distinct files that have at least one A4AF source, i.e. a source
+    /// (peer) that is also a candidate for another file. This is the MFC oracle
+    /// `a4afFileCount` semantic (a per-FILE count of files with `GetSrcA4AFCount()>0`),
+    /// as distinct from [`Self::a4af_candidate_count`] which sums A4AF source
+    /// relationships.
+    pub(crate) fn a4af_file_count(&self) -> usize {
+        let mut a4af_files: HashSet<&str> = HashSet::new();
+        for candidates in self.peers.values() {
+            if candidates.len() > 1 {
+                for candidate in candidates {
+                    a4af_files.insert(candidate.file_hash.as_str());
+                }
+            }
+        }
+        a4af_files.len()
+    }
+
     pub(crate) fn leased_peer_count(&self) -> usize {
         self.leased_peers.len()
     }
