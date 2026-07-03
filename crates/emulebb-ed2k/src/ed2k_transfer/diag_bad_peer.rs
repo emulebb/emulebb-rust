@@ -1,4 +1,5 @@
-//! `family:"bad_peer"` `diag_event_v1` emitters for the inbound upload path.
+//! `family:"bad_peer"` `diag_event_v1` emitters for the inbound upload path and
+//! the outbound download path (first-payload timeout).
 //!
 //! Mirrors the eMuleBB (MFC) `BadPeerDiagnosticsSeams` bad-peer events so the
 //! two clients' diagnostics diff cleanly (`diag_event_diff.py`). Emits go through
@@ -67,4 +68,25 @@ pub(crate) fn repeat_file_request(
         "windowSeconds": REPEAT_FILE_WINDOW_SECS,
     });
     emit("bad_peer", "repeat_file_request", "medium", keys, body);
+}
+
+/// `download_first_payload_timeout`: a download source we requested parts from
+/// sent no payload before the first-payload deadline elapsed (rust's
+/// `part_response_deadline` expiring while `session_payload_down == 0`), so we
+/// drop / requeue it. Mirrors MFC `CUpDownClient::CheckDownloadTimeout` -> bad_peer
+/// `download_first_payload_timeout` (`action:"cancel_transfer"`, gated on
+/// `GetSessionPayloadDown()==0` + idle >= `kDownloadFirstPayloadTimeoutMs`). This
+/// is the download-side counterpart to the upload-path bad-peer events above;
+/// `upload_keys` is reused only as the generic peer/peerHash/fileHash key builder.
+pub(crate) fn download_first_payload_timeout(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cancel_transfer",
+        "reason": "First payload timeout",
+    });
+    emit("bad_peer", "download_first_payload_timeout", "medium", keys, body);
 }

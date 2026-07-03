@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::ed2k_transfer::{
-    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState,
+    Ed2kResumeManifest, Ed2kSourceHint, Ed2kTransferRuntime, Ed2kTransferState, diag_bad_peer,
 };
 
 use super::super::{
@@ -309,6 +309,19 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             "peer_timeout_incomplete",
                             format!("file_hash={file_hash_hex}"),
                         );
+                        // Parity with MFC CUpDownClient::CheckDownloadTimeout: a
+                        // requested source that sent NO payload before the
+                        // first-payload deadline is surfaced as a bad_peer
+                        // download_first_payload_timeout (action cancel_transfer).
+                        // Gated on session_payload_down == 0 (= GetSessionPayloadDown()==0)
+                        // so a mid-transfer idle timeout is not mis-reported.
+                        if session_state.session_payload_down == 0 {
+                            diag_bad_peer::download_first_payload_timeout(
+                                &peer_addr.to_string(),
+                                session_state.peer_user_hash,
+                                file_hash_hex,
+                            );
+                        }
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
                             peer_addr,
