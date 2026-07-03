@@ -184,6 +184,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // -> KS_CONNECTED_BUDDY). While held, we answer OP_BUDDYPING with OP_BUDDYPONG
     // and forward relayed OP_CALLBACK frames pushed by handle_kad_callback_req.
     let mut buddy_hold: Option<InboundBuddyHold> = None;
+    // Phase B identity-spoofing guard: the first advertised user hash this
+    // connection binds; a later hello presenting a DIFFERENT hash is credit-farming
+    // impersonation (rust attributes credit by user hash) and is banned + dropped.
+    let mut bound_user_hash: Option<[u8; 16]> = None;
 
     // Run the session loop inside a fallible async scope so that EVERY exit
     // path -- a clean `break`, a propagated `?` I/O error, or any other early
@@ -257,6 +261,28 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         match (packet.protocol, packet.opcode) {
             (OP_EDONKEYPROT, OP_HELLO) => {
                 let hello_profile = decode_hello_profile(&packet.payload)?;
+                // Phase B: a re-hello presenting a different user hash than the one
+                // already bound is credit-farming impersonation -> ban + drop
+                // (MFC identity_userhash_changed -> Ban()).
+                if let Some(prior_hash) = bound_user_hash
+                    && prior_hash != hello_profile.identity.user_hash
+                {
+                    let ban_ip = match peer_addr {
+                        SocketAddr::V4(v4) => Some(*v4.ip()),
+                        SocketAddr::V6(_) => None,
+                    };
+                    transfer_runtime
+                        .ban_client(ban_ip, Some(hello_profile.identity.user_hash));
+                    crate::ed2k_transfer::diag_bad_peer::identity_userhash_changed(
+                        &peer_addr.to_string(),
+                        Some(hello_profile.identity.user_hash),
+                    );
+                    debug!(
+                        "banning {peer_addr}: user hash changed mid-connection (impersonation)"
+                    );
+                    break Ok(());
+                }
+                bound_user_hash = Some(hello_profile.identity.user_hash);
                 peer_supports_aich = hello_profile.supports_aich;
                 peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
                 // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer

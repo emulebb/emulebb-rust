@@ -52,6 +52,21 @@ pub(crate) fn packet_unknown_client_tcp_packet(
     );
 }
 
+/// `identity_userhash_changed`: a peer advertised a DIFFERENT user hash on the same
+/// connection after one was already bound — credit-farming / impersonation, since
+/// rust attributes upload/download credit by user hash. The peer is banned (IP +
+/// new hash) and dropped. Mirrors MFC `identity_userhash_changed` (severity high,
+/// `action:"ban"`). `action` is the only diff-comparable body field, so this is
+/// conformance-safe.
+pub(crate) fn identity_userhash_changed(peer: &str, peer_hash: Option<[u8; 16]>) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "ban",
+        "reason": "Userhash changed",
+    });
+    emit("bad_peer", "identity_userhash_changed", "high", keys, body);
+}
+
 /// `packet_invalid_multipacket_subopcode`: a peer sent a multipacket carrying a
 /// sub-opcode the decoder does not accept. Mirrors MFC
 /// `packet_invalid_multipacket_subopcode` (severity medium). rust aborts the
