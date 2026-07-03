@@ -225,9 +225,20 @@ impl DownloadSourceRegistry {
     /// engagement is untouched); only a peer left serving no file is released, so
     /// an A4AF peer shared with a live transfer is not yanked out from under it.
     pub(crate) fn release_file(&mut self, file_hash: &str) -> Vec<(Ipv4Addr, u16)> {
-        // Drop this file's candidates and forget peers left with nothing.
+        // Drop this file's candidates and forget peers left with nothing. Each
+        // candidate removed here is a genuine source removal (the file was deleted /
+        // cancelled), so emit source_dropped per candidate — mirroring MFC
+        // RemoveSource, which drops every source off a deleted part file's srclist
+        // with a source_dropped event (previously rust cleared them silently).
         self.peers.retain(|_, candidates| {
-            candidates.retain(|candidate| candidate.file_hash != file_hash);
+            candidates.retain(|candidate| {
+                if candidate.file_hash == file_hash {
+                    crate::diag_sched::source_dropped(&candidate.file_hash, &candidate.source);
+                    false
+                } else {
+                    true
+                }
+            });
             !candidates.is_empty()
         });
         // Release the lease of every peer that no longer has any candidate (it was
