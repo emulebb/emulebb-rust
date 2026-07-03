@@ -149,3 +149,31 @@ pub(crate) fn upload_duplicate_done_block_rejected(
         body,
     );
 }
+
+/// `upload_no_request_recycle` / `upload_slow_rate_recycle`: an active upload slot
+/// was reclaimed under sustained underfill — either it never uploaded
+/// (`noRequestUnderfill`) or it uploaded below the slow-rate threshold
+/// (`slowUnderfill`). Maps rust's underfill-recycle reason to the corresponding MFC
+/// bad_peer recycle event (`action:"cooldown"`, MFC `CUploadQueue`). Timeout-based
+/// recycles (waiting/granted/upload timeout) have no distinct MFC recycle event, and
+/// rust does not split slow vs zero rate (the oracle's `upload_zero_rate_recycle` /
+/// `upload_stalled_zero_rate_recycle` fold into `slowUnderfill`), so those are left
+/// unemitted rather than mislabelled.
+pub(crate) fn upload_recycle(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    recycle_reason: &str,
+) {
+    let event = match recycle_reason {
+        "noRequestUnderfill" => "upload_no_request_recycle",
+        "slowUnderfill" => "upload_slow_rate_recycle",
+        _ => return,
+    };
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cooldown",
+        "reason": "Upload slot recycled under sustained underfill",
+    });
+    emit("bad_peer", event, "medium", keys, body);
+}

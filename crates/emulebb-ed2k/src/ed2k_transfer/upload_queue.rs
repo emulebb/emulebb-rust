@@ -908,6 +908,12 @@ impl Ed2kUploadQueueState {
                 active_before,
                 waiting_before,
             );
+            super::diag_bad_peer::upload_recycle(
+                &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
+                key.peer.user_hash,
+                &key.file_hash,
+                recycle.reason,
+            );
             let (file_priority_score, credit_score_permille) = self
                 .sessions
                 .get(&key)
