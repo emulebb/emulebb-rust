@@ -34,6 +34,11 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     session: Option<Ed2kUploadSessionHandle>,
     file_hash: Option<Ed2kHash>,
     granted_sent: bool,
+    // Sticky: this peer was granted a slot at some point in this connection (never
+    // cleared while `granted_sent` toggles per grant/demote). Distinguishes a
+    // was-granted peer from a never-granted one for the close-reason funnel, since
+    // `granted_sent` is now reset on a demote-back-to-queue.
+    ever_granted: bool,
     last_queue_rank: Option<u16>,
     last_queue_rank_sent_at: Option<tokio::time::Instant>,
     // Stable peer identity for the `sched` diag_event_v1 emits, captured from the
@@ -58,6 +63,7 @@ impl ListenerUploadQueue {
             session: None,
             file_hash: None,
             granted_sent: false,
+            ever_granted: false,
             last_queue_rank: None,
             last_queue_rank_sent_at: None,
             diag_peer: None,
@@ -173,6 +179,34 @@ impl ListenerUploadQueue {
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
                 let now = tokio::time::Instant::now();
+                // A slot we had granted was demoted back to the waiting queue (idle
+                // recycle): tell the downloader to go OnQueue with OP_OUTOFPARTREQS
+                // once, mirroring MFC SendOutOfPartReqsAndAddToWaitingQueue, then keep
+                // the connection and resume queue-ranking rather than closing and
+                // shedding the peer. `granted_sent` is cleared so a later re-grant
+                // re-sends OP_ACCEPTUPLOADREQ; `ever_granted` stays set for the funnel.
+                if self.granted_sent {
+                    let packet = encode_out_of_part_reqs();
+                    dump_ed2k_tcp_listener_send(
+                        peer_addr,
+                        transport.mode,
+                        "out_of_part_reqs",
+                        &packet,
+                    );
+                    transport.write_all(&packet).await?;
+                    #[cfg(feature = "packet-diagnostics")]
+                    if let (Some(peer), Some(file_hash)) =
+                        (self.diag_peer.as_deref(), self.file_hash.as_ref())
+                    {
+                        diag_sched::out_of_part_reqs(
+                            peer,
+                            self.diag_peer_hash,
+                            &file_hash.to_string(),
+                        );
+                    }
+                    self.granted_sent = false;
+                    self.last_queue_rank = None;
+                }
                 let should_refresh = self.last_queue_rank != Some(rank)
                     || self.last_queue_rank_sent_at.is_none_or(|sent_at| {
                         now.duration_since(sent_at) >= ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL
@@ -184,9 +218,10 @@ impl ListenerUploadQueue {
                 Ok(ListenerQueuePoll::Continue)
             }
             Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
-                // Granted-then-idle slots recycle (Stale); never-granted peers are
-                // Rejected. `granted_sent` is exactly that distinction.
-                self.close_reason = Some(if self.granted_sent {
+                // A genuinely-gone session (a demoted waiter past waiting_timeout, or
+                // a lost connection). `ever_granted` — not `granted_sent`, which is
+                // cleared on demote — is the was-granted vs never-granted distinction.
+                self.close_reason = Some(if self.ever_granted {
                     "slot_recycled"
                 } else {
                     "rejected_never_granted"
@@ -503,6 +538,7 @@ impl ListenerUploadQueue {
     fn mark_granted_sent(&mut self) {
         let newly_granted = !self.granted_sent;
         self.granted_sent = true;
+        self.ever_granted = true;
         self.last_queue_rank = None;
         self.last_queue_rank_sent_at = None;
         if newly_granted {

@@ -460,6 +460,9 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
             .await,
         Ed2kUploadSessionStatus::Granted
     );
+    // The idle granted slot is reclaimed, but the peer is DEMOTED to the back of
+    // the waiting queue (mirroring MFC AddClientToQueue) rather than dropped, so it
+    // reports Waiting (not Stale); the freed slot promotes the existing waiter.
     assert_eq!(
         runtime
             .poll_upload_session_at(
@@ -468,7 +471,7 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
                 now + std::time::Duration::from_secs(3),
             )
             .await,
-        Ed2kUploadSessionStatus::Stale
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
     );
     assert_eq!(
         runtime
@@ -544,6 +547,8 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
             .await,
         Ed2kUploadSessionStatus::Granted
     );
+    // Slow active slot reclaimed during underfill: the peer is demoted to the
+    // waiting queue (Waiting), not dropped (Stale), and the waiter is promoted.
     assert_eq!(
         runtime
             .poll_upload_session_at(
@@ -552,7 +557,7 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
                 now + std::time::Duration::from_secs(7),
             )
             .await,
-        Ed2kUploadSessionStatus::Stale
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
     );
     assert_eq!(
         runtime

@@ -903,10 +903,42 @@ impl Ed2kUploadQueueState {
                     active_before,
                     waiting_before,
                 );
+                // Demote the reclaimed idle active slot to the BACK of the waiting
+                // queue instead of dropping the peer, mirroring MFC
+                // SendOutOfPartReqsAndAddToWaitingQueue: the slot is freed for a
+                // waiter, but the peer keeps its queue entry + open connection (the
+                // listener sees Waiting, not Stale, so it sends OP_OUTOFPARTREQS +
+                // queue rankings rather than closing and shedding upload demand).
+                // Reset queued_at/last_activity so a re-promotion earns a fresh
+                // granted window (no tight recycle loop) and the waiting_timeout
+                // counts from the requeue; a fresh sequence orders it after existing
+                // waiters so it does not jump the queue.
+                let waiting_sequence = self.take_waiting_sequence();
+                let demoted = if let Some(session) = self.sessions.get_mut(&key) {
+                    session.phase = Ed2kUploadSessionPhase::Waiting;
+                    session.queued_at = now;
+                    session.last_activity = now;
+                    // Re-enter as a clean waiter: clear the finished upload stint so
+                    // the demoted session does not skew the active upload-rate /
+                    // elastic-underfill accounting or block promotion of a waiter.
+                    session.upload_started_at = None;
+                    session.uploaded_bytes = 0;
+                    session.served_ranges.clear();
+                    session.waiting_sequence = waiting_sequence;
+                    true
+                } else {
+                    false
+                };
+                if demoted {
+                    self.waiting_order.push(key);
+                }
+            } else {
+                // Waiting session past the waiting timeout: a genuine queue drop.
+                self.sessions.remove(&key);
+                self.waiting_order.retain(|queued| queued != &key);
             }
-            self.sessions.remove(&key);
-            self.waiting_order.retain(|queued| queued != &key);
         }
+        self.trim_waiting_queue(now);
         self.promote_waiters(now);
     }
 
@@ -990,6 +1022,12 @@ impl Ed2kUploadQueueState {
             };
             next_session.phase = Ed2kUploadSessionPhase::Granted;
             next_session.last_activity = now;
+            // Fresh granted window on promotion: without this a waiter promoted long
+            // after it queued is immediately eligible for the no-request recycle
+            // (which keys off queued_at), which — now that a recycled peer is demoted
+            // back to the queue rather than dropped — would thrash promote/recycle
+            // between the two peers.
+            next_session.queued_at = now;
         }
     }
 
