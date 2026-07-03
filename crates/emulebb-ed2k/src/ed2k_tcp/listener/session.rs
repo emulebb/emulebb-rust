@@ -882,6 +882,15 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 .await?;
             }
             _ => {
+                // Phase A defensive diagnostic: an inbound peer packet the dispatcher
+                // does not handle; rust drops the connection (already defensive).
+                crate::ed2k_transfer::diag_bad_peer::packet_unknown_client_tcp_packet(
+                    &peer_addr.to_string(),
+                    None,
+                    packet.protocol,
+                    packet.opcode,
+                    packet.payload.len(),
+                );
                 if let Some(requested_file_hash) = requested_file_hash {
                     debug!(
                         "closing eD2k connection from {peer_addr}: unsupported protocol=0x{:02X} opcode=0x{:02X} requested_file_hash={requested_file_hash}",

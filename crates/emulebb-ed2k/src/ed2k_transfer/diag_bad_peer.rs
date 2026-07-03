@@ -12,6 +12,71 @@ use crate::diag_event::emit;
 
 use super::diag_sched::upload_keys;
 
+/// `peer`-only keys for a packet-level bad_peer event (no file/context). `peerHash`
+/// is included only when the peer's user hash is already known (post-hello).
+fn packet_keys(peer: &str, peer_hash: Option<[u8; 16]>) -> serde_json::Value {
+    let mut keys = serde_json::Map::new();
+    keys.insert("peer".to_string(), json!(peer));
+    if let Some(user_hash) = peer_hash {
+        keys.insert("peerHash".to_string(), json!(hex::encode(user_hash)));
+    }
+    serde_json::Value::Object(keys)
+}
+
+/// `packet_unknown_client_tcp_packet`: an inbound peer TCP packet whose
+/// protocol/opcode the eD2K dispatcher does not handle; the connection is dropped.
+/// Mirrors MFC `packet_unknown_client_tcp_packet` (severity medium,
+/// `action:"disconnect"`). protocol/opcode/payloadBytes are informational evidence
+/// (not diff-comparable body fields), so this cannot introduce a conformance gap.
+pub(crate) fn packet_unknown_client_tcp_packet(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    protocol: u8,
+    opcode: u8,
+    payload_bytes: usize,
+) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "disconnect",
+        "reason": "Unknown client TCP packet",
+        "protocol": protocol,
+        "opcode": opcode,
+        "payloadBytes": payload_bytes,
+    });
+    emit(
+        "bad_peer",
+        "packet_unknown_client_tcp_packet",
+        "medium",
+        keys,
+        body,
+    );
+}
+
+/// `packet_invalid_multipacket_subopcode`: a peer sent a multipacket carrying a
+/// sub-opcode the decoder does not accept. Mirrors MFC
+/// `packet_invalid_multipacket_subopcode` (severity medium). rust aborts the
+/// connection on the bad sub-op (more defensive than the oracle's reject); the
+/// `subOpcode` is informational evidence.
+pub(crate) fn packet_invalid_multipacket_subopcode(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    sub_opcode: u8,
+) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "disconnect",
+        "reason": "Invalid multipacket sub-opcode",
+        "subOpcode": sub_opcode,
+    });
+    emit(
+        "bad_peer",
+        "packet_invalid_multipacket_subopcode",
+        "medium",
+        keys,
+        body,
+    );
+}
+
 /// Observation window for repeat-block detection, matching the MFC bad-peer
 /// ledger window (`windowSeconds: 3600`).
 pub(crate) const REPEAT_BLOCK_WINDOW_SECS: u64 = 3600;

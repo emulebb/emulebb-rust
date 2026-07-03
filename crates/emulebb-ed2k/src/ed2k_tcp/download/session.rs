@@ -678,6 +678,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 remaining = &remaining[20..];
                             }
                             _ => {
+                                diag_bad_peer::packet_invalid_multipacket_subopcode(
+                                    &peer_addr.to_string(),
+                                    session_state.peer_user_hash,
+                                    sub_opcode,
+                                );
                                 anyhow::bail!(
                                     "unsupported OP_MULTIPACKETANSWER sub-op 0x{sub_opcode:02X}"
                                 );
@@ -754,6 +759,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 remaining = rest;
                             }
                             _ => {
+                                diag_bad_peer::packet_invalid_multipacket_subopcode(
+                                    &peer_addr.to_string(),
+                                    session_state.peer_user_hash,
+                                    sub_opcode,
+                                );
                                 anyhow::bail!(
                                     "unsupported OP_MULTIPACKETANSWER_EXT2 sub-op 0x{sub_opcode:02X}"
                                 );
