@@ -221,6 +221,38 @@ pub(crate) fn publish_round(
     emit(FAMILY, "kad_publish_round", "info", json!({}), body);
 }
 
+/// Periodic snapshot of the Kad shared-file publish loop's gate state
+/// (schema §3.3, milestone `publish_snapshot`). Surfaces the rich publish-loop
+/// diagnostics — in-flight vs budget, available DHT search permits, due vs
+/// skipped-by-budget — as a diag_event time-series so the publish-reach ramp and
+/// permit starvation are analysable from the log, not only the live
+/// `/api/v1/status` `kadPublish` snapshot. rust-only (the MFC oracle keeps the
+/// nearest data in its free-text upload-slot summary), so it reads as an allowed
+/// rust superset under the conformance model.
+pub(crate) fn kad_publish_snapshot(diag: &crate::kad_publish_diagnostics::KadPublishDiagnostics) {
+    let body = json!({
+        "milestone": "publish_snapshot",
+        "action": "observe",
+        "phase": diag.phase,
+        "itemCount": diag.item_count,
+        "inFlightCount": diag.in_flight_count,
+        "inFlightBudget": diag.in_flight_budget,
+        "availableSearchPermits": diag.available_search_permits,
+        "budgetExhausted": diag.budget_exhausted,
+        "sourceDueCount": diag.source_due_count,
+        "sourceSkippedByBudget": diag.source_skipped_by_budget,
+        "keywordDueCount": diag.keyword_due_count,
+        "keywordSkippedByBudget": diag.keyword_skipped_by_budget,
+        "sourcePublishedTotal": diag.source_published_total,
+        "keywordPublishedTotal": diag.keyword_published_total,
+        "completedCount": diag.completed_count,
+        "failedCount": diag.failed_count,
+        "timedOutCount": diag.timed_out_count,
+        "busyCount": diag.busy_count,
+    });
+    emit(FAMILY, "kad_publish_snapshot", "info", json!({}), body);
+}
+
 /// `firewall` milestone (schema §3.3): the Kad UDP firewall self-check resolved.
 /// `firewalled=false` -> milestone `open`; `firewalled=true` -> `firewalled`,
 /// matching the master's firewall bucket.

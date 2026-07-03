@@ -4562,6 +4562,9 @@ struct KadPublishLoopRuntime {
 /// (re)publish rate is bounded per-file by the 24h keyword / 5h source intervals,
 /// so this only controls how often we re-evaluate which files are due.
 const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 2;
+/// Cadence of the periodic `kad_publish_snapshot` diag_event (A5), kept well above
+/// the fast publish tick so the log time-series is sampled, not flooded.
+const KAD_PUBLISH_SNAPSHOT_INTERVAL_SECS: u64 = 30;
 /// Upper bound on files inspected in one Kad publish cycle. A large library may
 /// need several rounds to drain; this keeps each async loop slice bounded while
 /// the rotating cursor prevents first-file starvation.
@@ -4715,6 +4718,7 @@ async fn run_kad_shared_file_publish_loop(
     hydrate_kad_outbound_publish_schedule(&runtime.metadata_store, &mut schedule);
     let mut publish_tasks = JoinSet::new();
     let mut active_counts = KadSharedPublishActiveCounts::default();
+    let mut last_publish_snapshot = std::time::Instant::now();
     while !shutdown.load(Ordering::SeqCst) {
         if !runtime.dht.is_bootstrapped() {
             let in_flight_budget = kad_shared_file_publish_in_flight_budget(&runtime);
@@ -4747,6 +4751,17 @@ async fn run_kad_shared_file_publish_loop(
         .await
         {
             tracing::debug!("Kad shared-file publish cycle failed: {error:#}");
+        }
+
+        // A5: periodic diag_event snapshot of the publish-loop gate state so the
+        // in-flight/permit/due-vs-skipped picture is analysable from the log
+        // time-series, not only the live /api/v1/status kadPublish snapshot.
+        if last_publish_snapshot.elapsed() >= Duration::from_secs(KAD_PUBLISH_SNAPSHOT_INTERVAL_SECS)
+        {
+            diag_kad_event::kad_publish_snapshot(&kad_publish_diagnostics::snapshot(
+                &runtime.diagnostics,
+            ));
+            last_publish_snapshot = std::time::Instant::now();
         }
 
         let tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
