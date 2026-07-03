@@ -13,6 +13,10 @@ use tokio::time::MissedTickBehavior;
 
 const VPN_GUARD_RUNTIME_MONITOR_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Process exit code used when the runtime VPN Guard trips (binding lost). A distinct
+/// non-zero code lets a supervisor/soak distinguish a fail-closed VPN stop from a crash.
+const VPN_GUARD_BINDING_LOSS_EXIT_CODE: i32 = 3;
+
 #[derive(Debug, Clone)]
 pub(crate) struct VpnGuardRuntimeMonitor {
     bind_ip: Ipv4Addr,
@@ -61,10 +65,16 @@ pub(crate) async fn run(core: Arc<EmulebbCore>, monitor: VpnGuardRuntimeMonitor)
 
         tracing::error!(
             reason = %guard.startup_block_reason,
-            "VPN Guard runtime monitor stopped public P2P; REST remains available"
+            "VPN Guard runtime monitor: VPN binding lost — closing P2P and exiting the process (fail-closed)"
         );
+        // Fail-closed on runtime VPN binding loss. Close P2P first so nothing is left in
+        // flight on a non-tunnel path, then HARD-EXIT the process: keeping the daemon
+        // alive (even REST-only) is not leak-proof, because a later config/interface
+        // change could resume public P2P off-tunnel. This mirrors eMuleBB-MFC
+        // `ExitForVpnGuardFailure` (`::ExitProcess` from the bind-loss watchdog). The
+        // supervisor/soak is expected to treat this non-zero exit as a guarded stop.
         core.set_kad_running(false).await;
         let _ = core.disconnect_ed2k().await;
-        return;
+        std::process::exit(VPN_GUARD_BINDING_LOSS_EXIT_CODE);
     }
 }
