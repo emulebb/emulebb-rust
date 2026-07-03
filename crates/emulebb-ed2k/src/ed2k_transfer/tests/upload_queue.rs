@@ -433,6 +433,12 @@ async fn upload_queue_recycles_granted_slot_without_real_upload_activity() {
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
         .configure_upload_queue(crate::ed2k_transfer::Ed2kUploadQueueConfig {
+            // Sustained underfill pressure so the no-request idle slot is recycled
+            // (active slots are now reaped only under underfill, matching MFC, not on
+            // a plain granted-timeout timer).
+            upload_limit_bytes_per_sec: 100 * 1024,
+            elastic_underfill_bytes_per_sec: 50 * 1024,
+            elastic_underfill: std::time::Duration::from_secs(2),
             granted_timeout: std::time::Duration::from_secs(2),
             upload_timeout: std::time::Duration::from_secs(60),
             ..one_slot_config()

@@ -866,77 +866,88 @@ impl Ed2kUploadQueueState {
             .sessions
             .iter()
             .filter_map(|(key, session)| {
-                let timeout = match session.phase {
-                    Ed2kUploadSessionPhase::Waiting => self.config.waiting_timeout,
-                    Ed2kUploadSessionPhase::Granted => self.config.granted_timeout,
-                    Ed2kUploadSessionPhase::Uploading => self.config.upload_timeout,
-                };
-                let timeout_expired =
-                    now.saturating_duration_since(session.last_activity) > timeout;
-                let recycle = self.underfilled_active_recycle_diagnostics(session, now);
-                (timeout_expired || recycle.is_some()).then(|| {
-                    (
-                        key.clone(),
-                        session.phase,
-                        recycle.unwrap_or_else(|| self.timeout_recycle_diagnostics(session, now)),
-                    )
-                })
+                // Active slots (Granted/Uploading) are reaped ONLY by the sustained-
+                // underfill idle/slow recycle (MFC ShouldRecycleIdleUploadSlot), never
+                // on a plain last-activity timer: the master keeps a live-but-idle
+                // active client granted and drops a dead one via socket teardown (the
+                // rust listener does the same via its connection idle timeout ->
+                // release_session). Waiting entries are reaped on the waiting timeout.
+                match session.phase {
+                    Ed2kUploadSessionPhase::Waiting => (now
+                        .saturating_duration_since(session.last_activity)
+                        > self.config.waiting_timeout)
+                        .then(|| (key.clone(), None)),
+                    Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading => self
+                        .underfilled_active_recycle_diagnostics(session, now)
+                        .map(|diag| (key.clone(), Some(diag))),
+                }
             })
             .collect::<Vec<_>>();
-        for (key, phase, recycle) in expired {
-            // An idle active slot reclaimed by the queue is a `recycle` (master
-            // activeNoRequestRecycle*), distinct from a peer-initiated close; a
-            // reaped waiter is a plain queue drop and is not emitted here.
-            if matches!(
-                phase,
-                Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading
-            ) {
-                super::diag_sched::upload_slot_recycled(
-                    &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
-                    key.peer.user_hash,
-                    &key.file_hash,
-                    recycle.reason,
-                    recycle.slot_age_ms,
-                    recycle.idle_ms,
-                    recycle.uploaded_bytes,
-                    recycle.slot_rate_bytes_per_sec,
-                    active_before,
-                    waiting_before,
-                );
-                // Demote the reclaimed idle active slot to the BACK of the waiting
-                // queue instead of dropping the peer, mirroring MFC
-                // SendOutOfPartReqsAndAddToWaitingQueue: the slot is freed for a
-                // waiter, but the peer keeps its queue entry + open connection (the
-                // listener sees Waiting, not Stale, so it sends OP_OUTOFPARTREQS +
-                // queue rankings rather than closing and shedding upload demand).
-                // Reset queued_at/last_activity so a re-promotion earns a fresh
-                // granted window (no tight recycle loop) and the waiting_timeout
-                // counts from the requeue; a fresh sequence orders it after existing
-                // waiters so it does not jump the queue.
-                let waiting_sequence = self.take_waiting_sequence();
-                let demoted = if let Some(session) = self.sessions.get_mut(&key) {
-                    session.phase = Ed2kUploadSessionPhase::Waiting;
-                    session.queued_at = now;
-                    session.last_activity = now;
-                    // Re-enter as a clean waiter: clear the finished upload stint so
-                    // the demoted session does not skew the active upload-rate /
-                    // elastic-underfill accounting or block promotion of a waiter.
-                    session.upload_started_at = None;
-                    session.uploaded_bytes = 0;
-                    session.served_ranges.clear();
-                    session.waiting_sequence = waiting_sequence;
-                    true
-                } else {
-                    false
-                };
-                if demoted {
-                    self.waiting_order.push(key);
-                }
-            } else {
-                // Waiting session past the waiting timeout: a genuine queue drop.
+        for (key, recycle) in expired {
+            let Some(recycle) = recycle else {
+                // Waiting entry past the waiting timeout: a plain queue purge with no
+                // slot event (mirrors MFC RemoveFromWaitingQueue).
                 self.sessions.remove(&key);
                 self.waiting_order.retain(|queued| queued != &key);
+                continue;
+            };
+            // An idle/slow active slot reclaimed under sustained underfill (MFC
+            // activeNoRequestRecycle* / CheckForTimeOver): emit the recycle, then
+            // requeue the peer -- unless it is banned (master bRequeue=false) or no
+            // longer passes the queue-admission gates (AddClientToQueue re-gating),
+            // which the master drops instead of re-queuing.
+            super::diag_sched::upload_slot_recycled(
+                &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
+                key.peer.user_hash,
+                &key.file_hash,
+                recycle.reason,
+                recycle.slot_age_ms,
+                recycle.idle_ms,
+                recycle.uploaded_bytes,
+                recycle.slot_rate_bytes_per_sec,
+                active_before,
+                waiting_before,
+            );
+            let (file_priority_score, credit_score_permille) = self
+                .sessions
+                .get(&key)
+                .map(|session| (session.file_priority_score, session.credit_score_permille))
+                .unwrap_or_default();
+            let requeue = !key.peer.banned
+                && !self.reject_queue_admission(&key, file_priority_score, credit_score_permille, now)
+                && !self.reject_firewalled_callback_admission(&key);
+            if !requeue {
+                self.sessions.remove(&key);
+                self.waiting_order.retain(|queued| queued != &key);
+                continue;
             }
+            // Demote to the BACK of the waiting queue (mirroring MFC
+            // SendOutOfPartReqsAndAddToWaitingQueue): the slot is freed for a waiter,
+            // but the peer keeps its queue entry + open connection (the listener sees
+            // Waiting, not Stale, so it sends OP_OUTOFPARTREQS + queue rankings rather
+            // than closing and shedding upload demand). upload_slot_closed(reason =
+            // slot_recycled) mirrors the master's per-recycle RemoveFromUploadQueue
+            // close. queued_at/last_activity reset so a re-promotion earns a fresh
+            // granted window and the waiting timeout counts from the requeue; a fresh
+            // sequence orders it after existing waiters; the finished upload stint is
+            // cleared so it does not skew the active upload-rate accounting.
+            super::diag_sched::upload_slot_closed(
+                &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
+                key.peer.user_hash,
+                &key.file_hash,
+                "slot_recycled",
+            );
+            let waiting_sequence = self.take_waiting_sequence();
+            if let Some(session) = self.sessions.get_mut(&key) {
+                session.phase = Ed2kUploadSessionPhase::Waiting;
+                session.queued_at = now;
+                session.last_activity = now;
+                session.upload_started_at = None;
+                session.uploaded_bytes = 0;
+                session.served_ranges.clear();
+                session.waiting_sequence = waiting_sequence;
+            }
+            self.waiting_order.push(key);
         }
         self.trim_waiting_queue(now);
         self.promote_waiters(now);

@@ -140,9 +140,17 @@ impl ListenerUploadQueue {
         }
     }
 
-    /// Emit `upload_slot_closed` (with its funnel `reason`) when a held session is
-    /// released. The emission is compile-gated behind `packet-diagnostics`.
+    /// Emit `upload_slot_closed` (with its funnel `reason`) when a peer that is
+    /// currently holding an active upload slot is released. Only an active-slot exit
+    /// emits here, mirroring MFC (where `upload_slot_closed` fires from
+    /// `RemoveFromUploadQueue`, i.e. active-list exits only): a peer already demoted
+    /// back to the queue got its `slot_recycled` close at the recycle in the runtime
+    /// queue, and a pure waiter's exit emits no close. The emission is compile-gated
+    /// behind `packet-diagnostics`.
     fn emit_slot_closed(&self, reason: &str) {
+        if !self.granted_sent {
+            return;
+        }
         #[cfg(feature = "packet-diagnostics")]
         if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
         {
