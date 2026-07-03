@@ -151,4 +151,29 @@ mod tests {
         assert_eq!(decoded["schema"], "diag_event_v1");
         assert_eq!(decoded["family"], "sched");
     }
+
+    // Cross-crate diag_event_v1 envelope golden (C4): the ed2k + kad-net emitters
+    // each duplicate DiagEventRecord + encode_record_line and append to the SAME
+    // jsonl. This exact byte string is asserted identically in BOTH crates, so a
+    // field rename/reorder/addition in one (which would split the shared file)
+    // fails its golden test. Keep the two literals byte-identical.
+    #[test]
+    fn encode_record_line_matches_cross_crate_golden() {
+        let record = DiagEventRecord {
+            schema: "diag_event_v1",
+            client: "rust",
+            ts: "2026-06-18T00:00:00.000Z".to_string(),
+            seq: 1,
+            family: "sched",
+            event: "source_dropped",
+            severity: "info",
+            keys: json!({"peer": "192.0.2.10:4662"}),
+            body: json!({"outcome": "dropped"}),
+        };
+        let line = encode_record_line(&record).expect("line encoded");
+        assert_eq!(
+            String::from_utf8(line).unwrap(),
+            "{\"schema\":\"diag_event_v1\",\"client\":\"rust\",\"ts\":\"2026-06-18T00:00:00.000Z\",\"seq\":1,\"family\":\"sched\",\"event\":\"source_dropped\",\"severity\":\"info\",\"keys\":{\"peer\":\"192.0.2.10:4662\"},\"body\":{\"outcome\":\"dropped\"}}\n"
+        );
+    }
 }
