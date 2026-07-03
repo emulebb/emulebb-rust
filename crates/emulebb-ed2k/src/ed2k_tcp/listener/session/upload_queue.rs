@@ -151,13 +151,10 @@ impl ListenerUploadQueue {
         if !self.granted_sent {
             return;
         }
-        #[cfg(feature = "packet-diagnostics")]
         if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
         {
             diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string(), reason);
         }
-        #[cfg(not(feature = "packet-diagnostics"))]
-        let _ = reason;
     }
 
     pub(in crate::ed2k_tcp) fn read_timeout(&self) -> std::time::Duration {
@@ -202,7 +199,6 @@ impl ListenerUploadQueue {
                         &packet,
                     );
                     transport.write_all(&packet).await?;
-                    #[cfg(feature = "packet-diagnostics")]
                     if let (Some(peer), Some(file_hash)) =
                         (self.diag_peer.as_deref(), self.file_hash.as_ref())
                     {
@@ -250,7 +246,6 @@ impl ListenerUploadQueue {
                         &packet,
                     );
                     let _ = transport.write_all(&packet).await;
-                    #[cfg(feature = "packet-diagnostics")]
                     if let (Some(peer), Some(file_hash)) =
                         (self.diag_peer.as_deref(), self.file_hash.as_ref())
                     {

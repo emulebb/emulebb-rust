@@ -3,7 +3,6 @@ use std::{net::SocketAddr, time::Instant};
 use anyhow::{Context, Result};
 use emulebb_kad_proto::Ed2kHash;
 
-#[cfg(feature = "packet-diagnostics")]
 use crate::ed2k_transfer::diag_sched;
 use crate::{
     ed2k_tcp::{Ed2kTransport, OP_REQUESTPARTS_I64},
@@ -94,34 +93,27 @@ fn emit_upload_request_outcome(
     outcome: &str,
     diag: &UploadRequestDiag,
 ) {
-    #[cfg(not(feature = "packet-diagnostics"))]
-    {
-        let _ = (peer_upload_identity, requested, outcome, diag);
-    }
-    #[cfg(feature = "packet-diagnostics")]
-    {
-        let peer = diag_sched::peer_label(peer_upload_identity.ip, peer_upload_identity.tcp_port);
-        let file_hash = requested.to_string();
-        diag_sched::upload_request_outcome(
-            &peer,
-            peer_upload_identity.user_hash,
-            &file_hash,
-            outcome,
-            diag.requested_ranges,
-            diag.served_ranges,
-            diag.skipped_ranges,
-            diag.requested_bytes,
-            diag.served_bytes,
-            diag.payload_packets,
-            diag.throttle_delay_ms,
-            diag.verified_reader_open_ms,
-            diag.payload_read_ms,
-            diag.read_cache_hits,
-            diag.read_cache_misses,
-            diag.read_disk_bytes,
-            diag.first_skip_reason,
-        );
-    }
+    let peer = diag_sched::peer_label(peer_upload_identity.ip, peer_upload_identity.tcp_port);
+    let file_hash = requested.to_string();
+    diag_sched::upload_request_outcome(
+        &peer,
+        peer_upload_identity.user_hash,
+        &file_hash,
+        outcome,
+        diag.requested_ranges,
+        diag.served_ranges,
+        diag.skipped_ranges,
+        diag.requested_bytes,
+        diag.served_bytes,
+        diag.payload_packets,
+        diag.throttle_delay_ms,
+        diag.verified_reader_open_ms,
+        diag.payload_read_ms,
+        diag.read_cache_hits,
+        diag.read_cache_misses,
+        diag.read_disk_bytes,
+        diag.first_skip_reason,
+    );
 }
 
 fn emit_upload_payload_accounting(
@@ -130,37 +122,30 @@ fn emit_upload_payload_accounting(
     shared_complete: bool,
     diag: &UploadRequestDiag,
 ) {
-    #[cfg(not(feature = "packet-diagnostics"))]
-    {
-        let _ = (peer_upload_identity, requested, shared_complete, diag);
+    if diag.served_bytes == 0 {
+        return;
     }
-    #[cfg(feature = "packet-diagnostics")]
-    {
-        if diag.served_bytes == 0 {
-            return;
-        }
-        let peer = diag_sched::peer_label(peer_upload_identity.ip, peer_upload_identity.tcp_port);
-        let file_hash = requested.to_string();
-        let complete_bytes = if shared_complete {
-            diag.served_bytes
-        } else {
-            0
-        };
-        let part_file_bytes = if shared_complete {
-            0
-        } else {
-            diag.served_bytes
-        };
-        diag_sched::upload_payload_accounting(
-            &peer,
-            peer_upload_identity.user_hash,
-            &file_hash,
-            diag.served_bytes,
-            diag.sent_payload_bytes,
-            complete_bytes,
-            part_file_bytes,
-        );
-    }
+    let peer = diag_sched::peer_label(peer_upload_identity.ip, peer_upload_identity.tcp_port);
+    let file_hash = requested.to_string();
+    let complete_bytes = if shared_complete {
+        diag.served_bytes
+    } else {
+        0
+    };
+    let part_file_bytes = if shared_complete {
+        0
+    } else {
+        diag.served_bytes
+    };
+    diag_sched::upload_payload_accounting(
+        &peer,
+        peer_upload_identity.user_hash,
+        &file_hash,
+        diag.served_bytes,
+        diag.sent_payload_bytes,
+        complete_bytes,
+        part_file_bytes,
+    );
 }
 
 pub(in crate::ed2k_tcp) async fn serve_upload_payload(
