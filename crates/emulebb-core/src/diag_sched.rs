@@ -33,9 +33,13 @@ fn insert_source_keys(
     keys.insert("fileHash".to_string(), json!(file_hash_hex));
 }
 
-/// `conn_budget` (schema §3.5): the global connection-budget admit/deny decision
-/// at the download driver's source-connect site.
-pub(crate) fn conn_budget(
+/// `source_conn_budget`: rust's OUTBOUND download-source connect-budget gate
+/// (admit/deny a new connection to a download source). Named distinctly from the
+/// MFC oracle's `conn_budget`, which is the INBOUND listen-accept cap
+/// (`DiagEventLogSchedConnBudgetDeny`, deny-only, empty keys) — a different gate,
+/// so sharing the name would misalign a rust-vs-MFC diff. (Follow-up: emit a
+/// matching `conn_budget` at rust's own inbound-accept cap to cover the oracle.)
+pub(crate) fn source_conn_budget(
     decision: Ed2kConnectionBudgetDecision,
     file_hash_hex: &str,
     source: &Ed2kFoundSource,
@@ -59,7 +63,7 @@ pub(crate) fn conn_budget(
     let severity = if decision.admitted { "info" } else { "low" };
     emit(
         FAMILY,
-        "conn_budget",
+        "source_conn_budget",
         severity,
         Value::Object(keys),
         Value::Object(body),

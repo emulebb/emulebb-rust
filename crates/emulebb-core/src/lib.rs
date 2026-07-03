@@ -7093,7 +7093,7 @@ fn spawn_pending_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
         let budget = context
             .transfer_runtime
             .try_acquire_source_connection_detailed();
-        crate::diag_sched::conn_budget(budget, context.file_hash_hex, &source);
+        crate::diag_sched::source_conn_budget(budget, context.file_hash_hex, &source);
         if !budget.admitted {
             pending_sources.push_front(source);
             tracing::debug!(
