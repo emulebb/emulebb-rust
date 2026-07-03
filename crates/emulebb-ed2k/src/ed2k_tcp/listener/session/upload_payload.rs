@@ -336,14 +336,6 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             UploadRangePlan::Accepted => {}
             UploadRangePlan::DuplicateDone => {
                 request_diag.note_skip("duplicateDone");
-                crate::ed2k_transfer::diag_bad_peer::upload_duplicate_done_block_rejected(
-                    &peer_addr.to_string(),
-                    peer_upload_identity.user_hash,
-                    &hex::encode(requested.0),
-                    start,
-                    end,
-                    start / crate::ed2k_transfer::ED2K_PART_SIZE,
-                );
                 continue;
             }
             UploadRangePlan::Empty => {
