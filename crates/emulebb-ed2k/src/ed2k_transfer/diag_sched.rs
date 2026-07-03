@@ -47,9 +47,17 @@ pub(crate) fn upload_slot_opened(peer: &str, peer_hash: Option<[u8; 16]>, file_h
 
 /// `upload_slot_closed` (schema §3.5): an upload slot/queue entry is released on
 /// disconnect or explicit cancel.
-pub(crate) fn upload_slot_closed(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+pub(crate) fn upload_slot_closed(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    reason: &str,
+) {
     let keys = upload_keys(peer, peer_hash, file_hash);
-    let body = json!({ "outcome": "closed" });
+    // `reason` is the upload-funnel close cause (peer_cancelled | end_of_download |
+    // slot_recycled | rejected_never_granted | peer_disconnected) so rust vs MFC
+    // "why did the upload peer leave" distributions diff directly.
+    let body = json!({ "outcome": "closed", "reason": reason });
     emit(FAMILY, "upload_slot_closed", "info", keys, body);
 }
 

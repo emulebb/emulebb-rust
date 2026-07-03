@@ -438,6 +438,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 })?;
             }
             (OP_EDONKEYPROT, OP_CANCELTRANSFER) => {
+                upload_queue.note_close_reason("peer_cancelled");
                 upload_queue.release(transfer_runtime).await;
                 break Ok(());
             }
@@ -460,6 +461,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 // the peer signals end for the file it is currently working on.
                 let ends_slot = upload_queue.slot_file_hash() == ended_hash;
                 if ends_slot {
+                    upload_queue.note_close_reason("end_of_download");
                     upload_queue.release(transfer_runtime).await;
                 }
                 if ends_slot || requested_file_hash == ended_hash {

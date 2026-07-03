@@ -46,6 +46,10 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // count, first-seen) for MFC repeat_block_request parity. Bounded and pruned
     // to the observation window; a peer requests few distinct blocks at a time.
     block_request_ledger: Vec<([u8; 16], u64, u64, u32, std::time::Instant)>,
+    // Most-specific pending close reason for the `upload_slot_closed` funnel diag,
+    // set at the cancel/end/recycle/reject decision points; a plain disconnect
+    // leaves it `None` and reports `peer_disconnected`. Pointer-sized, no alloc.
+    close_reason: Option<&'static str>,
 }
 
 impl ListenerUploadQueue {
@@ -60,7 +64,15 @@ impl ListenerUploadQueue {
             diag_peer_hash: None,
             verified_reader: None,
             block_request_ledger: Vec::new(),
+            close_reason: None,
         }
+    }
+
+    /// Record the most-specific reason for the next slot release, for the
+    /// `upload_slot_closed` funnel diagnostic. Cheap `&'static str` assignment;
+    /// the emit it feeds is compile-gated behind `packet-diagnostics`.
+    pub(in crate::ed2k_tcp) fn note_close_reason(&mut self, reason: &'static str) {
+        self.close_reason = Some(reason);
     }
 
     /// Records one requested upload block and returns the repeat count when this
@@ -122,12 +134,16 @@ impl ListenerUploadQueue {
         }
     }
 
-    /// Emit `upload_slot_closed` when a held session is released.
-    fn emit_slot_closed(&self) {
+    /// Emit `upload_slot_closed` (with its funnel `reason`) when a held session is
+    /// released. The emission is compile-gated behind `packet-diagnostics`.
+    fn emit_slot_closed(&self, reason: &str) {
+        #[cfg(feature = "packet-diagnostics")]
         if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
         {
-            diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string());
+            diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string(), reason);
         }
+        #[cfg(not(feature = "packet-diagnostics"))]
+        let _ = reason;
     }
 
     pub(in crate::ed2k_tcp) fn read_timeout(&self) -> std::time::Duration {
@@ -168,6 +184,13 @@ impl ListenerUploadQueue {
                 Ok(ListenerQueuePoll::Continue)
             }
             Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
+                // Granted-then-idle slots recycle (Stale); never-granted peers are
+                // Rejected. `granted_sent` is exactly that distinction.
+                self.close_reason = Some(if self.granted_sent {
+                    "slot_recycled"
+                } else {
+                    "rejected_never_granted"
+                });
                 // WHY: if this peer was actively granted an upload slot and the queue
                 // is now recycling it (Stale), tell the downloader to go back to
                 // OnQueue with OP_OUTOFPARTREQS before the socket closes -- mirroring
@@ -381,11 +404,13 @@ impl ListenerUploadQueue {
             transfer_runtime
                 .release_upload_session(upload_session_handle)
                 .await;
-            self.emit_slot_closed();
+            let reason = self.close_reason.unwrap_or("peer_disconnected");
+            self.emit_slot_closed(reason);
         }
         self.session = None;
         self.file_hash = None;
         self.granted_sent = false;
+        self.close_reason = None;
         self.last_queue_rank = None;
         self.last_queue_rank_sent_at = None;
         self.diag_peer = None;
