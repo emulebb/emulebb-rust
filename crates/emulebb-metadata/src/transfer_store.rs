@@ -560,7 +560,14 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM transfer_pieces
+                        WHERE transfer_pieces.transfer_id = transfers.id
+                          AND transfer_pieces.state = 'Verified'
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id
@@ -612,7 +619,14 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
-            WHERE known_files.completed != 0
+            WHERE (
+                    known_files.completed != 0
+                    OR EXISTS (
+                        SELECT 1 FROM transfer_pieces
+                        WHERE transfer_pieces.transfer_id = transfers.id
+                          AND transfer_pieces.state = 'Verified'
+                    )
+                  )
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
                   WHERE unshared_files.known_file_id = known_files.id

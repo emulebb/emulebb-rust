@@ -625,6 +625,21 @@ impl Ed2kTransferRuntime {
         let raw = tokio::task::spawn_blocking(move || metadata.incomplete_transfer_manifests())
             .await
             .map_err(anyhow::Error::from)??;
-        raw.into_iter().map(manifest_from_metadata).collect()
+        let manifests: Vec<Ed2kResumeManifest> = raw
+            .into_iter()
+            .map(manifest_from_metadata)
+            .collect::<Result<_>>()?;
+        // Re-advertise resumable partfiles that already carry >=1 verified part into
+        // the in-memory serving/offer catalog (empty at boot). This matches the
+        // `upsert_verified_catalog_entry` gate (completed || verified_ranges
+        // non-empty) and eMule partfile sharing: without it, a hydrated partfile is
+        // still served on a direct request (its manifest exists) but is never OFFERED
+        // to the ed2k server, so peers cannot discover rust as a source for it.
+        for manifest in &manifests {
+            if !manifest.verified_ranges.is_empty() {
+                self.upsert_verified_catalog_entry(manifest).await;
+            }
+        }
+        Ok(manifests)
     }
 }
