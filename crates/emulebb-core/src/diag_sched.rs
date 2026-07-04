@@ -159,6 +159,27 @@ pub(crate) fn source_swapped(
     emit(FAMILY, "source_swapped", "info", Value::Object(keys), body);
 }
 
+/// `keyword_search`: a user-facing keyword search completed. Converged parity of the
+/// MFC oracle search path — captures the network method used and how many results
+/// came back, so rust-vs-oracle search behaviour is diffable from the diag stream.
+/// Privacy: the query text is NOT logged (only its length + result count + method),
+/// so search terms never reach the diagnostics. `keys` empty (whole-search event).
+pub(crate) fn keyword_search(method: &str, result_count: usize, query_len: usize, status: &str) {
+    let body = json!({
+        "method": method,
+        "resultCount": result_count,
+        "queryLen": query_len,
+        "status": status,
+    });
+    emit(
+        FAMILY,
+        "keyword_search",
+        "info",
+        Value::Object(Map::new()),
+        body,
+    );
+}
+
 /// `source_count` (schema §3.5): periodic download-source picture snapshot, for
 /// parity with MFC `DiagEventLogDownloadSourceCount`. Field mapping to rust's
 /// source registry: `sourceCount` = total live candidates; `validSourceCount` =

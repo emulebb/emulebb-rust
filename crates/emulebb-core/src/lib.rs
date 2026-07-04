@@ -1508,8 +1508,22 @@ impl EmulebbCore {
             }
         }
         search.updated_at = Utc::now();
+        let result_count = search.results.len();
+        let status_str = search.status.clone();
         let snapshot = search.clone();
         drop(state);
+        let method_str = match network_method {
+            Some(SearchNetworkMethod::Ed2kServer) => "server",
+            Some(SearchNetworkMethod::Ed2kGlobal) => "global",
+            Some(SearchNetworkMethod::Kad) => "kad",
+            None => "none",
+        };
+        crate::diag_sched::keyword_search(
+            method_str,
+            result_count,
+            request.query.chars().count(),
+            &status_str,
+        );
         if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
             tracing::warn!("failed to persist completed search {search_id}: {error}");
         }
