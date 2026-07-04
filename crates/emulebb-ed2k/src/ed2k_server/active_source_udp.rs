@@ -230,12 +230,96 @@ pub async fn search_source_udp_servers(
     Ok(Vec::new())
 }
 
+/// Interval between successive per-server `OP_GLOBGETSOURCES*` sends during one UDP
+/// source walk. Oracle `CDownloadQueue::SendNextUDPPacket` trickles exactly one server
+/// per ~1s `Process` tick (driven by `m_udcounter >= 10`), never fanning out to every
+/// configured server within a single tick. rust previously sent to all servers
+/// back-to-back (a ~one-datagram-per-server burst); pacing at the oracle cadence
+/// removes that spike while the socket keeps receiving replies in between.
+const UDP_SOURCE_SERVER_WALK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Drain inbound `OP_GLOBFOUNDSOURCES` datagrams from any already-queried server into
+/// `results_by_hash` until `deadline`, discarding malformed / unrequested / mismatched
+/// responses. Extracted so the server walk can interleave a paced send with response
+/// collection (the OS keeps buffering replies for servers already queried while the walk
+/// waits out the per-server interval). Returns a fatal socket-read error if one occurs.
+async fn drain_source_udp_responses(
+    socket: &tokio::net::UdpSocket,
+    queried_servers: &[super::ResolvedServerEntry],
+    deadline: TokioInstant,
+    requested_hashes: &HashSet<Ed2kHash>,
+    results_by_hash: &mut HashMap<Ed2kHash, Vec<Ed2kFoundSource>>,
+    cancel: &CancellationToken,
+) -> Option<anyhow::Error> {
+    if queried_servers.is_empty() {
+        return None;
+    }
+    loop {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
+            return None;
+        };
+        match tokio::time::timeout(
+            remaining,
+            read_server_udp_packet_from_any(socket, queried_servers),
+        )
+        .await
+        {
+            Ok(Ok(Some((response_server, packet)))) => {
+                if packet.opcode != OP_GLOBFOUNDSOURCES {
+                    continue;
+                }
+                let source_sets = match decode_udp_found_source_sets(&packet.payload) {
+                    Ok(source_sets) => source_sets,
+                    Err(error) => {
+                        warn!(
+                            "discarding malformed ED2K UDP source batch-search response endpoint={}: {error}",
+                            response_server.base_endpoint()
+                        );
+                        continue;
+                    }
+                };
+                for results in source_sets {
+                    let Some(file_hash) = results.first().map(|source| source.file_hash) else {
+                        continue;
+                    };
+                    if !requested_hashes.contains(&file_hash) {
+                        warn!(
+                            "discarding unrequested ED2K UDP source batch-search response file_hash={} endpoint={}",
+                            file_hash,
+                            response_server.base_endpoint()
+                        );
+                        continue;
+                    }
+                    let results =
+                        annotate_found_sources_server(results, response_server.base_endpoint());
+                    if let Err(error) = validate_found_sources(&results, file_hash) {
+                        warn!(
+                            "discarding mismatched ED2K UDP source batch-search response file_hash={} endpoint={}: {error}",
+                            file_hash,
+                            response_server.base_endpoint()
+                        );
+                        continue;
+                    }
+                    merge_found_sources(results_by_hash.entry(file_hash).or_default(), results);
+                }
+            }
+            Ok(Ok(None)) => continue,
+            Ok(Err(error)) => return Some(error),
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Executes ED2K server UDP source searches for several file hashes at once.
 ///
 /// eMule's global source walk fills each `OP_GLOBGETSOURCES*` datagram with
-/// multiple file IDs for the current server before rotating to the next server.
-/// This API preserves that packet shape for callers that can coalesce scarce
-/// active transfers before issuing the UDP walk.
+/// multiple file IDs for the current server before rotating to the next server,
+/// pacing one server per ~1s tick. This API preserves that packet shape *and*
+/// cadence for callers that can coalesce scarce active transfers before issuing
+/// the UDP walk.
 #[allow(clippy::cognitive_complexity)]
 pub async fn search_source_udp_server_batches(
     options: Ed2kUdpSourceBatchSearchOptions<'_>,
@@ -293,6 +377,11 @@ pub async fn search_source_udp_server_batches(
     let per_server_timeout = timeout.max(Duration::from_secs(5));
     let mut queried_servers = Vec::new();
 
+    // Oracle `CDownloadQueue::SendNextUDPPacket`: trickle one server's batched request
+    // per interval instead of fanning out to every configured server at once. After each
+    // send, drain replies for the pacing window (the OS keeps buffering responses from the
+    // servers already queried), then advance to the next server. This removes the previous
+    // simultaneous per-server burst without dropping any reply.
     for (attempt_index, configured_server) in configured_servers
         .into_iter()
         .take(max_attempts.max(1))
@@ -332,6 +421,21 @@ pub async fn search_source_udp_server_batches(
             continue;
         }
         queried_servers.push(resolved_server);
+        // Pace before the next server, draining any replies that arrive meanwhile so no
+        // early-server response is lost while we wait out the per-server interval.
+        let pacing_deadline = TokioInstant::now() + UDP_SOURCE_SERVER_WALK_INTERVAL;
+        if let Some(error) = drain_source_udp_responses(
+            &socket,
+            &queried_servers,
+            pacing_deadline,
+            &requested_hashes,
+            &mut results_by_hash,
+            cancel,
+        )
+        .await
+        {
+            last_error = Some(error);
+        }
     }
 
     if queried_servers.is_empty() {
@@ -341,66 +445,20 @@ pub async fn search_source_udp_server_batches(
         return Ok(HashMap::new());
     }
 
+    // Final listen tail after the last server was queried (the reask response window is
+    // independent of the send cadence).
     let deadline = TokioInstant::now() + per_server_timeout;
-    loop {
-        if cancel.is_cancelled() {
-            return Ok(HashMap::new());
-        }
-        let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
-            break;
-        };
-        match tokio::time::timeout(
-            remaining,
-            read_server_udp_packet_from_any(&socket, &queried_servers),
-        )
-        .await
-        {
-            Ok(Ok(Some((response_server, packet)))) => {
-                if packet.opcode != OP_GLOBFOUNDSOURCES {
-                    continue;
-                }
-                let source_sets = match decode_udp_found_source_sets(&packet.payload) {
-                    Ok(source_sets) => source_sets,
-                    Err(error) => {
-                        warn!(
-                            "discarding malformed ED2K UDP source batch-search response endpoint={}: {error}",
-                            response_server.base_endpoint()
-                        );
-                        continue;
-                    }
-                };
-                for results in source_sets {
-                    let Some(file_hash) = results.first().map(|source| source.file_hash) else {
-                        continue;
-                    };
-                    if !requested_hashes.contains(&file_hash) {
-                        warn!(
-                            "discarding unrequested ED2K UDP source batch-search response file_hash={} endpoint={}",
-                            file_hash,
-                            response_server.base_endpoint()
-                        );
-                        continue;
-                    }
-                    let results =
-                        annotate_found_sources_server(results, response_server.base_endpoint());
-                    if let Err(error) = validate_found_sources(&results, file_hash) {
-                        warn!(
-                            "discarding mismatched ED2K UDP source batch-search response file_hash={} endpoint={}: {error}",
-                            file_hash,
-                            response_server.base_endpoint()
-                        );
-                        continue;
-                    }
-                    merge_found_sources(results_by_hash.entry(file_hash).or_default(), results);
-                }
-            }
-            Ok(Ok(None)) => continue,
-            Ok(Err(error)) => {
-                last_error = Some(error);
-                break;
-            }
-            Err(_) => break,
-        }
+    if let Some(error) = drain_source_udp_responses(
+        &socket,
+        &queried_servers,
+        deadline,
+        &requested_hashes,
+        &mut results_by_hash,
+        cancel,
+    )
+    .await
+    {
+        last_error = Some(error);
     }
 
     if !results_by_hash.is_empty() {
