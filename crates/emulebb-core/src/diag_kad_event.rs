@@ -172,14 +172,20 @@ const fn publish_severity(outcome: KadPublishOutcome) -> &'static str {
 pub(crate) fn publish_failure(
     kind: KadPublishKind,
     file_hash: &str,
+    file_count: usize,
     failure_class: &str,
     elapsed_ms: u64,
     error: &str,
 ) {
+    // `fileCount` mirrors the MFC oracle body key on the SUCCESS path too, so a
+    // window where a keyword publish only ever fails still carries it — otherwise the
+    // observed `kad_keyword_publish` body would be missing an oracle key (conformance
+    // gap surfaced by the offline parity diff).
     let body = json!({
         "milestone": kind.failure_milestone(),
         "action": "publish",
         "publishKind": kind.publish_kind(),
+        "fileCount": file_count,
         "failureClass": failure_class,
         "elapsedMs": elapsed_ms,
         "error": error,

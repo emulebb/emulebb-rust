@@ -5694,6 +5694,7 @@ async fn drain_completed_kad_publish_tasks(
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
                     &primary_file_hash,
+                    outcome.file_hashes.len(),
                     "busy",
                     elapsed_ms,
                     "",
@@ -5710,6 +5711,7 @@ async fn drain_completed_kad_publish_tasks(
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
                     &primary_file_hash,
+                    outcome.file_hashes.len(),
                     "timedOut",
                     elapsed_ms,
                     "",
@@ -5726,6 +5728,7 @@ async fn drain_completed_kad_publish_tasks(
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
                     &primary_file_hash,
+                    outcome.file_hashes.len(),
                     "failed",
                     elapsed_ms,
                     &error,
