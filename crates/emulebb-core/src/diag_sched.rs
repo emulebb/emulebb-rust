@@ -70,6 +70,62 @@ pub(crate) fn source_conn_budget(
     );
 }
 
+/// `download_attempt_outcome`: the terminal decision of one outbound download
+/// attempt for a file — the counters that gate the queued-vs-downloading return in
+/// `run_ed2k_download_attempt`. Rust-only instrumentation (no oracle analogue); lets
+/// a soak see, per attempt, whether the transfer engaged/queued at any source and
+/// why it ended in `state`, so the persistent-reask behaviour can be judged from
+/// evidence rather than inferred. `keys.fileHash` only (whole-file decision).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn download_attempt_outcome(
+    file_hash_hex: &str,
+    state: &str,
+    sources_remaining: usize,
+    had_direct_sources: bool,
+    accepted_incomplete_peers: u32,
+    callback_sources_requested: usize,
+    deferred_active_direct: bool,
+    manifest_progress: bool,
+    requery_rounds: usize,
+) {
+    let mut keys = Map::new();
+    keys.insert("fileHash".to_string(), json!(file_hash_hex));
+    let body = json!({
+        "state": state,
+        "sourcesRemaining": sources_remaining,
+        "hadDirectSources": had_direct_sources,
+        "acceptedIncompletePeers": accepted_incomplete_peers,
+        "callbackSourcesRequested": callback_sources_requested,
+        "deferredActiveDirect": deferred_active_direct,
+        "manifestProgress": manifest_progress,
+        "requeryRounds": requery_rounds,
+    });
+    let severity = if state == "queued" { "low" } else { "info" };
+    emit(
+        FAMILY,
+        "download_attempt_outcome",
+        severity,
+        Value::Object(keys),
+        body,
+    );
+}
+
+/// `download_task_settled`: a background download task for a file is exiting, with
+/// `willReask` = whether it schedules a re-drive. Rust-only; makes the "task dies on
+/// queued and is never re-asked" defect (and its fix) directly visible.
+pub(crate) fn download_task_settled(file_hash_hex: &str, state: &str, will_reask: bool) {
+    let mut keys = Map::new();
+    keys.insert("fileHash".to_string(), json!(file_hash_hex));
+    let body = json!({ "state": state, "willReask": will_reask });
+    emit(
+        FAMILY,
+        "download_task_settled",
+        "info",
+        Value::Object(keys),
+        body,
+    );
+}
+
 /// `source_engaged` (schema §3.5): a source begins being served for a file.
 pub(crate) fn source_engaged(file_hash_hex: &str, source: &Ed2kFoundSource) {
     let mut keys = Map::new();

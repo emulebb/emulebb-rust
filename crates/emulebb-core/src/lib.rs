@@ -3274,10 +3274,44 @@ impl EmulebbCore {
         }
 
         let manifest = self.ed2k_transfers.manifest(&transfer.hash).await?;
+        let has_progress = manifest_has_ed2k_transfer_progress(&manifest);
+        let retry_on_error = last_direct_error.is_some()
+            && ed2k_download_retry::should_retry_after_exhausted_direct_sources(
+                had_direct_sources,
+                true,
+            );
+        // Evidence instrumentation: record WHY this attempt ended before returning,
+        // so the persistent-reask behaviour is judged from the diag stream, not
+        // inferred. The state string mirrors the return ladder below exactly.
+        let outcome_state = if manifest.completed {
+            "completed"
+        } else if has_progress
+            || !requested_callback_sources.is_empty()
+            || deferred_active_direct_sources
+            || accepted_incomplete_peers != 0
+            || retry_on_error
+        {
+            "downloading"
+        } else if last_direct_error.is_some() {
+            "error"
+        } else {
+            "queued"
+        };
+        crate::diag_sched::download_attempt_outcome(
+            &transfer.hash,
+            outcome_state,
+            sources.len(),
+            had_direct_sources,
+            accepted_incomplete_peers,
+            requested_callback_sources.len(),
+            deferred_active_direct_sources,
+            has_progress,
+            source_requery_round,
+        );
         if manifest.completed {
             return Ok(Some("completed"));
         }
-        if manifest_has_ed2k_transfer_progress(&manifest) {
+        if has_progress {
             return Ok(Some("downloading"));
         }
         if !requested_callback_sources.is_empty() {
@@ -3290,10 +3324,7 @@ impl EmulebbCore {
             return Ok(Some("downloading"));
         }
         if let Some(error) = last_direct_error {
-            if ed2k_download_retry::should_retry_after_exhausted_direct_sources(
-                had_direct_sources,
-                true,
-            ) {
+            if retry_on_error {
                 return Ok(Some("downloading"));
             }
             return Err(error).context("ED2K direct download did not complete");
@@ -3601,8 +3632,10 @@ impl EmulebbCore {
 
         let result = core.run_ed2k_download_attempt(&transfer, &cancel).await;
         let mut retry_downloading = false;
+        let settled_state: &str;
         match result {
             Ok(Some(next_state)) => {
+                settled_state = next_state;
                 retry_downloading = next_state == "downloading";
                 // Materialize the finished file by name (eMule move-to-Incoming)
                 // BEFORE refreshing the in-memory transfer, so the refreshed view
@@ -3616,8 +3649,11 @@ impl EmulebbCore {
                     );
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                settled_state = "cancelled";
+            }
             Err(error) => {
+                settled_state = "error";
                 tracing::warn!("ED2K background download attempt failed for {hash}: {error:#}");
                 if let Err(refresh_error) =
                     core.refresh_transfer_from_manifest(&hash, "queued").await
@@ -3630,6 +3666,10 @@ impl EmulebbCore {
         }
         // Release the dedup slot before re-queueing so the retry can re-acquire it.
         drop(guard);
+        // Evidence instrumentation: make the task-exit decision (and whether it
+        // re-drives) visible. Today `willReask` is only ever true for "downloading";
+        // a "queued" exit dies here — which is exactly the defect under investigation.
+        crate::diag_sched::download_task_settled(&hash, settled_state, retry_downloading);
         if retry_downloading {
             core.queue_ed2k_download_retry(hash);
         }
