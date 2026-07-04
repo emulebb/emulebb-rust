@@ -260,6 +260,53 @@ impl RoutingZone {
         }
     }
 
+    /// Kademlia network-size estimate — the oracle `CKademlia` DHT-population figure
+    /// derived from `CRoutingZone::EstimateCount`: extrapolate the routing-tree
+    /// density near the local ID out to the full keyspace, taking the MAX over leaf
+    /// zones (`CKademlia::Process` `uMaxUsers`). Mirrors the eMule formula exactly.
+    pub fn estimate_network_size(&self, udp_firewalled: bool) -> u32 {
+        // Track each branch ancestor's contact count on the way down so a leaf can
+        // read the count 3 levels up (oracle `m_pSuperZone->m_pSuperZone->m_pSuperZone`).
+        self.estimate_walk(udp_firewalled, &mut Vec::new())
+    }
+
+    fn estimate_walk(&self, fw: bool, ancestors: &mut Vec<usize>) -> u32 {
+        match &self.content {
+            ZoneContent::Leaf(_) => self.estimate_leaf(fw, ancestors),
+            ZoneContent::Branch { left, right } => {
+                ancestors.push(self.count());
+                let estimate = left
+                    .estimate_walk(fw, ancestors)
+                    .max(right.estimate_walk(fw, ancestors));
+                ancestors.pop();
+                estimate
+            }
+        }
+    }
+
+    /// Oracle `CRoutingZone::EstimateCount` for one leaf zone.
+    fn estimate_leaf(&self, fw: bool, ancestors: &[usize]) -> u32 {
+        if (self.depth as usize) < KBASE {
+            return (2f64.powi(self.depth as i32) * K as f64) as u32;
+        }
+        // Contacts in the zone 3 levels up (oracle super.super.super). `ancestors`
+        // holds branch counts for depths 0..self.depth-1, so index `depth-3` is the
+        // ancestor exactly 3 levels above this leaf.
+        let contacts_3up = self
+            .depth
+            .checked_sub(3)
+            .and_then(|index| ancestors.get(index as usize))
+            .copied()
+            .unwrap_or(0);
+        // Fullness of this part of the tree (oracle `fModify`).
+        let f_modify = contacts_3up as f64 / (K as f64 * 2.0);
+        // Firewalled modifier: oracle assumes ~20% firewalled (1.20), or 1.40 when we
+        // are UDP-firewalled (worse visibility). rust has no live firewalled-ratio
+        // stats, so use the oracle's base constants rather than the weighted variant.
+        let firewalled_modify = if fw { 1.40 } else { 1.20 };
+        (2f64.powi(self.depth as i32 - 2) * K as f64 * f_modify * firewalled_modify) as u32
+    }
+
     /// Run the small-timer maintenance sweep over every leaf bin, accumulating
     /// removed-contact IDs and per-leaf probe candidates (oracle
     /// `CRoutingZone::OnSmallTimer` walked across the tree).

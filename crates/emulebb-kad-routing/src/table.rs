@@ -207,6 +207,13 @@ impl RoutingTable {
     }
 
     /// Total number of contacts in the routing table.
+    /// Kademlia DHT network-size estimate (oracle `CKademlia::GetKademliaUsers`
+    /// backed by `CRoutingZone::EstimateCount`, taken over the whole tree). Returns
+    /// the estimated number of users on the Kad network from local routing density.
+    pub fn estimate_network_size(&self, udp_firewalled: bool) -> u32 {
+        self.root.estimate_network_size(udp_firewalled)
+    }
+
     pub fn len(&self) -> usize {
         self.total_contacts
     }

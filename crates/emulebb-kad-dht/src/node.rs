@@ -233,6 +233,17 @@ impl DhtNode {
         counts
     }
 
+    /// Estimated Kad DHT user population (oracle `CKademlia::GetKademliaUsers` via
+    /// `CRoutingZone::EstimateCount`), derived from local routing-tree density.
+    /// `udp_firewalled` selects the oracle firewalled modifier (1.40 vs 1.20).
+    pub async fn estimate_kad_users(&self, udp_firewalled: bool) -> u32 {
+        self.inner
+            .routing_table
+            .lock()
+            .await
+            .estimate_network_size(udp_firewalled)
+    }
+
     /// True if the routing table has enough contacts to operate.
     pub fn is_bootstrapped(&self) -> bool {
         self.inner

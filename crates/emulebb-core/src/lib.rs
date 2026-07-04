@@ -4439,6 +4439,17 @@ impl EmulebbCore {
         // Report the real UDP-firewall verdict (oracle
         // `CUDPFirewallTester::IsFirewalledUDP`): unverified is treated as OPEN.
         let firewalled = kad_firewall.lock().await.is_udp_firewalled();
+        // Kad DHT population estimate (oracle `CKademlia::GetKademliaUsers` via
+        // `CRoutingZone::EstimateCount`) and the derived file estimate (oracle
+        // `CPrefs::SetKademliaFiles`, using its ~108 files-per-user floor since rust
+        // does not track the live ed2k-server file average). Only meaningful once the
+        // routing tree is populated, so gate on `connected` like the oracle.
+        let kad_users = if connected {
+            u64::from(dht.estimate_kad_users(firewalled).await)
+        } else {
+            0
+        };
+        let kad_files = kad_users.saturating_mul(KAD_ESTIMATED_FILES_PER_USER);
         // The bootstrap driver always runs while Kad is up, re-driving the
         // self-lookup until connected, so we are "bootstrapping" whenever we have
         // contacts to bootstrap from and are not yet connected.
@@ -4469,8 +4480,8 @@ impl EmulebbCore {
             }),
             contact_count: Some(contact_count),
             lan_mode: Some(false),
-            users: connected.then_some(0),
-            files: connected.then_some(0),
+            users: connected.then_some(kad_users),
+            files: connected.then_some(kad_files),
             indexed_sources: Some(indexed_sources),
             indexed_keywords: Some(indexed_keywords),
             operation_queued: None,
@@ -4688,6 +4699,10 @@ struct KadPublishLoopRuntime {
 /// off its 1s heartbeat gated by `KADEMLIAPUBLISHTIME` (2s); the actual
 /// (re)publish rate is bounded per-file by the 24h keyword / 5h source intervals,
 /// so this only controls how often we re-evaluate which files are due.
+/// Files-per-user used to derive the Kad file-population estimate from the user
+/// estimate, mirroring the oracle `CPrefs::SetKademliaFiles` floor (108) applied
+/// when no live ed2k-server file average is available.
+const KAD_ESTIMATED_FILES_PER_USER: u64 = 108;
 const KAD_SHARED_FILE_PUBLISH_TICK_SECS: u64 = 2;
 /// Cadence of the periodic `kad_publish_snapshot` diag_event (A5), kept well above
 /// the fast publish tick so the log time-series is sampled, not flooded.
