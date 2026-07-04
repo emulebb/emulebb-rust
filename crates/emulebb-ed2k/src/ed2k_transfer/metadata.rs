@@ -615,4 +615,16 @@ impl Ed2kTransferRuntime {
         manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
         Ok(manifests)
     }
+
+    /// Persisted INCOMPLETE download manifests for startup resume. Unlike
+    /// [`manifests`], this filters to incomplete rows IN SQL (a handful vs the whole
+    /// library) and runs the blocking `rusqlite` load in `spawn_blocking`, so startup
+    /// hydration never blocks a tokio worker thread and starves REST.
+    pub async fn incomplete_manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
+        let metadata = self.metadata.clone();
+        let raw = tokio::task::spawn_blocking(move || metadata.incomplete_transfer_manifests())
+            .await
+            .map_err(anyhow::Error::from)??;
+        raw.into_iter().map(manifest_from_metadata).collect()
+    }
 }

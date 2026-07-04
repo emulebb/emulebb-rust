@@ -337,8 +337,23 @@ impl super::MetadataStore {
     }
 
     pub fn transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
+        self.transfer_manifests_filtered("")
+    }
+
+    /// Persisted INCOMPLETE download manifests only (`known_files.completed = 0`) —
+    /// the startup-resume set. Orders of magnitude smaller than the full (mostly
+    /// completed) library, so this can be loaded on startup without hauling every
+    /// row like `transfer_manifests`.
+    pub fn incomplete_transfer_manifests(&self) -> Result<Vec<MetadataTransferManifest>> {
+        self.transfer_manifests_filtered("WHERE known_files.completed = 0")
+    }
+
+    fn transfer_manifests_filtered(
+        &self,
+        where_clause: &str,
+    ) -> Result<Vec<MetadataTransferManifest>> {
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
+        let sql = format!(
             r#"
             SELECT known_files.id, transfers.id,
                    lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
@@ -356,9 +371,11 @@ impl super::MetadataStore {
                    transfers.source_mtime_ms
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
+            {where_clause}
             ORDER BY known_files.ed2k_hash
-            "#,
-        )?;
+            "#
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(TransferRow {
                 known_file_id: row.get(0)?,

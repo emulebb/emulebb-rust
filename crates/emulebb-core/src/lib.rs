@@ -2624,7 +2624,10 @@ impl EmulebbCore {
     /// (`source_path` set — served from their original path, not downloaded), and
     /// any transfer already present in memory (a REST resume racing startup).
     pub async fn resume_persisted_downloads(&self) -> usize {
-        let manifests = match self.ed2k_transfers.manifests().await {
+        // Load ONLY the incomplete rows, off the async runtime (spawn_blocking) — see
+        // `incomplete_manifests`. Loading the full library inline (`manifests`) blocks
+        // a tokio worker and starves REST at startup.
+        let manifests = match self.ed2k_transfers.incomplete_manifests().await {
             Ok(manifests) => manifests,
             Err(error) => {
                 tracing::warn!(
