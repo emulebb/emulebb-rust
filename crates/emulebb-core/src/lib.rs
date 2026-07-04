@@ -2633,6 +2633,13 @@ impl EmulebbCore {
                 return 0;
             }
         };
+        // Resume GRADUALLY. Queuing dozens of downloads at once (39 observed on the
+        // soak profile) thunder-herds the state lock and the source coordinator on
+        // top of the large-library shared reload, starving REST at startup (the
+        // control plane wedged in a live test). Let the post-connect startup burst
+        // settle, then stagger each resume — eMule's CDownloadQueue likewise drives
+        // incomplete files a few at a time, not all in one tick.
+        tokio::time::sleep(Duration::from_secs(RESUME_DOWNLOADS_INITIAL_DELAY_SECS)).await;
         let mut resumed = 0usize;
         for manifest in manifests {
             if manifest.completed
@@ -2657,10 +2664,11 @@ impl EmulebbCore {
             }
             self.queue_ed2k_download_attempt(transfer);
             resumed = resumed.saturating_add(1);
+            tokio::time::sleep(Duration::from_millis(RESUME_DOWNLOADS_STAGGER_MS)).await;
         }
         if resumed > 0 {
             tracing::info!(
-                "startup download hydration: resumed {resumed} persisted incomplete downloads"
+                "startup download hydration: resumed {resumed} persisted incomplete downloads (staggered)"
             );
         }
         resumed
@@ -7288,6 +7296,13 @@ const ED2K_DOWNLOAD_KAD_SOURCE_QUIET_DELAY_MS: u64 = 750;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_ROUNDS: usize = 2;
 const ED2K_DOWNLOAD_SOURCE_REQUERY_DELAY_SECS: u64 = 5;
 const ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS: u64 = 5;
+/// Startup download hydration pacing. Let the post-connect startup burst (large
+/// shared-library reload, publish) settle before adding download load, then stagger
+/// each resumed download so a big backlog does not thunder-herd the state lock /
+/// source coordinator and starve REST (a 39-download all-at-once resume wedged the
+/// control plane in a live test).
+const RESUME_DOWNLOADS_INITIAL_DELAY_SECS: u64 = 20;
+const RESUME_DOWNLOADS_STAGGER_MS: u64 = 1500;
 /// Parse a REST-surface IP string (the `Upload.address` / `TransferSource.ip`
 /// fields) into an `Ipv4Addr` for the ban store. Returns `None` when the value
 /// is empty or not a dialable IPv4 (e.g. a LowID client-id), so the ban falls
