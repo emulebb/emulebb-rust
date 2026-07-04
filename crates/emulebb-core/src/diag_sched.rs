@@ -170,12 +170,19 @@ pub(crate) fn source_count(
     valid_source_count: usize,
     nnp_source_count: usize,
     a4af_file_count: usize,
+    transferring_source_count: usize,
 ) {
     let body = json!({
         "sourceCount": source_count,
         "validSourceCount": valid_source_count,
         "nnpSourceCount": nnp_source_count,
         "a4afFileCount": a4af_file_count,
+        // `transferringSourceCount` = sources with a live download connection this
+        // round (rust `active_download_peer_endpoints`), the parity of MFC
+        // `GetTransferringSrcCount` (DS_DOWNLOADING). This is the key convergence
+        // metric: leased-but-not-transferring (validSourceCount >> this) is the
+        // stall signature (many engaged sources, none moving bytes).
+        "transferringSourceCount": transferring_source_count,
     });
     emit(FAMILY, "source_count", "info", Value::Object(Map::new()), body);
 }

@@ -3408,7 +3408,14 @@ impl EmulebbCore {
             let source_count = state.download_source_registry.candidate_count();
             let valid_source_count = state.download_source_registry.leased_peer_count();
             let a4af_file_count = state.download_source_registry.a4af_file_count();
-            crate::diag_sched::source_count(source_count, valid_source_count, 0, a4af_file_count);
+            let transferring_source_count = state.active_download_peer_endpoints.len();
+            crate::diag_sched::source_count(
+                source_count,
+                valid_source_count,
+                0,
+                a4af_file_count,
+                transferring_source_count,
+            );
             state.last_source_count_emit_at = Some(now);
         }
         (acquired, deferred, deferred_retry_delay)
