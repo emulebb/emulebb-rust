@@ -2611,6 +2611,61 @@ impl EmulebbCore {
         Ok(Some(transfer))
     }
 
+    /// Startup download hydration: load persisted INCOMPLETE downloads into the
+    /// in-memory transfer set and queue a download attempt for each, so in-progress
+    /// downloads resume after a restart. Mirrors the fact that the MFC oracle's
+    /// `CDownloadQueue` resumes every incomplete `.part` file on launch. Without
+    /// this, `state.transfers` starts empty (`profile_state.rs`) and every persisted
+    /// partial download is abandoned across restarts (evidence: 39 multi-GB partials
+    /// stranded on a single restart). Returns the number resumed.
+    ///
+    /// Skips: completed transfers (delivered/shared, not downloads), user
+    /// paused/stopped transfers (`control_state`), share-in-place shared files
+    /// (`source_path` set — served from their original path, not downloaded), and
+    /// any transfer already present in memory (a REST resume racing startup).
+    pub async fn resume_persisted_downloads(&self) -> usize {
+        let manifests = match self.ed2k_transfers.manifests().await {
+            Ok(manifests) => manifests,
+            Err(error) => {
+                tracing::warn!(
+                    "startup download hydration: failed to list persisted transfers: {error:#}"
+                );
+                return 0;
+            }
+        };
+        let mut resumed = 0usize;
+        for manifest in manifests {
+            if manifest.completed
+                || manifest.source_path.is_some()
+                || matches!(
+                    manifest.control_state.as_deref(),
+                    Some("paused") | Some("stopped")
+                )
+            {
+                continue;
+            }
+            let mut transfer = self.transfer_from_manifest(&manifest, "downloading");
+            {
+                let mut state = self.state.lock().await;
+                if state.transfers.contains_key(&transfer.hash) {
+                    continue;
+                }
+                apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+                state
+                    .transfers
+                    .insert(transfer.hash.clone(), transfer.clone());
+            }
+            self.queue_ed2k_download_attempt(transfer);
+            resumed = resumed.saturating_add(1);
+        }
+        if resumed > 0 {
+            tracing::info!(
+                "startup download hydration: resumed {resumed} persisted incomplete downloads"
+            );
+        }
+        resumed
+    }
+
     pub async fn index_file(&self, file: IndexedFile) -> Result<()> {
         self.index.lock().await.upsert_file(&file)
     }

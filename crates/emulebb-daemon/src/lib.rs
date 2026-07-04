@@ -569,6 +569,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                     "automatic ED2K/Kad startup failed; REST connect remains available"
                 ),
             }
+            // Resume persisted incomplete downloads now that ED2K/Kad are up so
+            // source acquisition can succeed. In-progress downloads from a prior
+            // run are otherwise abandoned (state.transfers starts empty).
+            let resumed = connect_core.resume_persisted_downloads().await;
+            if resumed > 0 {
+                info!(resumed, "resumed persisted incomplete downloads on startup");
+            }
         });
     }
     let serve_result = axum::serve(listener, app)
