@@ -190,10 +190,7 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     credit_user_hash: Option<[u8; 16]>,
     aich_recovery_parts: &mut Vec<u16>,
 ) -> Result<()> {
-    loop {
-        let Some(first_request) = pending_part_requests.first() else {
-            break;
-        };
+    while let Some(first_request) = pending_part_requests.first() {
         if !first_request.queued || first_request.response_bytes.is_empty() {
             break;
         }

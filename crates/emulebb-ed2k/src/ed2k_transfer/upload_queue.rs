@@ -1220,11 +1220,9 @@ impl Ed2kUploadQueueState {
                     .upload_started_at
                     .map(|started_at| now.saturating_duration_since(started_at).as_secs())
                     .unwrap_or(0);
-                if elapsed == 0 {
-                    None
-                } else {
-                    Some(session.uploaded_bytes / elapsed)
-                }
+                // checked_div yields None for elapsed == 0 (session too fresh to
+                // have a rate), else the per-second byte rate.
+                session.uploaded_bytes.checked_div(elapsed)
             })
             .sum()
     }

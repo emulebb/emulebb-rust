@@ -270,7 +270,7 @@ impl ReaskService {
         // Deterministic, rotated file order so no file is starved when the global
         // pacing floor admits only a subset per tick.
         let mut file_hashes: Vec<Ed2kHash> = self.per_file.keys().copied().collect();
-        file_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        file_hashes.sort_unstable_by_key(|hash| hash.0);
         let len = file_hashes.len();
         for step in 0..len {
             let index = (pacing.rotate_offset.wrapping_add(step)) % len;
