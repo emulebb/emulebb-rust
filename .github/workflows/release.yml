@@ -1,0 +1,69 @@
+name: Release
+
+# Build and publish the unsigned Windows x64 release artifact on a rust-v* tag.
+# The tag is created only after the soak-evidence review and an explicit operator
+# go (see docs/active/items/RUST-FEAT-033.md).
+on:
+  push:
+    tags:
+      - "rust-v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to build (rust-vX.Y.Z[-pre.N])"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MINIUPNP_REF: bced81fb0b73ae78c9b911c89e881fbc6d4a5c7c
+
+jobs:
+  windows-x64:
+    name: emulebb-rust-windows-x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Checkout emulebb-miniupnp (native C source)
+        uses: actions/checkout@v4
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Guard: the test-only egress-audit leak-test feature must never reach the
+      # release binary. The policy checker asserts it is not a default feature and
+      # not referenced by the daemon crate.
+      - name: Assert release build excludes test-only features
+        run: python tools/check_rust_client_policy.py
+
+      - name: Build release (default features only)
+        env:
+          MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
+        run: cargo build --release --locked -p emulebb-daemon
+
+      - name: Package unsigned Windows x64 zip
+        shell: bash
+        run: python tools/package_release_zip.py --target-dir target/release --out dist
+
+      - name: Publish to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
