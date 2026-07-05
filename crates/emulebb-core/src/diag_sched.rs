@@ -126,6 +126,42 @@ pub(crate) fn download_task_settled(file_hash_hex: &str, state: &str, will_reask
     );
 }
 
+/// `download_attempt_started`: a queued background download attempt actually
+/// entered its body (post-dedup, pre-source-acquisition). Rust-only breadcrumb;
+/// `blocked: true` means the dedup slot was still held and the attempt died
+/// silently instead. Pairs with `download_attempt_outcome`/`download_task_settled`
+/// so a spawned-but-stuck attempt is visible in the diag stream.
+pub(crate) fn download_attempt_started(file_hash_hex: &str, blocked: bool) {
+    let mut keys = Map::new();
+    keys.insert("fileHash".to_string(), json!(file_hash_hex));
+    let body = json!({ "blocked": blocked });
+    emit(
+        FAMILY,
+        "download_attempt_started",
+        if blocked { "low" } else { "info" },
+        Value::Object(keys),
+        body,
+    );
+}
+
+/// `download_retry_outcome`: the delayed background retry for a "downloading"
+/// exit woke up and either re-queued the attempt or died, with the transfer
+/// state it observed. Rust-only; pairs with `download_task_settled` so a
+/// deferred transfer that never re-attempts is attributable from the diag
+/// stream (retry-died vs attempt-never-scheduled).
+pub(crate) fn download_retry_outcome(file_hash_hex: &str, observed_state: &str, requeued: bool) {
+    let mut keys = Map::new();
+    keys.insert("fileHash".to_string(), json!(file_hash_hex));
+    let body = json!({ "observedState": observed_state, "requeued": requeued });
+    emit(
+        FAMILY,
+        "download_retry_outcome",
+        if requeued { "info" } else { "low" },
+        Value::Object(keys),
+        body,
+    );
+}
+
 /// `source_engaged` (schema §3.5): a source begins being served for a file.
 pub(crate) fn source_engaged(file_hash_hex: &str, source: &Ed2kFoundSource) {
     let mut keys = Map::new();
@@ -205,5 +241,11 @@ pub(crate) fn source_count(
         // stall signature (many engaged sources, none moving bytes).
         "transferringSourceCount": transferring_source_count,
     });
-    emit(FAMILY, "source_count", "info", Value::Object(Map::new()), body);
+    emit(
+        FAMILY,
+        "source_count",
+        "info",
+        Value::Object(Map::new()),
+        body,
+    );
 }

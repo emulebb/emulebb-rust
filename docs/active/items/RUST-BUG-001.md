@@ -43,10 +43,33 @@ must be diagnosed and folded back into the standard gate.
 
 ## Acceptance Criteria
 
-- [ ] Root cause of the timing flakiness identified and documented.
+- [x] Root cause of the timing flakiness identified and documented.
 - [ ] `kad_swarm` / `local_kad_swarm` pass deterministically across the OS matrix.
 - [x] CI runs the isolated `kad_swarm` step blocking.
 - [ ] CI runs them in the standard workspace matrix without `--skip`.
+
+## Root Cause (2026-07-05)
+
+Two independent causes, both fixed:
+
+1. **Product defect — per-endpoint retry cooldown starved multi-file peers.**
+   `DownloadSourceRegistry.last_attempted_endpoints` keyed the 20-minute
+   anti-churn cooldown by bare `(ip, tcp_port)` and stamped it at lease time,
+   so a peer that had just **successfully** served file A was unleasable for
+   file B for the whole window. The deferred transfer's attempt then slept the
+   cooldown remainder inside the defer loop — past the test's 120 s timeout,
+   and in production serializing multi-file downloads from one peer with
+   20-minute gaps (it also dead-locked the A4AF NNP swap re-engage). Fixed by
+   keying the cooldown per `(endpoint, file)` (the eMule `MIN_REQUEST_TIME`
+   per client-file relation), with a registry regression test. Diagnosed via
+   new rust-only `sched` breadcrumbs (`download_attempt_started`,
+   `download_retry_outcome`) that make a spawned-but-stalled attempt visible
+   in the diag stream.
+2. **CI harness env — loopback `X_LOCAL_IP`.** `ci.yml` exported
+   `X_LOCAL_IP=127.0.0.1`, which the swarm harness rejects by design
+   (`node.rs` `lan_bind_ip` asserts non-loopback), so every `local_kad_swarm`
+   test panicked on every runner. The workflow now resolves the runner's real
+   primary IPv4 into `X_LOCAL_IP` before the test gate.
 
 ## Notes
 
@@ -56,3 +79,5 @@ must be diagnosed and folded back into the standard gate.
   Rust-vs-MFC parity close blocker while the isolated `kad_swarm` step remains
   visible and blocking. It still belongs in the Phase 0 cleanup lane before the
   normal workspace matrix can be treated as fully rationalized.
+- Remaining: witness a green OS matrix on CI post-fix, then evaluate folding
+  the swarm tests back into the main step (drop `--skip local_kad_swarm`).

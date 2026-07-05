@@ -37,7 +37,15 @@ pub(crate) struct DownloadSourceCandidate {
 pub(crate) struct DownloadSourceRegistry {
     peers: HashMap<DownloadPeerKey, Vec<DownloadSourceCandidate>>,
     leased_peers: HashSet<DownloadPeerKey>,
-    last_attempted_endpoints: HashMap<(Ipv4Addr, u16), Instant>,
+    /// Per-(endpoint, file) attempt stamps backing the anti-churn retry
+    /// cooldown. WHY keyed by file and not by endpoint alone: the cooldown
+    /// exists to stop reconnect-hammering one endpoint for the SAME file
+    /// (eMule MIN_REQUEST_TIME is a per client-file relation). A bare-endpoint
+    /// key made a peer that had just SUCCESSFULLY served file A unleasable for
+    /// file B for the whole cooldown, serializing multi-file downloads from
+    /// one peer with 20-minute gaps and dead-locking the A4AF NNP swap (the
+    /// swapped-to file deferred against the stamp the swapped-from file left).
+    last_attempted_endpoints: HashMap<((Ipv4Addr, u16), String), Instant>,
 }
 
 impl DownloadSourceRegistry {
@@ -150,7 +158,7 @@ impl DownloadSourceRegistry {
         });
         if self
             .last_attempted_endpoints
-            .get(&endpoint)
+            .get(&(endpoint, file_hash.to_string()))
             .is_some_and(|last_attempted| {
                 now.saturating_duration_since(*last_attempted) < retry_cooldown
             })
@@ -162,7 +170,8 @@ impl DownloadSourceRegistry {
         if candidate.file_hash != file_hash || !self.leased_peers.insert(peer_key) {
             return None;
         }
-        self.last_attempted_endpoints.insert(endpoint, now);
+        self.last_attempted_endpoints
+            .insert((endpoint, file_hash.to_string()), now);
         Some(candidate.clone())
     }
 
@@ -171,10 +180,11 @@ impl DownloadSourceRegistry {
         now: Instant,
         retry_cooldown: Duration,
         source: &Ed2kFoundSource,
+        file_hash: &str,
     ) -> Option<Duration> {
         let last = *self
             .last_attempted_endpoints
-            .get(&(source.ip, source.tcp_port))?;
+            .get(&((source.ip, source.tcp_port), file_hash.to_string()))?;
         retry_cooldown.checked_sub(now.saturating_duration_since(last))
     }
 
@@ -592,6 +602,47 @@ mod tests {
                     file
                 )
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn endpoint_cooldown_is_per_file_so_a_multi_file_peer_serves_files_back_to_back() {
+        // Regression (kad_swarm E2E stall): a peer that had just successfully
+        // served file A was cooldown-blocked for file B for the whole 20-minute
+        // window, so the deferred transfer's attempt slept past every test and
+        // user-visible horizon. The cooldown is a per-(endpoint, file) anti-churn
+        // floor, not a per-endpoint one.
+        let source = source_with_endpoint(0x05, 41204);
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let file_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let file_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let cooldown = Duration::from_secs(20 * 60);
+        registry.add_candidate(now, candidate(file_a, 5, 1, source.clone()));
+
+        assert!(
+            registry
+                .lease_best_for_file(now, cooldown, &source, file_a)
+                .is_some()
+        );
+        // File A completes: the peer's lease is released, file A's candidates are
+        // gone, and the peer is now registered for file B (the next wanted file).
+        registry.release_peer(&source);
+        registry.release_file(file_a);
+        let later = now + Duration::from_secs(5);
+        registry.add_candidate(later, candidate(file_b, 5, 1, source.clone()));
+
+        assert!(
+            registry
+                .lease_best_for_file(later, cooldown, &source, file_b)
+                .is_some(),
+            "a peer that just served file A must be immediately leasable for file B"
+        );
+        assert!(
+            registry
+                .endpoint_retry_delay(later, cooldown, &source, file_a)
+                .is_some(),
+            "file A keeps its own anti-churn window against the same endpoint"
         );
     }
 

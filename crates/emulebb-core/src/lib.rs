@@ -3467,6 +3467,7 @@ impl EmulebbCore {
                     now,
                     ed2k_download_retry::ED2K_DIRECT_SOURCE_RETRY_COOLDOWN,
                     source,
+                    file_hash,
                 ) {
                     deferred_retry_delay =
                         Some(deferred_retry_delay.map_or(delay, |current| current.min(delay)));
@@ -3695,8 +3696,10 @@ impl EmulebbCore {
         let (guard, cancel) = {
             let mut state = core.state.lock().await;
             if !state.active_download_attempts.insert(hash.clone()) {
+                crate::diag_sched::download_attempt_started(&hash, true);
                 return;
             }
+            crate::diag_sched::download_attempt_started(&hash, false);
             // Install a fresh per-hash cancel token for this attempt; the loop
             // checks it each round and delete/pause/stop/recheck signal it to stop
             // the attempt promptly. The guard removes it on exit (only when its
@@ -3766,11 +3769,14 @@ impl EmulebbCore {
     async fn run_queued_ed2k_download_retry(core: EmulebbCore, hash: String) {
         tokio::time::sleep(Duration::from_secs(ED2K_DOWNLOAD_BACKGROUND_RETRY_SECS)).await;
         let Some(transfer) = core.transfer(&hash).await else {
+            crate::diag_sched::download_retry_outcome(&hash, "missing", false);
             return;
         };
         if transfer.state != "downloading" {
+            crate::diag_sched::download_retry_outcome(&hash, &transfer.state, false);
             return;
         }
+        crate::diag_sched::download_retry_outcome(&hash, &transfer.state, true);
         core.queue_ed2k_download_attempt(transfer);
     }
 
@@ -4898,7 +4904,8 @@ async fn run_kad_shared_file_publish_loop(
         // A5: periodic diag_event snapshot of the publish-loop gate state so the
         // in-flight/permit/due-vs-skipped picture is analysable from the log
         // time-series, not only the live /api/v1/status kadPublish snapshot.
-        if last_publish_snapshot.elapsed() >= Duration::from_secs(KAD_PUBLISH_SNAPSHOT_INTERVAL_SECS)
+        if last_publish_snapshot.elapsed()
+            >= Duration::from_secs(KAD_PUBLISH_SNAPSHOT_INTERVAL_SECS)
         {
             diag_kad_event::kad_publish_snapshot(&kad_publish_diagnostics::snapshot(
                 &runtime.diagnostics,
