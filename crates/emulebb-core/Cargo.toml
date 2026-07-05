@@ -8,6 +8,10 @@ description = "Local emulebb-rust application state and orchestration"
 [features]
 # Forwards the ed2k_packet_v1 packet-dump compile gate down to emulebb-ed2k.
 packet-diagnostics = ["emulebb-ed2k/packet-diagnostics"]
+# Test-only: forwards the egress-audit seam down so the RUST-FEAT-005 leak test
+# (tests/vpn_leak_egress.rs) can observe P2P socket bind/pin. Never enabled in the
+# daemon/release build (guarded by tools/check_rust_client_policy.py).
+egress-audit = ["emulebb-ed2k/egress-audit", "emulebb-kad-dht/egress-audit"]
 
 [dependencies]
 anyhow.workspace = true

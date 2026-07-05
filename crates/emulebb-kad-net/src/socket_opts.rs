@@ -14,6 +14,8 @@ use std::num::NonZeroU32;
 
 use socket2::SockRef;
 
+pub mod egress_audit;
+
 /// 1 MiB UDP receive buffer, matching eMule's `kBroadbandUdpReceiveBufferBytes`
 /// (the OS default is too small and drops bursts of inbound UDP packets).
 pub const P2P_UDP_RECV_BUFFER_BYTES: usize = 1024 * 1024;
@@ -33,32 +35,41 @@ pub fn pin_egress_to_interface(sock: SockRef<'_>, if_index: Option<u32>) -> io::
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{IP_UNICAST_IF, IPPROTO_IP, setsockopt};
 
-    let Some(index) = if_index.and_then(NonZeroU32::new) else {
-        return Ok(());
+    let applied = match if_index.and_then(NonZeroU32::new) {
+        None => None,
+        Some(index) => {
+            // IP_UNICAST_IF takes the interface index in network byte order.
+            let net_index = index.get().to_be();
+            let raw = sock.as_raw_socket() as usize;
+            let ret = unsafe {
+                setsockopt(
+                    raw,
+                    IPPROTO_IP,
+                    IP_UNICAST_IF,
+                    (&raw const net_index).cast::<u8>(),
+                    size_of::<u32>() as i32,
+                )
+            };
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Some(index.get())
+        }
     };
-    // IP_UNICAST_IF takes the interface index in network byte order.
-    let net_index = index.get().to_be();
-    let raw = sock.as_raw_socket() as usize;
-    let ret = unsafe {
-        setsockopt(
-            raw,
-            IPPROTO_IP,
-            IP_UNICAST_IF,
-            (&raw const net_index).cast::<u8>(),
-            size_of::<u32>() as i32,
-        )
-    };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    egress_audit::record(&sock, applied);
     Ok(())
 }
 
 #[cfg(not(windows))]
 pub fn pin_egress_to_interface(sock: SockRef<'_>, if_index: Option<u32>) -> io::Result<()> {
-    if let Some(index) = if_index.and_then(NonZeroU32::new) {
-        sock.bind_device_by_index_v4(Some(index))?;
-    }
+    let applied = match if_index.and_then(NonZeroU32::new) {
+        None => None,
+        Some(index) => {
+            sock.bind_device_by_index_v4(Some(index))?;
+            Some(index.get())
+        }
+    };
+    egress_audit::record(&sock, applied);
     Ok(())
 }
 

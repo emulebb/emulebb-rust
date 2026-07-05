@@ -11,6 +11,9 @@ description = "ED2K transfer runtime extracted for emulebb-rust"
 # builds compile the dump out entirely; enable for diagnostic/live-wire builds.
 # When enabled, the dump is still runtime-gated by the EMULEBB_RUST_LOG_DIR env var.
 packet-diagnostics = []
+# Forwards the test-only egress-audit seam down to emulebb-kad-net (via kad-dht).
+# Never enabled in a release/daemon build (see tools/check_rust_client_policy.py).
+egress-audit = ["emulebb-kad-dht/egress-audit"]
 
 [dependencies]
 anyhow.workspace = true

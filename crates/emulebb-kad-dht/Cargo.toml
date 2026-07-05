@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Kad2 DHT operations — bootstrap, lookup, search, publish"
 
+[features]
+# Forwards the test-only egress-audit seam down to emulebb-kad-net. Never enabled
+# in a release/daemon build (see tools/check_rust_client_policy.py).
+egress-audit = ["emulebb-kad-net/egress-audit"]
+
 [dependencies]
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-routing = { path = "../emulebb-kad-routing" }
