@@ -363,6 +363,57 @@ impl RoutingZone {
         }
     }
 
+    fn is_leaf(&self) -> bool {
+        matches!(self.content, ZoneContent::Leaf(_))
+    }
+
+    /// Merge sparse sibling leaf bins back into their parent, bottom-up — the
+    /// oracle `CRoutingZone::Consolidate` (RoutingZone.cpp:745-784): a branch
+    /// whose two children are both leaves and whose combined contact count is
+    /// strictly `< K/2` collapses into a single leaf holding all their contacts.
+    /// Runs post-order so a multi-level sparse subtree consolidates in one pass.
+    /// Returns the number of merges performed and appends any contact a merged
+    /// bin rejected to `dropped` so the table can release its bookkeeping. Under
+    /// the `< K/2` gate the merged bin (capacity `K`) can always hold every
+    /// contact, so `dropped` stays empty in practice; the oracle drops rejects,
+    /// and mirroring that keeps the accounting exact if the invariant ever slips.
+    pub(crate) fn consolidate(&mut self, dropped: &mut Vec<Contact>) -> u32 {
+        let ZoneContent::Branch { left, right } = &mut self.content else {
+            return 0;
+        };
+        // Post-order: give the children a chance to consolidate first.
+        let mut merges = 0;
+        if !left.is_leaf() {
+            merges += left.consolidate(dropped);
+        }
+        if !right.is_leaf() {
+            merges += right.consolidate(dropped);
+        }
+        // Merge only when BOTH children are now leaves and the combined bin is
+        // strictly under half-full (oracle GetNumContacts() < K/2).
+        if left.is_leaf() && right.is_leaf() {
+            let combined = left.count() + right.count();
+            if combined < K / 2 {
+                let mut merged = RoutingBin::new();
+                let mut contacts = Vec::with_capacity(combined);
+                if let ZoneContent::Leaf(bin) = &mut left.content {
+                    contacts.extend(bin.drain());
+                }
+                if let ZoneContent::Leaf(bin) = &mut right.content {
+                    contacts.extend(bin.drain());
+                }
+                for contact in contacts {
+                    if merged.try_add(contact.clone()).is_err() {
+                        dropped.push(contact);
+                    }
+                }
+                self.content = ZoneContent::Leaf(merged);
+                merges += 1;
+            }
+        }
+        merges
+    }
+
     /// Whether this zone may be split.
     fn can_split(
         &self,
@@ -642,5 +693,106 @@ mod tests {
         assert!(gate_fires(&make_leaf_with_size(2))); // exactly 0.2*K
         assert!(!gate_fires(&make_leaf_with_size(3)));
         assert!(!gate_fires(&make_leaf_with_size(K - 2))); // nearly full
+    }
+
+    /// One contact whose distance-bit-0 (== high bit of `id[0]`, since OWN is
+    /// ZERO) chooses the branch side, on its own /24 to dodge the per-bin subnet
+    /// cap. `left = false` -> right side (high bit set).
+    fn side_contact(seq: u8, left: bool) -> Contact {
+        let mut id = [0u8; 16];
+        id[0] = if left { 0x00 } else { 0x80 };
+        id[1] = seq; // keep ids distinct within a side
+        make_contact(id, &format!("40.{seq}.0.1"))
+    }
+
+    #[test]
+    fn consolidate_merges_sparse_sibling_leaves_and_preserves_contacts() {
+        let mut zone = RoutingZone::new_root();
+        // 2 contacts each side, split into a Branch{Leaf(2), Leaf(2)}.
+        for seq in 0..2u8 {
+            zone.add(side_contact(seq, true), &OWN, 0, usize::MAX)
+                .unwrap();
+            zone.add(side_contact(10 + seq, false), &OWN, 0, usize::MAX)
+                .unwrap();
+        }
+        zone.split(&OWN).unwrap();
+        assert!(
+            !zone.is_leaf(),
+            "precondition: zone is a Branch after split"
+        );
+        assert_eq!(zone.count(), 4);
+
+        let mut dropped = Vec::new();
+        // Combined 4 < K/2 (5): the two sparse sibling leaves merge into one.
+        assert_eq!(zone.consolidate(&mut dropped), 1);
+        assert!(
+            dropped.is_empty(),
+            "no contact is dropped under the K/2 gate"
+        );
+        assert!(
+            zone.is_leaf(),
+            "the branch collapsed back into a single leaf"
+        );
+        assert_eq!(zone.count(), 4, "every contact survives the merge");
+    }
+
+    #[test]
+    fn consolidate_does_not_merge_at_exactly_half_k() {
+        let mut zone = RoutingZone::new_root();
+        // Combined == K/2 (5): 3 left + 2 right. The gate is strict `< K/2`.
+        for seq in 0..3u8 {
+            zone.add(side_contact(seq, true), &OWN, 0, usize::MAX)
+                .unwrap();
+        }
+        for seq in 0..2u8 {
+            zone.add(side_contact(20 + seq, false), &OWN, 0, usize::MAX)
+                .unwrap();
+        }
+        zone.split(&OWN).unwrap();
+        assert!(!zone.is_leaf());
+        assert_eq!(zone.count(), K / 2);
+
+        let mut dropped = Vec::new();
+        assert_eq!(zone.consolidate(&mut dropped), 0);
+        assert!(
+            !zone.is_leaf(),
+            "exactly K/2 must NOT merge (strict less-than)"
+        );
+        assert_eq!(zone.count(), K / 2);
+    }
+
+    #[test]
+    fn consolidate_collapses_a_multi_level_sparse_subtree_in_one_pass() {
+        let mut zone = RoutingZone::new_root();
+        // 2 on each top-level side, then split the LEFT child again so the tree
+        // is Branch{ Branch{Leaf, Leaf}, Leaf }, all sparse.
+        for seq in 0..2u8 {
+            zone.add(side_contact(seq, true), &OWN, 0, usize::MAX)
+                .unwrap();
+            zone.add(side_contact(30 + seq, false), &OWN, 0, usize::MAX)
+                .unwrap();
+        }
+        zone.split(&OWN).unwrap();
+        if let ZoneContent::Branch { left, .. } = &mut zone.content {
+            left.split(&OWN).unwrap();
+        } else {
+            panic!("expected a Branch after the first split");
+        }
+        assert_eq!(zone.count(), 4);
+
+        let mut dropped = Vec::new();
+        // Post-order: the inner branch merges first, then the outer — >= 2 merges,
+        // ending in a single leaf with every contact preserved.
+        let merges = zone.consolidate(&mut dropped);
+        assert!(
+            merges >= 2,
+            "multi-level subtree consolidates bottom-up: {merges}"
+        );
+        assert!(dropped.is_empty());
+        assert!(
+            zone.is_leaf(),
+            "the whole sparse subtree collapsed to one leaf"
+        );
+        assert_eq!(zone.count(), 4);
     }
 }

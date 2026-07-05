@@ -87,6 +87,14 @@ impl DhtNode {
         table.random_lookup_targets(&mut next)
     }
 
+    /// Merge sparse sibling leaf zones back into their parent (oracle
+    /// `CRoutingZone::Consolidate`, run on the 45-minute consolidate timer) so
+    /// the routing tree stays compact as contacts churn out. Returns the number
+    /// of zones merged.
+    pub async fn routing_consolidate(&self) -> u32 {
+        self.inner.routing_table.lock().await.consolidate()
+    }
+
     /// Advance a contact's `CheckingType` staleness counter after a maintenance
     /// HELLO probe was sent to it (oracle `CContact::CheckingType`). Returns the
     /// new counter value, or `None` if the contact is gone.

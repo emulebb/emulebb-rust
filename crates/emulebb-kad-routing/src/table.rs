@@ -291,6 +291,23 @@ impl RoutingTable {
         outcome
     }
 
+    /// Merge sparse sibling leaf zones back into their parent (oracle
+    /// `CRoutingZone::Consolidate`, driven on the 45-minute consolidate timer).
+    /// Keeps the routing tree compact as contacts churn out over long uptimes.
+    /// Returns the number of merged zones. Any contact a merged bin rejects has
+    /// its per-IP / per-/24 bookkeeping released and `total_contacts` decremented
+    /// through the same accounting as removal — the `< K/2` merge gate means the
+    /// merged bin always fits every contact, so this is a defensive no-op path.
+    pub fn consolidate(&mut self) -> u32 {
+        let mut dropped = Vec::new();
+        let merges = self.root.consolidate(&mut dropped);
+        for contact in dropped {
+            self.release_ip_bookkeeping(contact.ip);
+            self.total_contacts = self.total_contacts.saturating_sub(1);
+        }
+        merges
+    }
+
     /// One random `FindNode` target per leaf passing the oracle big-timer fill
     /// gate (`CRoutingZone::OnBigTimer` -> `RandomLookup`). `rng` supplies random
     /// bytes for the in-zone target suffix.
@@ -354,6 +371,43 @@ mod tests {
             table.add_contact(c).unwrap();
         }
         assert_eq!(table.len(), 20);
+    }
+
+    #[test]
+    fn consolidate_preserves_contacts_and_the_table_counters() {
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+        // A handful of contacts across distinct /24s; enough to make the root
+        // split at least once but sparse enough that consolidate can re-merge.
+        for i in 1..=6usize {
+            let mut id = [0u8; 16];
+            id[0] = if i % 2 == 0 { 0x80 } else { 0x00 };
+            id[1] = i as u8;
+            table.add_contact(make_contact(id, &unique_ip(i))).unwrap();
+        }
+        let before = table.len();
+        assert_eq!(before, 6);
+
+        // Consolidate must never lose a contact here (combined bins stay under the
+        // K/2 gate that guarantees no reject), so total_contacts is unchanged and
+        // every contact is still retrievable.
+        let _ = table.consolidate();
+        assert_eq!(
+            table.len(),
+            before,
+            "consolidate must not drop live contacts"
+        );
+        let all = table.get_closest(&NodeId::ZERO, 100);
+        assert_eq!(all.len(), before, "every contact survives consolidation");
+
+        // Re-adding is idempotent (no double-count) and a fresh contact still fits,
+        // proving the per-IP/subnet bookkeeping was not corrupted by the merge.
+        let mut extra_id = [0x00u8; 16];
+        extra_id[1] = 0xEE;
+        table
+            .add_contact(make_contact(extra_id, &unique_ip(500)))
+            .unwrap();
+        assert_eq!(table.len(), before + 1);
     }
 
     #[test]

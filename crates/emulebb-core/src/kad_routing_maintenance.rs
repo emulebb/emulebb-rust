@@ -32,6 +32,11 @@ const BIG_TIMER_SECS: u64 = 10;
 /// Oracle `OnSmallTimer` runs once per minute per leaf; we sweep the whole table
 /// on this cadence.
 const SMALL_TIMER_SECS: u64 = 60;
+/// Oracle contact-consolidate timer (`CKademlia::m_tConsolidate`, seeded
+/// `tNow + MIN2S(45)` and re-armed every 45 min in `CKademlia::Process`,
+/// Kademlia.cpp:157,309-314): merge sparse sibling leaf zones back into their
+/// parent to keep the tree compact over long uptimes.
+const CONSOLIDATE_SECS: u64 = 45 * 60;
 /// Bound the number of random-target lookups we kick off per big-timer tick.
 /// The master fires at most ONE zone's `OnBigTimer` per scheduler pass: the
 /// `tNow >= m_tBigTimer` guard plus `m_tBigTimer = tNow + SEC(10)` after a
@@ -53,6 +58,8 @@ pub(crate) async fn run_kad_routing_maintenance_loop(
     let big_timer = Duration::from_secs(BIG_TIMER_SECS);
     let mut ticks_since_small_timer = 0u64;
     let small_timer_ticks = SMALL_TIMER_SECS / BIG_TIMER_SECS.max(1);
+    let mut ticks_since_consolidate = 0u64;
+    let consolidate_ticks = CONSOLIDATE_SECS / BIG_TIMER_SECS.max(1);
 
     while !shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(big_timer).await;
@@ -68,6 +75,16 @@ pub(crate) async fn run_kad_routing_maintenance_loop(
         if ticks_since_small_timer >= small_timer_ticks {
             ticks_since_small_timer = 0;
             run_small_timer_sweep(&dht, &ed2k_listener, &server_state, &kad_firewall).await;
+        }
+
+        // ── Consolidate: roughly every 45 minutes. ──
+        ticks_since_consolidate += 1;
+        if ticks_since_consolidate >= consolidate_ticks {
+            ticks_since_consolidate = 0;
+            let merged = dht.routing_consolidate().await;
+            if merged > 0 {
+                tracing::debug!("kad routing consolidate merged {merged} sparse zones");
+            }
         }
     }
 }
