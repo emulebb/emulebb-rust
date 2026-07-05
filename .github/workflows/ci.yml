@@ -69,6 +69,16 @@ jobs:
       - name: Checkout emulebb-rust
         uses: actions/checkout@v4
 
+      # clippy --workspace builds emulebb-miniupnpc-sys, whose build.rs compiles
+      # the vendored MiniUPnP C source; provide it exactly as the build-test job
+      # does so the clippy step is not blocked on a native build failure.
+      - name: Checkout emulebb-miniupnp (native C source)
+        uses: actions/checkout@v4
+        with:
+          repository: emulebb/emulebb-miniupnp
+          ref: ${{ env.MINIUPNP_REF }}
+          path: .ci/emulebb-miniupnp
+
       - name: Install Rust (stable + rustfmt, clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -80,6 +90,8 @@ jobs:
           python-version: "3.12"
 
       - name: Rust quality gate
+        env:
+          MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
         run: python tools/rust_quality_gate.py quick
 
   supply-chain:
