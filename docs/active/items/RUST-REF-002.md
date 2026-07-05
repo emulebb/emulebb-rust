@@ -42,10 +42,34 @@ Every finding gets exactly one disposition:
 
 ## Acceptance Criteria
 
-- [ ] 3-lane review executed against current MFC master after Phase 1/2 fixes.
-- [ ] Zero findings without a disposition.
-- [ ] Review verdict + finding table recorded in this item (not only in
+- [x] 3-lane review executed against current MFC master after Phase 1/2 fixes.
+- [ ] Zero findings without a disposition (see Execution below — P-1..P-6).
+- [x] Review verdict + finding table recorded in this item (not only in
       git-excluded working notes).
+
+## Verdict (2026-07-05)
+
+Full three-lane review recorded in
+[`docs/active/PARITY-REVIEW-2026-07-05.md`](../PARITY-REVIEW-2026-07-05.md).
+Rust is an oracle-faithful port **at wire parity** across Kad / eD2K transfer /
+server / REST / persistence; **no blocker-class divergence**; FEAT-025 verified
+conformant. 13 unregistered divergences dispositioned:
+
+- **FIX (2):** Kad `KADEMLIA2_RES` must filter unverified contacts
+  (`IsIpVerified`); server obfuscation ports/flags must persist across restart.
+- **FIX-comment + REGISTER (1):** OP_SERVERLIST auto-add (misleading pref
+  comment; register the always-on behavior).
+- **REGISTER-as-omission (4):** kad-flood-lan-exemption,
+  upload-slow-cooldown-suppression, upload-duplicate-queued-intra-packet,
+  ed2k-partial-file-preview.
+- **DEFER (6):** OP_OutOfPartReqs quarantine / upload-admission cooldowns /
+  queue-rank-flood ban (all → [[emulebb-rust-defensive-measures-plan]] Phases
+  D/E/C-rem); Kad index ceilings, network-size-estimate constants, DoneBlocks
+  128-bound (memory-safety/stat cosmetics → RELEASE-SCOPE deferred list).
+
+Execution plan (P-1..P-6, land each on main gate-green, then gate to live tests)
+is in the review doc. This item closes when P-1..P-6 land and zero findings are
+undispositioned.
 
 ## Notes
 
