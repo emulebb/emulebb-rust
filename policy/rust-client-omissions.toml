@@ -117,3 +117,43 @@ stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connect
 rust_behavior = "The Rust client does not send OP_SERVER_DESC_REQ and does not parse OP_SERVER_DESC_RES (opcodes 0xA2/0xA3 are unhandled). Server description/name for the CONNECTED server is still captured from the TCP ident/tag path; the rest of the server list keeps the name/description it was imported/configured with and is surfaced over the REST server routes."
 reason = "Cosmetic-only for a headless client: the description poll refreshes human-facing server name/description/version strings for the non-connected server list, which the REST controller neither drives nor needs (server selection is explicit over /api/v1, and server metadata comes from server.met import + the connected-server ident). Implementing a client-initiated cosmetic UDP poll adds outbound server traffic with no functional benefit, against the be-gentle posture."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the poll is client-initiated and optional, so omitting it only means non-connected server entries are not refreshed with wire-sourced descriptions. No server or peer behavior depends on the client sending it."
+
+[[omissions]]
+id = "kad-flood-lan-exemption"
+area = "kad"
+stock_behavior = "eMule's inbound Kad packet flood tracker exempts LAN/loopback source IPs from the per-(IP,opcode) token-bucket limiter and ban ONLY when the node is running in LAN mode (`if (CKademlia::IsRunningInLANMode() && IsLANIP(uIP)) return 0;`, PacketTracking.cpp:199)."
+rust_behavior = "The Rust inbound flood tracker exempts all LAN/loopback source IPs unconditionally (`flood_exempt = is_lan_ip(from.ip())`, receive_loop.rs), regardless of LAN-mode, so a flooding LAN peer is never throttled or banned by the flood tracker."
+reason = "Deliberate be-gentle simplification: a public VPN'd node (the release posture) essentially never receives Kad traffic from LAN peers, and unconditionally trusting LAN sources avoids a LAN-mode state dependency in the hot receive path. Strictly gentler than stock (it only ever exempts more, never bans more)."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the exemption only relaxes local flood defense against LAN sources, which are absent on a public node. Non-LAN (public) sources are throttled/banned exactly as stock."
+
+[[omissions]]
+id = "upload-slow-cooldown-suppression"
+area = "ed2k"
+stock_behavior = "eMule holds a slow-rate-recycled upload peer in a cooldown window (SetSlowUploadCooldownUntil / IsInSlowUploadCooldown gates FindBestClientInQueue, UploadQueue.cpp:228) and suppresses its queue score (bCooldownSuppressed, UploadClient.cpp:497), re-promoting it only via the broadband cooldown-probe path when capacity would otherwise idle."
+rust_behavior = "The Rust upload queue demotes a slow-rate-recycled peer to the back of the waiting queue with a fresh queued_at (upload_queue.rs), but has no cooldown-until timestamp and no score-suppression term, so with few waiters it can be re-promoted immediately."
+reason = "Deliberate local-slot-policy simplification: the cooldown/score-suppression machinery is eMuleBB-specific broadband upload tuning with no wire effect. The demote-to-tail behavior already deprioritizes a slow peer; the only difference is a possible promote/recycle churn under a near-empty queue, which is harmless (it still serves someone) and simpler than the cooldown-probe state machine."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it only changes local upload-slot scheduling among already-connected peers. A downloading peer sees the same protocol."
+
+[[omissions]]
+id = "upload-duplicate-queued-intra-packet"
+area = "ed2k"
+stock_behavior = "eMule tracks queued (pending, not-yet-served) upload block requests in a per-slot set that persists across packets (m_BlockRequests_keys, UploadClient.cpp:766-784), so a re-request of an already-queued block is rejected as upload_duplicate_queued_block_rejected even across separate packets."
+rust_behavior = "The Rust listener serves upload block requests synchronously (no persistent pending-block queue between packets), so it detects a queued-duplicate only within one request batch (accepted_ranges in upload_payload.rs). A cross-packet re-request of a not-yet-served block collapses into the already-served DuplicateDone path instead, so it is still rejected but may be labeled upload_duplicate_done_block_rejected rather than the queued sibling."
+reason = "Architectural consequence of the synchronous serve model (rust serves each request batch to completion rather than holding a pending-block queue). Net anti-abuse coverage is preserved — the duplicate is always rejected; only the emitted bad_peer event label can differ for a cross-packet queued duplicate."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the peer's duplicate block request is rejected either way. Only the diagnostic event classification differs from the oracle for the cross-packet case."
+
+[[omissions]]
+id = "ed2k-partial-file-preview"
+area = "controller"
+stock_behavior = "eMule can preview an incomplete download (CPartFile::PreviewAvailable + launching an external player against the partial .part file, or the archive/image preview handlers)."
+rust_behavior = "The Rust `/api/v1/transfers/{hash}/operations/preview` route returns the transfer view for a completed transfer and rejects a non-completed one; there is no partial-file preview action (no external-player launch, no partial media handling). The route shape (200 -> TransferResponse) is honored."
+reason = "Partial-file preview is an interactive GUI/media concept with no headless mapping: the core has no player and no display surface, and the REST contract exposes no preview media payload. Deliberately omitted (consistent with the ed2k-preview peer-preview omission)."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it is a local UI convenience. The REST route remains contract-shaped for a completed transfer."
+
+[[omissions]]
+id = "server-obfuscation-metadata-non-config"
+area = "ed2k"
+stock_behavior = "eMule's server.met persists per-server obfuscation metadata (ST_UDPFLAGS + the obfuscated-TCP/UDP port tags), so a server discovered via OP_SERVERLIST or imported from server.met keeps its obfuscation ports/flags across restarts and reconnects with obfuscation."
+rust_behavior = "The Rust client carries server obfuscation ports/flags only for statically CONFIGURED servers (from the operator config's Ed2kServerEntry). The REST/state server model (ServerInfo, at /api/v1 contract parity) intentionally has no obfuscation fields, the server.met parser does not extract obfuscation tags, and the OP_SERVERLIST decode carries only (ip, port) — so a non-config discovered/imported server has no obfuscation metadata to persist. The servers table's obfuscation_tcp_port / udp_flags columns are reserved/forward-looking."
+reason = "Deliberate scoping: obfuscation is delivered where it matters (the operator's configured servers, which keep it from config on every restart), while the headless server pipeline (REST ServerInfo -> SQLite) stays at /api/v1 contract parity without obfuscation fields. Threading obfuscation through the REST/state model would either regress the documented server schema or persist empty values, since no non-config path currently supplies obfuscation metadata."
+compatibility = "Does not affect eD2K or Kad wire compatibility for the supported path: configured servers connect with obfuscation exactly as intended. Only a non-config discovered/imported obfuscation-required server is unsupported (it would need config entry), which is the operator-driven server model already in use."

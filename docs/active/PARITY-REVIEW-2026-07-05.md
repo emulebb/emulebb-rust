@@ -33,13 +33,21 @@ confirmed at parity (full per-subsystem tables are in the review transcripts).
 | eD2K | Upload-admission cooldowns missing | MISSING | DEFER → defensive Phase E (P-5) |
 | eD2K | download_queue_rank_flood ban missing | MISSING | DEFER → defensive Phase C-rem (P-5) |
 | Server | OP_SERVERLIST auto-add not gated by an "add-servers-from-server" pref | PARTIAL | FIX comment + REGISTER (P-2) |
-| Server | Server obfuscation ports/flags not persisted across restart | PARTIAL | **FIX** (P-1) |
+| Server | Server obfuscation ports/flags not persisted across restart | PARTIAL | REGISTER (P-4, re-dispositioned) |
 | REST | `/transfers/{hash}/operations/preview` has no partial-file semantics | PARTIAL | REGISTER (P-4) |
 
 Registered intentional omissions (15) and the reserved-but-unwritten forward
 SQLite tables were excluded per scope and are not gaps.
 
-## The two fixes (P-1)
+## Execution status (2026-07-05)
+
+All items landed on `main`, gate green. P-1 Kad fix (`e473a52`), P-2 OP_SERVERLIST
+preference (`5778c10`), P-4 registrations (5 new omissions incl. the
+re-dispositioned obfuscation item), P-5/P-6 defers recorded in
+`docs/RELEASE-SCOPE.md`. RUST-REF-002 closed; parity baseline validated → cleared
+for the Phase-4 converged soak.
+
+## The fixes (P-1 / P-2)
 
 1. **Kad — filter unverified contacts out of `KADEMLIA2_RES`.** MFC
    `CRoutingBin::GetClosestTo` gates on `GetType() <= uMaxType && IsIpVerified()`
@@ -52,16 +60,18 @@ SQLite tables were excluded per scope and are not gaps.
    (`get_closest` / bootstrap must stay unfiltered to match
    `GetBootstrapContacts`). Anti-poisoning hygiene; wire-visible. Functional.
 
-2. **Server — persist server obfuscation ports/flags across restart.** The
-   `servers` table declares `obfuscation_tcp_port` + `udp_flags`
-   (`crates/emulebb-metadata/src/schema.sql:313-314`) but `upsert_server` /
-   `load_servers` (`crates/emulebb-metadata/src/profile_store.rs:160-242`) never
-   read/write them, and `effective_ed2k_config` zeroes them for DB-sourced
-   servers (`crates/emulebb-core/src/server_list.rs:112-125`). A discovered /
-   `import-met` obfuscation-capable server reconnects in plaintext after a
-   restart. Persist and reload the two existing columns (statically configured
-   servers are unaffected — their obfuscation fields come from config).
-   Functional.
+2. ~~**Server — persist server obfuscation ports/flags across restart.**~~
+   **RE-DISPOSITIONED to REGISTER (2026-07-05).** On implementation the fix
+   proved larger and worse than the review scoped: obfuscation is dropped one
+   layer earlier than the audit saw — at the `ServerInfo` REST/state DTO
+   (`crates/emulebb-core/src/rest_model.rs:153`), which Lane C confirmed is at
+   `/api/v1` contract parity **without** obfuscation fields. The server.met
+   parser does not extract obfuscation tags and OP_SERVERLIST carries only
+   `(ip, port)`, so no non-config path supplies obfuscation data; persisting the
+   vestigial columns would store zeros, and adding obfuscation to `ServerInfo`
+   would regress the documented REST server schema. Configured servers (the
+   soak-critical path) keep obfuscation from config on every restart. Registered
+   as `server-obfuscation-metadata-non-config`.
 
 ## Register-as-omission (P-4)
 

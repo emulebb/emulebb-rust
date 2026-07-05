@@ -47,8 +47,8 @@ are deliberate and either compatibility-neutral or strictly gentler than stock.
 
 ## Permanent omissions (intentional, will not be added)
 
-These are product decisions, not open gaps. Each has a full
-`stock_behavior` / `rust_behavior` / `reason` / `compatibility` record in
+These are product decisions, not open gaps (20 registered entries). Each has a
+full `stock_behavior` / `rust_behavior` / `reason` / `compatibility` record in
 `policy/rust-client-omissions.toml` (id in parentheses).
 
 - **Source Exchange v1** (`sx1-live-source-exchange`) — SX2-only; SX1 never sent,
@@ -67,9 +67,20 @@ These are product decisions, not open gaps. Each has a full
 - **Gentler network pacing** — sliding 5s connection-rate window
   (`conn-rate-rolling-five-second-window`), no spike modifier
   (`conn-rate-spike-modifier`), FIFO upload-bandwidth share instead of focus-slot
-  (`upload-throttle-focus-slot-distribution`), and scarcity-gated global source
-  supplement (`source-supplement-scarcity-gate`). All strictly equal-or-gentler
-  than stock, for the VPN'd headless no-ban posture.
+  (`upload-throttle-focus-slot-distribution`), scarcity-gated global source
+  supplement (`source-supplement-scarcity-gate`), unconditional LAN flood
+  exemption (`kad-flood-lan-exemption`), and demote-to-tail instead of
+  cooldown-suppression for slow uploaders (`upload-slow-cooldown-suppression`).
+  All strictly equal-or-gentler than stock, for the VPN'd headless no-ban posture.
+- **Synchronous-serve model artifacts** — a cross-packet queued-duplicate block
+  is rejected but may be labeled as a done-duplicate
+  (`upload-duplicate-queued-intra-packet`); partial-file preview is not a headless
+  action (`ed2k-partial-file-preview`). Wire-neutral.
+- **Server obfuscation on non-config servers** — obfuscation ports/flags are
+  honored for configured servers (kept from config on every restart) but not
+  carried through the REST/state/SQLite server model
+  (`server-obfuscation-metadata-non-config`), which stays at `/api/v1` contract
+  parity without obfuscation fields.
 - **Inert GUI preference knobs** — `pref-safe-server-connect`, `pref-new-auto-up`,
   `pref-new-auto-down`, `pref-download-auto-broadband-io` are round-tripped over
   REST for contract compatibility but drive no GUI-tuning behavior.
@@ -89,6 +100,18 @@ Real future capability, intentionally out of `0.1.0-beta.1`:
 - **Parser fuzzing** — cargo-fuzz targets for the hand-rolled binary parsers.
 - **Alternate UPnP-IGD NAT backend** — `nat/igd.rs` is a stub; the miniupnpc
   backend is the supported one.
+- **Anti-abuse depth (defensive-measures plan)** — OP_OutOfPartReqs
+  quarantine/cooldown escalation (Phase D), upload-admission cooldowns
+  (failed-admit / no-socket / short-failed-slot; Phase E), and the
+  download-queue-rank-flood ban (Phase C remainder). The base detectors
+  (out-of-part-reqs, file-request-flood, identity-change bans) ship; the
+  escalation state machines are parked in the defensive-measures roadmap. None
+  blocker.
+- **Kad/eD2K memory-safety & stat cosmetics** — self-imposed global Kad
+  source/notes index ceilings (MFC has none), the network-size estimate using
+  base firewalled constants instead of a live-ratio blend, and the 128-entry
+  per-slot DoneBlocks history (MFC unbounded). Documented, effectively
+  non-binding, no wire impact.
 
 ## Platform tier
 

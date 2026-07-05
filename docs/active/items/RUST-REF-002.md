@@ -2,7 +2,7 @@
 id: RUST-REF-002
 workflow: local
 title: Parity sweep for the 0.1.0-beta.1 release - enumerate and disposition every unregistered divergence
-status: OPEN
+status: DONE
 priority: Major
 category: refactor
 labels: [parity, review, kad, ed2k, rest, release]
@@ -43,7 +43,9 @@ Every finding gets exactly one disposition:
 ## Acceptance Criteria
 
 - [x] 3-lane review executed against current MFC master after Phase 1/2 fixes.
-- [ ] Zero findings without a disposition (see Execution below — P-1..P-6).
+- [x] Zero findings without a disposition — all 13 fixed/registered/deferred
+      (P-1 Kad fix + P-2 OP_SERVERLIST pref landed; P-4 registered 5 omissions;
+      P-5/P-6 deferred items recorded in RELEASE-SCOPE.md).
 - [x] Review verdict + finding table recorded in this item (not only in
       git-excluded working notes).
 
