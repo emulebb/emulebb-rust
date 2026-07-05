@@ -920,7 +920,12 @@ impl Ed2kUploadQueueState {
                 .map(|session| (session.file_priority_score, session.credit_score_permille))
                 .unwrap_or_default();
             let requeue = !key.peer.banned
-                && !self.reject_queue_admission(&key, file_priority_score, credit_score_permille, now)
+                && !self.reject_queue_admission(
+                    &key,
+                    file_priority_score,
+                    credit_score_permille,
+                    now,
+                )
                 && !self.reject_firewalled_callback_admission(&key);
             if !requeue {
                 self.sessions.remove(&key);

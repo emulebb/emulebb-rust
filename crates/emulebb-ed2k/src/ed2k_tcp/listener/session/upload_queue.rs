@@ -153,7 +153,12 @@ impl ListenerUploadQueue {
         }
         if let (Some(peer), Some(file_hash)) = (self.diag_peer.as_deref(), self.file_hash.as_ref())
         {
-            diag_sched::upload_slot_closed(peer, self.diag_peer_hash, &file_hash.to_string(), reason);
+            diag_sched::upload_slot_closed(
+                peer,
+                self.diag_peer_hash,
+                &file_hash.to_string(),
+                reason,
+            );
         }
     }
 

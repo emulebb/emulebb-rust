@@ -185,7 +185,13 @@ pub(crate) fn download_first_payload_timeout(
         "action": "cancel_transfer",
         "reason": "First payload timeout",
     });
-    emit("bad_peer", "download_first_payload_timeout", "medium", keys, body);
+    emit(
+        "bad_peer",
+        "download_first_payload_timeout",
+        "medium",
+        keys,
+        body,
+    );
 }
 
 /// `download_idle_timeout`: a download source that HAD sent payload this session
