@@ -255,8 +255,9 @@ fn dump_client_udp_record(record: &ClientUdpDumpRecord<'_>) {
 #[cfg(feature = "packet-diagnostics")]
 fn maybe_sync_client_udp_dump(file: &fs::File) {
     static CLIENT_UDP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
-    if CLIENT_UDP_LIVE_SYNC_COUNTER.fetch_add(1, Ordering::Relaxed) % CLIENT_UDP_LIVE_SYNC_EVERY
-        == 0
+    if CLIENT_UDP_LIVE_SYNC_COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(CLIENT_UDP_LIVE_SYNC_EVERY)
     {
         let _ = file.sync_data();
     }

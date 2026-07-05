@@ -230,6 +230,7 @@ pub(crate) fn capacity_snapshot(
 /// Hash samples are enough to align Rust/MFC batch selection without leaking
 /// private filenames or paths.
 #[cfg(feature = "packet-diagnostics")]
+#[allow(clippy::too_many_arguments)] // a flat diagnostics record builder; each field is a distinct dump column
 pub(crate) fn shared_publish_offer_batch(
     server: &str,
     entries_sent: usize,
