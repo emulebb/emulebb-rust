@@ -173,9 +173,16 @@ mod tests {
         assert!(status_ping_due_at(None, TokioInstant::now()));
     }
 
+    /// A test "now" far enough past process start that backdating it by the
+    /// 4.5h reask horizon cannot underflow the platform monotonic clock
+    /// (Instant counts from boot; a fresh CI runner has minutes of uptime).
+    fn anchored_now() -> TokioInstant {
+        TokioInstant::now() + UDP_SERV_STAT_REASK_TIME * 2
+    }
+
     #[test]
     fn status_ping_not_due_before_reask_time() {
-        let now = TokioInstant::now();
+        let now = anchored_now();
         // Just under the 4.5h cadence: not due (would be a ban-risk over-ping).
         let last = now - (UDP_SERV_STAT_REASK_TIME - Duration::from_secs(1));
         assert!(!status_ping_due_at(Some(last), now));
@@ -186,7 +193,7 @@ mod tests {
 
     #[test]
     fn status_ping_due_after_reask_time() {
-        let now = TokioInstant::now();
+        let now = anchored_now();
         let last = now - UDP_SERV_STAT_REASK_TIME;
         assert!(status_ping_due_at(Some(last), now));
         let well_past = now - (UDP_SERV_STAT_REASK_TIME + Duration::from_secs(3_600));
