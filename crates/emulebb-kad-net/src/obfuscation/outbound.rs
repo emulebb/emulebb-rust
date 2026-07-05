@@ -20,7 +20,14 @@ fn should_prefer_receiver_verify_key(opcode_value: u8) -> bool {
 }
 
 fn is_plain_protocol_marker(byte: u8) -> bool {
-    matches!(byte, 0xE3 | 0xE4 | 0xE5 | 0xA3 | 0xC5 | 0xD4)
+    // eMule EncryptedDatagramSocket re-rolls the semi-random obfuscation marker
+    // only when it collides with a real plaintext protocol byte: OP_EMULEPROT
+    // (0xC5), OP_PACKEDPROT (0xD4), OP_KADEMLIAHEADER (0xE4),
+    // OP_KADEMLIAPACKEDPROT (0xE5), OP_UDPRESERVEDPROT1 (0xA3),
+    // OP_UDPRESERVEDPROT2 (0xB2). It does NOT reserve OP_EDONKEYPROT (0xE3), and it
+    // DOES reserve 0xB2 — which the low-2-bits-even Kad marker can actually hit, so
+    // omitting it let a stock receiver misread ~1/256 obfuscated Kad datagrams.
+    matches!(byte, 0xC5 | 0xD4 | 0xE4 | 0xE5 | 0xA3 | 0xB2)
 }
 
 fn select_marker(mode: KadKeyMode) -> u8 {
@@ -127,5 +134,32 @@ impl ObfuscationLayer {
         result.extend_from_slice(&random_key_part.to_le_bytes());
         result.extend_from_slice(&encrypted_tail);
         result
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::{KadKeyMode, is_plain_protocol_marker, select_marker};
+
+    #[test]
+    fn reserved_marker_set_matches_stock() {
+        // Stock EncryptedDatagramSocket re-roll set: C5 D4 E4 E5 A3 B2.
+        for reserved in [0xC5u8, 0xD4, 0xE4, 0xE5, 0xA3, 0xB2] {
+            assert!(
+                is_plain_protocol_marker(reserved),
+                "{reserved:#04x} must be reserved like stock"
+            );
+        }
+        // OP_EDONKEYPROT (0xE3) is NOT reserved by stock (was a rust over-reservation).
+        assert!(!is_plain_protocol_marker(0xE3));
+    }
+
+    #[test]
+    fn select_marker_never_emits_a_reserved_byte() {
+        for _ in 0..4096 {
+            for mode in [KadKeyMode::NodeId, KadKeyMode::ReceiverVerifyKey] {
+                assert!(!is_plain_protocol_marker(select_marker(mode)));
+            }
+        }
     }
 }
