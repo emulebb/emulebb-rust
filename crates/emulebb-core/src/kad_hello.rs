@@ -169,7 +169,12 @@ pub(crate) async fn build_kad_hello_request(
         version: KAD_VERSION,
         tags: build_kad_hello_request_tags(
             bind_addr.port(),
-            firewall.udp_verified && firewall.udp_open,
+            // Stock advertises SOURCEUPORT (our intern Kad UDP port) whenever
+            // `!GetUseExternKadPort()`, i.e. always for a node on its intern port
+            // — NOT gated on the UDP firewall verdict. rust uses a single intern
+            // Kad port, so this is unconditionally true; a fresh/firewalled node
+            // still advertises its port exactly like stock.
+            true,
             firewall.udp_verified && !firewall.udp_open,
             tcp_firewalled,
             request_ack,
@@ -224,10 +229,10 @@ pub(crate) async fn build_kad_hello_response(
         version: KAD_VERSION,
         tags: build_kad_hello_response_tags(
             bind_addr.port(),
-            // Mirror the request builder: advertise SOURCEUPORT whenever we are
-            // on our verified-open intern Kad port (the rust modelling of
-            // `!GetUseExternKadPort()`).
-            firewall.udp_verified && firewall.udp_open,
+            // Mirror the request builder: SOURCEUPORT is advertised whenever we are
+            // on our intern Kad port (`!GetUseExternKadPort()`), unconditionally for
+            // rust's single-port model — not gated on the UDP firewall verdict.
+            true,
             firewall.udp_verified && !firewall.udp_open,
             tcp_firewalled,
             request_ack,
@@ -401,6 +406,30 @@ pub(crate) fn spawn_modern_kad_firewalled_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kad_hello_advertises_source_uport_even_when_firewalled() {
+        // Stock advertises TAG_SOURCEUPORT whenever on the intern Kad port
+        // (!GetUseExternKadPort), independent of the firewall verdict. A firewalled
+        // node therefore still emits SOURCEUPORT (plus KADMISCOPTIONS).
+        for build in [
+            build_kad_hello_request_tags as fn(u16, bool, bool, bool, bool) -> Vec<Tag>,
+            build_kad_hello_response_tags,
+        ] {
+            let tags = build(4672, true, true, true, false);
+            use emulebb_kad_proto::TagName::Short;
+            assert!(
+                tags.iter()
+                    .any(|tag| tag.name == Short(tag_name::SOURCEUPORT)),
+                "firewalled hello must still advertise SOURCEUPORT"
+            );
+            assert!(
+                tags.iter()
+                    .any(|tag| tag.name == Short(tag_name::KADMISCOPTIONS)),
+                "firewalled hello also carries KADMISCOPTIONS"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn kad_tcp_firewall_probe_requires_resolved_bind_interface_index() {
