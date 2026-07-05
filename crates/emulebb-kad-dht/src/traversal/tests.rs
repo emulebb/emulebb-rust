@@ -279,6 +279,7 @@ fn test_res_contacts_feed_the_addunfiltered_sink_as_they_arrive() {
         &config,
         NodeId::from_bytes([9; 16]),
         None,
+        None,
         response,
     );
 
@@ -1060,4 +1061,115 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
         "phase-2 must send at least one SEARCH_KEY_REQ even under a tight deadline; sent {} packets",
         outgoing.len()
     );
+}
+
+fn reask_candidate(last_octet: u8, state: CandidateState) -> TraversalCandidate {
+    let id = NodeId::from_bytes([last_octet; 16]);
+    TraversalCandidate {
+        contact: TraversalContact {
+            id,
+            addr: format!("127.0.0.1:{}", 4000 + last_octet as u16)
+                .parse()
+                .unwrap(),
+            tcp_port: 0,
+            version: 9,
+        },
+        state,
+        distance: NodeId::ZERO.distance(&id),
+    }
+}
+
+#[test]
+fn reask_more_fires_when_best_two_tried_are_dead_and_targets_closest_responder() {
+    // Distance grows with the last octet (target ZERO), so 0x01 < 0x02 < ... The
+    // two closest tried (0x01, 0x02) are Failed, a farther one (0x03) responded,
+    // and >= 6 contacts have been tried: re-ask 0x03 for more.
+    let candidates = vec![
+        reask_candidate(0x01, CandidateState::Failed),
+        reask_candidate(0x02, CandidateState::Failed),
+        reask_candidate(0x03, CandidateState::Responded),
+        reask_candidate(0x04, CandidateState::Failed),
+        reask_candidate(0x05, CandidateState::Responded),
+        reask_candidate(0x06, CandidateState::Failed),
+    ];
+    assert_eq!(
+        select_reask_more_target(&candidates, KADEMLIA_FIND_VALUE),
+        Some(NodeId::from_bytes([0x03; 16]))
+    );
+}
+
+#[test]
+fn reask_more_suppressed_when_a_best_two_contact_responded_or_too_few_tried() {
+    // The closest tried (0x01) responded -> we already have a live closest node.
+    let closest_alive = vec![
+        reask_candidate(0x01, CandidateState::Responded),
+        reask_candidate(0x02, CandidateState::Failed),
+        reask_candidate(0x03, CandidateState::Responded),
+        reask_candidate(0x04, CandidateState::Failed),
+        reask_candidate(0x05, CandidateState::Failed),
+        reask_candidate(0x06, CandidateState::Failed),
+    ];
+    assert_eq!(
+        select_reask_more_target(&closest_alive, KADEMLIA_FIND_VALUE),
+        None
+    );
+
+    // Fewer than 3 * KADEMLIA_FIND_VALUE (6) tried contacts.
+    let too_few = vec![
+        reask_candidate(0x01, CandidateState::Failed),
+        reask_candidate(0x02, CandidateState::Failed),
+        reask_candidate(0x03, CandidateState::Responded),
+    ];
+    assert_eq!(
+        select_reask_more_target(&too_few, KADEMLIA_FIND_VALUE),
+        None
+    );
+
+    // A node lookup (request count 11, not the value count 2) never re-asks.
+    let node_lookup = vec![
+        reask_candidate(0x01, CandidateState::Failed),
+        reask_candidate(0x02, CandidateState::Failed),
+        reask_candidate(0x03, CandidateState::Responded),
+        reask_candidate(0x04, CandidateState::Failed),
+        reask_candidate(0x05, CandidateState::Failed),
+        reask_candidate(0x06, CandidateState::Failed),
+    ];
+    assert_eq!(
+        select_reask_more_target(&node_lookup, KADEMLIA_FIND_NODE),
+        None
+    );
+}
+
+#[test]
+fn reask_more_target_admits_eleven_contacts_only_from_that_contact() {
+    // A RES from the re-ask target may carry up to KADEMLIA_FIND_VALUE_MORE (11)
+    // contacts even on a value lookup; the same over-count from any other contact
+    // is rejected as it exceeds the value request count.
+    let target = NodeId::from_bytes([0x03; 16]);
+    let contacts: Vec<ContactEntry> = (0u8..11)
+        .map(|n| ContactEntry {
+            node_id: NodeId::from_bytes([0x20 + n; 16]),
+            ip: 0x0A00_0001 + u32::from(n),
+            udp_port: 4672,
+            tcp_port: 4662,
+            version: 9,
+        })
+        .collect();
+    let responder = "127.0.0.1:4003".parse().unwrap();
+
+    // From the more-asked target: admitted (11 <= KADEMLIA_FIND_VALUE_MORE).
+    assert!(
+        sanitize_res_contacts(
+            &contacts,
+            responder,
+            KADEMLIA_FIND_VALUE_MORE as usize,
+            None,
+        )
+        .is_some()
+    );
+    // From an ordinary value-lookup contact: rejected (11 > KADEMLIA_FIND_VALUE).
+    assert!(
+        sanitize_res_contacts(&contacts, responder, KADEMLIA_FIND_VALUE as usize, None).is_none()
+    );
+    let _ = target;
 }

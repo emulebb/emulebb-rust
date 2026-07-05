@@ -8,8 +8,8 @@ use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
     constants::{
-        ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_STORE, KADEMLIA_VERSION2_47A,
-        KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
+        ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_FIND_VALUE_MORE,
+        KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
     },
     opcode,
     packet::{ContactEntry, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq},
@@ -294,6 +294,8 @@ async fn run_lookup_phase(
     let mut seen: HashSet<NodeId> = candidates.iter().map(|c| c.contact.id).collect();
     let mut join_set = JoinSet::new();
     let mut last_lookup_response_at = None;
+    // eMule `CSearch::JumpStart` FIND_VALUE_MORE re-ask: at most one per lookup.
+    let mut more_asked: Option<NodeId> = None;
 
     loop {
         if lookup_deadline_reached(config.cancel, config.deadline) {
@@ -301,6 +303,24 @@ async fn run_lookup_phase(
         }
         let remaining = config.deadline - Instant::now();
         launch_pending_queries(rpc, &mut candidates, &mut join_set, &config, remaining);
+        // Stalled value lookup with its two closest tried contacts dead: re-ask
+        // the closest responded contact for MORE close nodes (count 11 instead of
+        // the value-lookup 2), so a duplicate-of-dead closest set does not hide
+        // the truly-closest live node (eMule Search.cpp:288-304).
+        if more_asked.is_none()
+            && let Some(target_id) = select_reask_more_target(&candidates, config.req_count)
+        {
+            spawn_lookup_query_by_id(
+                rpc,
+                &mut join_set,
+                &candidates,
+                target_id,
+                &config,
+                KADEMLIA_FIND_VALUE_MORE,
+                remaining,
+            );
+            more_asked = Some(target_id);
+        }
         if join_set.is_empty() {
             break;
         }
@@ -315,6 +335,7 @@ async fn run_lookup_phase(
             &mut seen,
             &config,
             contact_id,
+            more_asked,
             query_result,
         ) {
             last_lookup_response_at = Some(Instant::now());
@@ -326,6 +347,37 @@ async fn run_lookup_phase(
 
     join_set.abort_all();
     build_lookup_phase_result(candidates, config.closest_limit, last_lookup_response_at)
+}
+
+/// The closest responded contact to re-ask for MORE close nodes, when a value
+/// lookup has stalled with its two closest tried contacts dead — mirroring
+/// eMule `CSearch::JumpStart` (`Search.cpp:288-304`). Returns `None` unless: the
+/// request count is the value-lookup count (2), at least `3 * KADEMLIA_FIND_VALUE`
+/// (6) contacts have been tried, and the two closest tried contacts both failed
+/// (neither responded). `candidates` is kept sorted by XOR distance, so the first
+/// non-`Pending` entries are the closest tried ones.
+fn select_reask_more_target(candidates: &[TraversalCandidate], req_count: u8) -> Option<NodeId> {
+    if req_count != KADEMLIA_FIND_VALUE {
+        return None;
+    }
+    let tried: Vec<&TraversalCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.state != CandidateState::Pending)
+        .collect();
+    if tried.len() < 3 * KADEMLIA_FIND_VALUE as usize {
+        return None;
+    }
+    let best_two_all_dead = tried
+        .iter()
+        .take(KADEMLIA_FIND_VALUE as usize)
+        .all(|candidate| candidate.state == CandidateState::Failed);
+    if !best_two_all_dead {
+        return None;
+    }
+    tried
+        .iter()
+        .find(|candidate| candidate.state == CandidateState::Responded)
+        .map(|candidate| candidate.contact.id)
 }
 
 fn initial_traversal_candidates(
@@ -375,6 +427,33 @@ fn launch_pending_queries(
             join_set,
             candidates[index].contact.clone(),
             config,
+            config.req_count,
+            remaining,
+        );
+    }
+}
+
+/// Re-query an already-known candidate by id with an explicit request count (used
+/// by the FIND_VALUE_MORE re-ask). No-op if the id is not among the candidates.
+fn spawn_lookup_query_by_id(
+    rpc: &RpcManager,
+    join_set: &mut JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)>,
+    candidates: &[TraversalCandidate],
+    contact_id: NodeId,
+    config: &LookupPhaseConfig<'_>,
+    req_count: u8,
+    remaining: Duration,
+) {
+    if let Some(candidate) = candidates
+        .iter()
+        .find(|candidate| candidate.contact.id == contact_id)
+    {
+        spawn_lookup_query(
+            rpc,
+            join_set,
+            candidate.contact.clone(),
+            config,
+            req_count,
             remaining,
         );
     }
@@ -385,12 +464,12 @@ fn spawn_lookup_query(
     join_set: &mut JoinSet<(NodeId, Result<KadPacket, emulebb_kad_net::NetError>)>,
     contact: TraversalContact,
     config: &LookupPhaseConfig<'_>,
+    req_count: u8,
     remaining: Duration,
 ) {
     register_traversal_identity(rpc, &contact);
     let rpc = rpc.clone();
     let query_timeout = config.query_timeout.min(remaining);
-    let req_count = config.req_count;
     let target = config.target;
     let work_class = config.work_class;
 
@@ -436,6 +515,7 @@ fn handle_lookup_response(
     seen: &mut HashSet<NodeId>,
     config: &LookupPhaseConfig<'_>,
     contact_id: NodeId,
+    more_asked: Option<NodeId>,
     query_result: Result<KadPacket, emulebb_kad_net::NetError>,
 ) -> bool {
     let candidate_idx = candidates
@@ -455,6 +535,7 @@ fn handle_lookup_response(
                 config,
                 contact_id,
                 candidate_idx,
+                more_asked,
                 response,
             );
             true
@@ -487,6 +568,7 @@ fn insert_response_contacts(
     config: &LookupPhaseConfig<'_>,
     contact_id: NodeId,
     candidate_idx: Option<usize>,
+    more_asked: Option<NodeId>,
     response: emulebb_kad_proto::packet::Res,
 ) {
     let responder_addr = candidate_idx
@@ -496,10 +578,20 @@ fn insert_response_contacts(
                 .map(|candidate| candidate.contact.addr)
         })
         .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+    // The FIND_VALUE_MORE re-ask target may return up to KADEMLIA_FIND_NODE (11)
+    // contacts even though the lookup's normal request count is the value-lookup
+    // 2; admit the wider set only from that one contact (eMule ProcessResponse's
+    // `pRequestedMoreNodesContact == pFromContact && size <= KADEMLIA_FIND_VALUE_MORE`
+    // exception, Search.cpp:352).
+    let max_contacts = if more_asked == Some(contact_id) {
+        KADEMLIA_FIND_VALUE_MORE as usize
+    } else {
+        config.req_count as usize
+    };
     let Some(sanitized) = sanitize_res_contacts(
         &response.contacts,
         responder_addr,
-        config.req_count as usize,
+        max_contacts,
         config.ip_filter,
     ) else {
         trace!(

@@ -48,6 +48,10 @@ pub const REPUBLISH_INTERVAL_SECS: u64 = 18_000;
 pub const KADEMLIA_FIND_VALUE: u8 = 0x02;
 /// Contacts to request in Req for node lookups.
 pub const KADEMLIA_FIND_NODE: u8 = 0x0B;
+/// Contacts to request when re-asking the closest responded contact for MORE
+/// close nodes after a stalled value lookup (eMule `CSearch::JumpStart`
+/// `SendFindValue(.., true)`; `KADEMLIA_FIND_VALUE_MORE == KADEMLIA_FIND_NODE`).
+pub const KADEMLIA_FIND_VALUE_MORE: u8 = KADEMLIA_FIND_NODE;
 /// Contacts to request in Req for store operations.
 pub const KADEMLIA_STORE: u8 = 0x04;
 /// Max XOR distance high-32-bits for sending search packets to a node.
