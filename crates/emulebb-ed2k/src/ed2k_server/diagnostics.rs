@@ -233,27 +233,30 @@ fn ed2k_server_state_id(session: &ServerSession) -> String {
     format!("server.{}.{}", session.trace_role, session.phase.as_str())
 }
 
+/// Open (create/append) the ed2k server dump file under `EMULEBB_RUST_LOG_DIR`.
+/// `None` when the env var is unset or the file cannot be created. Kept separate
+/// from the `OnceLock` cell so callers RE-ATTEMPT the open while the handle is
+/// still `None` (an early first-access must not permanently disable the dump).
+fn open_ed2k_server_dump_file() -> Option<fs::File> {
+    let dir = std::env::var("EMULEBB_RUST_LOG_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)?;
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!(
+        "{}{}.jsonl",
+        ED2K_SERVER_DUMP_FILE_PREFIX,
+        chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
+    ));
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
 fn ed2k_server_dump_file() -> &'static StdMutex<Option<fs::File>> {
     static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DUMP_FILE.get_or_init(|| {
-        let file = std::env::var("EMULEBB_RUST_LOG_DIR")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(|dir| {
-                fs::create_dir_all(&dir).ok()?;
-                let path = dir.join(format!(
-                    "{}{}.jsonl",
-                    ED2K_SERVER_DUMP_FILE_PREFIX,
-                    chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
-                ));
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .ok()
-            });
-        StdMutex::new(file)
-    })
+    DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
 fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
@@ -263,6 +266,9 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
     let Ok(mut guard) = ed2k_server_dump_file().lock() else {
         return;
     };
+    if guard.is_none() {
+        *guard = open_ed2k_server_dump_file();
+    }
     let Some(file) = guard.as_mut() else {
         return;
     };

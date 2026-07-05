@@ -95,27 +95,34 @@ fn ed2k_tcp_state_id(flow: &'static str, phase: &str) -> String {
     format!("{flow}.{phase}")
 }
 
+/// Open (create/append) the ed2k TCP dump file under `EMULEBB_RUST_LOG_DIR`.
+/// Returns `None` when the env var is unset or the file cannot be created.
+///
+/// Kept separate from the `OnceLock` cell so callers can RE-ATTEMPT the open
+/// while the handle is still `None`: the previous design opened inside
+/// `get_or_init`, so a single early first-access (before the daemon made
+/// `EMULEBB_RUST_LOG_DIR` visible) permanently cached `None` and silently
+/// disabled the dump for the whole run.
+fn open_ed2k_tcp_dump_file() -> Option<fs::File> {
+    let dir = std::env::var("EMULEBB_RUST_LOG_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)?;
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!(
+        "{}{}.jsonl",
+        ED2K_TCP_DUMP_FILE_PREFIX,
+        chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
+    ));
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
 fn ed2k_tcp_dump_file() -> &'static StdMutex<Option<fs::File>> {
     static DUMP_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DUMP_FILE.get_or_init(|| {
-        let file = std::env::var("EMULEBB_RUST_LOG_DIR")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(|dir| {
-                fs::create_dir_all(&dir).ok()?;
-                let path = dir.join(format!(
-                    "{}{}.jsonl",
-                    ED2K_TCP_DUMP_FILE_PREFIX,
-                    chrono::Utc::now().format("%Y.%m.%d-%H.%M.%S")
-                ));
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .ok()
-            });
-        StdMutex::new(file)
-    })
+    DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
 fn ed2k_protocol_name(protocol: u8) -> &'static str {
@@ -323,11 +330,18 @@ fn should_skip_bulk_packet(protocol: u8, opcode: u8, from_recv: bool) -> bool {
 fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
     if let Ok(line) = serde_json::to_string(record)
         && let Ok(mut guard) = ed2k_tcp_dump_file().lock()
-        && let Some(file) = guard.as_mut()
     {
-        let _ = writeln!(file, "{line}");
-        let _ = file.flush();
-        maybe_sync_ed2k_tcp_dump(file);
+        // Open on the first record and re-attempt whenever the handle is still
+        // None, so an early first-access (before EMULEBB_RUST_LOG_DIR is visible)
+        // does not permanently disable the dump for the run.
+        if guard.is_none() {
+            *guard = open_ed2k_tcp_dump_file();
+        }
+        if let Some(file) = guard.as_mut() {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            maybe_sync_ed2k_tcp_dump(file);
+        }
     }
 
     // uniform-diagnostics-v2 (lane D2): also emit the converged `ed2k_tcp`
@@ -629,6 +643,45 @@ mod tests {
     #[test]
     fn tcp_dump_prefix_uses_emulebb_rust_name() {
         assert_eq!(ED2K_TCP_DUMP_FILE_PREFIX, "emulebb-rust-ed2k-tcp-dump-");
+    }
+
+    // Regression guard: an early dump access before EMULEBB_RUST_LOG_DIR is
+    // visible must NOT permanently disable the dump (the OnceLock previously
+    // opened the file inside get_or_init and cached the resulting None forever,
+    // silently killing the whole run's ed2k dump). The writer must re-attempt.
+    #[cfg(feature = "packet-diagnostics")]
+    #[test]
+    fn dump_recovers_when_log_dir_appears_after_first_access() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "127.0.0.1:4662".parse().unwrap();
+        // First access with the log dir NOT visible: must be a recoverable no-op.
+        // SAFETY: this test owns the dump OnceLock's first access in its run.
+        unsafe {
+            std::env::remove_var("EMULEBB_RUST_LOG_DIR");
+        }
+        super::dump_ed2k_tcp_download_meta(addr, None, "session", "pre-env");
+        // The log dir now becomes available (mirrors the daemon making it visible
+        // after an early first-access): the next record must create + write.
+        let dir = std::env::temp_dir().join(format!("ed2k-dump-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::set_var("EMULEBB_RUST_LOG_DIR", &dir);
+        }
+        super::dump_ed2k_tcp_download_meta(addr, None, "session", "post-env");
+        let created = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(ED2K_TCP_DUMP_FILE_PREFIX)
+            });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            created,
+            "dump must recover once EMULEBB_RUST_LOG_DIR appears after an early access"
+        );
     }
 
     #[test]
