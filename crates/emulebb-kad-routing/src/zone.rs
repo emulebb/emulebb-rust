@@ -176,8 +176,13 @@ impl RoutingZone {
     }
 
     /// Collect contacts closest to `target` whose oracle freshness type is at
-    /// most `max_type` (mirrors `CRoutingBin::GetClosestTo`'s `GetType() <=
-    /// uMaxType` gate). The caller sorts by XOR distance and truncates.
+    /// most `max_type` AND that are IP-verified — mirroring `CRoutingBin::
+    /// GetClosestTo`'s `GetType() <= uMaxType && IsIpVerified()` gate
+    /// (`RoutingBin.cpp:242`). This is the `KADEMLIA2_REQ` responder path; an
+    /// unverified (potentially source-spoofed) contact is never handed out in
+    /// `KADEMLIA2_RES`, an anti-poisoning defense. Bootstrap uses the unfiltered
+    /// [`get_closest`](Self::get_closest) (oracle `GetBootstrapContacts`). The
+    /// caller sorts by XOR distance and truncates.
     pub fn get_closest_max_type(
         &self,
         target: &NodeId,
@@ -189,7 +194,7 @@ impl RoutingZone {
         match &self.content {
             ZoneContent::Leaf(bin) => {
                 for c in bin.iter() {
-                    if c.oracle_type() <= max_type {
+                    if c.oracle_type() <= max_type && c.verified {
                         result.push(c.clone());
                     }
                 }

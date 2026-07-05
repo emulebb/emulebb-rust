@@ -153,11 +153,14 @@ impl RoutingTable {
     }
 
     /// Get up to `n` contacts closest to `target` by XOR distance, restricted to
-    /// contacts whose oracle freshness type is at most `max_type`.
+    /// contacts whose oracle freshness type is at most `max_type` AND that are
+    /// IP-verified.
     ///
-    /// Mirrors `CRoutingZone::GetClosestTo(uMaxType, ...)`: the REQ responder
-    /// passes `max_type = 2`, which keeps only contacts that have a valid age
-    /// bucket and drops contacts staler than the requested freshness.
+    /// Mirrors `CRoutingZone::GetClosestTo(uMaxType, ...)` /
+    /// `CRoutingBin::GetClosestTo` (`GetType() <= uMaxType && IsIpVerified()`):
+    /// the `KADEMLIA2_REQ` responder passes `max_type = 2` and must never hand
+    /// out an unverified (potentially source-spoofed) contact. Bootstrap uses
+    /// the unfiltered [`get_closest`](Self::get_closest).
     pub fn get_closest_max_type(&self, target: &NodeId, n: usize, max_type: u8) -> Vec<Contact> {
         let mut result = Vec::new();
         self.root
@@ -444,6 +447,10 @@ mod tests {
         let also_fresh = make_contact([0x02; 16], "3.0.1.1");
         table.add_contact(fresh).unwrap();
         table.add_contact(also_fresh).unwrap();
+        // Verify both so this test isolates the freshness (max_type) filter from
+        // the IP-verified filter (covered separately below).
+        assert!(table.verify_contact(&NodeId::from_bytes([0x01; 16]), "3.0.0.1".parse().unwrap()));
+        assert!(table.verify_contact(&NodeId::from_bytes([0x02; 16]), "3.0.1.1".parse().unwrap()));
 
         // max_type 2 keeps both fresh contacts.
         assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 2).len(), 2);
@@ -460,6 +467,26 @@ mod tests {
             c.created_at = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
         }
         assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 0).len(), 1);
+    }
+
+    #[test]
+    fn get_closest_max_type_excludes_unverified_contacts() {
+        // The KADEMLIA2_REQ responder must never hand out an unverified
+        // (potentially source-spoofed) contact, even a fresh one (oracle
+        // CRoutingBin::GetClosestTo IsIpVerified gate). Bootstrap's get_closest
+        // stays unfiltered.
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+        table
+            .add_contact(make_contact([0x01; 16], "3.0.0.1"))
+            .unwrap();
+        // Unverified (default): excluded from the REQ/RES serve path...
+        assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 2).len(), 0);
+        // ...but still present for bootstrap (unfiltered).
+        assert_eq!(table.get_closest(&NodeId::ZERO, 10).len(), 1);
+        // Once IP-verified, it is served.
+        assert!(table.verify_contact(&NodeId::from_bytes([0x01; 16]), "3.0.0.1".parse().unwrap()));
+        assert_eq!(table.get_closest_max_type(&NodeId::ZERO, 10, 2).len(), 1);
     }
 
     #[test]
