@@ -446,7 +446,7 @@ checksum = "94cdc65b1cf9e871453ce2f86f5aaec24ff2eaa36a1fa3e02e441dddc3613b99"
 
 [[package]]
 name = "emulebb-core"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-daemon"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-ed2k"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-index"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "binrw",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-dht"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "binrw",
  "emulebb-kad-net",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-net"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-proto"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "binrw",
  "encoding_rs",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-kad-routing"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "emulebb-kad-proto",
  "thiserror 1.0.69",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-metadata"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-miniupnpc"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "emulebb-miniupnpc-sys",
@@ -622,14 +622,14 @@ dependencies = [
 
 [[package]]
 name = "emulebb-miniupnpc-sys"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "emulebb-rest"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "emulebb-tools"
-version = "0.0.3"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "clap",

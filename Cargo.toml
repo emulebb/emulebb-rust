@@ -18,8 +18,8 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
-version = "0.0.3"
+license = "GPL-2.0"
+version = "0.1.0-beta.1"
 
 [workspace.dependencies]
 anyhow = "1"
