@@ -165,12 +165,8 @@ fn login_request_matches_oracle_tag_shape() {
         connect_options: emule_connect_options(true),
         direct_udp_callback: false,
     });
-    let nickname_tag_header = [
-        ed2k_string_tag_type(HELLO_NICKNAME.len()),
-        0x01,
-        0x00,
-        CT_NAME,
-    ];
+    // CT_NAME login tag uses the stock WriteTagToFile form: TAGTYPE_STRING + u16 name-len.
+    let nickname_tag_header = [TAGTYPE_STRING, 0x01, 0x00, CT_NAME];
     let version_tag_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_VERSION];
     let server_flags_tag_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_SERVER_FLAGS];
     let emule_version_tag_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_EMULE_VERSION];
@@ -269,7 +265,7 @@ fn login_request_matches_stock_072a_plaintext_sample() {
     .unwrap();
 
     let expected = decode(
-            "e33c0000000173bec566140e7e6083c450c9af026f83000000004fb60400000015010001654d756c65030100113c0000000301002019010000030100fb00200100",
+            "e33e0000000173bec566140e7e6083c450c9af026f83000000004fb604000000020100010500654d756c65030100113c0000000301002019010000030100fb00200100",
         )
         .unwrap();
 
@@ -298,7 +294,7 @@ fn login_request_matches_stock_072a_obfuscated_preference_sample() {
     .unwrap();
 
     let expected = decode(
-            "e33c0000000173bec566140e7e6083c450c9af026f83000000004fb60400000015010001654d756c65030100113c0000000301002019070000030100fb00200100",
+            "e33e0000000173bec566140e7e6083c450c9af026f83000000004fb604000000020100010500654d756c65030100113c0000000301002019070000030100fb00200100",
         )
         .unwrap();
 

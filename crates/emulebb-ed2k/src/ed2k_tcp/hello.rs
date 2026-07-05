@@ -54,25 +54,19 @@ fn push_ed2k_u32_tag(payload: &mut Vec<u8>, name: u8, value: u32) {
     payload.extend_from_slice(&value.to_le_bytes());
 }
 
-pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
-    if (1..=16).contains(&len) {
-        TAGTYPE_STR1 + u8::try_from(len - 1).expect("string tag length fits in u8")
-    } else {
-        TAGTYPE_STRING
-    }
-}
-
 fn push_ed2k_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
+    // OP_HELLO / OP_HELLOANSWER string tags (CT_NAME, CT_MOD_VERSION) use eMule
+    // `CTag::WriteTagToFile`: always `TAGTYPE_STRING` + u16 length, NEVER the
+    // compact `WriteNewEd2kTag` STR optimization (which the offerfiles/search path
+    // uses). A compact STR type here was a unique non-stock fingerprint on every
+    // hello, so force the length-prefixed stock form.
     let value_bytes = value.as_bytes();
-    let type_byte = ed2k_string_tag_type(value_bytes.len());
-    encode_ed2k_short_tag_header(payload, type_byte, name);
-    if type_byte == TAGTYPE_STRING {
-        payload.extend_from_slice(
-            &u16::try_from(value_bytes.len())
-                .expect("string tag length fits in u16")
-                .to_le_bytes(),
-        );
-    }
+    encode_ed2k_short_tag_header(payload, TAGTYPE_STRING, name);
+    payload.extend_from_slice(
+        &u16::try_from(value_bytes.len())
+            .expect("string tag length fits in u16")
+            .to_le_bytes(),
+    );
     payload.extend_from_slice(value_bytes);
 }
 

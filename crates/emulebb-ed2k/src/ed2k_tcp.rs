@@ -113,8 +113,7 @@ pub(in crate::ed2k_tcp) use hello::{
 use hello::{DecodedHelloIdentity, encode_hello_answer, is_mule_hello};
 #[cfg(test)]
 use hello::{
-    ed2k_string_tag_type, emule_misc_options1, emule_misc_options2, emule_version_tag,
-    encode_emule_info_request,
+    emule_misc_options1, emule_misc_options2, emule_version_tag, encode_emule_info_request,
 };
 pub use hello_buddy::{HelloBuddySnapshot, set_hello_buddy_snapshot};
 pub use identity::Ed2kSecureIdent;

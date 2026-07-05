@@ -45,18 +45,20 @@ pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
 }
 
 pub(super) fn push_string_tag(payload: &mut Vec<u8>, name: u8, value: &str) {
+    // Server login string tags use eMule `CTag::WriteTagToFile`: always
+    // `TAGTYPE_STRING` with a u16 length prefix, NEVER the `WriteNewEd2kTag`
+    // compact-string optimization (that is `push_short_string_tag`, used for
+    // OP_OFFERFILES). Emitting a compact STR type here (0x15…) produced a hybrid
+    // no stock writer can generate — a unique non-stock fingerprint on every login.
     let value_bytes = value.as_bytes();
-    let type_byte = ed2k_string_tag_type(value_bytes.len());
-    payload.push(type_byte);
+    payload.push(TAGTYPE_STRING);
     payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(name);
-    if type_byte == TAGTYPE_STRING {
-        payload.extend_from_slice(
-            &u16::try_from(value_bytes.len())
-                .expect("string tag length fits in u16")
-                .to_le_bytes(),
-        );
-    }
+    payload.extend_from_slice(
+        &u16::try_from(value_bytes.len())
+            .expect("string tag length fits in u16")
+            .to_le_bytes(),
+    );
     payload.extend_from_slice(value_bytes);
 }
 

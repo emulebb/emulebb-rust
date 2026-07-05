@@ -108,8 +108,6 @@ use startup::{
 };
 #[cfg(test)]
 use startup::{encode_offer_files_payload, offer_files_catalog_fingerprint, server_capabilities};
-#[cfg(test)]
-use tag_codec::ed2k_string_tag_type;
 use tag_codec::{decode_ed2k_string, decode_tag};
 use types::ServerUdpPacket;
 pub use types::{Ed2kFoundSource, Ed2kSearchFile, Ed2kServerLoopOptions, Ed2kServerState};

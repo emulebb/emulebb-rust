@@ -47,12 +47,8 @@ fn hello_answer_advertises_emule_style_tags() {
         connect_options: emule_connect_options(true),
         direct_udp_callback: false,
     });
-    let expected_name_header = [
-        ed2k_string_tag_type(HELLO_NICKNAME.len()),
-        0x01,
-        0x00,
-        CT_NAME,
-    ];
+    // CT_NAME uses the stock WriteTagToFile form: TAGTYPE_STRING + u16 name-len.
+    let expected_name_header = [TAGTYPE_STRING, 0x01, 0x00, CT_NAME];
     let expected_u32_version_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_VERSION];
     let expected_udp_ports_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_EMULE_UDPPORTS];
     let expected_misc1_header = [TAGTYPE_UINT32, 0x01, 0x00, CT_EMULE_MISCOPTIONS1];
@@ -266,7 +262,7 @@ fn hello_answer_matches_truthful_plaintext_profile() {
     });
 
     let expected = decode(
-            "e3520000004c73bec566140e7e6083c450c9af026f8395581b524fb60600000015010001654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a2c0000030100fb00200100b07b02ef8810",
+            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a2c0000030100fb00200100b07b02ef8810",
         )
         .unwrap();
 
