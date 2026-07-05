@@ -26,6 +26,6 @@ pub use packet::{
     Firewalled2Req, FirewalledAckRes, FirewalledReq, FirewalledRes, HelloReq, HelloRes,
     HelloResAck, KadPacket, Ping, Pong, PublishEntry, PublishKeyReq, PublishNotesReq, PublishRes,
     PublishResAck, PublishSourceReq, Req, Res, SearchKeyReq, SearchNotesReq, SearchRes,
-    SearchResultEntry, SearchSourceReq,
+    SearchResultEntry, SearchSourceReq, pack_kad_packet,
 };
 pub use tag::{Tag, TagName, TagValue};

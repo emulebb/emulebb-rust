@@ -38,6 +38,43 @@ use codec::{
 /// crafted zlib bomb from expanding into an unbounded allocation.
 const MAX_DECOMPRESSED_KAD_PACKET_LEN: usize = 64 * 1024;
 
+/// eMule `Packet::PackPacket` for Kad: when the full cleartext Kad packet exceeds
+/// 200 bytes, zlib-deflate the body (everything after the 2-byte
+/// `[OP_KADEMLIAHEADER][opcode]` header) at best compression and — only if it
+/// shrinks — flip the header to `OP_KADEMLIAPACKEDPROT` (0xE4 → 0xE5), keeping the
+/// opcode byte uncompressed. Mirrors the `if (uLenData > 200) PackPacket()` gate
+/// in every `CKademliaUDPListener::SendPacket` overload; a stock Kad node always
+/// packs its oversized BOOTSTRAP_RES / KADEMLIA2_RES / SEARCH_RES / PUBLISH
+/// datagrams, so never packing is a passive fingerprint. Applied to the cleartext
+/// packet before obfuscation (the 0xE4/0xE5 byte rides inside the encrypted body).
+#[must_use]
+pub fn pack_kad_packet(encoded: Vec<u8>) -> Vec<u8> {
+    use std::io::Write;
+
+    const KAD_PACK_THRESHOLD: usize = 200;
+    if encoded.len() <= KAD_PACK_THRESHOLD {
+        return encoded;
+    }
+    let body = &encoded[2..];
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    if encoder.write_all(body).is_err() {
+        return encoded;
+    }
+    let compressed = match encoder.finish() {
+        Ok(compressed) => compressed,
+        Err(_) => return encoded,
+    };
+    // Stock only keeps the packed form when it is actually smaller (`newsize < size`).
+    if compressed.len() >= body.len() {
+        return encoded;
+    }
+    let mut packed = Vec::with_capacity(2 + compressed.len());
+    packed.push(OP_KADEMLIAPACKEDPROT);
+    packed.push(encoded[1]);
+    packed.extend_from_slice(&compressed);
+    packed
+}
+
 fn require_body_len(opcode: u8, body: &[u8], expected: usize) -> Result<(), ProtoError> {
     if body.len() == expected {
         Ok(())

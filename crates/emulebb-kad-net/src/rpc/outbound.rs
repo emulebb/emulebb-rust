@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use emulebb_kad_proto::KadPacket;
+use emulebb_kad_proto::{KadPacket, pack_kad_packet};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::debug;
@@ -185,7 +185,11 @@ impl RpcManager {
             .lock()
             .unwrap()
             .record_work_class_send(work_class, wait_millis);
-        let encoded = packet.encode()?;
+        // eMule packs any Kad datagram whose cleartext exceeds 200 bytes
+        // (0xE4 -> 0xE5, zlib body); a stock node always does, so pack before
+        // obfuscation to stay wire-identical (the header byte rides inside the
+        // encrypted body).
+        let encoded = pack_kad_packet(packet.encode()?);
         let outbound = self
             .inner
             .obfuscation

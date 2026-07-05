@@ -62,6 +62,50 @@ fn test_bootstrap_res_roundtrip() {
 }
 
 #[test]
+fn pack_kad_packet_zlib_packs_large_packets_and_leaves_small_ones() {
+    // A 10-contact BOOTSTRAP_RES is 16+2+1+2 + 25*10 = 271 bytes > 200, so it packs.
+    let contacts: Vec<ContactEntry> = (0..10u8)
+        .map(|index| ContactEntry {
+            node_id: NodeId::from_bytes([index; 16]),
+            ip: 0x0102_0304 + u32::from(index),
+            udp_port: 4672,
+            tcp_port: 4662,
+            version: 9,
+        })
+        .collect();
+    let pkt = KadPacket::BootstrapRes(BootstrapRes {
+        sender_id: NodeId::from_bytes([0xAA; 16]),
+        sender_tcp_port: 4662,
+        sender_version: 9,
+        contacts,
+    });
+    let encoded = pkt.encode().unwrap();
+    assert_eq!(encoded[0], OP_KADEMLIAHEADER);
+    assert!(
+        encoded.len() > 200,
+        "fixture must exceed the 200-byte pack gate"
+    );
+
+    let packed = pack_kad_packet(encoded.clone());
+    // Packed: header flipped to 0xE5, opcode preserved, and smaller than the input.
+    assert_eq!(packed[0], OP_KADEMLIAPACKEDPROT);
+    assert_eq!(packed[1], encoded[1]);
+    assert!(packed.len() < encoded.len(), "compressed body must shrink");
+    // The packed datagram decodes back to the identical packet.
+    if let KadPacket::BootstrapRes(res) = KadPacket::decode(&packed).unwrap() {
+        assert_eq!(res.contacts.len(), 10);
+        assert_eq!(res.sender_version, 9);
+        assert_eq!(res.contacts[9].node_id, NodeId::from_bytes([9u8; 16]));
+    } else {
+        panic!("packed BOOTSTRAP_RES did not decode back");
+    }
+
+    // A tiny packet (Ping = 2 bytes) is left untouched (below the gate).
+    let ping = KadPacket::Ping.encode().unwrap();
+    assert_eq!(pack_kad_packet(ping.clone()), ping);
+}
+
+#[test]
 fn test_packed_packet_decode() {
     // Build a plain Ping, then zlib-compress it to simulate 0xE5 packet
     use flate2::{Compression, write::ZlibEncoder};
