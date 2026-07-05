@@ -36,6 +36,30 @@ pub(super) fn push_short_u8_tag(payload: &mut Vec<u8>, name: u8, value: u8) {
     payload.push(value);
 }
 
+/// eMule `CTag::WriteNewEd2kTag` integer down-sizing: emit `value` as the smallest
+/// UINT type that holds it (u8 <=255, u16 <=65535, u32 <=4G, else u64), short-name.
+/// Matches stock's OP_OFFERFILES FT_FILESIZE / FT_FILESIZE_HI encoding (a small
+/// file's size tag is a u8/u16, not always u32).
+pub(super) fn push_short_int_tag(payload: &mut Vec<u8>, name: u8, value: u64) {
+    if value <= u64::from(u8::MAX) {
+        payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT8);
+        payload.push(name);
+        payload.push(value as u8);
+    } else if value <= u64::from(u16::MAX) {
+        payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT16);
+        payload.push(name);
+        payload.extend_from_slice(&(value as u16).to_le_bytes());
+    } else if value <= u64::from(u32::MAX) {
+        payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT32);
+        payload.push(name);
+        payload.extend_from_slice(&(value as u32).to_le_bytes());
+    } else {
+        payload.push(TAG_SHORT_NAME_MASK | TAGTYPE_UINT64);
+        payload.push(name);
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
 pub(super) fn ed2k_string_tag_type(len: usize) -> u8 {
     if (1..=16).contains(&len) {
         TAGTYPE_STR1 + u8::try_from(len - 1).expect("string tag length fits in u8")

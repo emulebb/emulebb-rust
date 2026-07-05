@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::tag_codec::{
-    push_short_string_tag, push_short_u8_tag, push_short_u32_tag, push_string_tag, push_u32_tag,
+    push_short_int_tag, push_short_string_tag, push_short_u8_tag, push_string_tag, push_u32_tag,
 };
 use super::{
     CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
@@ -156,9 +156,11 @@ fn encode_offer_files_payload_at_cursor(
         payload.extend_from_slice(&advertised_client_port.to_le_bytes());
         payload.extend_from_slice(&tag_count.to_le_bytes());
         push_short_string_tag(&mut payload, FT_FILENAME, file_name);
-        push_short_u32_tag(&mut payload, FT_FILESIZE, lower_file_size);
+        // Stock down-sizes integer tags via WriteNewEd2kTag, so a small file's size
+        // is a u8/u16, not always u32.
+        push_short_int_tag(&mut payload, FT_FILESIZE, u64::from(lower_file_size));
         if upper_file_size != 0 {
-            push_short_u32_tag(&mut payload, FT_FILESIZE_HI, upper_file_size);
+            push_short_int_tag(&mut payload, FT_FILESIZE_HI, u64::from(upper_file_size));
         }
         if has_type_tag {
             if use_integer_type {

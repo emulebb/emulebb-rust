@@ -599,18 +599,17 @@ fn offer_files_payload_advertises_large_file_size_truthfully() {
         ),
         4
     );
+    // Stock down-sizes each dword via WriteNewEd2kTag: the low dword (12345)
+    // becomes a u16 and the high dword (5) a u8, and together they reconstruct the
+    // true size truthfully.
+    let low = short_int_tag_value(&payload, FT_FILESIZE).expect("FT_FILESIZE present");
+    let high = short_int_tag_value(&payload, FT_FILESIZE_HI).expect("FT_FILESIZE_HI present");
+    assert_eq!(low, large_size & 0xFFFF_FFFF);
+    assert_eq!(high, large_size >> 32);
     assert_eq!(
-        short_u32_tag_value(&payload, FT_FILESIZE),
-        Some(large_size as u32)
-    );
-    assert_eq!(
-        short_u32_tag_value(&payload, FT_FILESIZE_HI),
-        Some((large_size >> 32) as u32)
-    );
-    assert_ne!(
-        short_u32_tag_value(&payload, FT_FILESIZE),
-        Some(u32::MAX),
-        "large-file offers must not saturate the low size tag"
+        low | (high << 32),
+        large_size,
+        "size reconstructs truthfully"
     );
 }
 
@@ -665,6 +664,35 @@ fn short_u32_tag_value(payload: &[u8], tag_name: u8) -> Option<u32> {
         .position(|window| window == header)?;
     let value = payload.get(offset + header.len()..offset + header.len() + 4)?;
     Some(u32::from_le_bytes(value.try_into().unwrap()))
+}
+
+/// Read a short-name integer tag value regardless of the WriteNewEd2kTag-downsized
+/// UINT width (u8/u16/u32/u64).
+fn short_int_tag_value(payload: &[u8], tag_name: u8) -> Option<u64> {
+    for type_byte in [
+        TAGTYPE_UINT8,
+        TAGTYPE_UINT16,
+        TAGTYPE_UINT32,
+        TAGTYPE_UINT64,
+    ] {
+        let header = [TAG_SHORT_NAME_MASK | type_byte, tag_name];
+        if let Some(offset) = payload.windows(header.len()).position(|w| w == header) {
+            let start = offset + header.len();
+            return match type_byte {
+                TAGTYPE_UINT8 => payload.get(start).map(|&b| u64::from(b)),
+                TAGTYPE_UINT16 => payload
+                    .get(start..start + 2)
+                    .map(|v| u64::from(u16::from_le_bytes(v.try_into().unwrap()))),
+                TAGTYPE_UINT32 => payload
+                    .get(start..start + 4)
+                    .map(|v| u64::from(u32::from_le_bytes(v.try_into().unwrap()))),
+                _ => payload
+                    .get(start..start + 8)
+                    .map(|v| u64::from_le_bytes(v.try_into().unwrap())),
+            };
+        }
+    }
+    None
 }
 
 #[test]
