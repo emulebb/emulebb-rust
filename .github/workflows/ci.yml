@@ -46,10 +46,20 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # The local Kad swarm harness refuses loopback by design (node.rs
+      # lan_bind_ip): bind through the runner's real primary IPv4 so the
+      # multi-node tests exercise a genuine interface, exactly like the
+      # operator split-tunnel machines do via X_LOCAL_IP.
+      - name: Resolve runner LAN IP (X_LOCAL_IP)
+        shell: bash
+        run: |
+          ip=$(python -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('203.0.113.1', 9)); print(s.getsockname()[0])")
+          echo "resolved X_LOCAL_IP=$ip"
+          echo "X_LOCAL_IP=$ip" >> "$GITHUB_ENV"
+
       - name: Rust build/test gate
         env:
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
-          X_LOCAL_IP: 127.0.0.1
         run: python tools/rust_quality_gate.py ci-test
 
   quality:
