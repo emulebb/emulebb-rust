@@ -50,9 +50,9 @@ compatibility = "Does not affect eD2K or Kad wire compatibility."
 id = "peer-chat-messaging"
 area = "ed2k"
 stock_behavior = "Classic eMule supports interactive peer-to-peer text chat/messaging (OP_MESSAGE) and a chat window."
-rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state. It also leaves the captcha-support hello bit (CT_EMULE_MISCOPTIONS2 bit 11) unadvertised, since captcha is the anti-spam gate for chat the client never answers."
-reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so it is outside the headless, REST-controllable scope of this client."
-compatibility = "Does not affect eD2K or Kad wire compatibility; unsupported OP_MESSAGE from peers is simply not surfaced."
+rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state (OP_MESSAGE / the captcha challenge-response are decode-only). It DOES advertise the captcha-support hello bit (CT_EMULE_MISCOPTIONS2 bit 11 = 1) to stay wire-identical to a stock eMule 0.72a client, which hardcodes that bit to 1 (BaseClient.cpp uSupportsCaptcha); only the interactive chat behavior is omitted, not the advertised capability."
+reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so the chat session is outside the headless, REST-controllable scope. The advertised capability bit still mirrors stock so the hello is not a non-stock fingerprint (RUST-FIX-035)."
+compatibility = "Does not affect eD2K or Kad wire compatibility; the hello bitfield matches stock eMule, and an unsolicited OP_MESSAGE from a peer is simply not surfaced (as with a stock user who never opens the chat window)."
 
 [[omissions]]
 id = "ed2k-preview"
