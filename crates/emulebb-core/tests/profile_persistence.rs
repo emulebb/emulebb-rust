@@ -7,7 +7,7 @@ use std::{
 use emulebb_core::{
     CategoryCreate, CategoryPriorityValue, EmulebbCore, FriendCreate, LocalShareCreate,
     NullableStringField, NullableU32Field, PreferencesUpdate, ServerCreate, ServerUpdate,
-    TransferUpdate,
+    TransferCreate, TransferUpdate,
 };
 use emulebb_index::FileIndex;
 
@@ -142,6 +142,20 @@ async fn delete_category_resets_referencing_transfers_to_uncategorized() {
         })
         .await
         .unwrap();
+    // Shared files stay out of the transfer queue; re-adding the link restores
+    // the completed transfer row so this test has a real queued transfer to
+    // categorize (same restore path as the share lifecycle tests).
+    let restored = core
+        .create_transfer(TransferCreate {
+            link: Some(share.ed2k_link.clone()),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.hash, share.hash);
     let category = core
         .create_category(CategoryCreate {
             name: "Movies".to_string(),
