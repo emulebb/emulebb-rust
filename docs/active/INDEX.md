@@ -19,9 +19,11 @@ Active vs Parked ledger).
 ## Current Snapshot
 
 **Source of truth:** `EMULEBB_WORKSPACE_ROOT\repos\emulebb-rust` (`main` branch)
-**Scope note:** emulebb-rust is **out of RC2 ship scope** — the backlog captures
-parity and design work to stage, not release-blocking gates. RC2 is verification
-+ release-blocking fixes only.
+**Scope note:** emulebb-rust is **out of RC2 ship scope** (the MFC RC train).
+Since 2026-07-05 the repo carries its **own release gate**: the
+`rust-v0.1.0-beta.1` first-usable-release program tracked by
+[RUST-FEAT-033](items/RUST-FEAT-033.md) (`milestone: release-0.1.0-beta.1`
+groups its items).
 **Protocol policy:** IPv4-only, stock-compatible for implemented eD2K/Kad
 behaviour; intentional omissions are recorded in
 [`policy/rust-client-omissions.toml`](../../policy/rust-client-omissions.toml).
@@ -74,6 +76,17 @@ stay active-only; see [Closed Items](#closed-items-archive) for the archive.
 | [RUST-FEAT-005](items/RUST-FEAT-005.md) | Critical | OPEN | Automated VPN leak-test — assert no data egress off the tunnel (release-blocking) |
 | [RUST-FEAT-006](items/RUST-FEAT-006.md) | Major | OPEN | Docker — publish a linuxserver-style GHCR image (suite bundle prerequisite) |
 | [RUST-FEAT-007](items/RUST-FEAT-007.md) | Minor | OPEN | REST push — SSE stream for live transfer updates (+ transfers.sse capability) |
+| [RUST-FEAT-025](items/RUST-FEAT-025.md) | Major | OPEN | Anti-abuse — redo upload_duplicate_done_block_rejected (+ queued sibling) with conformant ledger semantics |
+| [RUST-FEAT-030](items/RUST-FEAT-030.md) | Minor | OPEN | Kad — implement KADEMLIA_FIND_VALUE_MORE re-ask in lookup traversal |
+| [RUST-FEAT-031](items/RUST-FEAT-031.md) | Minor | OPEN | Kad — handle inbound legacy KADEMLIA_FIREWALLED_ACK_RES (0x59) |
+| [RUST-FEAT-032](items/RUST-FEAT-032.md) | Minor | OPEN | Kad — routing-zone consolidation (merge sparse sibling leaf bins on the 45-minute timer) |
+| [RUST-FEAT-033](items/RUST-FEAT-033.md) | Critical | OPEN | Release — first usable release rust-v0.1.0-beta.1 (scope doc, GH release workflow, soak-gated tag) |
+
+### Refactors / Evidence (`REF`)
+
+| ID | Priority | Status | Title |
+|----|----------|--------|-------|
+| [RUST-REF-002](items/RUST-REF-002.md) | Major | OPEN | Parity sweep for the 0.1.0-beta.1 release — enumerate and disposition every unregistered divergence |
 
 ### Bugs (`BUG`)
 
