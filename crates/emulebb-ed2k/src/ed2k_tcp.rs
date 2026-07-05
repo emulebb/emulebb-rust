@@ -230,7 +230,13 @@ const EDONKEY_VERSION: u32 = 0x3C;
 const EMULE_VERSION_MAJOR: u32 = 0;
 const EMULE_VERSION_MINOR: u32 = 72;
 const EMULE_VERSION_UPDATE: u32 = 0;
-const EMULE_VERSION_SHORT: u8 = EMULE_VERSION_MINOR as u8;
+// eMule `m_uCurVersionShort` (OP_EMULEINFO leading byte): the product minor
+// version formatted as decimal digits then re-parsed as hex — `Format("0x%lu")`
+// then `scanf("0x%x")` (Emule.cpp) — i.e. a BCD-style byte. For 0.72 this is
+// 0x72, NOT 0x48 (=72). Peers read it as `m_byEmuleVersion` in
+// ProcessMuleInfoPacket; 0x48 would misidentify us as an ancient "0.48" client.
+const EMULE_VERSION_SHORT: u8 =
+    (((EMULE_VERSION_MINOR / 10) << 4) | (EMULE_VERSION_MINOR % 10)) as u8;
 const EMULE_SECURE_IDENT_VERSION: u32 = 3;
 const EMULE_INFO_FEATURES: u32 = 3;
 const EMULE_ADVERTISED_KAD_VERSION: u32 = 10;
