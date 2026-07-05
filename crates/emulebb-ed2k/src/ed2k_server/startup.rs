@@ -27,15 +27,14 @@ use super::{
     ED2K_FILETYPE_PROGRAM, ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR,
     EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI,
     FT_FILETYPE, HELLO_NICKNAME, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
-    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SAMPLE_HASH, OFFER_FILE_SAMPLE_NAME,
-    OFFER_FILE_SAMPLE_SIZE, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES,
-    OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
-    OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION,
-    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES,
-    SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT,
-    SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession,
-    ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
+    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST,
+    OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ,
+    OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry,
+    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER,
+    SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
+    SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
+    SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE,
+    SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -355,15 +354,11 @@ fn offered_files_catalog_at_cursor(
     // <= MAX_OFFER_FILES_PER_ADVERTISEMENT); guard against a 0 so a misconfigured
     // server can never zero out the batch.
     let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    let mut all_offered_files = ranked_offer_files(shared_catalog);
-    if all_offered_files.is_empty() {
-        all_offered_files.push((
-            OFFER_FILE_SAMPLE_HASH,
-            OFFER_FILE_SAMPLE_NAME.to_string(),
-            u64::from(OFFER_FILE_SAMPLE_SIZE),
-            ED2K_FILETYPE_PROGRAM,
-        ));
-    }
+    // Stock parity (SharedFileList::SendListToServer): an empty share advertises
+    // ZERO files, so do NOT fabricate a placeholder offer — a stock client sharing
+    // nothing sends a 0-file OP_OFFERFILES, and a synthetic sample would be a
+    // non-stock tell.
+    let all_offered_files = ranked_offer_files(shared_catalog);
     let total_entries = all_offered_files.len();
     if total_entries <= max_offer_files {
         return OfferedFilesCatalog {
@@ -906,6 +901,18 @@ mod tests {
                 .len(),
             MAX_OFFER_FILES_PER_ADVERTISEMENT
         );
+    }
+
+    #[test]
+    fn empty_share_advertises_zero_files_without_a_placeholder() {
+        // Stock parity: an empty share sends a 0-file OP_OFFERFILES, not a
+        // fabricated sample entry.
+        let catalog = offered_files_catalog_at_cursor(&[], 0, MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        assert_eq!(catalog.entries.len(), 0);
+        assert_eq!(catalog.total_entries, 0);
+        let payload = encode_offer_files_payload(&[], Some(0), Ipv4Addr::LOCALHOST, 4662, None);
+        assert_eq!(&payload[..4], &0u32.to_le_bytes(), "0 offered files");
+        assert_eq!(payload.len(), 4, "no file entries follow the count");
     }
 
     #[test]
