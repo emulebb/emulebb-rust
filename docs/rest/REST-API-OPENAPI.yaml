@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: eMuleBB REST API (canonical superset, emulebb-rust)
-  version: 1.0.0
-  x-contract-version: "1.0.0"
+  version: 1.1.0
+  x-contract-version: "1.1.0"
   x-contract-baseline: "eMuleBB 0.7.3 contract"
   summary: The one capability-gated /api/v1 contract; emulebb-rust owns the superset.
   description: >
@@ -3145,6 +3145,9 @@ components:
           type: boolean
         safeServerConnect:
           type: boolean
+        addServersFromServer:
+          type: boolean
+          description: Add servers advertised by a connected server (OP_SERVERLIST); eMule GetAddServersFromServer, default true.
         networkKademlia:
           type: boolean
         networkEd2k:
@@ -3203,6 +3206,9 @@ components:
           type: boolean
         safeServerConnect:
           type: boolean
+        addServersFromServer:
+          type: boolean
+          description: Add servers advertised by a connected server (OP_SERVERLIST); eMule GetAddServersFromServer, default true.
         networkKademlia:
           type: boolean
         networkEd2k:

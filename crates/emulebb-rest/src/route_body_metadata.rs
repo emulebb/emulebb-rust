@@ -184,6 +184,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "newAutoDown",
         "creditSystem",
         "safeServerConnect",
+        "addServersFromServer",
         "networkKademlia",
         "networkEd2k",
         "downloadAutoBroadbandIo",

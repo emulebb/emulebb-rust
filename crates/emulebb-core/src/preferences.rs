@@ -40,6 +40,7 @@ pub(crate) fn default_preferences() -> Preferences {
         new_auto_down: true,
         credit_system: true,
         safe_server_connect: true,
+        add_servers_from_server: true,
         network_kademlia: true,
         network_ed2k: true,
         download_auto_broadband_io: true,
@@ -62,6 +63,7 @@ pub(crate) fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
         && update.new_auto_down.is_none()
         && update.credit_system.is_none()
         && update.safe_server_connect.is_none()
+        && update.add_servers_from_server.is_none()
         && update.network_kademlia.is_none()
         && update.network_ed2k.is_none()
         && update.download_auto_broadband_io.is_none()
@@ -137,6 +139,9 @@ pub(crate) fn apply_preferences_update(
     }
     if let Some(value) = update.safe_server_connect {
         preferences.safe_server_connect = value;
+    }
+    if let Some(value) = update.add_servers_from_server {
+        preferences.add_servers_from_server = value;
     }
     if let Some(value) = update.network_kademlia {
         preferences.network_kademlia = value;

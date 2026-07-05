@@ -1292,6 +1292,12 @@ impl EmulebbCore {
         if servers.is_empty() {
             return;
         }
+        // eMule `CServerSocket::ProcessPacket` OP_SERVERLIST adds advertised
+        // servers only when `thePrefs.GetAddServersFromServer()` is set (default
+        // on). Honor the same preference so an operator can turn auto-add off.
+        if !self.state.lock().await.preferences.add_servers_from_server {
+            return;
+        }
         let existing: HashSet<String> = self
             .servers()
             .await
@@ -8905,6 +8911,29 @@ mod tests {
             .expect("discovered server added");
         assert_eq!(new_server.priority, "low");
         assert!(!new_server.static_server);
+    }
+
+    #[tokio::test]
+    async fn merge_discovered_servers_respects_add_servers_from_server_preference() {
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        // eMule GetAddServersFromServer default is on; turning it off must stop
+        // OP_SERVERLIST auto-add.
+        core.update_preferences(PreferencesUpdate {
+            add_servers_from_server: Some(false),
+            ..PreferencesUpdate::default()
+        })
+        .await
+        .unwrap();
+        core.merge_discovered_ed2k_servers(vec![(Ipv4Addr::new(203, 0, 113, 9), 4661)])
+            .await;
+        assert!(
+            !core
+                .servers()
+                .await
+                .iter()
+                .any(|s| s.address == "203.0.113.9" && s.port == 4661),
+            "auto-add disabled: a discovered server must not be added"
+        );
     }
 
     #[tokio::test]

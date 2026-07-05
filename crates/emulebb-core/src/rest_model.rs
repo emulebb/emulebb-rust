@@ -53,6 +53,12 @@ pub struct Preferences {
     pub new_auto_down: bool,
     pub credit_system: bool,
     pub safe_server_connect: bool,
+    /// Whether servers advertised by a connected server (OP_SERVERLIST) are
+    /// added to the server list (eMule `GetAddServersFromServer()`, default on).
+    /// `#[serde(default)]` so a preferences blob persisted before this field
+    /// existed still loads (defaulting to on, matching stock).
+    #[serde(default = "default_add_servers_from_server")]
+    pub add_servers_from_server: bool,
     pub network_kademlia: bool,
     pub network_ed2k: bool,
     pub download_auto_broadband_io: bool,
@@ -92,6 +98,8 @@ pub struct PreferencesUpdate {
     #[serde(default)]
     pub safe_server_connect: Option<bool>,
     #[serde(default)]
+    pub add_servers_from_server: Option<bool>,
+    #[serde(default)]
     pub network_kademlia: Option<bool>,
     #[serde(default)]
     pub network_ed2k: Option<bool>,
@@ -100,6 +108,10 @@ pub struct PreferencesUpdate {
 }
 
 fn default_reconnect() -> bool {
+    true
+}
+
+fn default_add_servers_from_server() -> bool {
     true
 }
 

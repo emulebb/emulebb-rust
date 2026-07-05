@@ -66,7 +66,7 @@ async fn capabilities_returns_contract_version_and_capability_list() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["contractVersion"], "1.0.0");
+    assert_eq!(value["data"]["contractVersion"], "1.1.0");
     assert_eq!(value["data"]["apiVersion"], "v1");
     assert!(
         value["data"]["capabilities"]
