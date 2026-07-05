@@ -96,8 +96,14 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
         "build": [build_step()],
         "test-workspace": [test_workspace_step()],
         "test-kad-swarm": [test_kad_swarm_step()],
+        "test-vpn-leak": [test_vpn_leak_step()],
         "quick": [policy_step(), fmt_step(), clippy_step()],
-        "ci-test": [build_step(), test_workspace_step(), test_kad_swarm_step()],
+        "ci-test": [
+            build_step(),
+            test_workspace_step(),
+            test_kad_swarm_step(),
+            test_vpn_leak_step(),
+        ],
     }
     if gate == "ci":
         return [
@@ -107,6 +113,7 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
             build_step(),
             test_workspace_step(),
             test_kad_swarm_step(),
+            test_vpn_leak_step(),
         ]
     return steps[gate]
 
@@ -144,6 +151,29 @@ def test_kad_swarm_step() -> tuple[str, list[str]]:
             "emulebb-core",
             "--test",
             "kad_swarm",
+            "--locked",
+            "--",
+            "--test-threads=1",
+        ],
+    )
+
+
+def test_vpn_leak_step() -> tuple[str, list[str]]:
+    # RUST-FEAT-005 dynamic leak gate (release-blocking): observed-egress test
+    # under the egress-audit feature. Serial: the 3 scenarios share the global
+    # egress recorder. The feature is test-only and must never reach a release
+    # build (enforced by check_rust_client_policy.py).
+    return (
+        "vpn leak-test (observed egress)",
+        [
+            "cargo",
+            "test",
+            "-p",
+            "emulebb-core",
+            "--features",
+            "egress-audit",
+            "--test",
+            "vpn_leak_egress",
             "--locked",
             "--",
             "--test-threads=1",

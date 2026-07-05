@@ -3,7 +3,7 @@ id: RUST-FEAT-005
 workflow: github
 github_issue: https://github.com/emulebb/emulebb-rust/issues/5
 title: Automated VPN leak-test — assert no data egress off the tunnel (release-blocking)
-status: OPEN
+status: IN_PROGRESS
 priority: Critical
 category: feature
 labels: [vpn, anonymity, safety, tests, ci, release-blocker]
@@ -44,9 +44,35 @@ keeps it true over time.
 
 ## Acceptance Criteria
 
-- [ ] Tunnel-down scenario: zero eD2K TCP / Kad UDP egress off the tunnel observed.
-- [ ] Control/REST plane on the local IP still functions.
-- [ ] Test runs blocking in CI and fails if the data plane leaks.
+- [x] Tunnel-down scenario: zero eD2K TCP / Kad UDP egress off the tunnel observed.
+- [x] Control/REST plane on the local IP still functions.
+- [x] Test runs blocking in CI and fails if the data plane leaks.
+
+## Implementation (2026-07-05)
+
+The dynamic **observed-egress** gate landed via a test-only `egress-audit` cargo
+feature: an audit recorder at the single P2P socket chokepoint
+(`emulebb-kad-net/src/socket_opts/egress_audit.rs`, hooked in
+`pin_egress_to_interface`) captures every P2P socket's bound local address and
+the interface index its egress was pinned to.
+`crates/emulebb-core/tests/vpn_leak_egress.rs` asserts three scenarios:
+- **tunnel up** — every P2P socket is bound to the tunnel IP and pinned to the
+  tunnel interface index (so no datagram/segment can leave a non-tunnel iface);
+- **tunnel down** — ZERO P2P sockets open (empty audit) while REST/status answer;
+- **tunnel pulled mid-run** — no NEW P2P socket opens (steady-state fail-closed).
+
+Wired blocking into CI via the `test-vpn-leak` step of
+`tools/rust_quality_gate.py ci-test`
+(`cargo test -p emulebb-core --features egress-audit --test vpn_leak_egress --
+--test-threads=1`; serial because the 3 scenarios share the global recorder).
+`tools/check_rust_client_policy.py` guards the feature as test-only (never in a
+crate's `default` feature set, never referenced by the daemon binary).
+
+**Remaining (additive evidence, NOT release-blocking now that socket-truth gates
+CI on both OSes):** an optional Linux-only wire-truth CI job (dummy tunnel iface +
+tcpdump asserting zero off-tunnel frames), and the operator Windows wire-truth
+`tools/vpn_leak_local_gate.py` (pktmon on the physical NIC with a real hide.me
+tunnel pull), recorded during the Phase-4 soak.
 
 ## Notes
 

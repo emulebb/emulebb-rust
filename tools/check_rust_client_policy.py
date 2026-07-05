@@ -34,6 +34,7 @@ def main() -> int:
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_no_loopback_binds())
+    errors.extend(check_egress_audit_is_test_only())
     if errors:
         print("rust client policy check failed:", file=sys.stderr)
         for error in errors:
@@ -222,6 +223,31 @@ def function_calls(text: str, name: str) -> list[str]:
         else:
             calls.append(text[index:])
             return calls
+
+
+def check_egress_audit_is_test_only() -> list[str]:
+    """The `egress-audit` seam (RUST-FEAT-005 leak test) must never reach a
+    release build: no crate may put it in a `default` feature set, and the daemon
+    binary crate must not reference it at all (nor enable it on a dependency)."""
+    errors: list[str] = []
+    feature = "egress-audit"
+    for cargo in sorted(ROOT.glob("crates/*/Cargo.toml")):
+        try:
+            manifest = read_toml(cargo)
+        except Exception as exc:  # noqa: BLE001 - surface a bad manifest as an error
+            errors.append(f"could not parse {cargo.relative_to(ROOT)}: {exc}")
+            continue
+        rel = str(cargo.relative_to(ROOT)).replace("\\", "/")
+        name = manifest.get("package", {}).get("name", "")
+        default = manifest.get("features", {}).get("default", [])
+        if feature in default:
+            errors.append(f"{rel} lists '{feature}' in [features].default (must be test-only)")
+        if name == "emulebb-daemon" and feature in cargo.read_text(encoding="utf-8"):
+            errors.append(
+                f"{rel} references '{feature}'; the daemon binary must never enable the "
+                "test-only egress-audit seam"
+            )
+    return errors
 
 
 if __name__ == "__main__":
