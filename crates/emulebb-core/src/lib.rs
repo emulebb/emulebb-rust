@@ -6384,6 +6384,22 @@ async fn handle_kad_local_store_packet(
                 FirewalledResponseOutcome::Ignored => {}
             }
         }
+        KadPacket::FirewalledAckRes => {
+            // Legacy (pre-Kad-v7) UDP TCP-firewall-check acknowledgement: a helper
+            // we probed connected back to our eD2k TCP port and confirms it over
+            // UDP (0x59) instead of over the modern TCP OP_KAD_FWTCPCHECK_ACK path
+            // (oracle Process_KADEMLIA_FIREWALLED_ACK_RES -> IncFirewalled). Count
+            // it as an open observation through the SAME TCP-recheck accounting as
+            // the modern ack. `record_tcp_open_ack` source-validates internally
+            // (IsKadFirewallCheckIP), so an unrequested 0x59 is dropped — stricter
+            // than the oracle's unvalidated legacy path, matching rust's posture.
+            // The decoder already enforced the oracle's zero-length body check.
+            let accepted = kad_firewall
+                .lock()
+                .await
+                .record_tcp_open_ack(from.ip(), Utc::now());
+            tracing::debug!("Kad legacy FIREWALLED_ACK_RES from {from} accepted={accepted}");
+        }
         KadPacket::FirewallUdp(packet) => {
             let outcome = kad_firewall.lock().await.record_firewall_udp_packet(
                 from.ip(),

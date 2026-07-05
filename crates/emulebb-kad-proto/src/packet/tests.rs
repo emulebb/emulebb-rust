@@ -495,6 +495,18 @@ fn firewalled_response_and_legacy_ack_reject_stock_exact_size_trailing_bytes() {
 }
 
 #[test]
+fn legacy_firewalled_ack_res_decodes_from_zero_length_body() {
+    // The valid legacy (pre-Kad-v7) TCP-firewall ack is a bare zero-length 0x59
+    // (oracle Process_KADEMLIA_FIREWALLED_ACK_RES requires uLenPacket == 0). The
+    // core dispatch routes it into the TCP-recheck open-ack accounting.
+    let legacy_ack = vec![0xE4, opcode::FIREWALLED_ACK_RES];
+    assert!(matches!(
+        KadPacket::decode(&legacy_ack),
+        Ok(KadPacket::FirewalledAckRes)
+    ));
+}
+
+#[test]
 fn firewall_udp_uses_stock_min_size_and_ignores_trailing_bytes() {
     let short = vec![OP_KADEMLIAHEADER, opcode::FIREWALLUDP, 0, 0];
     assert!(matches!(
