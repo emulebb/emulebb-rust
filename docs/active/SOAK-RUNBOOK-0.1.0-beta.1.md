@@ -46,9 +46,12 @@ a 5 s REST poll, and 5-minute stability/coverage checkpoints. The harness
 launches both clients, drives synchronized actions, and runs the
 observe-and-correlate `soak_action_diff` + `diag_event_diff`.
 
-On start it also, automatically: (1) enforces VPN Guard `Block` on both clients
-and validates the public exit via STUN + HTTP against the hide.me allowlist,
-aborting on any leak; (2) seeds the **12 most-sourced common linux downloads**
+On start it also, automatically: (1) enforces VPN Guard `Block` on both clients,
+then reads each client's **own** guard verdict over REST (`data.network.vpnGuard`)
+— the client runs the bound HTTP + STUN egress probes itself (eMuleBB
+`PublicIpProbe` / rust RUST-FEAT-034) and validates its public IP against the
+allowlist; the harness aborts if either client's guard is inactive, startup-blocked,
+or (rust) reports `egressVerified=false`; (2) seeds the **12 most-sourced common linux downloads**
 (`--seed-downloads 12`) on both clients and records them as deterministic
 fixtures for re-runs. The rust runtime persists at
 `%EMULEBB_WORKSPACE_OUTPUT_ROOT%\soak\rust-runtime` (`--fresh-rust-runtime` for a
@@ -67,9 +70,10 @@ clean per-campaign profile).
       name into `incomingDir`/category end-to-end.
 - [ ] **REST responsive throughout** — no control-plane starvation under
       hashing / Kad-publish load ([[rest-starvation-root-causes]]).
-- [ ] **VPN exit validated (automated)** — the pre-soak STUN+HTTP exit check
-      passed on both clients (exit IP inside the hide.me allowlist, STUN==HTTP);
-      recorded under `vpnExitValidation` in the run summary.
+- [ ] **VPN exit validated (automated, client-side)** — each client's own VPN
+      Guard reports active + not blocked, and rust's `egressVerified=true` (bound
+      HTTP+STUN probes resolved an allowlisted public IP); recorded under
+      `vpnExitValidation` in the run summary.
 - [ ] **Leak gate (operator wire-truth)** — with the daemon bound to the live
       hide.me tunnel, pull the tunnel mid-soak and confirm (pktmon on the
       physical NIC) **zero** off-tunnel eD2K/Kad packets. This is the Windows
