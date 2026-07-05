@@ -31,8 +31,10 @@ Everything below is this repo's local deltas only:
   `emulebb_ed2k::long_path::long_path(&Path) -> PathBuf` helper rewrites an
   absolute path to its verbatim `\\?\` form (drive + `\\?\UNC\` for UNC) on
   Windows and is identity on non-Windows, applied ONLY at the three content
-  boundaries above. NOTE on the current model: there is no separate operator
-  download/incoming output path — completed payloads live in the internal
-  short-path piece store — and `Category.path` is validated/stored but not yet
-  used to open output files; the helper is wired where a category path is
-  consumed so the boundary is ready when category-rooted output lands.
+  boundaries above. NOTE on the current model: completed downloads are
+  DELIVERED by name into an operator-facing directory
+  (`emulebb_ed2k::ed2k_transfer::deliver` + `emulebb-core/src/delivery.rs`):
+  the transfer's `Category.path` when set, otherwise the configured
+  `incomingDir`. Delivery hard-links on the same volume (or copies + atomically
+  renames across volumes) and keeps the internal short-path piece store as the
+  seeding source; both destination classes go through `long_path`.

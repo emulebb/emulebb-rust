@@ -2,19 +2,23 @@
 //!
 //! eMule keeps an upload-queue position warm for hours by disconnecting and
 //! periodically *reasking* over UDP instead of holding a TCP socket per queued
-//! source. This module is the pure, transport-free foundation for that
-//! behaviour in emulebb-rust (see `docs/design/udp-source-reask.md`):
+//! source. This module implements that behaviour end to end for emulebb-rust
+//! (see `docs/design/udp-source-reask.md`):
 //!
 //! - [`codec`]: wire encode/decode of the four HighID reask opcodes.
 //! - [`registry`]: the `(ip, udp_port)` anti-spoof pending-reply gate.
 //! - [`state`]: per-source reask state, cadence policy, and the downloader-side
 //!   reaction table.
 //! - [`reciprocity`]: the uploader-side answer decision for inbound reasks.
+//! - [`runtime`]: the live transport loop ([`run_ed2k_udp_reask_loop`]), spawned
+//!   by `emulebb-core` when `enable_udp_reask` is set (default on). Datagrams
+//!   ride the shared, egress-pinned Kad UDP socket (no separate client-UDP
+//!   port), with [`buddy_relay`] handling the LowID buddy-relayed legs.
 //!
-//! The client-UDP transport + per-transfer reask ticker that call these (and the
-//! shared-vs-separate UDP-port decision) are the gated next slice. The re-exports
-//! below are the public surface that transport will consume; until it lands they
-//! are unused by design.
+//! The re-exports below are the module's full foundation surface. The live
+//! runtime reaches some of it through direct submodule paths and the unit
+//! tests exercise the rest, so parts are unused from the lib's perspective;
+//! keep the allow rather than pruning the parity-shaped API.
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod buddy_relay;
