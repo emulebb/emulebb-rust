@@ -145,7 +145,7 @@ impl DhtNode {
             .and_then(|addr| addr.ip().to_string().parse::<std::net::Ipv4Addr>().ok());
         let mut contacts = self.inner.routing_table.lock().await.all_contacts();
         // Newest contacts first (oracle prepends fresh candidates).
-        contacts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        contacts.sort_by_key(|contact| std::cmp::Reverse(contact.created_at));
         contacts
             .into_iter()
             .filter(|contact| {

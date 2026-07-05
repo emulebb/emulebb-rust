@@ -45,7 +45,7 @@ fn test_candidate_sorting() {
             distance: target.distance(&NodeId::from_bytes([0x01; 16])),
         },
     ];
-    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+    candidates.sort_by_key(|candidate| candidate.distance);
     // 0x01... is closer to ZERO than 0xFF...
     assert_eq!(candidates[0].contact.id, NodeId::from_bytes([0x01; 16]));
 }

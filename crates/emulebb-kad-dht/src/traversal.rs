@@ -392,7 +392,7 @@ fn initial_traversal_candidates(
             state: CandidateState::Pending,
         })
         .collect();
-    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+    candidates.sort_by_key(|candidate| candidate.distance);
     candidates.dedup_by(|a, b| a.contact.id == b.contact.id);
     candidates
 }
