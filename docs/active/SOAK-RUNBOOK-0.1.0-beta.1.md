@@ -22,10 +22,15 @@ tunnels; well-sourced ubuntu/linux ISO fixtures only ([[live-test-content-well-s
    `--diagnostics` build → `builds/app/main/x64/Release/diagnostics/bin/emulebb-diagnostics.exe`
    via `python -m emule_workspace build app --variant main --config Release --platform x64 --diagnostics`.
    Must be current (post the FEAT-025 oracle seams).
-3. **Operator inputs** — `live-wire-inputs.local.json` naming the parity shared
-   roots (operator-owned; not committed).
-4. **hide.me VPN** configured with the LAN `192.168.1.0/24` in `ExcludeIPRanges`;
-   VPN Guard `Block`.
+3. **Operator inputs** — `live-wire-inputs.local.json` (operator-owned, gitignored):
+   `mfc_profile.profile_dir` set to the persisted MFC profile (rust auto-mirrors
+   its `config\shareddir.dat` shared set); linux `search_terms.generic_open`
+   (`ubuntu iso` / `linux iso` / …); `deterministic_downloads` (auto-populated).
+4. **`vpn-guard-live.local.json`** (gitignored, beside the inputs): the hide.me
+   `allowedPublicIpCidrs` allowlist + `p2pBindInterfaceName: hide.me`. The harness
+   activates VPN Guard `Block` on **both** clients from this file and validates the
+   exit against it — no manual profile edit needed.
+5. **hide.me VPN** connected, LAN `192.168.1.0/24` in `ExcludeIPRanges`.
 
 ## Run
 
@@ -41,6 +46,14 @@ a 5 s REST poll, and 5-minute stability/coverage checkpoints. The harness
 launches both clients, drives synchronized actions, and runs the
 observe-and-correlate `soak_action_diff` + `diag_event_diff`.
 
+On start it also, automatically: (1) enforces VPN Guard `Block` on both clients
+and validates the public exit via STUN + HTTP against the hide.me allowlist,
+aborting on any leak; (2) seeds the **12 most-sourced common linux downloads**
+(`--seed-downloads 12`) on both clients and records them as deterministic
+fixtures for re-runs. The rust runtime persists at
+`%EMULEBB_WORKSPACE_OUTPUT_ROOT%\soak\rust-runtime` (`--fresh-rust-runtime` for a
+clean per-campaign profile).
+
 ## Gate criteria (record all as release evidence)
 
 - [ ] **Parity diff clean** — `diag_event_diff` shows no unregistered
@@ -54,6 +67,9 @@ observe-and-correlate `soak_action_diff` + `diag_event_diff`.
       name into `incomingDir`/category end-to-end.
 - [ ] **REST responsive throughout** — no control-plane starvation under
       hashing / Kad-publish load ([[rest-starvation-root-causes]]).
+- [ ] **VPN exit validated (automated)** — the pre-soak STUN+HTTP exit check
+      passed on both clients (exit IP inside the hide.me allowlist, STUN==HTTP);
+      recorded under `vpnExitValidation` in the run summary.
 - [ ] **Leak gate (operator wire-truth)** — with the daemon bound to the live
       hide.me tunnel, pull the tunnel mid-soak and confirm (pktmon on the
       physical NIC) **zero** off-tunnel eD2K/Kad packets. This is the Windows
