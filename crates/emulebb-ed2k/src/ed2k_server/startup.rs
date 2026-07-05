@@ -285,12 +285,15 @@ pub(super) fn encode_udp_search_request(
     if server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETFILES != 0
         && server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES != 0
     {
-        let mut payload = Vec::with_capacity(search_payload.len() + 11);
+        let mut payload = Vec::with_capacity(search_payload.len() + 7);
         payload.extend_from_slice(&1u32.to_le_bytes());
-        push_u32_tag(
+        // Stock encodes CT_SERVER_UDPSEARCH_FLAGS via WriteNewEd2kTag, which
+        // down-sizes the value 0x01 to a compact short-name UINT8 tag (89 0E 01),
+        // not the long UINT32 form (SearchResultsWnd.cpp).
+        push_short_u8_tag(
             &mut payload,
             CT_SERVER_UDPSEARCH_FLAGS,
-            SRVCAP_UDP_NEWTAGS_LARGEFILES,
+            SRVCAP_UDP_NEWTAGS_LARGEFILES as u8,
         );
         payload.extend_from_slice(search_payload);
         (OP_GLOBSEARCHREQ3, payload)

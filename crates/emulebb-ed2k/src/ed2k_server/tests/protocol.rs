@@ -34,6 +34,12 @@ fn udp_keyword_search_request_adds_large_file_flags_when_supported() {
 
     assert_eq!(opcode, OP_GLOBSEARCHREQ3);
     assert_eq!(&payload[..4], &1u32.to_le_bytes());
+    // Stock encodes CT_SERVER_UDPSEARCH_FLAGS via WriteNewEd2kTag: a compact
+    // short-name UINT8 tag `89 0E 01`, not the long UINT32 form.
+    assert_eq!(
+        &payload[4..7],
+        &[0x80 | 0x09, CT_SERVER_UDPSEARCH_FLAGS, 0x01]
+    );
     assert!(payload.ends_with(b"abc"));
 }
 
