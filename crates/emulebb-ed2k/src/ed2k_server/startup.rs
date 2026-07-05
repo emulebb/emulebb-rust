@@ -23,19 +23,19 @@ use super::tag_codec::{
 };
 use super::{
     CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
-    ED2K_FILETYPE_ARCHIVE, ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_PROGRAM,
-    ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR, EMULE_VERSION_MINOR,
-    EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE, HELLO_NICKNAME,
-    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
-    OFFER_FILE_SAMPLE_HASH, OFFER_FILE_SAMPLE_NAME, OFFER_FILE_SAMPLE_SIZE,
-    OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU,
-    OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
-    OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION,
-    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
-    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
-    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
-    is_low_id,
+    ED2K_FILETYPE_ANY, ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_IMAGE,
+    ED2K_FILETYPE_PROGRAM, ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR,
+    EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI,
+    FT_FILETYPE, HELLO_NICKNAME, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
+    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SAMPLE_HASH, OFFER_FILE_SAMPLE_NAME,
+    OFFER_FILE_SAMPLE_SIZE, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES,
+    OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2,
+    OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION,
+    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES,
+    SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES,
+    SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT,
+    SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession,
+    ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -137,10 +137,21 @@ fn encode_offer_files_payload_at_cursor(
             .expect("offered file count fits in u32")
             .to_le_bytes(),
     );
+    let use_integer_type = server_flags.unwrap_or_default() & SERVER_TCP_FLAG_TYPETAGINTEGER != 0;
     for (file_hash, file_name, file_size, file_type) in &offered_files.entries {
         let lower_file_size = *file_size as u32;
         let upper_file_size = u32::try_from(file_size >> 32).unwrap_or(u32::MAX);
-        let tag_count = if upper_file_size == 0 { 3u32 } else { 4u32 };
+        // FT_FILETYPE per stock (SharedFileList::CreateOfferedFilePacket): an
+        // integer search-ID to TYPETAGINTEGER servers, else the string term; an
+        // ANY (unknown) type publishes no FT_FILETYPE tag at all.
+        let has_type_tag = *file_type != ED2K_FILETYPE_ANY;
+        let mut tag_count = 2u32; // FT_FILENAME + FT_FILESIZE
+        if upper_file_size != 0 {
+            tag_count += 1;
+        }
+        if has_type_tag {
+            tag_count += 1;
+        }
         payload.extend_from_slice(file_hash);
         payload.extend_from_slice(&advertised_client_id.to_le_bytes());
         payload.extend_from_slice(&advertised_client_port.to_le_bytes());
@@ -150,7 +161,13 @@ fn encode_offer_files_payload_at_cursor(
         if upper_file_size != 0 {
             push_short_u32_tag(&mut payload, FT_FILESIZE_HI, upper_file_size);
         }
-        push_short_u8_tag(&mut payload, FT_FILETYPE, *file_type);
+        if has_type_tag {
+            if use_integer_type {
+                push_short_u8_tag(&mut payload, FT_FILETYPE, *file_type);
+            } else if let Some(term) = ed2k_file_type_search_term(*file_type) {
+                push_short_string_tag(&mut payload, FT_FILETYPE, term);
+            }
+        }
     }
     EncodedOfferFilesPayload {
         payload,
@@ -481,6 +498,9 @@ fn unix_time_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// Classify a filename to its published ED2K search-ID (`GetED2KFileTypeSearchID`).
+/// Archives and CD/DVD images fold to PROGRAM ("Pro"); an unrecognized extension
+/// is ANY (0), which publishes no FT_FILETYPE tag at all.
 fn ed2k_offer_file_type(file_name: &str) -> u8 {
     match file_name
         .rsplit('.')
@@ -488,11 +508,39 @@ fn ed2k_offer_file_type(file_name: &str) -> u8 {
         .map(|extension| extension.to_ascii_lowercase())
         .as_deref()
     {
-        Some("avi" | "mp4" | "mkv" | "mov" | "wmv" | "mpeg" | "mpg") => ED2K_FILETYPE_VIDEO,
-        Some("mp3" | "flac" | "ogg" | "wav" | "aac" | "m4a") => ED2K_FILETYPE_AUDIO,
-        Some("zip" | "rar" | "7z" | "tar" | "gz" | "bz2") => ED2K_FILETYPE_ARCHIVE,
-        Some("pdf" | "doc" | "docx" | "txt" | "rtf" | "epub") => ED2K_FILETYPE_DOCUMENT,
-        _ => ED2K_FILETYPE_PROGRAM,
+        Some(
+            "avi" | "mp4" | "mkv" | "mov" | "wmv" | "mpeg" | "mpg" | "flv" | "webm" | "m4v" | "ts"
+            | "vob" | "ogm" | "divx" | "asf",
+        ) => ED2K_FILETYPE_VIDEO,
+        Some(
+            "mp3" | "flac" | "ogg" | "wav" | "aac" | "m4a" | "wma" | "opus" | "ac3" | "mpc" | "mid",
+        ) => ED2K_FILETYPE_AUDIO,
+        Some("jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "ico") => {
+            ED2K_FILETYPE_IMAGE
+        }
+        // Archives + CD/DVD images publish as PROGRAM ("Pro") per stock's
+        // GetED2KFileTypeSearchID fold, alongside actual programs.
+        Some(
+            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "ace" | "iso" | "bin" | "nrg"
+            | "img" | "cue" | "mdf" | "exe" | "msi" | "dll",
+        ) => ED2K_FILETYPE_PROGRAM,
+        Some("pdf" | "doc" | "docx" | "txt" | "rtf" | "epub" | "chm" | "odt") => {
+            ED2K_FILETYPE_DOCUMENT
+        }
+        _ => ED2K_FILETYPE_ANY,
+    }
+}
+
+/// The string FT_FILETYPE term (`GetED2KFileTypeSearchTerm`) for a search-ID, used
+/// for servers without `SRV_TCPFLG_TYPETAGINTEGER`. ANY has no term.
+fn ed2k_file_type_search_term(search_id: u8) -> Option<&'static str> {
+    match search_id {
+        ED2K_FILETYPE_AUDIO => Some("Audio"),
+        ED2K_FILETYPE_VIDEO => Some("Video"),
+        ED2K_FILETYPE_IMAGE => Some("Image"),
+        ED2K_FILETYPE_PROGRAM => Some("Pro"),
+        ED2K_FILETYPE_DOCUMENT => Some("Doc"),
+        _ => None,
     }
 }
 

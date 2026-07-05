@@ -504,12 +504,55 @@ fn offer_files_payload_matches_oracle_search_session_sample() {
     )
     .unwrap();
 
+    // Server has no SRV_TCPFLG_TYPETAGINTEGER, so FT_FILETYPE is the STRING term
+    // for a .iso (CD-image folds to PROGRAM = "Pro"), not an integer.
     let expected = decode(
-            "e34a00000015010000009f3c23db7651efbac9a837a8a0ae3ed9fbfbfbfbfbfb0300000082011e007562756e74752d6c696e75782d6f7261636c652d73616d706c652e69736f830200002000890304",
+            "e34c00000015010000009f3c23db7651efbac9a837a8a0ae3ed9fbfbfbfbfbfb0300000082011e007562756e74752d6c696e75782d6f7261636c652d73616d706c652e69736f830200002000930350726f",
         )
         .unwrap();
 
     assert_eq!(packet, expected);
+}
+
+#[test]
+fn offer_files_payload_uses_integer_file_type_for_typetaginteger_servers() {
+    let shared_catalog = vec![Ed2kSharedEntry {
+        file_hash: hex::encode(OFFER_FILE_SAMPLE_HASH),
+        canonical_name: OFFER_FILE_SAMPLE_NAME.to_string(),
+        file_size: u64::from(OFFER_FILE_SAMPLE_SIZE),
+        verified_complete: false,
+        verified_ranges: Vec::new(),
+        compatibility_hint: true,
+        source_count_hint: Some(12),
+        aich_root: None,
+        upload_priority: "normal".to_string(),
+        auto_upload_priority: false,
+        comment: String::new(),
+        rating: 0,
+        all_time_uploaded_bytes: 0,
+        complete_parts: Vec::new(),
+        publish: Default::default(),
+    }];
+    let packet = encode_offer_files_payload(
+        &shared_catalog,
+        Some(0x521B_5895),
+        Ipv4Addr::LOCALHOST,
+        46671,
+        Some(SERVER_TCP_FLAG_TYPETAGINTEGER),
+    );
+    // FT_FILETYPE is an integer search-ID (PROGRAM=4 for a CD-image) on a
+    // TYPETAGINTEGER server: short u8 tag `89 03 04`.
+    assert!(
+        packet
+            .windows(3)
+            .any(|window| window == [0x80 | 0x09, FT_FILETYPE, ED2K_FILETYPE_PROGRAM]),
+        "TYPETAGINTEGER server must receive the integer file type"
+    );
+    // and NOT the string term "Pro".
+    assert!(
+        !packet.windows(3).any(|window| window == *b"Pro"),
+        "integer path must not also emit the string term"
+    );
 }
 
 #[test]

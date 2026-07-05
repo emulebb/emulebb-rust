@@ -212,11 +212,17 @@ const FT_FILESIZE: u8 = 0x02;
 const FT_FILETYPE: u8 = 0x03;
 const FT_SOURCES: u8 = 0x15;
 const FT_FILESIZE_HI: u8 = 0x3A;
-const ED2K_FILETYPE_PROGRAM: u8 = 0x04;
-const ED2K_FILETYPE_DOCUMENT: u8 = 0x05;
-const ED2K_FILETYPE_ARCHIVE: u8 = 0x06;
-const ED2K_FILETYPE_AUDIO: u8 = 0x07;
-const ED2K_FILETYPE_VIDEO: u8 = 0x08;
+// ED2K search-ID file types (eserver 17.6+, OtherFunctions.h `ED2KFT_*`): the
+// integer FT_FILETYPE value published in OP_OFFERFILES. `GetED2KFileTypeSearchID`
+// folds Archive/CD-image to PROGRAM ("Pro"); an unknown type (ANY) publishes no
+// FT_FILETYPE tag at all. The earlier rust values (audio=7/video=8/archive=6)
+// were a non-stock enum.
+const ED2K_FILETYPE_ANY: u8 = 0;
+const ED2K_FILETYPE_AUDIO: u8 = 1;
+const ED2K_FILETYPE_VIDEO: u8 = 2;
+const ED2K_FILETYPE_IMAGE: u8 = 3;
+const ED2K_FILETYPE_PROGRAM: u8 = 4;
+const ED2K_FILETYPE_DOCUMENT: u8 = 5;
 
 const OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID: u32 = 0xFBFB_FBFB;
 const OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT: u16 = 0xFBFB;
