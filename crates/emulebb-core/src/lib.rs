@@ -4854,8 +4854,7 @@ fn kad_shared_file_publish_in_flight_budget(runtime: &KadPublishLoopRuntime) -> 
 fn kad_shared_file_publish_in_flight_budget_for(max_concurrent_searches: usize) -> usize {
     max_concurrent_searches
         .saturating_sub(KAD_SHARED_FILE_PUBLISH_RESERVED_SEARCH_PERMITS)
-        .max(1)
-        .min(KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL)
+        .clamp(1, KAD_SHARED_FILE_PUBLISH_KIND_CAP_TOTAL)
 }
 
 async fn run_kad_shared_file_publish_loop(

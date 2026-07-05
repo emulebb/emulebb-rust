@@ -148,6 +148,11 @@ pub fn ed2k_part_count(file_size: u64) -> u16 {
 pub(crate) const ED2K_EMBLOCK_SIZE: u64 = 184_320;
 const PAYLOAD_FILE_NAME: &str = "pieces.bin";
 
+/// Cross-connection same-file upload-churn ledger: `(peer key, file hash) ->
+/// (repeat count, first-seen)`, bounded and window-pruned for MFC
+/// `repeat_file_request` parity (observe-only).
+type UploadFileChurnLedger = Arc<StdMutex<HashMap<(String, String), (u32, Instant)>>>;
+
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the
 /// transfer-backed shared catalog.
 #[derive(Debug)]
@@ -175,7 +180,7 @@ pub struct Ed2kTransferRuntime {
     /// Cross-connection same-file upload-churn ledger keyed by (peer key, file
     /// hash) -> (count, first-seen) for MFC repeat_file_request parity. Bounded and
     /// window-pruned; observe-only.
-    upload_file_churn: Arc<StdMutex<HashMap<(String, String), (u32, Instant)>>>,
+    upload_file_churn: UploadFileChurnLedger,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received

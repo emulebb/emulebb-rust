@@ -986,9 +986,7 @@ impl Ed2kUploadQueueState {
                 > self.config.granted_timeout)
                 .then(|| self.recycle_diagnostics(session, now, "noRequestUnderfill"));
         }
-        let Some(started_at) = session.upload_started_at else {
-            return None;
-        };
+        let started_at = session.upload_started_at?;
         if now.saturating_duration_since(started_at) < self.config.upload_timeout {
             return None;
         }

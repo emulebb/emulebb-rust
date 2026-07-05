@@ -341,7 +341,10 @@ fn dump_ed2k_tcp_record(record: &Ed2kTcpDumpRecord<'_>) {
 
 fn maybe_sync_ed2k_tcp_dump(file: &fs::File) {
     static ED2K_TCP_LIVE_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
-    if ED2K_TCP_LIVE_SYNC_COUNTER.fetch_add(1, Ordering::Relaxed) % ED2K_TCP_LIVE_SYNC_EVERY == 0 {
+    if ED2K_TCP_LIVE_SYNC_COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(ED2K_TCP_LIVE_SYNC_EVERY)
+    {
         let _ = file.sync_data();
     }
 }

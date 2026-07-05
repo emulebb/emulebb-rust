@@ -102,7 +102,7 @@ rationale = "Shared-directory scan/reload orchestration (recursive intake walk, 
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-ed2k/src/ed2k_tcp/dump.rs"
-hard_limit_lines = 643
+hard_limit_lines = 646
 rationale = "Single cohesive ed2k_packet_v1 packet-diagnostics dump unit, gated behind the packet-diagnostics Cargo feature (the equivalent of eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef): the record struct, the per-opcode field extractors, the obfuscation/transport annotations, and the JSONL writer all belong to one diagnostic record shape and are dead-code-eliminated in release builds. Splitting the extractors from the record they populate would scatter one wire-dump format across files for no maintainability gain. Allowlisted at the current size (over the 600 default budget); the dump is diagnostic-only and carries zero release cost. Bumped again (+10, 633 -> 643) for the RUST-BUG-004 live-diagnostics flush/sync slice (flush the JSONL writer on each record and sync the dump stream with the live eD2K session so converged captures do not trail the wire). Cap retro-pinned 2026-07-05 when the quality gate was restored."
 
 [[structure.large_file_allowlist]]

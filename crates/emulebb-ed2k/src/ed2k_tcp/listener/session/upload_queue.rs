@@ -361,10 +361,10 @@ impl ListenerUploadQueue {
         transfer_runtime: &Ed2kTransferRuntime,
         requested: &Ed2kHash,
     ) -> Result<Option<Ed2kVerifiedRangeReader>> {
-        if let Some((cached_hash, reader)) = self.verified_reader.take() {
-            if cached_hash == *requested {
-                return Ok(Some(reader));
-            }
+        if let Some((cached_hash, reader)) = self.verified_reader.take()
+            && cached_hash == *requested
+        {
+            return Ok(Some(reader));
         }
         transfer_runtime.open_verified_range_reader(requested).await
     }

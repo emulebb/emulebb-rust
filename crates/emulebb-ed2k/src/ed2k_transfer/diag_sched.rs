@@ -76,6 +76,7 @@ pub(crate) fn upload_slot_closed(
 /// `upload_slot_recycled` (schema §3.5): an idle/timed-out active slot is
 /// reclaimed by the queue (master `activeNoRequestRecycle*`), distinct from a
 /// peer-initiated close.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn upload_slot_recycled(
     peer: &str,
     peer_hash: Option<[u8; 16]>,
@@ -113,6 +114,7 @@ pub(crate) fn queue_rank(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &st
 /// `upload_request_outcome` (schema extension): one OP_REQUESTPARTS admission and
 /// payload-serving result. This fills the parity gap between "request accepted"
 /// and "payload packet left the socket", without logging file names or payload.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn upload_request_outcome(
     peer: &str,
     peer_hash: Option<[u8; 16]>,
@@ -182,6 +184,7 @@ pub(crate) fn upload_payload_accounting(
 /// Rust has no periodic upload-queue tick (its slot scheduling is driven per
 /// connection), so this is emitted whenever the capacity is inspected rather
 /// than on a fixed timer — a cadence difference the structural harness tolerates.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn capacity_snapshot(
     base_slots: usize,
     elastic_slots: usize,

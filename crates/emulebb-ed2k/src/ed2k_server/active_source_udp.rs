@@ -258,9 +258,7 @@ async fn drain_source_udp_responses(
         if cancel.is_cancelled() {
             return None;
         }
-        let Some(remaining) = deadline.checked_duration_since(TokioInstant::now()) else {
-            return None;
-        };
+        let remaining = deadline.checked_duration_since(TokioInstant::now())?;
         match tokio::time::timeout(
             remaining,
             read_server_udp_packet_from_any(socket, queried_servers),

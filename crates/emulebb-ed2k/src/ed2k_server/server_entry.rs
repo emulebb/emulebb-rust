@@ -158,6 +158,52 @@ pub(super) fn configured_server_entries(config: &Ed2kConfig) -> Result<Vec<Confi
     Ok(ordered)
 }
 
+pub(super) async fn resolve_server_entry(
+    entry: &ConfiguredServerEntry,
+) -> Result<ResolvedServerEntry> {
+    let lookup = format!("{}:{}", entry.host, entry.port);
+    let ip = if let Ok(parsed_ip) = entry.host.parse::<Ipv4Addr>() {
+        parsed_ip
+    } else {
+        lookup_host(&lookup)
+            .await
+            .with_context(|| format!("failed to resolve {lookup}"))?
+            .find_map(|endpoint| match endpoint {
+                SocketAddr::V4(endpoint) => Some(*endpoint.ip()),
+                SocketAddr::V6(_) => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("no IPv4 address resolved for {lookup}"))?
+    };
+    Ok(ResolvedServerEntry {
+        entry: entry.clone(),
+        ip,
+    })
+}
+
+pub(super) async fn resolve_callback_server_entry(
+    config: &Ed2kConfig,
+    server_endpoint: SocketAddr,
+) -> Result<ResolvedServerEntry> {
+    let endpoint_v4 = match server_endpoint {
+        SocketAddr::V4(endpoint) => endpoint,
+        SocketAddr::V6(_) => {
+            anyhow::bail!("ED2K callback server endpoint must be IPv4, got {server_endpoint}")
+        }
+    };
+
+    for configured_server in configured_server_entries(config)? {
+        let resolved_server = resolve_server_entry(&configured_server).await?;
+        if resolved_server.base_endpoint() == SocketAddr::V4(endpoint_v4) {
+            return Ok(resolved_server);
+        }
+    }
+
+    Ok(ResolvedServerEntry {
+        entry: ConfiguredServerEntry::from_endpoint_text(&server_endpoint.to_string())?,
+        ip: *endpoint_v4.ip(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,50 +250,4 @@ mod tests {
         assert_eq!(entries[0].base_endpoint_text(), "203.0.113.10:4661");
         assert_eq!(entries[1].base_endpoint_text(), "203.0.113.20:4661");
     }
-}
-
-pub(super) async fn resolve_server_entry(
-    entry: &ConfiguredServerEntry,
-) -> Result<ResolvedServerEntry> {
-    let lookup = format!("{}:{}", entry.host, entry.port);
-    let ip = if let Ok(parsed_ip) = entry.host.parse::<Ipv4Addr>() {
-        parsed_ip
-    } else {
-        lookup_host(&lookup)
-            .await
-            .with_context(|| format!("failed to resolve {lookup}"))?
-            .find_map(|endpoint| match endpoint {
-                SocketAddr::V4(endpoint) => Some(*endpoint.ip()),
-                SocketAddr::V6(_) => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("no IPv4 address resolved for {lookup}"))?
-    };
-    Ok(ResolvedServerEntry {
-        entry: entry.clone(),
-        ip,
-    })
-}
-
-pub(super) async fn resolve_callback_server_entry(
-    config: &Ed2kConfig,
-    server_endpoint: SocketAddr,
-) -> Result<ResolvedServerEntry> {
-    let endpoint_v4 = match server_endpoint {
-        SocketAddr::V4(endpoint) => endpoint,
-        SocketAddr::V6(_) => {
-            anyhow::bail!("ED2K callback server endpoint must be IPv4, got {server_endpoint}")
-        }
-    };
-
-    for configured_server in configured_server_entries(config)? {
-        let resolved_server = resolve_server_entry(&configured_server).await?;
-        if resolved_server.base_endpoint() == SocketAddr::V4(endpoint_v4) {
-            return Ok(resolved_server);
-        }
-    }
-
-    Ok(ResolvedServerEntry {
-        entry: ConfiguredServerEntry::from_endpoint_text(&server_endpoint.to_string())?,
-        ip: *endpoint_v4.ip(),
-    })
 }

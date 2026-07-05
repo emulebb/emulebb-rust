@@ -279,7 +279,7 @@ impl DaemonConfig {
         };
         let secure_ident = Arc::new(load_or_create_secure_ident(metadata)?);
         let ip_filter = self.load_ip_filter()?;
-        let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, &detected_interfaces);
+        let vpn_interface_bound = self.vpn_binding_confirmed(bind_ip, detected_interfaces);
         Ok(Some(Ed2kNetworkConfig {
             bind_ip,
             kad_bind_addr: self.kad_bind_addr(bind_ip)?,
