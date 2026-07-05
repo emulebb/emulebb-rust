@@ -223,7 +223,7 @@ pub use rest_model::{
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
     Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource, TransferStats,
     TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardStatus,
+    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -351,6 +351,10 @@ pub struct EmulebbCore {
     /// external eD2k TCP/UDP ports), read at hello/login-encode time. Fed by the
     /// server (OP_IDCHANGE), the STUN fallback, and the NAT-mapping sync.
     ed2k_reachability: ExternalReachability,
+    /// Latest bound dual-plane egress-probe report (STUN UDP + HTTP TCP) that the
+    /// VPN Guard monitor runs to verify the public egress (eMuleBB PublicIpProbe).
+    /// Read by `vpn_guard_status`; refreshed by `run_vpn_guard_egress_probe`.
+    vpn_guard_egress: Arc<std::sync::Mutex<vpn_guard::EgressProbeReport>>,
     /// Tracks the detached per-transfer background download tasks for the current
     /// connected session, so `disconnect_ed2k` can abort them (they are otherwise
     /// untracked detached tasks that survive disconnect and orphan on shutdown).
@@ -475,6 +479,9 @@ impl EmulebbCore {
             ed2k_runtime: Arc::new(Mutex::new(None)),
             ed2k_reask_handle: Arc::new(std::sync::Mutex::new(None)),
             ed2k_reachability: ExternalReachability::new(),
+            vpn_guard_egress: Arc::new(std::sync::Mutex::new(
+                vpn_guard::EgressProbeReport::default(),
+            )),
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),

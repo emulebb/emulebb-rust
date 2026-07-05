@@ -28,7 +28,38 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return VpnGuardStatus::off();
         };
-        vpn_guard::status(network, self.ed2k_reachability.get())
+        let report = self
+            .vpn_guard_egress
+            .lock()
+            .map(|report| report.clone())
+            .unwrap_or_default();
+        vpn_guard::status(network, self.ed2k_reachability.get(), &report)
+    }
+
+    /// Run the bound dual-plane egress probe (STUN UDP + HTTP TCP) and store the
+    /// result, mirroring eMuleBB's `PublicIpProbe` gate: both legs are source-bound
+    /// and egress-pinned to the tunnel interface, so the observed public IP is the
+    /// real P2P egress. Called by the VPN Guard monitor (startup + runtime). No-op
+    /// (records nothing) when there is no resolved bind IP to probe from.
+    pub async fn run_vpn_guard_egress_probe(&self) {
+        let Some(network) = self.ed2k_network.as_ref() else {
+            return;
+        };
+        // Only probe when there is a public-IP CIDR gate to verify; without one
+        // there is nothing to check and no reason to emit external probe traffic.
+        if network.vpn_guard.allowed_public_ip_cidrs.trim().is_empty() {
+            return;
+        }
+        let bind_ip = network.bind_ip;
+        if bind_ip.is_unspecified() || bind_ip.is_loopback() {
+            return;
+        }
+        let timeout = std::time::Duration::from_secs(6);
+        let stun = emulebb_ed2k::public_ip_probe::stun_probe_bound(bind_ip, timeout).await;
+        let http = emulebb_ed2k::public_ip_probe::http_probe(bind_ip, timeout).await;
+        if let Ok(mut report) = self.vpn_guard_egress.lock() {
+            *report = vpn_guard::EgressProbeReport { stun, http };
+        }
     }
 
     /// Current configured/resolved P2P binding snapshot for REST status surfaces.

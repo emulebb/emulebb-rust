@@ -1,11 +1,35 @@
 use std::{net::Ipv4Addr, sync::atomic::Ordering};
 
 use emulebb_ed2k::NetworkInterface;
+use emulebb_ed2k::public_ip_probe::BoundProbeResult;
 use ipnet::Ipv4Net;
 
-use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardStatus};
+use crate::{Ed2kNetworkConfig, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus};
 
-pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -> VpnGuardStatus {
+/// Latest bound egress-probe outcomes (STUN UDP + HTTP TCP), mirroring eMuleBB's
+/// dual `PublicIpProbe`. Populated by the guard monitor's active egress probe and
+/// consumed by [`status`] for the verdict + REST surface. Default = not yet probed.
+#[derive(Debug, Clone, Default)]
+pub struct EgressProbeReport {
+    pub stun: BoundProbeResult,
+    pub http: BoundProbeResult,
+}
+
+fn probe_status(probe: &BoundProbeResult) -> VpnGuardProbeStatus {
+    VpnGuardProbeStatus {
+        attempted: probe.attempted,
+        succeeded: probe.succeeded,
+        public_ip: probe.public_ip.map(|ip| ip.to_string()),
+        provider: probe.provider.clone(),
+        error: probe.error.clone(),
+    }
+}
+
+pub(crate) fn status(
+    network: &Ed2kNetworkConfig,
+    public_ip: Option<Ipv4Addr>,
+    report: &EgressProbeReport,
+) -> VpnGuardStatus {
     let guard = &network.vpn_guard;
     let blocking = is_blocking_mode(guard);
     let vpn_interface_bound = network
@@ -18,19 +42,66 @@ pub(crate) fn status(network: &Ed2kNetworkConfig, public_ip: Option<Ipv4Addr>) -
     } else {
         None
     };
-    let public_ip_block_reason = blocking
+    // Active dual-plane egress verdict (eMuleBB PublicIpProbe): when blocking with
+    // a CIDR gate, each attempted bound probe must resolve an allowlisted public IP.
+    let egress_block = blocking
+        .then(|| egress_probe_block_reason(guard, report))
+        .flatten();
+    // The learned reachability IP (server OP_IDCHANGE / STUN fallback) still gates
+    // even before the active probes have run, so the guard is never open at startup.
+    let learned_block = blocking
         .then(|| public_ip_block_reason(guard, public_ip))
         .flatten();
     let startup_block_reason = interface_block_reason
-        .or(public_ip_block_reason)
+        .or(egress_block.clone())
+        .or(learned_block)
         .unwrap_or_default();
+    let cidr_gate = !guard.allowed_public_ip_cidrs.trim().is_empty();
+    let probed_ip = report
+        .http
+        .public_ip
+        .or(report.stun.public_ip)
+        .or(public_ip)
+        .map(|ip| ip.to_string());
     VpnGuardStatus {
         enabled: guard.enabled,
         mode: if blocking { "block" } else { "off" }.to_string(),
         allowed_public_ip_cidrs: guard.allowed_public_ip_cidrs.clone(),
         startup_blocked: !startup_block_reason.is_empty(),
         startup_block_reason,
+        public_ip: probed_ip,
+        egress_verified: blocking && cidr_gate && egress_block.is_none(),
+        egress_block_reason: egress_block.unwrap_or_default(),
+        stun_probe: probe_status(&report.stun),
+        http_probe: probe_status(&report.http),
     }
+}
+
+/// Dual-probe egress verdict — eMuleBB `VpnGuardPolicySeams::IsProbeResultAllowed`
+/// (`!bPublicIpCheckRequired || (bProbeSucceeded && bPublicIpAllowed)`) applied to
+/// both the STUN and HTTP bound probes. With no CIDR gate there is nothing to
+/// verify (`None`). An unattempted probe is skipped (the monitor attempts it each
+/// cycle); an attempted probe must have succeeded and resolved an allowlisted IP.
+pub(crate) fn egress_probe_block_reason(
+    guard: &VpnGuardConfig,
+    report: &EgressProbeReport,
+) -> Option<String> {
+    if guard.allowed_public_ip_cidrs.trim().is_empty() {
+        return None;
+    }
+    for (label, probe) in [("STUN", &report.stun), ("HTTP", &report.http)] {
+        if !probe.attempted {
+            continue;
+        }
+        if !probe.succeeded {
+            let detail = probe.error.as_deref().unwrap_or("no public IP resolved");
+            return Some(format!("VPN Guard {label} egress probe failed: {detail}"));
+        }
+        if let Some(reason) = public_ip_block_reason(guard, probe.public_ip) {
+            return Some(format!("{label} egress {reason}"));
+        }
+    }
+    None
 }
 
 fn is_blocking_mode(guard: &VpnGuardConfig) -> bool {
@@ -166,6 +237,67 @@ mod tests {
             mode: "block".to_string(),
             allowed_public_ip_cidrs: cidrs.to_string(),
         }
+    }
+
+    fn probe(succeeded: bool, ip: Option<Ipv4Addr>, attempted: bool) -> BoundProbeResult {
+        BoundProbeResult {
+            attempted,
+            succeeded,
+            public_ip: ip,
+            provider: "http://test/".to_string(),
+            error: (!succeeded).then(|| "unreachable".to_string()),
+        }
+    }
+
+    #[test]
+    fn egress_verdict_none_without_cidr_gate() {
+        // No CIDR gate → nothing to verify even if a probe resolved an odd IP.
+        let report = EgressProbeReport {
+            stun: probe(true, Some(Ipv4Addr::new(1, 1, 1, 1)), true),
+            http: probe(true, Some(Ipv4Addr::new(1, 1, 1, 1)), true),
+        };
+        assert!(egress_probe_block_reason(&guard(""), &report).is_none());
+    }
+
+    #[test]
+    fn egress_verdict_allows_in_range_and_blocks_out_of_range() {
+        let guard = guard("176.10.104.0/22");
+        let allowed = Ipv4Addr::new(176, 10, 104, 9);
+        let leaked = Ipv4Addr::new(8, 8, 8, 8);
+        // Both probes resolve an allowlisted IP → verified.
+        let ok = EgressProbeReport {
+            stun: probe(true, Some(allowed), true),
+            http: probe(true, Some(allowed), true),
+        };
+        assert!(egress_probe_block_reason(&guard, &ok).is_none());
+        // HTTP probe resolves an out-of-allowlist IP → a leak is reported.
+        let leak = EgressProbeReport {
+            stun: probe(true, Some(allowed), true),
+            http: probe(true, Some(leaked), true),
+        };
+        assert!(
+            egress_probe_block_reason(&guard, &leak)
+                .unwrap()
+                .contains("HTTP egress")
+        );
+    }
+
+    #[test]
+    fn egress_verdict_fails_closed_on_probe_failure_but_skips_unattempted() {
+        let guard = guard("176.10.104.0/22");
+        // An attempted-but-failed probe fails closed (could not verify egress).
+        let failed = EgressProbeReport {
+            stun: probe(false, None, true),
+            http: BoundProbeResult::default(),
+        };
+        assert!(
+            egress_probe_block_reason(&guard, &failed)
+                .unwrap()
+                .contains("STUN egress probe failed")
+        );
+        // A not-yet-attempted probe is skipped (monitor attempts it each cycle).
+        let unattempted = EgressProbeReport::default();
+        assert!(egress_probe_block_reason(&guard, &unattempted).is_none());
     }
 
     #[test]

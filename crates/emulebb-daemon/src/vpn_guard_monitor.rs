@@ -13,6 +13,11 @@ use tokio::time::MissedTickBehavior;
 
 const VPN_GUARD_RUNTIME_MONITOR_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How many monitor ticks between active egress re-probes (STUN + HTTP). The fast
+/// tick handles local interface-binding loss; the bound egress probe is gentler
+/// (external providers) so it runs on a slower cadence (~5 min) after a startup gate.
+const EGRESS_PROBE_EVERY_TICKS: u32 = 30;
+
 /// Process exit code used when the runtime VPN Guard trips (binding lost). A distinct
 /// non-zero code lets a supervisor/soak distinguish a fail-closed VPN stop from a crash.
 const VPN_GUARD_BINDING_LOSS_EXIT_CODE: i32 = 3;
@@ -39,10 +44,20 @@ pub(crate) fn monitor_config(network: &Ed2kNetworkConfig) -> Option<VpnGuardRunt
 }
 
 pub(crate) async fn run(core: Arc<EmulebbCore>, monitor: VpnGuardRuntimeMonitor) {
+    // Startup egress gate (eMuleBB PublicIpProbe): actively verify the public egress
+    // via the bound STUN + HTTP probes before trusting the P2P data plane. A no-op
+    // when there is no CIDR gate or no resolved bind IP.
+    core.run_vpn_guard_egress_probe().await;
     let mut interval = tokio::time::interval(VPN_GUARD_RUNTIME_MONITOR_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ticks_since_probe: u32 = 0;
     loop {
         interval.tick().await;
+        ticks_since_probe += 1;
+        if ticks_since_probe >= EGRESS_PROBE_EVERY_TICKS {
+            ticks_since_probe = 0;
+            core.run_vpn_guard_egress_probe().await;
+        }
         let confirmed = detect_interfaces()
             .map(|interfaces| {
                 binding_confirmed(

@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: eMuleBB REST API (canonical superset, emulebb-rust)
-  version: 1.1.0
-  x-contract-version: "1.1.0"
+  version: 1.2.0
+  x-contract-version: "1.2.0"
   x-contract-baseline: "eMuleBB 0.7.3 contract"
   summary: The one capability-gated /api/v1 contract; emulebb-rust owns the superset.
   description: >
@@ -3490,7 +3490,7 @@ components:
         vpnGuard:
           type: object
           additionalProperties: false
-          required: [enabled, mode, allowedPublicIpCidrs, startupBlocked, startupBlockReason]
+          required: [enabled, mode, allowedPublicIpCidrs, startupBlocked, startupBlockReason, publicIp, egressVerified, egressBlockReason, stunProbe, httpProbe]
           properties:
             enabled:
               type: boolean
@@ -3503,6 +3503,39 @@ components:
               type: boolean
             startupBlockReason:
               type: string
+            publicIp:
+              type: string
+              nullable: true
+              description: Probe-confirmed public egress IPv4 (from the bound STUN/HTTP probes), when known.
+            egressVerified:
+              type: boolean
+              description: Whether both bound egress probes resolved an allowlisted public IP.
+            egressBlockReason:
+              type: string
+              description: Why the egress is not verified (empty when verified or no CIDR gate).
+            stunProbe:
+              $ref: '#/components/schemas/VpnGuardEgressProbe'
+            httpProbe:
+              $ref: '#/components/schemas/VpnGuardEgressProbe'
+    VpnGuardEgressProbe:
+      type: object
+      additionalProperties: false
+      description: One bound (tunnel source-bound + IP_UNICAST_IF-pinned) public-IP egress probe (eMuleBB PublicIpProbe).
+      required: [attempted, succeeded, publicIp, provider, error]
+      properties:
+        attempted:
+          type: boolean
+        succeeded:
+          type: boolean
+        publicIp:
+          type: string
+          nullable: true
+        provider:
+          type: string
+          description: Provider URL (HTTP) or STUN server label that answered / was last tried.
+        error:
+          type: string
+          nullable: true
     GeolocationRuntimeDiagnostics:
       type: object
       additionalProperties: false

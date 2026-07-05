@@ -749,6 +749,18 @@ pub struct VpnGuardConfig {
     pub allowed_public_ip_cidrs: String,
 }
 
+/// One bound egress-probe outcome surfaced over REST (eMuleBB
+/// `SBoundPublicIpv4ProbeResult` subset): the STUN (UDP) or HTTP (TCP) egress
+/// public-IP check the VPN Guard runs, source-bound + pinned to the tunnel.
+#[derive(Debug, Clone, Default)]
+pub struct VpnGuardProbeStatus {
+    pub attempted: bool,
+    pub succeeded: bool,
+    pub public_ip: Option<String>,
+    pub provider: String,
+    pub error: Option<String>,
+}
+
 /// Resolved VPN-guard state surfaced through the REST status surfaces.
 #[derive(Debug, Clone, Default)]
 pub struct VpnGuardStatus {
@@ -757,6 +769,16 @@ pub struct VpnGuardStatus {
     pub allowed_public_ip_cidrs: String,
     pub startup_blocked: bool,
     pub startup_block_reason: String,
+    /// The probe-confirmed public egress IPv4 (from the HTTP/STUN probes), when known.
+    pub public_ip: Option<String>,
+    /// Whether the dual bound egress probes both resolved an allowlisted public IP.
+    pub egress_verified: bool,
+    /// Why the egress is not verified (empty when verified or no CIDR gate).
+    pub egress_block_reason: String,
+    /// The UDP/STUN bound egress-probe outcome.
+    pub stun_probe: VpnGuardProbeStatus,
+    /// The TCP/HTTP bound egress-probe outcome.
+    pub http_probe: VpnGuardProbeStatus,
 }
 
 impl VpnGuardStatus {

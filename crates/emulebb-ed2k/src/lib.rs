@@ -21,6 +21,7 @@ pub mod kad_firewall;
 pub mod long_path;
 pub mod nat;
 pub mod networking;
+pub mod public_ip_probe;
 pub mod reachability;
 pub mod shared_publish_rank;
 pub mod stun;

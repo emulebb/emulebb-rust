@@ -8,13 +8,14 @@ use std::path::Path as FsPath;
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
-    ServerInfo, Status, Transfer, TransferThroughputStats, UploadPolicyMetrics, VpnGuardStatus,
+    ServerInfo, Status, Transfer, TransferThroughputStats, UploadPolicyMetrics,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use serde_json::{Value, json};
 
 use crate::{BulkOperationResult, RestState, SearchResultsPage, SharedFileResponse};
 
-const CONTRACT_VERSION: &str = "1.1.0";
+const CONTRACT_VERSION: &str = "1.2.0";
 
 pub(crate) fn lifecycle_response(lifecycle: &AppLifecycle) -> Value {
     let shutdown = lifecycle.state == "shuttingdown" || lifecycle.state == "done";
@@ -170,13 +171,35 @@ pub(crate) fn network_response(
             "activeInterfaceIndex": network.active_interface_index,
             "resolveResult": network.resolve_result
         },
-        "vpnGuard": {
-            "enabled": guard.enabled,
-            "mode": guard.mode,
-            "allowedPublicIpCidrs": guard.allowed_public_ip_cidrs,
-            "startupBlocked": guard.startup_blocked,
-            "startupBlockReason": guard.startup_block_reason
-        }
+        "vpnGuard": vpn_guard_json(guard)
+    })
+}
+
+/// The `vpnGuard` REST object incl. the bound dual-plane egress-probe results
+/// (eMuleBB `PublicIpProbe`): `stunProbe` (UDP) + `httpProbe` (TCP), the
+/// probe-confirmed `publicIp`, and the `egressVerified` verdict.
+fn vpn_guard_json(guard: &VpnGuardStatus) -> Value {
+    json!({
+        "enabled": guard.enabled,
+        "mode": guard.mode,
+        "allowedPublicIpCidrs": guard.allowed_public_ip_cidrs,
+        "startupBlocked": guard.startup_blocked,
+        "startupBlockReason": guard.startup_block_reason,
+        "publicIp": guard.public_ip,
+        "egressVerified": guard.egress_verified,
+        "egressBlockReason": guard.egress_block_reason,
+        "stunProbe": probe_json(&guard.stun_probe),
+        "httpProbe": probe_json(&guard.http_probe)
+    })
+}
+
+fn probe_json(probe: &VpnGuardProbeStatus) -> Value {
+    json!({
+        "attempted": probe.attempted,
+        "succeeded": probe.succeeded,
+        "publicIp": probe.public_ip,
+        "provider": probe.provider,
+        "error": probe.error
     })
 }
 
