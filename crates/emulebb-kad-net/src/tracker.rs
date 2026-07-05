@@ -239,7 +239,17 @@ impl PacketTracker {
     /// elapsed time (capped at the bucket cap), spend the per-packet cost, then
     /// drop on a negative balance (massive-drop + ban below `-3 * cap`).
     pub fn record_and_check(&mut self, key: PacketTrackerKey) -> PacketTrackerDecision {
-        let now = Instant::now();
+        self.record_and_check_at(key, Instant::now())
+    }
+
+    /// [`record_and_check`](Self::record_and_check) with an explicit `now`, so
+    /// token-refill behavior can be exercised deterministically in tests without
+    /// wall-clock sleeps (which flake under CI scheduling jitter).
+    fn record_and_check_at(
+        &mut self,
+        key: PacketTrackerKey,
+        now: Instant,
+    ) -> PacketTrackerDecision {
         let limit = self.limit_for_bucket(key.bucket);
         let cap = bucket_cap_ms(limit);
         let cost = per_packet_token_cost_ms(limit);
@@ -515,26 +525,40 @@ mod tests {
 
     #[test]
     fn token_bucket_refills_continuously_after_partial_idle() {
-        // Short window so the refill is observable in a unit test: max 2 per
-        // 100ms -> cap 100ms, cost 50ms.
+        // Short window so the refill is observable: max 2 per 100ms -> cap 100ms,
+        // cost 50ms. Deterministic injected instants (no wall-clock sleep) so the
+        // refill math is exact and cannot flake under CI scheduling jitter.
         let mut tracker =
             PacketTracker::new(20, 50, Duration::from_secs(1), Duration::from_millis(100));
         let addr = key("9.9.9.9", PacketTrackerBucket::BootstrapReq);
-        // Override BootstrapReq to the small window for this test by using the
-        // PingReq-style budget is not possible; instead use the configured
-        // request_window buckets which all share 100ms here. BootstrapReq is 2.
-        // Spend the whole bucket: 2 allowed (tokens 50 -> 0), 3rd drops to -50.
-        assert!(tracker.record_and_check(addr).allowed);
-        assert!(tracker.record_and_check(addr).allowed);
-        assert!(!tracker.record_and_check(addr).allowed);
-        // Idle ~130ms: refills ~130ms (capped at the 100ms cap), clearing the
-        // -50 deficit, so one packet is allowed again (continuous refill, not a
-        // hard window reset).
-        std::thread::sleep(Duration::from_millis(130));
-        assert!(tracker.record_and_check(addr).allowed);
-        // The bucket is back near empty after that spend, so a tight follow-up
-        // drops again (the deficit is continuous, not reset to a full window).
-        assert!(!tracker.record_and_check(addr).allowed);
+        let t0 = Instant::now();
+        // Spend the whole bucket in quick succession: the sub-millisecond offsets
+        // advance `last_tick` (so each existing-bucket call spends) while adding
+        // zero refill (`as_millis()` truncates < 1ms to 0). Fresh call holds 50;
+        // then 50 -> 0 (allowed), then 0 -> -50 (dropped).
+        assert!(tracker.record_and_check_at(addr, t0).allowed);
+        assert!(
+            tracker
+                .record_and_check_at(addr, t0 + Duration::from_micros(100))
+                .allowed
+        );
+        assert!(
+            !tracker
+                .record_and_check_at(addr, t0 + Duration::from_micros(200))
+                .allowed
+        );
+        // Idle 130ms: refills 130ms (min-capped at the 100ms cap) over the -50
+        // deficit -> tokens = min(-50+~130,100)-50 = ~29 >= 0, so one packet is
+        // allowed again (continuous refill, not a hard window reset).
+        let t1 = t0 + Duration::from_millis(130);
+        assert!(tracker.record_and_check_at(addr, t1).allowed);
+        // A follow-up ~0ms later sees tokens ~29 -> ~-21, so it drops (the deficit
+        // is continuous, not reset to a full window).
+        assert!(
+            !tracker
+                .record_and_check_at(addr, t1 + Duration::from_micros(100))
+                .allowed
+        );
     }
 
     #[test]
