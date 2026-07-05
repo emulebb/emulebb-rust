@@ -44,7 +44,12 @@ pub(in crate::ed2k_tcp) enum UploadPayloadOutcome {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum UploadRangePlan {
     Accepted,
+    /// The peer re-requested a block already completed/served in its slot
+    /// (queue `Ed2kUploadRangeAdmission::DuplicateDone`, MFC `m_DoneBlocks_keys`).
     DuplicateDone,
+    /// The peer repeated a block already queued (pending) within THIS request
+    /// batch (MFC `m_BlockRequests_keys`), the queued sibling of the done case.
+    DuplicateQueued,
     Empty,
     QueueStale,
     QueueWaiting,
@@ -309,7 +314,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                         accepted_start == start && accepted_end == end
                     })
                 {
-                    UploadRangePlan::DuplicateDone
+                    UploadRangePlan::DuplicateQueued
                 } else {
                     accepted_ranges.push((start, end));
                     UploadRangePlan::Accepted
@@ -336,6 +341,32 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             UploadRangePlan::Accepted => {}
             UploadRangePlan::DuplicateDone => {
                 request_diag.note_skip("duplicateDone");
+                // MFC AddReqBlock reject-duplicate-done-block: the peer asked for
+                // a block already completed in its slot; reject and surface the
+                // bad_peer event (repeatCount from the process-global rejection
+                // ledger, no `behavior` key — oracle conformance).
+                crate::ed2k_transfer::diag_bad_peer::upload_duplicate_done_block_rejected(
+                    &peer_addr.to_string(),
+                    peer_upload_identity.user_hash,
+                    &hex::encode(requested.0),
+                    start,
+                    end,
+                    start / crate::ed2k_transfer::ED2K_PART_SIZE,
+                );
+                continue;
+            }
+            UploadRangePlan::DuplicateQueued => {
+                request_diag.note_skip("duplicateQueued");
+                // MFC AddReqBlock reject-duplicate-queued-block: the peer repeated
+                // a block already queued in its slot within this request batch.
+                crate::ed2k_transfer::diag_bad_peer::upload_duplicate_queued_block_rejected(
+                    &peer_addr.to_string(),
+                    peer_upload_identity.user_hash,
+                    &hex::encode(requested.0),
+                    start,
+                    end,
+                    start / crate::ed2k_transfer::ED2K_PART_SIZE,
+                );
                 continue;
             }
             UploadRangePlan::Empty => {
@@ -453,10 +484,10 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         .saturating_sub(reader_disk_bytes_before);
 
     let outcome = if request_diag.served_bytes == 0 {
-        if request_diag.first_skip_reason == Some("duplicateDone") {
-            "duplicateDone"
-        } else {
-            "noPayload"
+        match request_diag.first_skip_reason {
+            Some("duplicateDone") => "duplicateDone",
+            Some("duplicateQueued") => "duplicateQueued",
+            _ => "noPayload",
         }
     } else if request_diag.served_bytes >= request_diag.requested_bytes
         && request_diag.skipped_ranges == 0

@@ -145,6 +145,206 @@ pub(crate) fn repeat_block_request(
     emit("bad_peer", "repeat_block_request", "medium", keys, body);
 }
 
+/// Process-global rejection ledger backing `upload_duplicate_done_block_rejected`
+/// and `upload_duplicate_queued_block_rejected`.
+///
+/// WHY global (not per-connection): MFC counts these rejections in a
+/// process-wide map (`g_badPeerBehaviorLedger`, `UpdateBehaviorLedger`) keyed
+/// `peerKey|block|fileHash|start|end`, so a peer that reconnects and re-requests
+/// the same already-served block keeps accumulating `repeatCount` across
+/// connections within the hour. Keying this per-connection (as the observe-only
+/// `repeat_block_request` ledger does, which counts *requests*, not rejections)
+/// under-counts vs the oracle and was one of the two causes of the RUST-FEAT-025
+/// revert (`045a781`). This ledger counts REJECTION emissions, globally, per
+/// `(peer_key, file_hash, start, end)`.
+mod duplicate_block_ledger {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use super::REPEAT_BLOCK_WINDOW_SECS;
+
+    /// Cleanup sweep cadence (MFC `kBadPeerBehaviorLedgerCleanupMs = SEC2MS(60)`).
+    const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+    /// Hard cap so a flood of distinct `(peer, block)` keys cannot grow the map
+    /// without bound between sweeps; the oldest entries are dropped first.
+    const MAX_ENTRIES: usize = 4096;
+
+    struct Entry {
+        first_seen: Instant,
+        last_seen: Instant,
+        count: u32,
+    }
+
+    struct Ledger {
+        entries: HashMap<(String, String, u64, u64), Entry>,
+        last_cleanup: Instant,
+    }
+
+    fn ledger() -> &'static Mutex<Ledger> {
+        static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
+        LEDGER.get_or_init(|| {
+            Mutex::new(Ledger {
+                entries: HashMap::new(),
+                last_cleanup: Instant::now(),
+            })
+        })
+    }
+
+    /// Record one rejection for `(peer_key, file_hash, start, end)` and return the
+    /// in-window rejection count (1 on the first rejection, matching the oracle
+    /// `SBadPeerBehaviorLedgerState::uCount` semantics).
+    pub(super) fn record(peer_key: &str, file_hash: &str, start: u64, end: u64) -> u32 {
+        let window = Duration::from_secs(REPEAT_BLOCK_WINDOW_SECS);
+        let now = Instant::now();
+        let mut ledger = match ledger().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if now.duration_since(ledger.last_cleanup) >= CLEANUP_INTERVAL {
+            ledger.last_cleanup = now;
+            ledger
+                .entries
+                .retain(|_, entry| now.duration_since(entry.last_seen) < window);
+        }
+        let key = (peer_key.to_string(), file_hash.to_string(), start, end);
+        let expired = ledger
+            .entries
+            .get(&key)
+            .is_some_and(|entry| now.duration_since(entry.last_seen) >= window);
+        if expired {
+            ledger.entries.remove(&key);
+        }
+        if let Some(entry) = ledger.entries.get_mut(&key) {
+            entry.last_seen = now;
+            entry.count = entry.count.saturating_add(1);
+            return entry.count;
+        }
+        if ledger.entries.len() >= MAX_ENTRIES
+            && let Some(oldest) = ledger
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.first_seen)
+                .map(|(k, _)| k.clone())
+        {
+            ledger.entries.remove(&oldest);
+        }
+        ledger.entries.insert(
+            key,
+            Entry {
+                first_seen: now,
+                last_seen: now,
+                count: 1,
+            },
+        );
+        1
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        let mut ledger = match ledger().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        ledger.entries.clear();
+        ledger.last_cleanup = Instant::now();
+    }
+}
+
+/// The MFC bad-peer ledger peer key: the user hash when known (`hash:<md4>`),
+/// else the source IP (`ip:<addr>`), matching `PeerBehaviorKey`. Kept internal to
+/// the duplicate-block emitters so the `repeatCount` accumulates per identity the
+/// same way the oracle does across reconnects.
+fn behavior_peer_key(peer: &str, peer_hash: Option<[u8; 16]>) -> String {
+    match peer_hash {
+        Some(hash) => format!("hash:{}", hex::encode(hash)),
+        None => format!("ip:{}", peer.rsplit_once(':').map_or(peer, |(ip, _)| ip)),
+    }
+}
+
+/// `upload_duplicate_done_block_rejected`: a peer requested an upload block that is
+/// already completed/served in its slot, so we reject the range instead of
+/// re-serving it. Mirrors MFC `CUpDownClient::AddReqBlock` -> bad_peer
+/// `upload_duplicate_done_block_rejected` (`action:"reject_block_request"`,
+/// severity medium). `repeatCount`/`windowSeconds` come from the process-global
+/// rejection ledger (see [`duplicate_block_ledger`]); the body carries NO
+/// `behavior` key (the oracle adapter sets `behavior` only for the observe-only
+/// `repeat_*` events — including it here would fail the rust-superset conformance
+/// diff, the second cause of the RUST-FEAT-025 revert). `part_index` is
+/// `start_offset / ED2K_PART_SIZE`, as MFC reports it.
+pub(crate) fn upload_duplicate_done_block_rejected(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    start_offset: u64,
+    end_offset: u64,
+    part_index: u64,
+) {
+    let repeat_count = duplicate_block_ledger::record(
+        &behavior_peer_key(peer, peer_hash),
+        file_hash,
+        start_offset,
+        end_offset,
+    );
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "reject_block_request",
+        "reason": "Duplicate upload block request already completed in slot",
+        "repeatCount": repeat_count,
+        "windowSeconds": REPEAT_BLOCK_WINDOW_SECS,
+        "startOffset": start_offset,
+        "endOffset": end_offset,
+        "partIndex": part_index,
+    });
+    emit(
+        "bad_peer",
+        "upload_duplicate_done_block_rejected",
+        "medium",
+        keys,
+        body,
+    );
+}
+
+/// `upload_duplicate_queued_block_rejected`: a peer re-requested an upload block
+/// that is already QUEUED (pending) in its slot, so we reject the duplicate.
+/// Mirrors MFC `CUpDownClient::AddReqBlock` -> bad_peer
+/// `upload_duplicate_queued_block_rejected` (`action:"reject_block_request"`,
+/// severity medium), the sibling of the done-block case above (the reverted
+/// RUST-FEAT-025 mislabeled this queued branch as the done branch). Same
+/// process-global rejection ledger, same no-`behavior` body shape.
+pub(crate) fn upload_duplicate_queued_block_rejected(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    start_offset: u64,
+    end_offset: u64,
+    part_index: u64,
+) {
+    let repeat_count = duplicate_block_ledger::record(
+        &behavior_peer_key(peer, peer_hash),
+        file_hash,
+        start_offset,
+        end_offset,
+    );
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "reject_block_request",
+        "reason": "Duplicate upload block request already queued in slot",
+        "repeatCount": repeat_count,
+        "windowSeconds": REPEAT_BLOCK_WINDOW_SECS,
+        "startOffset": start_offset,
+        "endOffset": end_offset,
+        "partIndex": part_index,
+    });
+    emit(
+        "bad_peer",
+        "upload_duplicate_queued_block_rejected",
+        "medium",
+        keys,
+        body,
+    );
+}
+
 /// `repeat_file_request`: the same peer (re)started an upload session for the same
 /// file more than once within the observation window. Mirrors MFC
 /// `TrackUploadFileBehavior` -> `repeat_file_request` (oracle `CUploadQueue`).
@@ -249,4 +449,50 @@ pub(crate) fn upload_recycle(
         "reason": "Upload slot recycled under sustained underfill",
     });
     emit("bad_peer", event, "medium", keys, body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{behavior_peer_key, duplicate_block_ledger};
+
+    #[test]
+    fn behavior_peer_key_prefers_user_hash_then_ip() {
+        assert_eq!(
+            behavior_peer_key("198.51.100.7:4662", Some([0xAB; 16])),
+            format!("hash:{}", "ab".repeat(16))
+        );
+        // No hash yet: fall back to the source IP, dropping the ephemeral port
+        // (MFC PeerBehaviorKey keys on IP, not IP:port).
+        assert_eq!(
+            behavior_peer_key("198.51.100.7:4662", None),
+            "ip:198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn rejection_ledger_counts_per_peer_block_and_starts_each_key_at_one() {
+        duplicate_block_ledger::reset();
+        let peer = "hash:aa";
+        let file = "ffffffffffffffffffffffffffffffff";
+        // Same (peer, file, block) accumulates: 1, 2, 3 (oracle uCount).
+        assert_eq!(duplicate_block_ledger::record(peer, file, 0, 180_000), 1);
+        assert_eq!(duplicate_block_ledger::record(peer, file, 0, 180_000), 2);
+        assert_eq!(duplicate_block_ledger::record(peer, file, 0, 180_000), 3);
+        // A different block for the same peer/file is an independent key.
+        assert_eq!(
+            duplicate_block_ledger::record(peer, file, 180_000, 360_000),
+            1
+        );
+        // A different peer for the same block is an independent key.
+        assert_eq!(
+            duplicate_block_ledger::record("hash:bb", file, 0, 180_000),
+            1
+        );
+        // A different file for the same peer/block is an independent key.
+        assert_eq!(
+            duplicate_block_ledger::record(peer, "00000000000000000000000000000000", 0, 180_000),
+            1
+        );
+        duplicate_block_ledger::reset();
+    }
 }
