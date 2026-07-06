@@ -328,6 +328,19 @@ impl ServerSession {
             receive_cipher.apply(&mut encrypted_padding);
         }
 
+        // WHY: the obfuscated login path carries the first packet (the
+        // OP_LOGINREQUEST) inside the crypt-negotiation response, bypassing
+        // send_packet() and therefore its dump hook — live server dumps showed
+        // OP_IDCHANGE recvs with no matching login send. Dump it here exactly
+        // like the plain path does (plaintext opcode + payload, pre-cipher).
+        if first_packet.len() >= TCP_PACKET_HEADER_LEN {
+            dump_ed2k_server_packet(
+                self,
+                "tx",
+                first_packet[5],
+                &first_packet[TCP_PACKET_HEADER_LEN..],
+            );
+        }
         let response_padding_len =
             rand::thread_rng().gen_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
         let mut response = Vec::with_capacity(6 + response_padding_len + first_packet.len());
