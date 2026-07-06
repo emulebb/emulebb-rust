@@ -252,6 +252,12 @@ pub struct Search {
     pub method: String,
     pub r#type: String,
     pub status: String,
+    /// Honest reason for a non-completed status (additive REST field
+    /// `statusReason`): e.g. `waiting-for-server-connection` while `queued`,
+    /// or the explicit failure reason when `error`. `None` when completed or
+    /// running normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub results: Vec<SearchResult>,

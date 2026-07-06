@@ -76,6 +76,7 @@ pub(crate) fn search_results_page(
         method: search.method,
         file_type: search.r#type,
         status: search.status,
+        status_reason: search.status_reason,
         total,
         offset,
         limit,

@@ -25,13 +25,13 @@ use emulebb_ed2k::{
     built_in_upnp_port_mapping_providers,
     config::Ed2kConfig,
     ed2k_server::{
-        Ed2kFoundSource, Ed2kServerLoopOptions, Ed2kServerSearchHandle, Ed2kServerState,
-        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
-        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
-        parse_server_met, publish_shared_catalog_via_background_session,
-        request_callback_via_background_session, run_ed2k_server_loop, search_keyword_udp_servers,
-        search_keyword_via_background_session, search_source_udp_server_batches,
-        search_source_via_background_session,
+        Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerLoopOptions,
+        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpKeywordSearchOptions,
+        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
+        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
+        publish_shared_catalog_via_background_session, request_callback_via_background_session,
+        run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
+        search_source_udp_server_batches, search_source_via_background_session,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -122,6 +122,7 @@ mod preferences;
 mod profile_state;
 mod search_query;
 mod search_queue;
+mod search_queue_runtime;
 mod search_state;
 mod server_list;
 mod shared_dir_monitor;
@@ -204,6 +205,8 @@ use search_query::{
     SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
     search_criteria_from_request, search_result_from_ed2k, search_result_from_indexed,
 };
+use search_queue::{SearchQueue, SearchQueueLane};
+use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
     SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
 };
@@ -392,6 +395,12 @@ pub struct EmulebbCore {
     shared_catalog_publish_last: Arc<Mutex<Option<Instant>>>,
     ed2k_publish_diagnostics: ed2k_publish_diagnostics::SharedEd2kPublishDiagnostics,
     kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
+    /// Connection-aware queue for network searches (`search_queue.rs` state
+    /// machine + `search_queue_runtime.rs` drain task). `std::sync::Mutex` by
+    /// design: guards are held for short sync sections only — never across an
+    /// `.await` and never while acquiring the `state` lock — so the create
+    /// path (state → queue) cannot deadlock against the drain path.
+    search_queue: Arc<std::sync::Mutex<SearchQueue>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -501,6 +510,7 @@ impl EmulebbCore {
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
             ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
+            search_queue: Arc::new(std::sync::Mutex::new(SearchQueue::new())),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -1454,17 +1464,61 @@ impl EmulebbCore {
                 .map(|file| search_result_from_indexed(&search_id, &request, file)),
         );
         apply_search_filters(&mut results, &request);
-        // Create the search as "running" and return immediately; the slow ED2K
-        // network search runs in the background and flips status to "completed".
-        // This follows the eMuleBB contract's running->complete search lifecycle
-        // so controllers (e.g. aMuTorrent) get a prompt POST and poll GET for
-        // results instead of blocking the create call until the network replies.
+        // Network methods go through the connection-aware queue (operator
+        // directive 2026-07-06): a search submitted while its backend is still
+        // connecting/absent is QUEUED with an honest status+reason and drains
+        // automatically when the backend is ready — it is never fired into a
+        // stale handle and never silently "completed" with local-only results.
+        // Non-network methods (or no eD2k network configured at all) keep the
+        // immediate running->completed local-index path.
+        let queue_lane = self
+            .ed2k_network
+            .as_ref()
+            .and_then(|_| SearchQueueLane::for_method(&request.method));
+        let mut spawn_drain = false;
+        if let Some(lane) = queue_lane {
+            let mut queue = self.search_queue.lock().unwrap();
+            if let Err(error) =
+                queue.enqueue(search_id.clone(), request.clone(), lane, Instant::now())
+            {
+                // Explicit POST rejection (duplicate / queue full) — the
+                // allocated id is simply skipped, never inserted.
+                crate::diag_sched::keyword_search_queue(
+                    "rejected",
+                    &request.method,
+                    Some(match error {
+                        search_queue::SearchEnqueueError::DuplicateQueued => "duplicate-queued",
+                        search_queue::SearchEnqueueError::QueueFull => "queue-full",
+                    }),
+                    0,
+                );
+                bail!("{error}");
+            }
+            spawn_drain = queue.claim_drain_task();
+            crate::diag_sched::keyword_search_queue(
+                "queued",
+                &request.method,
+                Some(lane.waiting_reason()),
+                0,
+            );
+        }
+        // Create the search and return immediately; the network part runs via
+        // the queue drain (or the legacy background task) and flips the status
+        // queued->running->completed. This keeps the eMuleBB contract's
+        // running->complete lifecycle: controllers (e.g. aMuTorrent) get a
+        // prompt POST and poll GET for results; "queued" is an additive state
+        // consumers treat like running (poll until "complete").
+        let (status, status_reason) = match queue_lane {
+            Some(lane) => ("queued", Some(lane.waiting_reason().to_string())),
+            None => ("running", None),
+        };
         let search = Search {
             id: search_id.clone(),
             query: request.query.clone(),
             method: request.method.clone(),
             r#type: request.r#type.clone(),
-            status: "running".to_string(),
+            status: status.to_string(),
+            status_reason,
             created_at: now,
             updated_at: now,
             results,
@@ -1472,15 +1526,24 @@ impl EmulebbCore {
         search_state::persist_search(&self.metadata_store, &search)?;
         state.searches.insert(search_id.clone(), search.clone());
         drop(state);
-        let core = self.clone();
-        tokio::spawn(async move {
-            core.run_background_search(search_id, request).await;
-        });
+        if queue_lane.is_some() {
+            if spawn_drain {
+                self.spawn_search_queue_drain();
+            }
+        } else {
+            let core = self.clone();
+            tokio::spawn(async move {
+                core.run_background_search(search_id, request).await;
+            });
+        }
         Ok(search)
     }
 
-    /// Runs the network search for an already-created "running" search,
-    /// merges any results with the local-index ones, and marks it completed.
+    /// Legacy immediate path for NON-QUEUED searches (unknown methods, or no
+    /// eD2k network configured): resolves the live network method, runs any
+    /// applicable network search, and completes the search with whatever the
+    /// local index already provided. Network methods never reach this path —
+    /// they go through the connection-aware queue (`search_queue_runtime`).
     async fn run_background_search(&self, search_id: String, request: SearchCreate) {
         let ed2k_connected = self.connected_ed2k_search_handle().await.is_some();
         let kad_connected = self
@@ -1489,62 +1552,42 @@ impl EmulebbCore {
             .is_some_and(|dht| dht.is_bootstrapped());
         let network_method =
             resolve_search_network_method(&request.method, ed2k_connected, kad_connected);
-        let outcome = match network_method {
-            Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => {
-                self.search_ed2k_servers(&search_id, &request, network_method)
-                    .await
-            }
-            Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
-                Some(dht) => search_kad_keywords(dht, &search_id, &request).await,
-                None => Ok(None),
-            },
-            None => Ok(None),
-        };
-        let mut state = self.state.lock().await;
-        let Some(search) = state.searches.get_mut(&search_id) else {
-            return;
-        };
-        match outcome {
-            Ok(ed2k_results) => {
-                if let Some(mut ed2k_results) = ed2k_results {
-                    apply_search_filters(&mut ed2k_results, &request);
-                    let seen: std::collections::HashSet<String> = search
-                        .results
-                        .iter()
-                        .map(|result| result.hash.clone())
-                        .collect();
-                    search.results.extend(
-                        ed2k_results
-                            .into_iter()
-                            .filter(|result| !seen.contains(&result.hash)),
-                    );
-                }
-                search.status = "completed".to_string();
-            }
-            Err(error) => {
-                tracing::warn!("background search failed for {search_id}: {error:#}");
-                search.status = "error".to_string();
-            }
-        }
-        search.updated_at = Utc::now();
-        let result_count = search.results.len();
-        let status_str = search.status.clone();
-        let snapshot = search.clone();
-        drop(state);
         let method_str = match network_method {
             Some(SearchNetworkMethod::Ed2kServer) => "server",
             Some(SearchNetworkMethod::Ed2kGlobal) => "global",
             Some(SearchNetworkMethod::Kad) => "kad",
             None => "none",
         };
-        crate::diag_sched::keyword_search(
-            method_str,
-            result_count,
-            request.query.chars().count(),
-            &status_str,
-        );
-        if let Err(error) = search_state::persist_search(&self.metadata_store, &snapshot) {
-            tracing::warn!("failed to persist completed search {search_id}: {error}");
+        let outcome = match network_method {
+            Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal) => self
+                .search_ed2k_servers(&search_id, &request, network_method)
+                .await
+                .map(|outcome| match outcome {
+                    Ed2kServerSearchOutcome::Completed(results) => Some(results),
+                    Ed2kServerSearchOutcome::Unavailable
+                    | Ed2kServerSearchOutcome::NotConnected => None,
+                }),
+            Some(SearchNetworkMethod::Kad) => match self.ed2k_dht_node().await {
+                Some(dht) => search_kad_keywords(dht, &search_id, &request).await,
+                None => Ok(None),
+            },
+            None => Ok(None),
+        };
+        match outcome {
+            Ok(network_results) => {
+                self.complete_search_with_results(
+                    &search_id,
+                    &request,
+                    method_str,
+                    network_results,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!("background search failed for {search_id}: {error:#}");
+                self.fail_search(&search_id, &request, method_str, "network-search-failed")
+                    .await;
+            }
         }
     }
 
@@ -2865,83 +2908,96 @@ impl EmulebbCore {
         search_id: &str,
         request: &SearchCreate,
         network_method: Option<SearchNetworkMethod>,
-    ) -> Result<Option<Vec<SearchResult>>> {
+    ) -> Result<Ed2kServerSearchOutcome> {
         if !matches!(
             network_method,
             Some(SearchNetworkMethod::Ed2kServer | SearchNetworkMethod::Ed2kGlobal)
         ) {
-            return Ok(None);
+            return Ok(Ed2kServerSearchOutcome::Unavailable);
         }
         let Some(network) = self.ed2k_network.as_ref() else {
-            return Ok(None);
+            return Ok(Ed2kServerSearchOutcome::Unavailable);
         };
         let config = self.effective_ed2k_config(&network.config, None).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
-            return Ok(None);
+            return Ok(Ed2kServerSearchOutcome::Unavailable);
         }
 
         let cancel = CancellationToken::new();
         // WHY: stock eMule/eMuleBB sends keyword searches through the current
         // server connection; opening ad-hoc TCP logins here creates non-stock
         // public-server traffic and repeats the source-search storm pattern.
-        if let Some(handle) = self.connected_ed2k_search_handle().await {
-            let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
-            let timeout = connected_server_keyword_search_timeout(&config);
-            let criteria = search_criteria_from_request(request);
-            let mut files = Vec::new();
-            match search_keyword_via_background_session(
-                &handle,
-                &request.query,
-                criteria,
+        let Some(handle) = self.connected_ed2k_search_handle().await else {
+            // WHY: distinct from Unavailable so the queued path can retry when
+            // a session comes back — the old Ok(None) here is exactly what let
+            // a search "complete" in <100ms with zero wire traffic.
+            return Ok(Ed2kServerSearchOutcome::NotConnected);
+        };
+        let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
+        let timeout = connected_server_keyword_search_timeout(&config);
+        let criteria = search_criteria_from_request(request);
+        let mut files = Vec::new();
+        match search_keyword_via_background_session(
+            &handle,
+            &request.query,
+            criteria,
+            timeout,
+            &cancel,
+        )
+        .await
+        {
+            Ok(background_files) => {
+                if background_files.is_empty() {
+                    tracing::warn!(
+                        "ED2K background keyword search returned no results query={:?}",
+                        request.query
+                    );
+                } else {
+                    files.extend(background_files);
+                }
+            }
+            // WHY: an interrupted send (stale handle / session dropped before
+            // answering) must PROPAGATE so the queue re-queues the search; the
+            // old warn-and-continue path reported it completed-empty instead.
+            Err(error)
+                if error
+                    .downcast_ref::<Ed2kBackgroundSearchInterrupted>()
+                    .is_some() =>
+            {
+                return Err(error);
+            }
+            Err(error) => tracing::warn!(
+                "ED2K background keyword search failed query={:?} error={error}",
+                request.query
+            ),
+        }
+        if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
+            match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
+                bind_ip: network.bind_ip,
+                config: &config,
+                excluded_endpoint: connected_server_endpoint,
+                max_attempts: configured_server_attempts(&config),
+                query: &request.query,
                 timeout,
-                &cancel,
-            )
+                cancel: &cancel,
+            })
             .await
             {
-                Ok(background_files) => {
-                    if background_files.is_empty() {
-                        tracing::warn!(
-                            "ED2K background keyword search returned no results query={:?}",
-                            request.query
-                        );
-                    } else {
-                        files.extend(background_files);
-                    }
-                }
+                Ok(global_files) => files.extend(global_files),
                 Err(error) => tracing::warn!(
-                    "ED2K background keyword search failed query={:?} error={error}",
+                    "ED2K global UDP keyword search failed query={:?} error={error}",
                     request.query
                 ),
             }
-            if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
-                match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
-                    bind_ip: network.bind_ip,
-                    config: &config,
-                    excluded_endpoint: connected_server_endpoint,
-                    max_attempts: configured_server_attempts(&config),
-                    query: &request.query,
-                    timeout,
-                    cancel: &cancel,
-                })
-                .await
-                {
-                    Ok(global_files) => files.extend(global_files),
-                    Err(error) => tracing::warn!(
-                        "ED2K global UDP keyword search failed query={:?} error={error}",
-                        request.query
-                    ),
-                }
-            }
-            let mut seen_hashes = HashSet::new();
-            return Ok(Some(
-                files
-                    .into_iter()
-                    .filter(|file| seen_hashes.insert(file.file_hash))
-                    .map(|file| search_result_from_ed2k(search_id, request, file))
-                    .collect(),
-            ));
         }
-        Ok(None)
+        let mut seen_hashes = HashSet::new();
+        Ok(Ed2kServerSearchOutcome::Completed(
+            files
+                .into_iter()
+                .filter(|file| seen_hashes.insert(file.file_hash))
+                .map(|file| search_result_from_ed2k(search_id, request, file))
+                .collect(),
+        ))
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -8906,6 +8962,64 @@ mod tests {
         }
         assert_eq!(completed.status, "completed");
         assert_eq!(completed.results.len(), 1);
+    }
+
+    // Operator directive 2026-07-06: a network search submitted while the
+    // backend is still connecting/absent must surface an honest "queued"
+    // status with a reason and wait for readiness — never complete instantly
+    // with local-only results — and identical queued queries are rejected
+    // explicitly instead of amassing wire traffic for later.
+    #[tokio::test]
+    async fn network_search_queues_with_honest_status_and_rejects_duplicates() {
+        let transfer_root = unique_runtime_dir("emulebb-core-search-queue");
+        let network = test_network_config_with_store(
+            &transfer_root,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        );
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap(),
+            transfer_root.join("transfers"),
+            Some(network),
+        )
+        .unwrap();
+
+        let request = SearchCreate {
+            query: "queued query".to_string(),
+            method: "server".to_string(),
+            ..Default::default()
+        };
+        let search = core.create_search(request.clone()).await.unwrap();
+        assert_eq!(search.status, "queued");
+        assert_eq!(
+            search.status_reason.as_deref(),
+            Some("waiting-for-server-connection")
+        );
+
+        // No server session ever connects: the search stays honestly queued
+        // (drain ticks run but the backend never becomes ready).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let still_queued = core.search(&search.id).await.unwrap();
+        assert_eq!(still_queued.status, "queued");
+
+        // An identical queued query on the same lane is rejected explicitly.
+        let error = core
+            .create_search(request)
+            .await
+            .expect_err("duplicate queued query must be rejected");
+        assert!(error.to_string().contains("already queued"));
+
+        // A different query queues fine alongside it.
+        let other = core
+            .create_search(SearchCreate {
+                query: "another queued query".to_string(),
+                method: "server".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(other.status, "queued");
     }
 
     #[tokio::test]

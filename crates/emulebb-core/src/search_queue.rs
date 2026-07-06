@@ -172,6 +172,7 @@ impl SearchQueue {
     }
 
     /// Number of waiting (not in-flight) searches.
+    #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -192,11 +193,9 @@ impl SearchQueue {
             return Err(SearchEnqueueError::QueueFull);
         }
         let normalized = normalized_queue_query(&request.query);
-        if self
-            .pending
-            .iter()
-            .any(|entry| entry.lane == lane && normalized_queue_query(&entry.request.query) == normalized)
-        {
+        if self.pending.iter().any(|entry| {
+            entry.lane == lane && normalized_queue_query(&entry.request.query) == normalized
+        }) {
             return Err(SearchEnqueueError::DuplicateQueued);
         }
         self.pending.push_back(QueuedSearch {
@@ -313,16 +312,18 @@ impl SearchQueue {
 
     /// Puts a dispatched search whose send failed mid-flight (stale handle /
     /// session died before answering) back at the FRONT of the queue for a
-    /// bounded retry on a fresh session. `Err(entry)` when the attempt budget
-    /// is exhausted — the caller must fail the search with an explicit error.
-    pub(crate) fn requeue_for_retry(&mut self, entry: QueuedSearch) -> Result<(), QueuedSearch> {
+    /// bounded retry on a fresh session. Returns `false` (dropping the entry)
+    /// when the attempt budget is exhausted — the caller must then fail the
+    /// search with an explicit error, never a fake "completed".
+    #[must_use]
+    pub(crate) fn requeue_for_retry(&mut self, entry: QueuedSearch) -> bool {
         if entry.send_attempts >= SEARCH_QUEUE_MAX_SEND_ATTEMPTS {
-            return Err(entry);
+            return false;
         }
         // Front, not back: the retried search was first in line; re-appending
         // would let later submissions leapfrog it on every session flap.
         self.pending.push_front(entry);
-        Ok(())
+        true
     }
 
     fn server_lane_open(&self, now: Instant, readiness: SearchBackendReadiness) -> bool {
@@ -374,7 +375,13 @@ mod tests {
         SearchBackendReadiness { server, kad }
     }
 
-    fn enqueue(queue: &mut SearchQueue, id: &str, query: &str, lane: SearchQueueLane, now: Instant) {
+    fn enqueue(
+        queue: &mut SearchQueue,
+        id: &str,
+        query: &str,
+        lane: SearchQueueLane,
+        now: Instant,
+    ) {
         queue
             .enqueue(id.to_string(), request(query), lane, now)
             .expect("enqueue succeeds");
@@ -390,7 +397,10 @@ mod tests {
             SearchQueueLane::for_method("GLOBAL"),
             Some(SearchQueueLane::Server)
         );
-        assert_eq!(SearchQueueLane::for_method("kad"), Some(SearchQueueLane::Kad));
+        assert_eq!(
+            SearchQueueLane::for_method("kad"),
+            Some(SearchQueueLane::Kad)
+        );
         assert_eq!(SearchQueueLane::for_method(""), Some(SearchQueueLane::Auto));
         assert_eq!(
             SearchQueueLane::for_method("automatic"),
@@ -511,14 +521,12 @@ mod tests {
             assert_eq!(dispatch.entry.send_attempts, attempt);
             queue.finish(dispatch.lane);
             if attempt < SEARCH_QUEUE_MAX_SEND_ATTEMPTS {
-                queue
-                    .requeue_for_retry(dispatch.entry)
-                    .expect("retry budget left");
+                assert!(queue.requeue_for_retry(dispatch.entry), "retry budget left");
             } else {
-                let rejected = queue
-                    .requeue_for_retry(dispatch.entry)
-                    .expect_err("attempt budget exhausted");
-                assert_eq!(rejected.search_id, "1");
+                assert!(
+                    !queue.requeue_for_retry(dispatch.entry),
+                    "attempt budget exhausted"
+                );
             }
             when += SEARCH_QUEUE_DRAIN_SLOT;
         }
@@ -587,7 +595,10 @@ mod tests {
         enqueue(&mut queue, "1", "alpha", SearchQueueLane::Server, now);
 
         let tick = queue.tick(now + SEARCH_QUEUE_MAX_WAIT, ready(false, false));
-        assert!(tick.expired.is_empty(), "at the bound the entry still waits");
+        assert!(
+            tick.expired.is_empty(),
+            "at the bound the entry still waits"
+        );
 
         let tick = queue.tick(
             now + SEARCH_QUEUE_MAX_WAIT + Duration::from_secs(1),
@@ -607,7 +618,10 @@ mod tests {
         assert!(queue.claim_drain_task());
         assert!(!queue.claim_drain_task(), "second claim must lose");
 
-        assert!(!queue.release_drain_task_if_idle(), "pending entry: keep running");
+        assert!(
+            !queue.release_drain_task_if_idle(),
+            "pending entry: keep running"
+        );
         let mut tick = queue.tick(now, ready(true, false));
         let dispatch = tick.dispatches.pop().unwrap();
         assert!(

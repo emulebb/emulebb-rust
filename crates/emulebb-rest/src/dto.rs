@@ -165,6 +165,9 @@ pub(crate) struct SearchResultsPage {
     #[serde(rename = "type")]
     pub(crate) file_type: String,
     pub(crate) status: String,
+    /// Additive REST field: honest reason for a non-completed status (e.g.
+    /// `waiting-for-server-connection` while queued). `null` when absent.
+    pub(crate) status_reason: Option<String>,
     pub(crate) total: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,

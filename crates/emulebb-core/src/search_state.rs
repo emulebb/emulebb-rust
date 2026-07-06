@@ -89,12 +89,24 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
 fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
     let created_at = timestamp_ms(search.created_at_ms, "search created_at_ms")?;
     let updated_at = timestamp_ms(search.updated_at_ms, "search updated_at_ms")?;
+    // WHY: a persisted "queued"/"running" search has no queue entry or
+    // background task after a restart — leaving the status as-is would show
+    // an immortal in-progress search that can never complete (the dishonest
+    // sibling of the silent completed-empty bug). Surface the truth instead.
+    let (status, status_reason) = match search.status.as_str() {
+        "queued" | "running" => (
+            "error".to_string(),
+            Some("interrupted-by-restart".to_string()),
+        ),
+        _ => (search.status, None),
+    };
     Ok(Search {
         id: search.public_id.clone(),
         query: search.query,
         method: search.method,
         r#type: search.search_type.clone(),
-        status: search.status,
+        status,
+        status_reason,
         created_at,
         updated_at,
         results: search

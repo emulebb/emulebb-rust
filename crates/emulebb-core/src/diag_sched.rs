@@ -216,6 +216,39 @@ pub(crate) fn keyword_search(method: &str, result_count: usize, query_len: usize
     );
 }
 
+/// `keyword_search_queue`: rust-only superset event tracing the connection-aware
+/// search queue lifecycle — `outcome` is `queued` (submitted while the backend
+/// was not ready), `rejected` (duplicate/cap at enqueue), `drained` (dispatched
+/// once the backend became ready), `retry` (send interrupted mid-flight,
+/// re-queued), `retry-exhausted`, or `expired` (max queue wait exceeded).
+/// Privacy: like `keyword_search`, the query text is never logged — only the
+/// requested method, the machine reason token, and the attempt count.
+pub(crate) fn keyword_search_queue(
+    outcome: &str,
+    method: &str,
+    reason: Option<&str>,
+    attempts: u32,
+) {
+    let mut body = Map::new();
+    body.insert("outcome".to_string(), json!(outcome));
+    body.insert("method".to_string(), json!(method));
+    if let Some(reason) = reason {
+        body.insert("reason".to_string(), json!(reason));
+    }
+    body.insert("attempts".to_string(), json!(attempts));
+    let severity = match outcome {
+        "drained" => "info",
+        _ => "low",
+    };
+    emit(
+        FAMILY,
+        "keyword_search_queue",
+        severity,
+        Value::Object(Map::new()),
+        Value::Object(body),
+    );
+}
+
 /// `source_count` (schema §3.5): periodic download-source picture snapshot, for
 /// parity with MFC `DiagEventLogDownloadSourceCount`. Field mapping to rust's
 /// source registry: `sourceCount` = total live candidates; `validSourceCount` =
