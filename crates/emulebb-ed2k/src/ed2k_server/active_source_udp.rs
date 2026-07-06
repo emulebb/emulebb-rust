@@ -137,6 +137,14 @@ pub async fn search_source_udp_servers(
                 continue;
             }
         };
+        if resolved_server_matches_endpoint(&resolved_server, excluded_endpoint) {
+            info!(
+                "skipping ED2K UDP source-search connected server endpoint={} file_hash={}",
+                resolved_server.base_endpoint(),
+                file_hash
+            );
+            continue;
+        }
         info!(
             "ED2K UDP source search attempt={}/{} endpoint={} name={} file_hash={}",
             attempt_index + 1,
@@ -400,6 +408,14 @@ pub async fn search_source_udp_server_batches(
                 continue;
             }
         };
+        if resolved_server_matches_endpoint(&resolved_server, excluded_endpoint) {
+            info!(
+                "skipping ED2K UDP source batch-search connected server endpoint={} target_count={}",
+                resolved_server.base_endpoint(),
+                targets.len()
+            );
+            continue;
+        }
         info!(
             "ED2K UDP source batch search attempt={}/{} endpoint={} name={} target_count={}",
             attempt_index + 1,
@@ -466,4 +482,47 @@ pub async fn search_source_udp_server_batches(
         return Err(error);
     }
     Ok(HashMap::new())
+}
+
+fn resolved_server_matches_endpoint(
+    server: &super::ResolvedServerEntry,
+    endpoint: Option<SocketAddr>,
+) -> bool {
+    endpoint.is_some_and(|endpoint| server.base_endpoint() == endpoint)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use super::*;
+
+    #[test]
+    fn resolved_endpoint_exclusion_matches_ip_even_when_configured_host_differs() {
+        let resolved = super::super::ResolvedServerEntry {
+            entry: super::super::ConfiguredServerEntry {
+                host: "server.example.invalid".to_string(),
+                port: 5687,
+                name: None,
+                description: None,
+                udp_flags: 0,
+                udp_key: 0,
+                udp_key_ip: 0,
+                obfuscation_port_tcp: 0,
+                obfuscation_port_udp: 0,
+                soft_files: 0,
+                hard_files: 0,
+            },
+            ip: Ipv4Addr::new(203, 0, 113, 10),
+        };
+
+        assert!(resolved_server_matches_endpoint(
+            &resolved,
+            Some(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 5687)))
+        ));
+        assert!(!resolved_server_matches_endpoint(
+            &resolved,
+            Some(SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 5687)))
+        ));
+    }
 }
