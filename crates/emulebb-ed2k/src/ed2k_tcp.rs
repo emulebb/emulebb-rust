@@ -96,7 +96,9 @@ pub(in crate::ed2k_tcp) use download::{DownloadSessionOptions, drive_download_se
 use download::{DownloadWindowLimits, next_download_read_timeout, select_download_window_limits};
 pub use download::{Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome, download_file_from_peer};
 pub(crate) use dump::dump_ed2k_tcp_download_meta;
-pub(in crate::ed2k_tcp) use dump::{dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send};
+pub(in crate::ed2k_tcp) use dump::{
+    dump_ed2k_tcp_download_recv, dump_ed2k_tcp_download_send, dump_ed2k_tcp_send_for_flow,
+};
 pub use firewall_helper::connect_callback_peer;
 pub use firewall_helper::emule_connect_options;
 pub(crate) use firewall_helper::is_connection_shutdown_error;

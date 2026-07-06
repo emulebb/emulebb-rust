@@ -203,6 +203,7 @@ async fn handle_firewall_helper_packet(
                 context.helper_addr,
                 context.secure_ident,
                 peer_secure_ident,
+                "udp_firewall_check",
             )
             .await?
                 && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
@@ -237,6 +238,7 @@ async fn handle_firewall_helper_packet(
                 context.helper_addr,
                 context.secure_ident,
                 peer_secure_ident,
+                "udp_firewall_check",
             )
             .await?;
         }

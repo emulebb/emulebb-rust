@@ -17,7 +17,7 @@ use sha1::Sha1;
 
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_KEY_BITS, Ed2kTransport,
-    OP_EMULEPROT, OP_SECIDENTSTATE, OP_SIGNATURE, dump_ed2k_tcp_download_send, encode_packet,
+    OP_EMULEPROT, OP_SECIDENTSTATE, OP_SIGNATURE, dump_ed2k_tcp_send_for_flow, encode_packet,
 };
 
 /// Stock eMule `MAXPUBKEYSIZE` (`ClientCredits.h`): the secure-ident public-key
@@ -409,11 +409,16 @@ fn select_outbound_challenge_ip(
     }
 }
 
+/// `flow` is the calling session's packet-dump flow (`"listener"`,
+/// `"native_download"`, or `"udp_firewall_check"`): this helper is shared by
+/// all three session kinds, so the dump must be attributed to the caller's
+/// flow rather than a hardcoded one.
 pub(super) async fn try_send_secure_ident_signature(
     transport: &mut Ed2kTransport,
     peer_addr: SocketAddr,
     secure_ident: &Ed2kSecureIdent,
     peer_state: &mut Ed2kPeerSecureIdentState,
+    flow: &'static str,
 ) -> Result<bool> {
     let Some(peer_public_key) = peer_state.peer_public_key.as_deref() else {
         return Ok(false);
@@ -442,7 +447,7 @@ pub(super) async fn try_send_secure_ident_signature(
             challenge_ip,
         )?,
     );
-    dump_ed2k_tcp_download_send(peer_addr, transport.mode, "signature", &signature);
+    dump_ed2k_tcp_send_for_flow(flow, peer_addr, transport.mode, "signature", &signature);
     transport
         .write_all(&signature)
         .await

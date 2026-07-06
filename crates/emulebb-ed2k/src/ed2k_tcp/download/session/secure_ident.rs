@@ -52,6 +52,7 @@ pub(super) async fn handle_secident_state(
         peer_addr,
         secure_ident,
         &mut session_state.peer_secure_ident,
+        "native_download",
     )
     .await?
         && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
@@ -88,6 +89,7 @@ pub(super) async fn handle_public_key(
         peer_addr,
         secure_ident,
         &mut session_state.peer_secure_ident,
+        "native_download",
     )
     .await?;
     Ok(())

@@ -603,6 +603,22 @@ pub(super) fn dump_ed2k_tcp_listener_recv(
     dump_ed2k_tcp_recv("listener", remote_addr, transport_mode, phase, packet);
 }
 
+/// Flow-parameterized send dump for shared session helpers (currently the
+/// secure-ident signature sender) that serve multiple session flows. The
+/// per-flow wrappers below hardcode their flow; a helper shared by the
+/// listener, native-download, and udp-firewall-check sessions must dump under
+/// the CALLING session's flow, or its packets are misattributed in the packet
+/// dump (a listener SecIdent signature previously appeared as native_download).
+pub(in crate::ed2k_tcp) fn dump_ed2k_tcp_send_for_flow(
+    flow: &'static str,
+    remote_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    phase: &str,
+    bytes: &[u8],
+) {
+    dump_ed2k_tcp_send(flow, remote_addr, transport_mode, phase, bytes);
+}
+
 pub(crate) fn dump_ed2k_tcp_download_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,

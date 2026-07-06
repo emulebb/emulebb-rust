@@ -56,8 +56,14 @@ pub(super) async fn handle_secident_state(
             .await
             .with_context(|| format!("failed to send OP_PUBLICKEY to {peer_addr}"))?;
     }
-    if !try_send_secure_ident_signature(transport, peer_addr, secure_ident, peer_secure_ident)
-        .await?
+    if !try_send_secure_ident_signature(
+        transport,
+        peer_addr,
+        secure_ident,
+        peer_secure_ident,
+        "listener",
+    )
+    .await?
         && state == ED2K_SECURE_IDENT_SIGNATURE_NEEDED
         && !peer_secure_ident.requested_peer_key
     {
@@ -94,8 +100,14 @@ pub(super) async fn handle_public_key(
             .as_ref()
             .map_or(0, Vec::len)
     );
-    let _ = try_send_secure_ident_signature(transport, peer_addr, secure_ident, peer_secure_ident)
-        .await?;
+    let _ = try_send_secure_ident_signature(
+        transport,
+        peer_addr,
+        secure_ident,
+        peer_secure_ident,
+        "listener",
+    )
+    .await?;
     Ok(())
 }
 
