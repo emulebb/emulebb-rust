@@ -41,6 +41,11 @@ pub(crate) struct CoreState {
     /// round (oracle `DS_WAITCALLBACKKAD` reap window).
     pub(crate) ed2k_kad_callback_last_sent:
         HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
+    /// Last time we sent `OP_CALLBACKREQUEST` through the connected eD2K server,
+    /// keyed by (LowID client id, file hash). Mirrors eMule's per-source
+    /// `MIN2MS(20)` callback retry gate.
+    pub(crate) ed2k_server_callback_last_sent:
+        HashMap<crate::ed2k_sources::Ed2kServerCallbackKey, Instant>,
     pub(crate) shared_directories: Vec<SharedDirectoryRoot>,
     pub(crate) unshared_hashes: HashSet<String>,
     pub(crate) monitor_shared_hashes: HashMap<PathBuf, String>,

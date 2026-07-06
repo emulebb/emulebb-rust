@@ -1,4 +1,8 @@
-use std::net::Ipv4Addr;
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    time::{Duration, Instant},
+};
 
 use emulebb_ed2k::config::Ed2kConfig;
 use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
@@ -6,8 +10,9 @@ use emulebb_kad_dht::SourceResult;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    configured_server_attempts, global_udp_source_batch_server_attempts,
-    kad_source_result_to_ed2k_found_source, merge_download_sources,
+    ED2K_SERVER_CALLBACK_COOLDOWN, claim_ed2k_server_callback_request, configured_server_attempts,
+    global_udp_source_batch_server_attempts, kad_source_result_to_ed2k_found_source,
+    merge_download_sources,
 };
 
 fn kad_source(udp_port: u16) -> SourceResult {
@@ -55,6 +60,43 @@ fn global_udp_source_batch_attempts_cover_effective_server_list() {
 
     config.server_endpoints.clear();
     assert_eq!(global_udp_source_batch_server_attempts(&config), 1);
+}
+
+#[test]
+fn server_callback_claim_is_per_client_file_and_uses_twenty_minute_gate() {
+    let mut last_sent = HashMap::new();
+    let now = Instant::now();
+
+    assert!(claim_ed2k_server_callback_request(
+        &mut last_sent,
+        0x1234,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now
+    ));
+    assert!(!claim_ed2k_server_callback_request(
+        &mut last_sent,
+        0x1234,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now + Duration::from_secs(30)
+    ));
+    assert!(claim_ed2k_server_callback_request(
+        &mut last_sent,
+        0x1234,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        now + Duration::from_secs(30)
+    ));
+    assert!(claim_ed2k_server_callback_request(
+        &mut last_sent,
+        0x5678,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now + Duration::from_secs(30)
+    ));
+    assert!(claim_ed2k_server_callback_request(
+        &mut last_sent,
+        0x1234,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now + ED2K_SERVER_CALLBACK_COOLDOWN
+    ));
 }
 
 fn direct_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundSource {

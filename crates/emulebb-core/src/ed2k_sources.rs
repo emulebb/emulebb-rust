@@ -10,7 +10,7 @@
 //! reach them by their bare names.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, SocketAddr},
     time::{Duration, Instant},
 };
@@ -36,6 +36,29 @@ use crate::{
 pub(crate) enum Ed2kServerCallbackRoute {
     BackgroundSession,
     Unavailable,
+}
+
+pub(crate) const ED2K_SERVER_CALLBACK_COOLDOWN: Duration = Duration::from_secs(20 * 60);
+
+pub(crate) type Ed2kServerCallbackKey = (u32, String);
+
+pub(crate) fn claim_ed2k_server_callback_request(
+    last_sent: &mut HashMap<Ed2kServerCallbackKey, Instant>,
+    client_id: u32,
+    file_hash: &str,
+    now: Instant,
+) -> bool {
+    last_sent.retain(|_, sent_at| {
+        now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
+    });
+    let key = (client_id, file_hash.to_string());
+    if last_sent.get(&key).is_some_and(|sent_at| {
+        now.saturating_duration_since(*sent_at) < ED2K_SERVER_CALLBACK_COOLDOWN
+    }) {
+        return false;
+    }
+    last_sent.insert(key, now);
+    true
 }
 
 pub(crate) fn source_key(

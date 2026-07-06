@@ -147,16 +147,17 @@ use ed2k_source_batch::{
     claim_connected_server_source_batch, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
 };
 use ed2k_sources::{
-    Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
-    collect_kad_ed2k_sources, configured_server_attempts, direct_download_candidate_sources,
-    drop_self_sources, ed2k_server_callback_route, found_source_from_hint,
-    global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
-    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
-    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
-    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
-    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
-    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
-    significant_keyword_words_unique, sort_download_sources, source_endpoint_key, source_key,
+    Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
+    claim_ed2k_server_callback_request, collect_kad_ed2k_metadata, collect_kad_ed2k_sources,
+    configured_server_attempts, direct_download_candidate_sources, drop_self_sources,
+    ed2k_server_callback_route, found_source_from_hint, global_udp_source_batch_server_attempts,
+    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
+    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
+    merge_download_sources, new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
+    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
+    should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
+    should_skip_no_progress_source_requery, significant_keyword_words_unique,
+    sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -3158,6 +3159,26 @@ impl EmulebbCore {
                             .source_server
                             .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),
                         connected_server_endpoint
+                            .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
+                    );
+                    continue;
+                }
+                let callback_claimed = {
+                    let mut state = self.state.lock().await;
+                    claim_ed2k_server_callback_request(
+                        &mut state.ed2k_server_callback_last_sent,
+                        source.client_id,
+                        &transfer.hash,
+                        Instant::now(),
+                    )
+                };
+                if !callback_claimed {
+                    tracing::debug!(
+                        "ED2K server callback suppressed by cooldown file_hash={} client_id={} source_server={}",
+                        transfer.hash,
+                        source.client_id,
+                        source
+                            .source_server
                             .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string())
                     );
                     continue;
