@@ -780,21 +780,36 @@ impl EmulebbCore {
 
         let mut runtime_guard = self.ed2k_runtime.lock().await;
         if let Some(runtime) = runtime_guard.as_ref() {
+            let mut reconnect_needed = false;
             if let Some(endpoint) = endpoint {
+                let requested_endpoint = endpoint.parse::<SocketAddr>().ok();
+                let same_live_endpoint = {
+                    let server_state = runtime.server_state.read().await;
+                    requested_endpoint.is_some_and(|requested| {
+                        server_state.endpoint == Some(requested)
+                            && (server_state.connected || server_state.connecting)
+                    })
+                };
                 *runtime.target_server_endpoint.write().await = Some(endpoint.to_string());
                 // WHY: an explicit REST/UI server connect must interrupt the
                 // current background session and make the loop try that endpoint
-                // next, matching MFC's directed ConnectToServer behavior.
-                runtime.server_reconnect_signal.notify_one();
+                // next, matching MFC's directed ConnectToServer behavior. Asking
+                // for the already-live endpoint is a status-confirming no-op; do
+                // not drop a healthy persistent server session just because a
+                // controller re-sent the same connect command.
+                reconnect_needed = !same_live_endpoint;
             }
             let server_state = runtime.server_state.read().await;
             if !server_state.connected && !server_state.connecting {
                 // WHY: REST connect must behave like eMule's explicit connect button.
                 // A disconnected background session can otherwise sit in its normal
                 // reconnect backoff while the controller observes a no-op response.
-                runtime.server_reconnect_signal.notify_one();
+                reconnect_needed = true;
             }
             drop(server_state);
+            if reconnect_needed {
+                runtime.server_reconnect_signal.notify_one();
+            }
             drop(runtime_guard);
             return Ok(self.ed2k_status().await);
         }
@@ -9174,6 +9189,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let dht_task = dht.start();
         let target_server_endpoint = Arc::new(RwLock::new(None));
+        let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
 
         *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
             search_handle,
@@ -9182,7 +9198,7 @@ mod tests {
             kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
             nat: Arc::new(NatManager::default()),
             shutdown: Arc::clone(&shutdown),
-            server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+            server_reconnect_signal: Arc::clone(&server_reconnect_signal),
             target_server_endpoint: Arc::clone(&target_server_endpoint),
             kad_firewall_recheck: None,
             tasks: vec![dht_task],
@@ -9195,6 +9211,82 @@ mod tests {
         assert_eq!(
             target_server_endpoint.read().await.as_deref(),
             Some("203.0.113.20:4661")
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                server_reconnect_signal.notified()
+            )
+            .await
+            .is_ok(),
+            "retargeting a running server loop must signal reconnect"
+        );
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = core.disconnect_ed2k().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
+        let transfer_root = unique_runtime_dir("emulebb-core-same-server-connect-noop");
+        let mut network = test_network_config_with_store(
+            &transfer_root,
+            KadLocalStoreConfig::default(),
+            SnoopQueueConfig::default(),
+        );
+        network.config.server_endpoints = vec!["203.0.113.20:4661".to_string()];
+        let core = EmulebbCore::new_with_network(
+            "test",
+            FileIndex::in_memory().unwrap(),
+            &transfer_root,
+            Some(network),
+        )
+        .unwrap();
+        let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dht_task = dht.start();
+        let target_server_endpoint = Arc::new(RwLock::new(None));
+        let server_reconnect_signal = Arc::new(tokio::sync::Notify::new());
+        let server_state = Arc::new(RwLock::new(Ed2kServerState {
+            endpoint: Some("203.0.113.20:4661".parse().unwrap()),
+            connected: true,
+            ..Ed2kServerState::default()
+        }));
+
+        *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+            search_handle,
+            server_state,
+            dht,
+            kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+            nat: Arc::new(NatManager::default()),
+            shutdown: Arc::clone(&shutdown),
+            server_reconnect_signal: Arc::clone(&server_reconnect_signal),
+            target_server_endpoint: Arc::clone(&target_server_endpoint),
+            kad_firewall_recheck: None,
+            tasks: vec![dht_task],
+            download_tasks: Arc::clone(&core.ed2k_download_tasks),
+        });
+
+        let result = core.connect_ed2k_server("203.0.113.20:4661").await.unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(
+            target_server_endpoint.read().await.as_deref(),
+            Some("203.0.113.20:4661")
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                server_reconnect_signal.notified()
+            )
+            .await
+            .is_err(),
+            "same-endpoint connect must not drop a live server session"
         );
         shutdown.store(true, Ordering::SeqCst);
         let _ = core.disconnect_ed2k().await;
