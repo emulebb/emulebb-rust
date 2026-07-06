@@ -63,7 +63,11 @@ impl RpcManager {
                                     KadUdpDumpSummary {
                                         protocol: plain.first().copied().unwrap_or_default(),
                                         opcode: plain.get(1).copied(),
-                                        opcode_name: None,
+                                        // Name the heuristic opcode byte too (known name
+                                        // or the "UNKNOWN" marker) so decode-failed diag
+                                        // records stay self-sufficient for opcode-coverage
+                                        // crediting, matching the decoded-packet records.
+                                        opcode_name: plain.get(1).map(|&op| opcode_name(op)),
                                         raw_obfuscated: was_obfuscated,
                                         transport_mode: Some(inbound_transport_mode(
                                             was_obfuscated,

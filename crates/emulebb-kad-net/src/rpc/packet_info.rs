@@ -304,6 +304,23 @@ mod tests {
     use super::opcode_name;
     use emulebb_kad_proto::constants::opcode;
 
+    // Regression (2026-07-06 parity audit): an unknown/legacy inbound Kad opcode
+    // (e.g. Kad1 KADEMLIA_REQ 0x20) must keep its RAW NUMERIC opcode through the
+    // decode + diag pipeline, with "UNKNOWN" as the name marker. If either ever
+    // becomes None/absent, the offline coverage tooling can no longer credit rust
+    // with receiving those opcodes from the diag stream alone.
+    #[test]
+    fn unknown_legacy_inbound_opcode_keeps_raw_numeric_opcode_for_diagnostics() {
+        let datagram = [0xE4u8, 0x20, 0x01, 0x02, 0x03];
+        let packet = emulebb_kad_proto::KadPacket::decode(&datagram).expect("decodes as Unknown");
+        assert!(matches!(
+            packet,
+            emulebb_kad_proto::KadPacket::Unknown { opcode: 0x20, .. }
+        ));
+        assert_eq!(packet.opcode(), 0x20);
+        assert_eq!(opcode_name(0x20), "UNKNOWN");
+    }
+
     #[test]
     fn deprecated_kad_hello_opcodes_are_named_for_diagnostics() {
         assert_eq!(
