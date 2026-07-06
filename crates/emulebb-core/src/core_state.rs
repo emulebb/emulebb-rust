@@ -32,6 +32,7 @@ pub(crate) struct CoreState {
     pub(crate) active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     pub(crate) download_source_registry: DownloadSourceRegistry,
     pub(crate) ed2k_server_source_last_queried: HashMap<String, Instant>,
+    pub(crate) ed2k_server_source_last_frame_at: Option<Instant>,
     pub(crate) ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
     pub(crate) ed2k_kad_source_last_queried: HashMap<String, (Instant, u8)>,
     /// Last time we sent an outbound Kad `KADEMLIA_CALLBACK_REQ` for a firewalled

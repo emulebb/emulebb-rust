@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -29,6 +30,8 @@ type BackgroundKeywordSearchResponse =
     std::result::Result<Vec<Ed2kSearchFile>, BackgroundSearchFailure>;
 type BackgroundSourceSearchResponse =
     std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
+type BackgroundSourceBatchSearchResponse =
+    std::result::Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>, BackgroundSearchFailure>;
 type BackgroundCallbackRequestResponse = std::result::Result<(), BackgroundSearchFailure>;
 type BackgroundPublishResponse =
     std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
@@ -103,6 +106,13 @@ pub struct Ed2kServerSearchInbox {
     pub(super) receiver: mpsc::Receiver<BackgroundServerSearchRequest>,
 }
 
+/// One file included in a connected-server TCP source-search frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ed2kServerSourceBatchTarget {
+    pub file_hash: Ed2kHash,
+    pub file_size: u64,
+}
+
 #[derive(Debug)]
 pub(super) enum BackgroundServerSearchRequest {
     Keyword {
@@ -116,6 +126,11 @@ pub(super) enum BackgroundServerSearchRequest {
         file_size: u64,
         timeout: Duration,
         response: oneshot::Sender<BackgroundSourceSearchResponse>,
+    },
+    SourceBatch {
+        targets: Vec<Ed2kServerSourceBatchTarget>,
+        timeout: Duration,
+        response: oneshot::Sender<BackgroundSourceBatchSearchResponse>,
     },
     Callback {
         client_id: u32,
@@ -147,6 +162,12 @@ pub(super) enum PendingBackgroundServerSearch {
         file_hash: Ed2kHash,
         deadline: TokioInstant,
         response: oneshot::Sender<BackgroundSourceSearchResponse>,
+    },
+    SourceBatch {
+        pending_hashes: HashSet<Ed2kHash>,
+        deadline: TokioInstant,
+        results_by_hash: HashMap<Ed2kHash, Vec<Ed2kFoundSource>>,
+        response: oneshot::Sender<BackgroundSourceBatchSearchResponse>,
     },
 }
 
@@ -230,6 +251,37 @@ pub async fn search_source_via_background_session(
         _ = cancel.cancelled() => Ok(Vec::new()),
         response = receive_response => {
             let response = response.context("ED2K background source responder dropped")?;
+            response.map_err(BackgroundSearchFailure::into_anyhow)
+        }
+    }
+}
+
+/// Requests source searches for several files on the already-connected ED2K
+/// background session, packed into one oracle-style TCP frame.
+pub async fn search_source_batch_via_background_session(
+    handle: &Ed2kServerSearchHandle,
+    targets: &[Ed2kServerSourceBatchTarget],
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>> {
+    if targets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (response, receive_response) = oneshot::channel();
+    handle
+        .sender
+        .send(BackgroundServerSearchRequest::SourceBatch {
+            targets: targets.to_vec(),
+            timeout,
+            response,
+        })
+        .await
+        .context("ED2K background search channel is closed")?;
+
+    tokio::select! {
+        _ = cancel.cancelled() => Ok(HashMap::new()),
+        response = receive_response => {
+            let response = response.context("ED2K background source-batch responder dropped")?;
             response.map_err(BackgroundSearchFailure::into_anyhow)
         }
     }
@@ -347,13 +399,19 @@ pub(super) fn handle_background_udp_packet(
             let _ = response.send(Ok(results));
         }
         OP_GLOBFOUNDSOURCES => {
-            let Some(Source {
-                file_hash,
-                deadline,
-                response,
-            }) = pending_background_search.take()
-            else {
+            let Some(pending) = pending_background_search.take() else {
                 return Ok(());
+            };
+            let (file_hash, deadline, response) = match pending {
+                Source {
+                    file_hash,
+                    deadline,
+                    response,
+                } => (file_hash, deadline, response),
+                other => {
+                    *pending_background_search = Some(other);
+                    return Ok(());
+                }
             };
             let mut aggregated_results = Vec::new();
             let source_sets = match decode_udp_found_source_sets(&packet.payload) {
@@ -443,6 +501,9 @@ pub(super) fn fail_background_search_request(
             BackgroundServerSearchRequest::Source { response, .. } => {
                 let _ = response.send(Err(failure.clone()));
             }
+            BackgroundServerSearchRequest::SourceBatch { response, .. } => {
+                let _ = response.send(Err(failure.clone()));
+            }
             BackgroundServerSearchRequest::Callback { response, .. } => {
                 let _ = response.send(Err(failure.clone()));
             }
@@ -464,6 +525,17 @@ pub(super) fn fail_pending_background_search(
             }
             Source { response, .. } => {
                 let _ = response.send(Err(failure.clone()));
+            }
+            PendingBackgroundServerSearch::SourceBatch {
+                response,
+                results_by_hash,
+                ..
+            } => {
+                if failure.interrupted {
+                    let _ = response.send(Err(failure.clone()));
+                } else {
+                    let _ = response.send(Ok(results_by_hash));
+                }
             }
         }
     }
@@ -528,6 +600,47 @@ pub(super) async fn start_background_server_search(
             Ok(Some(Source {
                 file_hash,
                 deadline: TokioInstant::now() + timeout,
+                response,
+            }))
+        }
+        BackgroundServerSearchRequest::SourceBatch {
+            targets,
+            timeout,
+            response,
+        } => {
+            if targets.is_empty() {
+                let _ = response.send(Ok(HashMap::new()));
+                return Ok(None);
+            }
+            wait_for_offer_files_settle(session).await;
+            session.set_phase(
+                ServerSessionPhase::SearchActive,
+                format!(
+                    "dispatching background source batch target_count={}",
+                    targets.len()
+                ),
+            );
+            let mut payload = Vec::new();
+            let mut pending_hashes = HashSet::new();
+            for target in &targets {
+                payload
+                    .extend_from_slice(&encode_source_request(target.file_hash, target.file_size));
+                pending_hashes.insert(target.file_hash);
+            }
+            let opcode = source_request_opcode(context.connect_options, session.server_flags);
+            session.send_packet(opcode, &payload).await?;
+            info!(
+                "sent ED2K background source batch endpoint={} trace_id={} role={} opcode=0x{:02X} target_count={}",
+                session.endpoint,
+                session.trace_id,
+                session.trace_role,
+                opcode,
+                pending_hashes.len()
+            );
+            Ok(Some(PendingBackgroundServerSearch::SourceBatch {
+                pending_hashes,
+                deadline: TokioInstant::now() + timeout,
+                results_by_hash: HashMap::new(),
                 response,
             }))
         }

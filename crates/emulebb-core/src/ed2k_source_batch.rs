@@ -3,19 +3,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-use emulebb_ed2k::ed2k_server::Ed2kUdpSourceBatchTarget;
+use emulebb_ed2k::ed2k_server::{Ed2kServerSourceBatchTarget, Ed2kUdpSourceBatchTarget};
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{CoreState, Transfer};
 
 pub(crate) const ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL: Duration =
+    Duration::from_secs(15 * (16 + 4));
+pub(crate) const ED2K_CONNECTED_SERVER_SOURCE_FRAME_MAX_FILES: usize = 15;
 pub(crate) const ED2K_KAD_SOURCE_REASK_BASE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const ED2K_KAD_SOURCE_REASK_MAX_MULTIPLIER: u8 = 7;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedEd2kUdpSourceBatch {
     pub targets: Vec<Ed2kUdpSourceBatchTarget>,
+    pub transfers: HashMap<Ed2kHash, Transfer>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedConnectedServerSourceBatch {
+    pub targets: Vec<Ed2kServerSourceBatchTarget>,
     pub transfers: HashMap<Ed2kHash, Transfer>,
 }
 
@@ -75,29 +84,66 @@ pub(crate) fn claim_ed2k_udp_source_batch(
     ClaimedEd2kUdpSourceBatch { targets, transfers }
 }
 
-pub(crate) fn claim_connected_server_source_refresh(
+pub(crate) fn claim_connected_server_source_batch(
     state: &mut CoreState,
-    file_hash: &str,
+    current_transfer: &Transfer,
+    current_file_hash: Ed2kHash,
     now: Instant,
-) -> bool {
+) -> ClaimedConnectedServerSourceBatch {
     state
         .ed2k_server_source_last_queried
         .retain(|_, last_queried| {
             now.saturating_duration_since(*last_queried) < ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN
         });
     if state
-        .ed2k_server_source_last_queried
-        .get(file_hash)
-        .is_some_and(|last_queried| {
-            now.saturating_duration_since(*last_queried) < ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN
+        .ed2k_server_source_last_frame_at
+        .is_some_and(|last_frame| {
+            now.saturating_duration_since(last_frame) < ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL
         })
     {
-        return false;
+        return ClaimedConnectedServerSourceBatch {
+            targets: Vec::new(),
+            transfers: HashMap::new(),
+        };
     }
-    state
-        .ed2k_server_source_last_queried
-        .insert(file_hash.to_string(), now);
-    true
+
+    let mut candidates = Vec::new();
+    candidates.push((current_file_hash, current_transfer.clone()));
+    for transfer in state.transfers.values() {
+        if transfer.hash == current_transfer.hash
+            || !is_server_source_batch_transfer_candidate(transfer)
+            || transfer.size_bytes == 0
+        {
+            continue;
+        }
+        let Ok(file_hash) = transfer.hash.parse::<Ed2kHash>() else {
+            continue;
+        };
+        candidates.push((file_hash, transfer.clone()));
+    }
+
+    let mut targets = Vec::new();
+    let mut transfers = HashMap::new();
+    for (file_hash, transfer) in candidates {
+        if was_recently_queried_on_connected_server(state, &transfer.hash, now) {
+            continue;
+        }
+        state
+            .ed2k_server_source_last_queried
+            .insert(transfer.hash.clone(), now);
+        targets.push(Ed2kServerSourceBatchTarget {
+            file_hash,
+            file_size: transfer.size_bytes,
+        });
+        transfers.insert(file_hash, transfer);
+        if targets.len() >= ED2K_CONNECTED_SERVER_SOURCE_FRAME_MAX_FILES {
+            break;
+        }
+    }
+    if !targets.is_empty() {
+        state.ed2k_server_source_last_frame_at = Some(now);
+    }
+    ClaimedConnectedServerSourceBatch { targets, transfers }
 }
 
 pub(crate) fn claim_kad_source_refresh(
@@ -133,6 +179,26 @@ fn was_recently_queried(state: &CoreState, file_hash: &str, now: Instant) -> boo
         .is_some_and(|last_queried| {
             now.saturating_duration_since(*last_queried) < ED2K_SERVER_UDP_SOURCE_BATCH_COOLDOWN
         })
+}
+
+fn was_recently_queried_on_connected_server(
+    state: &CoreState,
+    file_hash: &str,
+    now: Instant,
+) -> bool {
+    state
+        .ed2k_server_source_last_queried
+        .get(file_hash)
+        .is_some_and(|last_queried| {
+            now.saturating_duration_since(*last_queried) < ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN
+        })
+}
+
+fn is_server_source_batch_transfer_candidate(transfer: &Transfer) -> bool {
+    !matches!(
+        transfer.state.as_str(),
+        "completed" | "completing" | "paused" | "stopped" | "hashing"
+    )
 }
 
 fn is_ed2k_udp_source_batch_transfer_candidate(transfer: &Transfer) -> bool {
@@ -183,33 +249,66 @@ mod tests {
     }
 
     #[test]
-    fn connected_server_source_refresh_is_paced_per_file() {
+    fn connected_server_source_batch_paces_frames_and_per_file_reasks() {
         let now = Instant::now();
         let current_hash = Ed2kHash::from_bytes([0x55; 16]);
         let other_hash = Ed2kHash::from_bytes([0x66; 16]);
         let current = transfer(current_hash, "downloading", 1024);
-        let mut state = core_state_with_transfers([current]);
+        let other = transfer(other_hash, "queued", 2048);
+        let mut state = core_state_with_transfers([current.clone(), other.clone()]);
 
-        assert!(claim_connected_server_source_refresh(
+        let first = claim_connected_server_source_batch(&mut state, &current, current_hash, now);
+        assert_eq!(first.targets.len(), 2);
+        assert!(first.transfers.contains_key(&current_hash));
+        assert!(first.transfers.contains_key(&other_hash));
+
+        let frame_blocked = claim_connected_server_source_batch(
             &mut state,
-            &current_hash.to_string(),
-            now
-        ));
-        assert!(!claim_connected_server_source_refresh(
+            &current,
+            current_hash,
+            now + Duration::from_secs(5),
+        );
+        assert!(frame_blocked.targets.is_empty());
+
+        let per_file_blocked = claim_connected_server_source_batch(
             &mut state,
-            &current_hash.to_string(),
-            now + Duration::from_secs(5)
-        ));
-        assert!(claim_connected_server_source_refresh(
+            &current,
+            current_hash,
+            now + ED2K_CONNECTED_SERVER_SOURCE_FRAME_INTERVAL + Duration::from_secs(1),
+        );
+        assert!(per_file_blocked.targets.is_empty());
+
+        let refreshed = claim_connected_server_source_batch(
             &mut state,
-            &other_hash.to_string(),
-            now + Duration::from_secs(5)
-        ));
-        assert!(claim_connected_server_source_refresh(
-            &mut state,
-            &current_hash.to_string(),
-            now + ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN + Duration::from_secs(1)
-        ));
+            &current,
+            current_hash,
+            now + ED2K_CONNECTED_SERVER_SOURCE_COOLDOWN + Duration::from_secs(1),
+        );
+        assert!(
+            refreshed
+                .targets
+                .iter()
+                .any(|target| target.file_hash == current_hash)
+        );
+    }
+
+    #[test]
+    fn connected_server_source_batch_limits_frame_to_mfc_size() {
+        let now = Instant::now();
+        let current_hash = Ed2kHash::from_bytes([0x91; 16]);
+        let current = transfer(current_hash, "downloading", 1024);
+        let mut transfers = vec![current.clone()];
+        for byte in 0x92..0xB0 {
+            transfers.push(transfer(Ed2kHash::from_bytes([byte; 16]), "queued", 1024));
+        }
+        let mut state = core_state_with_transfers(transfers);
+
+        let claimed = claim_connected_server_source_batch(&mut state, &current, current_hash, now);
+
+        assert_eq!(
+            claimed.targets.len(),
+            ED2K_CONNECTED_SERVER_SOURCE_FRAME_MAX_FILES
+        );
     }
 
     #[test]
@@ -276,6 +375,7 @@ mod tests {
             active_download_peer_endpoints: HashSet::new(),
             download_source_registry: DownloadSourceRegistry::default(),
             ed2k_server_source_last_queried: HashMap::new(),
+            ed2k_server_source_last_frame_at: None,
             ed2k_udp_source_batch_last_queried: HashMap::new(),
             ed2k_kad_source_last_queried: HashMap::new(),
             ed2k_kad_callback_last_sent: HashMap::new(),

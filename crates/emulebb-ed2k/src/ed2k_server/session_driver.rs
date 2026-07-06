@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use emulebb_kad_proto::Ed2kHash;
 use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tracing::{debug, info, warn};
 
@@ -240,6 +241,12 @@ pub(super) async fn run_one_server_session(
                                 session.endpoint,
                                 session.trace_id
                             ),
+                            BackgroundServerSearchRequest::SourceBatch { targets, .. } => info!(
+                                "queued ED2K background source batch target_count={} endpoint={} trace_id={} awaiting login",
+                                targets.len(),
+                                session.endpoint,
+                                session.trace_id
+                            ),
                             BackgroundServerSearchRequest::Callback { client_id, .. } => info!(
                                 "queued ED2K background callback request client_id={} endpoint={} trace_id={} awaiting login",
                                 client_id,
@@ -260,7 +267,8 @@ pub(super) async fn run_one_server_session(
                 if let Some(pending) = pending_background_search.as_ref() {
                     let deadline = match pending {
                         PendingBackgroundServerSearch::Keyword { deadline, .. }
-                        | PendingBackgroundServerSearch::Source { deadline, .. } => *deadline,
+                        | PendingBackgroundServerSearch::Source { deadline, .. }
+                        | PendingBackgroundServerSearch::SourceBatch { deadline, .. } => *deadline,
                     };
                     tokio::time::sleep_until(deadline).await;
                 } else {
@@ -271,7 +279,10 @@ pub(super) async fn run_one_server_session(
                     Some(PendingBackgroundServerSearch::Keyword { .. }) => {
                         "ED2K background session search timed out waiting for OP_SEARCHRESULT"
                     }
-                    Some(PendingBackgroundServerSearch::Source { .. }) => {
+                    Some(
+                        PendingBackgroundServerSearch::Source { .. }
+                        | PendingBackgroundServerSearch::SourceBatch { .. },
+                    ) => {
                         "ED2K background session search timed out waiting for OP_FOUNDSOURCES"
                     }
                     None => unreachable!("pending background search timeout without search"),
@@ -385,6 +396,67 @@ pub(super) async fn run_one_server_session(
                                 packet.opcode == OP_FOUNDSOURCES_OBFU
                             );
                             let _ = response.send(Ok(results));
+                            continue;
+                        }
+                        (OP_FOUNDSOURCES | OP_FOUNDSOURCES_OBFU, PendingBackgroundServerSearch::SourceBatch {
+                            mut pending_hashes,
+                            deadline,
+                            mut results_by_hash,
+                            response,
+                        }) => {
+                            let response_hash = if packet.payload.len() >= 16 {
+                                Ed2kHash(packet.payload[..16].try_into().unwrap())
+                            } else {
+                                pending_background_search = Some(PendingBackgroundServerSearch::SourceBatch {
+                                    pending_hashes,
+                                    deadline,
+                                    results_by_hash,
+                                    response,
+                                });
+                                handle_server_packet(
+                                    &mut session,
+                                    packet,
+                                    context,
+                                    false,
+                                )
+                                .await?;
+                                continue;
+                            };
+                            let results = annotate_found_sources_server(
+                                decode_found_sources(
+                                    &packet.payload,
+                                    packet.opcode == OP_FOUNDSOURCES_OBFU,
+                                )?,
+                                session.endpoint,
+                            );
+                            validate_found_sources(&results, response_hash)?;
+                            if pending_hashes.remove(&response_hash) {
+                                results_by_hash.insert(response_hash, results);
+                            }
+                            if pending_hashes.is_empty() {
+                                session.set_phase(
+                                    ServerSessionPhase::Completed,
+                                    format!(
+                                        "completed background source batch result_sets={}",
+                                        results_by_hash.len()
+                                    ),
+                                );
+                                info!(
+                                    "completed ED2K background source batch endpoint={} trace_id={} result_sets={} obfuscated={}",
+                                    session.endpoint,
+                                    session.trace_id,
+                                    results_by_hash.len(),
+                                    packet.opcode == OP_FOUNDSOURCES_OBFU
+                                );
+                                let _ = response.send(Ok(results_by_hash));
+                            } else {
+                                pending_background_search = Some(PendingBackgroundServerSearch::SourceBatch {
+                                    pending_hashes,
+                                    deadline,
+                                    results_by_hash,
+                                    response,
+                                });
+                            }
                             continue;
                         }
                         (_, pending) => {

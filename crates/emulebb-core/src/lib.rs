@@ -31,7 +31,7 @@ use emulebb_ed2k::{
         ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
         publish_shared_catalog_via_background_session, request_callback_via_background_session,
         run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
-        search_source_udp_server_batches, search_source_via_background_session,
+        search_source_batch_via_background_session, search_source_udp_server_batches,
     },
     ed2k_tcp::{
         Ed2kHelloIdentity, Ed2kListenerOptions, Ed2kPeerDownloadOptions, Ed2kPeerDownloadOutcome,
@@ -144,7 +144,7 @@ use ed2k_net_drivers::{
 };
 pub use ed2k_publish_diagnostics::Ed2kPublishDiagnostics;
 use ed2k_source_batch::{
-    claim_connected_server_source_refresh, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
+    claim_connected_server_source_batch, claim_ed2k_udp_source_batch, claim_kad_source_refresh,
 };
 use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity, collect_kad_ed2k_metadata,
@@ -3943,23 +3943,50 @@ impl EmulebbCore {
                 (None, None)
             };
         let has_background_search = background_search.is_some();
-        let allow_connected_server_source_refresh =
-            allow_server_source_refresh && has_background_search && {
+        if allow_server_source_refresh
+            && has_background_search
+            && let Some(handle) = background_search.as_ref()
+        {
+            let claimed_batch = {
                 let mut state = self.state.lock().await;
-                claim_connected_server_source_refresh(&mut state, &transfer.hash, Instant::now())
+                claim_connected_server_source_batch(&mut state, transfer, file_hash, Instant::now())
             };
-        if allow_connected_server_source_refresh && let Some(handle) = background_search {
-            let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
-            match search_source_via_background_session(
-                &handle, file_hash, file_size, timeout, &cancel,
-            )
-            .await
-            {
-                Ok(results) => merge_download_sources(&mut sources, results),
-                Err(error) => tracing::warn!(
-                    "ED2K background source search failed file_hash={} error={error}",
-                    file_hash
-                ),
+            if !claimed_batch.targets.is_empty() {
+                let timeout = Duration::from_secs(config.connect_timeout_secs.max(15));
+                match search_source_batch_via_background_session(
+                    handle,
+                    &claimed_batch.targets,
+                    timeout,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(results_by_hash) => {
+                        for (result_hash, mut results) in results_by_hash {
+                            if !network.ip_filter.is_empty() {
+                                results.retain(|source| !network.ip_filter.is_filtered(source.ip));
+                            }
+                            let ban_store = self.ed2k_transfers.ban_store();
+                            results.retain(|source| {
+                                !ban_store.is_banned(Some(source.ip), source.user_hash.as_ref())
+                            });
+                            if result_hash == file_hash {
+                                merge_download_sources(&mut sources, results);
+                            } else if let Some(batch_transfer) =
+                                claimed_batch.transfers.get(&result_hash)
+                            {
+                                self.register_download_source_candidates(batch_transfer, &results)
+                                    .await;
+                                self.remember_ed2k_sources(result_hash, &results).await?;
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        "ED2K background source batch search failed file_hash={} target_count={} error={error}",
+                        file_hash,
+                        claimed_batch.targets.len()
+                    ),
+                }
             }
         }
         // Stock eMule obtains server sources through the connected server TCP

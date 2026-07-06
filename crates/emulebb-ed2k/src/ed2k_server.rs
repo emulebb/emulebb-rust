@@ -60,8 +60,9 @@ use background::{
 };
 pub use background::{
     Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle, Ed2kServerSearchInbox,
-    new_ed2k_server_search_channel, publish_shared_catalog_via_background_session,
-    request_callback_via_background_session, search_keyword_via_background_session,
+    Ed2kServerSourceBatchTarget, new_ed2k_server_search_channel,
+    publish_shared_catalog_via_background_session, request_callback_via_background_session,
+    search_keyword_via_background_session, search_source_batch_via_background_session,
     search_source_via_background_session,
 };
 use diagnostics::{dump_ed2k_server_loop_meta, dump_ed2k_server_meta, dump_ed2k_server_packet};

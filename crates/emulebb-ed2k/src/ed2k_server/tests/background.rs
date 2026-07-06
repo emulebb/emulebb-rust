@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[tokio::test]
 async fn background_search_channel_round_trips_results() {
@@ -89,6 +90,75 @@ async fn background_source_search_channel_round_trips_results() {
     .unwrap();
 
     assert_eq!(results, vec![expected]);
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn background_source_batch_search_channel_round_trips_results_by_hash() {
+    let (handle, mut inbox) = new_ed2k_server_search_channel(1);
+    let cancel = CancellationToken::new();
+    let file_hash_a = Ed2kHash([0x54; 16]);
+    let file_hash_b = Ed2kHash([0x55; 16]);
+    let expected = Ed2kFoundSource {
+        file_hash: file_hash_b,
+        ip: Ipv4Addr::new(10, 20, 30, 41),
+        tcp_port: 4662,
+        client_id: u32::from_le_bytes([10, 20, 30, 41]),
+        low_id: false,
+        obfuscated: true,
+        obfuscation_options: Some(0x03),
+        user_hash: Some([0x62; 16]),
+        source_server: None,
+        buddy_id: None,
+        buddy_endpoint: None,
+        source_udp_port: None,
+    };
+    let expected_for_task = expected.clone();
+
+    let responder = tokio::spawn(async move {
+        let request = inbox.receiver.recv().await.unwrap();
+        match request {
+            BackgroundServerSearchRequest::SourceBatch {
+                targets, response, ..
+            } => {
+                assert_eq!(
+                    targets,
+                    vec![
+                        Ed2kServerSourceBatchTarget {
+                            file_hash: file_hash_a,
+                            file_size: 42,
+                        },
+                        Ed2kServerSourceBatchTarget {
+                            file_hash: file_hash_b,
+                            file_size: 84,
+                        },
+                    ]
+                );
+                let _ = response.send(Ok(HashMap::from([(file_hash_b, vec![expected_for_task])])));
+            }
+            other => panic!("unexpected background request: {other:?}"),
+        }
+    });
+
+    let results = search_source_batch_via_background_session(
+        &handle,
+        &[
+            Ed2kServerSourceBatchTarget {
+                file_hash: file_hash_a,
+                file_size: 42,
+            },
+            Ed2kServerSourceBatchTarget {
+                file_hash: file_hash_b,
+                file_size: 84,
+            },
+        ],
+        Duration::from_secs(1),
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.get(&file_hash_b), Some(&vec![expected]));
     responder.await.unwrap();
 }
 
