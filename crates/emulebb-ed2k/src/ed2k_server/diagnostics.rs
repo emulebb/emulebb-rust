@@ -20,15 +20,15 @@ use super::{
     OP_FOUNDSOURCES_OBFU, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBFOUNDSOURCES,
     OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
     OP_GLOBSEARCHRES, OP_GLOBSERVSTATREQ, OP_GLOBSERVSTATRES, OP_IDCHANGE, OP_LOGINREQUEST,
-    OP_OFFERFILES, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST, OP_SEARCHRESULT,
-    OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS, ResolvedServerEntry,
-    ServerSession,
+    OP_OFFERFILES, OP_PACKEDPROT, OP_QUERY_MORE_RESULT, OP_REJECT, OP_SEARCHREQUEST,
+    OP_SEARCHRESULT, OP_SERVERIDENT, OP_SERVERLIST, OP_SERVERMESSAGE, OP_SERVERSTATUS,
+    ResolvedServerEntry, ServerSession,
 };
 
 const ED2K_SERVER_DUMP_FILE_PREFIX: &str = "emulebb-rust-ed2k-server-dump-";
 
 /// eD2k server protocol marker (OP_EDONKEYPROT) — server packets ride the eD2k
-/// protocol byte, same as the converged client/server packet diagnostics.
+/// protocol byte unless the server advertised packed payload support.
 const OP_EDONKEYPROT_MARKER: u8 = 0xE3;
 /// Payload hex cap, matching the client dump + eMuleBB diagnostic build.
 const MAX_SERVER_DUMP_HEX_BYTES: usize = 4 * 1024;
@@ -143,6 +143,7 @@ pub(super) fn dump_ed2k_server_loop_meta(
 pub(super) fn dump_ed2k_server_packet(
     _session: &ServerSession,
     _direction: &'static str,
+    _protocol_marker: u8,
     _opcode: u8,
     _payload: &[u8],
 ) {
@@ -211,6 +212,7 @@ pub(super) fn dump_ed2k_server_udp_packet(
 pub(super) fn dump_ed2k_server_packet(
     session: &ServerSession,
     direction: &'static str,
+    protocol_marker: u8,
     opcode: u8,
     payload: &[u8],
 ) {
@@ -246,8 +248,8 @@ pub(super) fn dump_ed2k_server_packet(
         } else {
             "plaintext"
         },
-        protocol: Some("ed2k"),
-        protocol_marker: Some(OP_EDONKEYPROT_MARKER),
+        protocol: Some(server_protocol_name(protocol_marker)),
+        protocol_marker: Some(protocol_marker),
         opcode: Some(opcode),
         opcode_name: Some(server_opcode_name(opcode)),
         payload_len: Some(payload.len()),
@@ -256,6 +258,14 @@ pub(super) fn dump_ed2k_server_packet(
         note: None,
     };
     dump_ed2k_server_record(&record);
+}
+
+fn server_protocol_name(protocol_marker: u8) -> &'static str {
+    match protocol_marker {
+        OP_EDONKEYPROT_MARKER => "ed2k",
+        OP_PACKEDPROT => "packed",
+        _ => "unknown",
+    }
 }
 
 fn next_ed2k_server_dump_event_seq() -> u64 {
@@ -371,8 +381,9 @@ fn server_opcode_name(opcode: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ED2K_SERVER_DUMP_FILE_PREFIX, OP_CALLBACKREQUEST, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ,
-        OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_GLOBSEARCHRES, server_opcode_name,
+        ED2K_SERVER_DUMP_FILE_PREFIX, OP_CALLBACKREQUEST, OP_EDONKEYPROT_MARKER,
+        OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
+        OP_GLOBSEARCHRES, OP_PACKEDPROT, server_opcode_name, server_protocol_name,
     };
 
     #[test]
@@ -394,5 +405,12 @@ mod tests {
             server_opcode_name(OP_GLOBFOUNDSOURCES),
             "OP_GLOBFOUNDSOURCES"
         );
+    }
+
+    #[test]
+    fn server_protocol_name_reports_packed_framing() {
+        assert_eq!(server_protocol_name(OP_EDONKEYPROT_MARKER), "ed2k");
+        assert_eq!(server_protocol_name(OP_PACKEDPROT), "packed");
+        assert_eq!(server_protocol_name(0x7F), "unknown");
     }
 }

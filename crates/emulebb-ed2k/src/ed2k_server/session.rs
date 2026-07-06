@@ -209,7 +209,7 @@ impl ServerSession {
             packet.len(),
             use_compression
         );
-        dump_ed2k_server_packet(self, "tx", opcode, payload);
+        dump_ed2k_server_packet(self, "tx", packet[0], opcode, payload);
         if let Some(cipher) = self.send_cipher.as_mut() {
             cipher.apply(&mut packet);
         }
@@ -337,6 +337,7 @@ impl ServerSession {
             dump_ed2k_server_packet(
                 self,
                 "tx",
+                first_packet[0],
                 first_packet[5],
                 &first_packet[TCP_PACKET_HEADER_LEN..],
             );
@@ -473,7 +474,7 @@ impl ServerSession {
             header[5],
             payload.len()
         );
-        dump_ed2k_server_packet(self, "rx", header[5], &payload);
+        dump_ed2k_server_packet(self, "rx", header[0], header[5], &payload);
         Ok(Some(Ed2kPacket {
             opcode: header[5],
             payload,
