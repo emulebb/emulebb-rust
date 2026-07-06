@@ -54,12 +54,14 @@ pub use active_source_udp::{
     search_source_udp_server_batches, search_source_udp_servers,
 };
 use background::{
-    BackgroundServerSearchContext, BackgroundServerSearchRequest, PendingBackgroundServerSearch,
-    fail_background_search_request, fail_pending_background_search, handle_background_udp_packet,
-    log_search_result_page, start_background_server_search,
+    BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
+    PendingBackgroundServerSearch, fail_background_search_request,
+    fail_pending_background_search, handle_background_udp_packet, log_search_result_page,
+    start_background_server_search,
 };
 pub use background::{
-    Ed2kServerSearchHandle, Ed2kServerSearchInbox, new_ed2k_server_search_channel,
+    Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle, Ed2kServerSearchInbox,
+    new_ed2k_server_search_channel,
     publish_shared_catalog_via_background_session, request_callback_via_background_session,
     search_keyword_via_background_session, search_source_via_background_session,
 };

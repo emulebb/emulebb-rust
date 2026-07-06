@@ -10,7 +10,8 @@ use super::udp_runtime::{
     bind_server_udp_socket, read_server_udp_packet, send_server_udp_status_request,
 };
 use super::{
-    BackgroundServerSearchContext, BackgroundServerSearchRequest, Ed2kServerSearchInbox,
+    BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
+    Ed2kServerSearchInbox,
     Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES,
     OP_QUERY_MORE_RESULT, OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry,
     ServerSession, ServerSessionPhase, annotate_found_sources_server, decode_found_sources,
@@ -140,11 +141,15 @@ pub(super) async fn run_one_server_session(
         if context.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             fail_background_search_request(
                 &mut queued_background_search,
-                "ED2K background session is shutting down before search dispatch",
+                &BackgroundSearchFailure::interrupted(
+                    "ED2K background session is shutting down before search dispatch",
+                ),
             );
             fail_pending_background_search(
                 &mut pending_background_search,
-                "ED2K background session is shutting down before search completion",
+                &BackgroundSearchFailure::interrupted(
+                    "ED2K background session is shutting down before search completion",
+                ),
             );
             clear_server_connection_state(&context.state).await;
             return Ok(ServerSessionExit::ContinueOrder);
@@ -160,11 +165,15 @@ pub(super) async fn run_one_server_session(
             }, if queued_background_search.is_none() && pending_background_search.is_none() => {
                 fail_background_search_request(
                     &mut queued_background_search,
-                    "ED2K background session rotated before search dispatch",
+                    &BackgroundSearchFailure::interrupted(
+                        "ED2K background session rotated before search dispatch",
+                    ),
                 );
                 fail_pending_background_search(
                     &mut pending_background_search,
-                    "ED2K background session rotated before search completion",
+                    &BackgroundSearchFailure::interrupted(
+                        "ED2K background session rotated before search completion",
+                    ),
                 );
                 info!(
                     "rotating ED2K server session from {} after {:?}",
@@ -183,11 +192,15 @@ pub(super) async fn run_one_server_session(
                 );
                 fail_background_search_request(
                     &mut queued_background_search,
-                    "ED2K background session reconnecting before search dispatch",
+                    &BackgroundSearchFailure::interrupted(
+                        "ED2K background session reconnecting before search dispatch",
+                    ),
                 );
                 fail_pending_background_search(
                     &mut pending_background_search,
-                    "ED2K background session reconnecting before search completion",
+                    &BackgroundSearchFailure::interrupted(
+                        "ED2K background session reconnecting before search completion",
+                    ),
                 );
                 info!(
                     "re-login requested for ED2K server {}; dropping session to reconnect",
@@ -264,7 +277,13 @@ pub(super) async fn run_one_server_session(
                     }
                     None => unreachable!("pending background search timeout without search"),
                 };
-                fail_pending_background_search(&mut pending_background_search, timeout_error);
+                // WHY: timed_out (NOT interrupted): the request DID run on a live
+                // session and the server never answered - an honest empty outcome,
+                // not a retryable transport failure.
+                fail_pending_background_search(
+                    &mut pending_background_search,
+                    &BackgroundSearchFailure::timed_out(timeout_error),
+                );
             }
             packet = session.read_packet() => {
                 let Some(packet) = packet? else {
@@ -274,11 +293,15 @@ pub(super) async fn run_one_server_session(
                     );
                     fail_background_search_request(
                         &mut queued_background_search,
-                        &format!("{closed_error} before search dispatch"),
+                        &BackgroundSearchFailure::interrupted(format!(
+                            "{closed_error} before search dispatch"
+                        )),
                     );
                     fail_pending_background_search(
                         &mut pending_background_search,
-                        &format!("{closed_error} before search completion"),
+                        &BackgroundSearchFailure::interrupted(format!(
+                            "{closed_error} before search completion"
+                        )),
                     );
                     anyhow::bail!(
                         "{closed_error}"

@@ -25,10 +25,68 @@ use super::{
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
-type BackgroundKeywordSearchResponse = std::result::Result<Vec<Ed2kSearchFile>, String>;
-type BackgroundSourceSearchResponse = std::result::Result<Vec<Ed2kFoundSource>, String>;
-type BackgroundCallbackRequestResponse = std::result::Result<(), String>;
-type BackgroundPublishResponse = std::result::Result<OfferFilesPublishStats, String>;
+type BackgroundKeywordSearchResponse = std::result::Result<Vec<Ed2kSearchFile>, BackgroundSearchFailure>;
+type BackgroundSourceSearchResponse = std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
+type BackgroundCallbackRequestResponse = std::result::Result<(), BackgroundSearchFailure>;
+type BackgroundPublishResponse = std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
+
+/// Marker error surfaced by the background-session request wrappers when the
+/// request never ran to completion on a live connected server session: the
+/// request channel was closed (stale handle after a runtime teardown), the
+/// responder was dropped, or the session shut down / rotated / reconnected /
+/// lost the connection mid-flight. Callers must treat the search as
+/// NOT-ATTEMPTED (e.g. requeue it for a fresh session), never as a
+/// completed-empty result - that silent-empty mapping is exactly the failure
+/// mode the connection-aware search queue exists to remove. Detect it with
+/// `anyhow::Error::downcast_ref::<Ed2kBackgroundSearchInterrupted>()`.
+#[derive(Debug)]
+pub struct Ed2kBackgroundSearchInterrupted(String);
+
+impl std::fmt::Display for Ed2kBackgroundSearchInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Ed2kBackgroundSearchInterrupted {}
+
+/// Failure detail carried on the background response channels. `interrupted`
+/// separates session-transition failures (the request never completed on a
+/// live session; retryable, see [`Ed2kBackgroundSearchInterrupted`]) from a
+/// genuine on-session wait that timed out (the server just never answered).
+#[derive(Debug, Clone)]
+pub(super) struct BackgroundSearchFailure {
+    message: String,
+    interrupted: bool,
+}
+
+impl BackgroundSearchFailure {
+    pub(super) fn interrupted(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            interrupted: true,
+        }
+    }
+
+    pub(super) fn timed_out(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            interrupted: false,
+        }
+    }
+
+    fn into_anyhow(self) -> anyhow::Error {
+        if self.interrupted {
+            anyhow::Error::new(Ed2kBackgroundSearchInterrupted(self.message))
+        } else {
+            anyhow::Error::msg(self.message)
+        }
+    }
+}
+
+fn interrupted_error(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Ed2kBackgroundSearchInterrupted(message.into()))
+}
 
 /// Handle used by active jobs to execute a keyword search through the
 /// long-lived ED2K background session.
@@ -124,15 +182,20 @@ pub async fn search_keyword_via_background_session(
             response,
         })
         .await
-        .context("ED2K background search channel is closed")?;
+        // WHY: a failed send means the background runtime is gone (stale
+        // handle) - the search never reached any session, so it must be
+        // retryable-interrupted, not a terminal search failure.
+        .map_err(|_| interrupted_error("ED2K background search channel is closed"))?;
 
     tokio::select! {
         _ = cancel.cancelled() => Ok(Vec::new()),
         result = tokio::time::timeout(timeout, receive_response) => {
             let response = result
                 .with_context(|| format!("timed out waiting for ED2K background search response after {timeout:?}"))?
-                .context("ED2K background search responder dropped")?;
-            response.map_err(anyhow::Error::msg)
+                // WHY: a dropped responder means the session task died before
+                // answering - also never-completed, so retryable-interrupted.
+                .map_err(|_| interrupted_error("ED2K background search responder dropped"))?;
+            response.map_err(BackgroundSearchFailure::into_anyhow)
         }
     }
 }
@@ -164,7 +227,7 @@ pub async fn search_source_via_background_session(
         _ = cancel.cancelled() => Ok(Vec::new()),
         response = receive_response => {
             let response = response.context("ED2K background source responder dropped")?;
-            response.map_err(anyhow::Error::msg)
+            response.map_err(BackgroundSearchFailure::into_anyhow)
         }
     }
 }
@@ -193,7 +256,7 @@ pub async fn request_callback_via_background_session(
             let response = result
                 .with_context(|| format!("timed out waiting for ED2K background callback response after {timeout:?}"))?
                 .context("ED2K background callback responder dropped")?;
-            response.map_err(anyhow::Error::msg)
+            response.map_err(BackgroundSearchFailure::into_anyhow)
         }
     }
 }
@@ -221,7 +284,7 @@ pub async fn publish_shared_catalog_via_background_session(
             let response = result
                 .with_context(|| format!("timed out waiting for ED2K background publish response after {timeout:?}"))?
                 .context("ED2K background publish responder dropped")?;
-            response.map_err(anyhow::Error::msg)
+            response.map_err(BackgroundSearchFailure::into_anyhow)
         }
     }
 }
@@ -367,21 +430,21 @@ pub(super) fn handle_background_udp_packet(
 
 pub(super) fn fail_background_search_request(
     request: &mut Option<BackgroundServerSearchRequest>,
-    error: &str,
+    failure: &BackgroundSearchFailure,
 ) {
     if let Some(request) = request.take() {
         match request {
             BackgroundServerSearchRequest::Keyword { response, .. } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
             BackgroundServerSearchRequest::Source { response, .. } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
             BackgroundServerSearchRequest::Callback { response, .. } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
             BackgroundServerSearchRequest::Publish { response } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
         }
     }
@@ -389,15 +452,15 @@ pub(super) fn fail_background_search_request(
 
 pub(super) fn fail_pending_background_search(
     request: &mut Option<PendingBackgroundServerSearch>,
-    error: &str,
+    failure: &BackgroundSearchFailure,
 ) {
     if let Some(request) = request.take() {
         match request {
             Keyword { response, .. } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
             Source { response, .. } => {
-                let _ = response.send(Err(error.to_string()));
+                let _ = response.send(Err(failure.clone()));
             }
         }
     }
