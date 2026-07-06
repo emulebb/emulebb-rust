@@ -38,7 +38,8 @@ pub(crate) struct CoreState {
     /// buddy source, keyed by (source ip, source tcp port, file hash). Enforces the
     /// callback cooldown so a buddy-only source is not re-callbacked every requery
     /// round (oracle `DS_WAITCALLBACKKAD` reap window).
-    pub(crate) ed2k_kad_callback_last_sent: HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
+    pub(crate) ed2k_kad_callback_last_sent:
+        HashMap<crate::kad_callback_initiator::KadCallbackKey, Instant>,
     pub(crate) shared_directories: Vec<SharedDirectoryRoot>,
     pub(crate) unshared_hashes: HashSet<String>,
     pub(crate) monitor_shared_hashes: HashMap<PathBuf, String>,

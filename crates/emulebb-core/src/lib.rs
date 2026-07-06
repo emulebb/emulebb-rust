@@ -4296,7 +4296,10 @@ impl EmulebbCore {
             .advertised_tcp_port(network.listen_port);
         // Also register a callback intent so the inbound connect-back is claimed as
         // this download (the source hellos with its LowID client-id).
-        for source in sources.iter().filter(|s| is_direct_kad_callback_candidate(s)) {
+        for source in sources
+            .iter()
+            .filter(|s| is_direct_kad_callback_candidate(s))
+        {
             let (Some(buddy_id), Some((buddy_ip, buddy_port))) =
                 (source.buddy_id, source.buddy_endpoint)
             else {

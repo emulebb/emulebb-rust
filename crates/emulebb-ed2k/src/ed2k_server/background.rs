@@ -25,10 +25,13 @@ use super::{
 };
 use crate::ed2k_transfer::Ed2kSharedCatalog;
 
-type BackgroundKeywordSearchResponse = std::result::Result<Vec<Ed2kSearchFile>, BackgroundSearchFailure>;
-type BackgroundSourceSearchResponse = std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
+type BackgroundKeywordSearchResponse =
+    std::result::Result<Vec<Ed2kSearchFile>, BackgroundSearchFailure>;
+type BackgroundSourceSearchResponse =
+    std::result::Result<Vec<Ed2kFoundSource>, BackgroundSearchFailure>;
 type BackgroundCallbackRequestResponse = std::result::Result<(), BackgroundSearchFailure>;
-type BackgroundPublishResponse = std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
+type BackgroundPublishResponse =
+    std::result::Result<OfferFilesPublishStats, BackgroundSearchFailure>;
 
 /// Marker error surfaced by the background-session request wrappers when the
 /// request never ran to completion on a live connected server session: the

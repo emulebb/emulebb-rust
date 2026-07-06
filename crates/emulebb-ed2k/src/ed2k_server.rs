@@ -55,15 +55,14 @@ pub use active_source_udp::{
 };
 use background::{
     BackgroundSearchFailure, BackgroundServerSearchContext, BackgroundServerSearchRequest,
-    PendingBackgroundServerSearch, fail_background_search_request,
-    fail_pending_background_search, handle_background_udp_packet, log_search_result_page,
-    start_background_server_search,
+    PendingBackgroundServerSearch, fail_background_search_request, fail_pending_background_search,
+    handle_background_udp_packet, log_search_result_page, start_background_server_search,
 };
 pub use background::{
     Ed2kBackgroundSearchInterrupted, Ed2kServerSearchHandle, Ed2kServerSearchInbox,
-    new_ed2k_server_search_channel,
-    publish_shared_catalog_via_background_session, request_callback_via_background_session,
-    search_keyword_via_background_session, search_source_via_background_session,
+    new_ed2k_server_search_channel, publish_shared_catalog_via_background_session,
+    request_callback_via_background_session, search_keyword_via_background_session,
+    search_source_via_background_session,
 };
 use diagnostics::{dump_ed2k_server_loop_meta, dump_ed2k_server_meta, dump_ed2k_server_packet};
 use flags::{format_connect_options, format_server_flags, is_low_id};

@@ -298,12 +298,7 @@ pub(crate) fn buddy(established: bool, peer: SocketAddr) {
 /// `CCS_KADCALLBACK`). `outcome` is `sent`/`send_failed`; `keys.peer` is the
 /// buddy relay endpoint the request went to. This has no direct MFC diag_event
 /// analog (MFC only `DebugSend`s), so it is an allowed rust-only superset event.
-pub(crate) fn callback(
-    outcome: &str,
-    buddy_peer: SocketAddr,
-    source: SocketAddr,
-    file_hash: &str,
-) {
+pub(crate) fn callback(outcome: &str, buddy_peer: SocketAddr, source: SocketAddr, file_hash: &str) {
     let milestone = match outcome {
         "sent" => "callback_requested",
         _ => "callback_request_failed",
