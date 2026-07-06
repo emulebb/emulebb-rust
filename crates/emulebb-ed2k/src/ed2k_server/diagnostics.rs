@@ -275,7 +275,18 @@ fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
     let _ = std::io::Write::write_all(file, line.as_bytes());
     let _ = std::io::Write::write_all(file, b"\n");
     let _ = std::io::Write::flush(file);
-    let _ = file.sync_data();
+    maybe_sync_ed2k_server_dump(file);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+fn maybe_sync_ed2k_server_dump(file: &fs::File) {
+    static SINCE_SYNC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if SINCE_SYNC
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(128)
+    {
+        let _ = file.sync_data();
+    }
 }
 
 fn server_opcode_name(opcode: u8) -> &'static str {

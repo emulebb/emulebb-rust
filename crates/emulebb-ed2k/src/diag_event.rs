@@ -24,7 +24,7 @@
 
 use std::{
     fs,
-    io::Write,
+    io::{BufWriter, Write},
     sync::{
         Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -36,6 +36,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
+/// Flush the buffered diag-event writer periodically instead of per event. These
+/// emits run on packet hot paths in diagnostics builds; blocking filesystem syncs
+/// here can delay unrelated async tasks, including REST handlers.
+const DIAG_FLUSH_EVERY: u64 = 256;
 
 /// One `diag_event_v1` envelope (schema §2). `keys` and `body` are arbitrary
 /// JSON objects supplied by the call site so each family maps its own §3 fields.
@@ -57,8 +61,8 @@ fn next_seq() -> u64 {
     NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn writer() -> &'static StdMutex<Option<fs::File>> {
-    static DIAG_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
+fn writer() -> &'static StdMutex<Option<BufWriter<fs::File>>> {
+    static DIAG_FILE: OnceLock<StdMutex<Option<BufWriter<fs::File>>>> = OnceLock::new();
     DIAG_FILE.get_or_init(|| {
         let file = std::env::var("EMULEBB_RUST_LOG_DIR")
             .ok()
@@ -74,7 +78,8 @@ fn writer() -> &'static StdMutex<Option<fs::File>> {
                     .append(true)
                     .open(path)
                     .ok()
-            });
+            })
+            .map(BufWriter::new);
         StdMutex::new(file)
     })
 }
@@ -110,8 +115,13 @@ pub fn emit(
         return;
     };
     let _ = file.write_all(&line);
-    let _ = file.flush();
-    let _ = file.sync_data();
+    static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
+    if SINCE_FLUSH
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(DIAG_FLUSH_EVERY)
+    {
+        let _ = file.flush();
+    }
 }
 
 fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
