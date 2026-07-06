@@ -57,26 +57,27 @@ fn next_seq() -> u64 {
     NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
+fn open_writer_file() -> Option<fs::File> {
+    std::env::var("EMULEBB_RUST_LOG_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .and_then(|dir| {
+            fs::create_dir_all(&dir).ok()?;
+            let path = dir.join(format!(
+                "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
+                std::process::id()
+            ));
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        })
+}
+
 fn writer() -> &'static StdMutex<Option<fs::File>> {
     static DIAG_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DIAG_FILE.get_or_init(|| {
-        let file = std::env::var("EMULEBB_RUST_LOG_DIR")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(|dir| {
-                fs::create_dir_all(&dir).ok()?;
-                let path = dir.join(format!(
-                    "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
-                    std::process::id()
-                ));
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .ok()
-            });
-        StdMutex::new(file)
-    })
+    DIAG_FILE.get_or_init(|| StdMutex::new(open_writer_file()))
 }
 
 /// Append one `diag_event_v1` record. `keys` / `body` are pre-built JSON values
@@ -92,6 +93,9 @@ pub fn emit(
     let Ok(mut guard) = writer().lock() else {
         return;
     };
+    if guard.is_none() {
+        *guard = open_writer_file();
+    }
     let Some(file) = guard.as_mut() else {
         return;
     };
