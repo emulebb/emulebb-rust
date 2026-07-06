@@ -397,6 +397,39 @@ mod tests {
     }
 
     #[test]
+    fn registry_refreshing_same_source_does_not_bypass_retry_cooldown() {
+        let source = source_with_hash([0x23; 16]);
+        let mut registry = DownloadSourceRegistry::default();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let now = Instant::now();
+        let retry_cooldown = Duration::from_secs(20 * 60);
+        registry.add_candidate(now, candidate(file, 1, 10, source.clone()));
+
+        assert!(
+            registry
+                .lease_best_for_file(now, retry_cooldown, &source, file)
+                .is_some()
+        );
+        registry.release_peer(&source);
+
+        // Fresh source discovery may re-add/refresh the same peer on the next
+        // download attempt. That must not clear the last-attempt stamp; otherwise
+        // a failing source can be redialed every short retry cycle.
+        let refreshed_at = now + Duration::from_secs(30);
+        registry.add_candidate(refreshed_at, candidate(file, 1, 10, source.clone()));
+
+        assert!(
+            registry
+                .lease_best_for_file(refreshed_at, retry_cooldown, &source, file)
+                .is_none()
+        );
+        assert_eq!(
+            registry.endpoint_retry_delay(refreshed_at, retry_cooldown, &source, file),
+            Some(retry_cooldown - Duration::from_secs(30))
+        );
+    }
+
+    #[test]
     fn registry_defers_when_peer_is_better_for_another_file() {
         let source = source_with_hash([0x33; 16]);
         let mut registry = DownloadSourceRegistry::default();
