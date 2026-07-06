@@ -114,6 +114,7 @@ pub fn emit(
         return;
     };
     let _ = file.write_all(&line);
+    let _ = file.flush();
 }
 
 fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
