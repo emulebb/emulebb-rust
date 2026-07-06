@@ -217,7 +217,7 @@ const TCP_PACKET_HEADER_LEN: usize = 6;
 /// out-of-memory denial of service from a hostile `packet_length`.
 pub(crate) const MAX_ED2K_PACKET_LEN: usize = 2_000_000;
 const MAX_PEER_DECOMPRESSED_PACKET_LEN: usize = 50_000;
-const ED2K_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const ED2K_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const ED2K_UPLOAD_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(not(test))]
 const ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);

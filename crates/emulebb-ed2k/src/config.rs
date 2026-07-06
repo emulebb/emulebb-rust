@@ -144,7 +144,7 @@ impl Default for Ed2kConfig {
             server_endpoints: Vec::new(),
             obfuscation_enabled: true,
             probe_search_term: None,
-            connect_timeout_secs: 15,
+            connect_timeout_secs: 30,
             // eMule CONSERVTIMEOUT (Opcodes.h:109) = SEC2MS(25) for a pending
             // server connection attempt.
             server_connect_timeout_secs: 25,
@@ -228,8 +228,8 @@ mod tests {
     #[test]
     fn default_connect_timeout_budgets_match_emule_reach() {
         let config = Ed2kConfig::default();
-        // Direct peer connect stays conservative (~15s).
-        assert_eq!(config.connect_timeout_secs, 15);
+        // Direct peer connect matches eMule's default ConnectionTimeout.
+        assert_eq!(config.connect_timeout_secs, 30);
         // eMule CONSERVTIMEOUT (Opcodes.h:109) = SEC2MS(25) for server connect.
         assert_eq!(config.server_connect_timeout_secs, 25);
         // eMule ClientList.cpp:1059 reaps a LowID callback wait at SEC2MS(45).

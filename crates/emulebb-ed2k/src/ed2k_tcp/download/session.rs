@@ -140,8 +140,8 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
         peer_connect_options,
         reask_register,
     } = options;
-    const QUEUE_RANK_GRACE: Duration = Duration::from_secs(20);
-    const PART_RESPONSE_GRACE: Duration = Duration::from_secs(20);
+    const QUEUE_RANK_GRACE: Duration = Duration::from_secs(75);
+    const PART_RESPONSE_GRACE: Duration = Duration::from_secs(75);
     // eMule keeps a pending block scheduler that is broader than one live wire
     // request. We mirror that with one claimed piece, a queued-vs-unqueued
     // block list, and wire packets that carry up to three queued ranges.
