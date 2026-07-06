@@ -69,7 +69,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         let mut attempted_any = false;
         let target_endpoint = target_server_endpoint.read().await.clone();
         for configured_server in
-            ordered_configured_servers(&configured_servers, target_endpoint.as_deref())
+            selected_configured_servers(&configured_servers, target_endpoint.as_deref())
         {
             if shutdown.load(Ordering::Relaxed) {
                 break;
@@ -153,30 +153,26 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     }
 }
 
-fn ordered_configured_servers(
+fn selected_configured_servers(
     configured_servers: &[ConfiguredServerEntry],
     target_endpoint: Option<&str>,
 ) -> Vec<ConfiguredServerEntry> {
     let Some(target_endpoint) = target_endpoint else {
         return configured_servers.to_vec();
     };
-    let Some(target_index) = configured_servers.iter().position(|entry| {
+    if let Some(target) = configured_servers.iter().find(|entry| {
         entry
             .base_endpoint_text()
             .eq_ignore_ascii_case(target_endpoint)
-    }) else {
-        return configured_servers.to_vec();
-    };
-    let mut ordered = Vec::with_capacity(configured_servers.len());
-    ordered.push(configured_servers[target_index].clone());
-    ordered.extend(
-        configured_servers
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != target_index)
-            .map(|(_, entry)| entry.clone()),
-    );
-    ordered
+    }) {
+        // WHY: an explicit REST/UI server selection is a pinned session. Falling
+        // through to imported server.met rows makes parity/live runs silently
+        // leave the selected server after a disconnect.
+        return vec![target.clone()];
+    }
+    ConfiguredServerEntry::from_endpoint_text(target_endpoint)
+        .map(|target| vec![target])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -188,26 +184,35 @@ mod tests {
     }
 
     #[test]
-    fn targeted_server_is_tried_first_without_dropping_fallbacks() {
+    fn targeted_server_is_pinned_without_fallbacks() {
         let servers = vec![
             server("192.0.2.1:4661"),
             server("192.0.2.2:4661"),
             server("192.0.2.3:4661"),
         ];
 
-        let ordered = ordered_configured_servers(&servers, Some("192.0.2.2:4661"));
+        let selected = selected_configured_servers(&servers, Some("192.0.2.2:4661"));
 
-        assert_eq!(ordered[0].base_endpoint_text(), "192.0.2.2:4661");
-        assert_eq!(ordered[1].base_endpoint_text(), "192.0.2.1:4661");
-        assert_eq!(ordered[2].base_endpoint_text(), "192.0.2.3:4661");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].base_endpoint_text(), "192.0.2.2:4661");
     }
 
     #[test]
-    fn unknown_target_keeps_configured_order() {
+    fn unknown_target_uses_target_without_fallbacks() {
         let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
 
-        let ordered = ordered_configured_servers(&servers, Some("192.0.2.99:4661"));
+        let selected = selected_configured_servers(&servers, Some("192.0.2.99:4661"));
 
-        assert_eq!(ordered, servers);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].base_endpoint_text(), "192.0.2.99:4661");
+    }
+
+    #[test]
+    fn invalid_unknown_target_has_no_fallbacks() {
+        let servers = vec![server("192.0.2.1:4661"), server("192.0.2.2:4661")];
+
+        let selected = selected_configured_servers(&servers, Some("not-a-server"));
+
+        assert!(selected.is_empty());
     }
 }
