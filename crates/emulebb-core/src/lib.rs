@@ -121,6 +121,7 @@ mod physical_disk;
 mod preferences;
 mod profile_state;
 mod search_query;
+mod search_queue;
 mod search_state;
 mod server_list;
 mod shared_dir_monitor;
