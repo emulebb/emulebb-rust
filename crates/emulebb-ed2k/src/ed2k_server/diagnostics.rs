@@ -300,6 +300,10 @@ fn ed2k_server_dump_file() -> &'static StdMutex<Option<fs::File>> {
     DUMP_FILE.get_or_init(|| StdMutex::new(None))
 }
 
+// WHY: gated like its (all feature-on) callers because it calls the gated
+// `maybe_sync_ed2k_server_dump`; leaving it unconditional broke every
+// feature-off build with an unresolved-name error.
+#[cfg(feature = "packet-diagnostics")]
 fn dump_ed2k_server_record(record: &Ed2kServerDumpRecord<'_>) {
     let Ok(line) = serde_json::to_string(record) else {
         return;
