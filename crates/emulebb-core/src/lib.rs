@@ -103,6 +103,7 @@ mod ed2k_publish_diagnostics;
 mod ed2k_source_batch;
 mod ed2k_sources;
 mod kad_buddy;
+mod kad_callback_initiator;
 mod kad_control;
 mod kad_hello;
 mod kad_passive_replay;
