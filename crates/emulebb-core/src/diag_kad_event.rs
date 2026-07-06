@@ -292,6 +292,39 @@ pub(crate) fn buddy(established: bool, peer: SocketAddr) {
     );
 }
 
+/// `callback` milestone (uniform-diagnostics-v2 §3.3, rust superset): we
+/// originated an outbound Kad `KADEMLIA_CALLBACK_REQ` to a firewalled buddy
+/// source's buddy so the source connects back to us (oracle `BaseClient.cpp`
+/// `CCS_KADCALLBACK`). `outcome` is `sent`/`send_failed`; `keys.peer` is the
+/// buddy relay endpoint the request went to. This has no direct MFC diag_event
+/// analog (MFC only `DebugSend`s), so it is an allowed rust-only superset event.
+pub(crate) fn callback(
+    outcome: &str,
+    buddy_peer: SocketAddr,
+    source: SocketAddr,
+    file_hash: &str,
+) {
+    let milestone = match outcome {
+        "sent" => "callback_requested",
+        _ => "callback_request_failed",
+    };
+    let severity = if outcome == "sent" { "info" } else { "low" };
+    let body = json!({
+        "milestone": milestone,
+        "action": "callback",
+        "outcome": outcome,
+        "source": source.to_string(),
+        "fileHash": file_hash,
+    });
+    emit(
+        FAMILY,
+        "callback",
+        severity,
+        json!({ "peer": buddy_peer.to_string(), "fileHash": file_hash }),
+        body,
+    );
+}
+
 /// `lookup` milestone `lookup_complete` (schema §3.3): a Kad search/lookup
 /// completed. `searchType` mirrors the master's `LogSearchResponseEvent` search
 /// type integer; `resultCount` is the number of results gathered.
@@ -353,6 +386,18 @@ mod tests {
         firewall(false);
         buddy(true, "1.2.3.4:4672".parse().unwrap());
         buddy(false, "1.2.3.4:4672".parse().unwrap());
+        callback(
+            "sent",
+            "198.51.100.9:5000".parse().unwrap(),
+            "192.0.2.77:4662".parse().unwrap(),
+            "abc123",
+        );
+        callback(
+            "send_failed",
+            "198.51.100.9:5000".parse().unwrap(),
+            "192.0.2.77:4662".parse().unwrap(),
+            "abc123",
+        );
         lookup_complete(KAD_SEARCH_TYPE_FILE, 7);
         routing_summary(
             true,
