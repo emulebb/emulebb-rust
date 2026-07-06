@@ -365,16 +365,29 @@ impl ServerSession {
                     self.phase.as_str(),
                     self.endpoint
                 );
-                dump_ed2k_server_meta(self, "server socket reached eof");
+                dump_ed2k_server_meta(self, "server session drop reason=eof");
                 return Ok(None);
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                dump_ed2k_server_meta(
+                    self,
+                    format!("server session drop reason=read_error detail={error}"),
+                );
+                return Err(error.into());
+            }
         }
         if let Some(cipher) = self.receive_cipher.as_mut() {
             cipher.apply(&mut header);
         }
 
         if !matches!(header[0], OP_EDONKEYPROT | OP_PACKEDPROT) {
+            dump_ed2k_server_meta(
+                self,
+                format!(
+                    "server session drop reason=read_error detail=unsupported_protocol_0x{:02X}",
+                    header[0]
+                ),
+            );
             anyhow::bail!(
                 "unsupported ED2K server protocol 0x{:02X} from {}",
                 header[0],
@@ -384,11 +397,29 @@ impl ServerSession {
 
         let packet_length = u32::from_le_bytes([header[1], header[2], header[3], header[4]]);
         if packet_length == 0 {
+            dump_ed2k_server_meta(
+                self,
+                "server session drop reason=read_error detail=invalid_packet_length_0",
+            );
             anyhow::bail!("invalid ED2K server packet length 0");
         }
-        let payload_len =
-            usize::try_from(packet_length - 1).context("server packet length overflow")?;
+        let payload_len = match usize::try_from(packet_length - 1) {
+            Ok(payload_len) => payload_len,
+            Err(error) => {
+                dump_ed2k_server_meta(
+                    self,
+                    format!("server session drop reason=read_error detail=length_overflow {error}"),
+                );
+                anyhow::bail!("server packet length overflow");
+            }
+        };
         if payload_len > MAX_ED2K_PACKET_LEN {
+            dump_ed2k_server_meta(
+                self,
+                format!(
+                    "server session drop reason=read_error detail=oversized_packet payload_len={payload_len} max={MAX_ED2K_PACKET_LEN}"
+                ),
+            );
             anyhow::bail!(
                 "oversized ED2K server packet length {} exceeds {} from {}",
                 payload_len,
@@ -397,13 +428,28 @@ impl ServerSession {
             );
         }
         let mut payload = vec![0u8; payload_len];
-        self.stream.read_exact(&mut payload).await?;
+        if let Err(error) = self.stream.read_exact(&mut payload).await {
+            dump_ed2k_server_meta(
+                self,
+                format!("server session drop reason=read_error detail=payload_read {error}"),
+            );
+            return Err(error.into());
+        }
         if let Some(cipher) = self.receive_cipher.as_mut() {
             cipher.apply(&mut payload);
         }
-        let payload = decode_server_payload(header[0], payload).with_context(|| {
-            format!("failed to decode ED2K server packet from {}", self.endpoint)
-        })?;
+        let payload = match decode_server_payload(header[0], payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                dump_ed2k_server_meta(
+                    self,
+                    format!("server session drop reason=read_error detail=decode {error}"),
+                );
+                return Err(error).with_context(|| {
+                    format!("failed to decode ED2K server packet from {}", self.endpoint)
+                });
+            }
+        };
         debug!(
             "ED2K trace id={} role={} phase={} dir=rx endpoint={} prot=0x{:02X} opcode=0x{:02X} payload_len={}",
             self.trace_id,

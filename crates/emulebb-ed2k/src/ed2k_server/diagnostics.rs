@@ -65,6 +65,14 @@ struct Ed2kServerDumpRecord<'a> {
 #[cfg(not(feature = "packet-diagnostics"))]
 pub(super) fn dump_ed2k_server_meta(_session: &ServerSession, _note: impl Into<String>) {}
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub(super) fn dump_ed2k_server_loop_meta(
+    _endpoint: &str,
+    _phase: &'static str,
+    _note: impl Into<String>,
+) {
+}
+
 #[cfg(feature = "packet-diagnostics")]
 pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<String>) {
     let record = Ed2kServerDumpRecord {
@@ -86,6 +94,39 @@ pub(super) fn dump_ed2k_server_meta(session: &ServerSession, note: impl Into<Str
         } else {
             "plaintext"
         },
+        protocol: None,
+        protocol_marker: None,
+        opcode: None,
+        opcode_name: None,
+        payload_len: None,
+        payload_hex: None,
+        payload_hex_truncated: None,
+        note: Some(note.into()),
+    };
+    dump_ed2k_server_record(&record);
+}
+
+#[cfg(feature = "packet-diagnostics")]
+pub(super) fn dump_ed2k_server_loop_meta(
+    endpoint: &str,
+    phase: &'static str,
+    note: impl Into<String>,
+) {
+    let record = Ed2kServerDumpRecord {
+        schema: "ed2k_packet_v1",
+        source: "emulebb-rust",
+        ts_utc: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        event_seq: next_ed2k_server_dump_event_seq(),
+        trace_id: 0,
+        trace_key: format!("server:background:loop:{endpoint}"),
+        state_id: format!("server.background.{phase}"),
+        state_label: phase,
+        role: "background",
+        flow: "server",
+        phase,
+        direction: "meta",
+        remote_addr: endpoint.to_string(),
+        transport_mode: "unknown",
         protocol: None,
         protocol_marker: None,
         opcode: None,

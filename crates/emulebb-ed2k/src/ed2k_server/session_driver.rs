@@ -14,11 +14,11 @@ use super::{
     Ed2kServerState, OP_FOUNDSOURCES, OP_FOUNDSOURCES_OBFU, OP_LOGINREQUEST, OP_OFFERFILES,
     OP_QUERY_MORE_RESULT, OP_SEARCHRESULT, PendingBackgroundServerSearch, ResolvedServerEntry,
     ServerSession, ServerSessionPhase, annotate_found_sources_server, decode_found_sources,
-    decode_search_result_page, encode_login_request, encode_packet, fail_background_search_request,
-    fail_pending_background_search, format_connect_options, handle_background_udp_packet,
-    handle_server_packet, log_search_result_page, login_identity_for_server_transport,
-    server_udp_endpoint, should_use_server_obfuscation, start_background_server_search,
-    validate_found_sources,
+    decode_search_result_page, dump_ed2k_server_meta, encode_login_request, encode_packet,
+    fail_background_search_request, fail_pending_background_search, format_connect_options,
+    handle_background_udp_packet, handle_server_packet, log_search_result_page,
+    login_identity_for_server_transport, server_udp_endpoint, should_use_server_obfuscation,
+    start_background_server_search, validate_found_sources,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +177,10 @@ pub(super) async fn run_one_server_session(
             _ = context.reconnect_signal.notified() => {
                 // Drop the session and reconnect now: used both when advertised
                 // ports change and when REST/UI requests a different server.
+                dump_ed2k_server_meta(
+                    &session,
+                    "server session drop reason=reconnect_signal",
+                );
                 fail_background_search_request(
                     &mut queued_background_search,
                     "ED2K background session reconnecting before search dispatch",

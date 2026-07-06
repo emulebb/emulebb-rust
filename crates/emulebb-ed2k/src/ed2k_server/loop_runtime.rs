@@ -10,7 +10,8 @@ use super::server_events::Ed2kServerListEvent;
 use super::types::ServerSessionContext;
 use super::{
     Ed2kServerLoopOptions, clear_server_connection_state, configured_server_entries,
-    resolve_server_entry, run_one_server_session, session_driver::ServerSessionExit,
+    dump_ed2k_server_loop_meta, resolve_server_entry, run_one_server_session,
+    session_driver::ServerSessionExit,
 };
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
 #[allow(clippy::cognitive_complexity)]
@@ -82,9 +83,29 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         Ok(ServerSessionExit::ContinueOrder) => {}
                         Ok(ServerSessionExit::RestartPreferredOrder) => {
                             if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
+                                let endpoint = server.base_endpoint().to_string();
+                                dump_ed2k_server_loop_meta(
+                                    &endpoint,
+                                    "retry_delay",
+                                    format!(
+                                        "server loop retry delay reason=reconnect_signal delay_ms={}",
+                                        reconnect_delay.as_millis()
+                                    ),
+                                );
                                 tokio::select! {
-                                    () = tokio::time::sleep(reconnect_delay) => {}
+                                    () = tokio::time::sleep(reconnect_delay) => {
+                                        dump_ed2k_server_loop_meta(
+                                            &endpoint,
+                                            "retry_delay_complete",
+                                            "server loop retry delay completed reason=reconnect_signal",
+                                        );
+                                    }
                                     () = session_context.reconnect_signal.notified() => {
+                                        dump_ed2k_server_loop_meta(
+                                            &endpoint,
+                                            "retry_delay_interrupted",
+                                            "server loop retry delay interrupted reason=reconnect_signal",
+                                        );
                                         info!(
                                             "ED2K server reconnect delay interrupted by explicit reconnect request"
                                         );
@@ -95,6 +116,12 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                         }
                         Err(error) => {
                             clear_server_connection_state(&state).await;
+                            let endpoint = server.base_endpoint().to_string();
+                            dump_ed2k_server_loop_meta(
+                                &endpoint,
+                                "session_error",
+                                format!("server session drop reason=session_error detail={error}"),
+                            );
                             // eMule `CServerList::ServerStats`: a failed connect/session
                             // increments the server's fail-count (the core drops a
                             // non-static dead server at the threshold). A successful
@@ -114,6 +141,12 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                     }
                 }
                 Err(error) => {
+                    let endpoint = configured_server.base_endpoint_text();
+                    dump_ed2k_server_loop_meta(
+                        &endpoint,
+                        "resolve_error",
+                        format!("server session drop reason=resolve_error detail={error}"),
+                    );
                     // A resolve failure is also a connect failure for the dead-server
                     // accounting (eMule treats a server it cannot reach as failed).
                     if let Some(sender) = session_context.server_list_events.as_ref() {
@@ -130,9 +163,29 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             }
 
             if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
+                let endpoint = configured_server.base_endpoint_text();
+                dump_ed2k_server_loop_meta(
+                    &endpoint,
+                    "retry_delay",
+                    format!(
+                        "server loop retry delay reason=connect_or_session_end delay_ms={}",
+                        reconnect_delay.as_millis()
+                    ),
+                );
                 tokio::select! {
-                    () = tokio::time::sleep(reconnect_delay) => {}
+                    () = tokio::time::sleep(reconnect_delay) => {
+                        dump_ed2k_server_loop_meta(
+                            &endpoint,
+                            "retry_delay_complete",
+                            "server loop retry delay completed reason=connect_or_session_end",
+                        );
+                    }
                     () = session_context.reconnect_signal.notified() => {
+                        dump_ed2k_server_loop_meta(
+                            &endpoint,
+                            "retry_delay_interrupted",
+                            "server loop retry delay interrupted reason=reconnect_signal",
+                        );
                         info!(
                             "ED2K server reconnect delay interrupted by explicit reconnect request"
                         );
@@ -148,7 +201,20 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         }
 
         if !attempted_any && !shutdown.load(Ordering::Relaxed) {
+            dump_ed2k_server_loop_meta(
+                "none",
+                "retry_delay",
+                format!(
+                    "server loop retry delay reason=no_configured_server_selected delay_ms={}",
+                    reconnect_delay.as_millis()
+                ),
+            );
             tokio::time::sleep(reconnect_delay).await;
+            dump_ed2k_server_loop_meta(
+                "none",
+                "retry_delay_complete",
+                "server loop retry delay completed reason=no_configured_server_selected",
+            );
         }
     }
 }

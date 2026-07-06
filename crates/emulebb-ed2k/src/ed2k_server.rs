@@ -63,7 +63,7 @@ pub use background::{
     publish_shared_catalog_via_background_session, request_callback_via_background_session,
     search_keyword_via_background_session, search_source_via_background_session,
 };
-use diagnostics::{dump_ed2k_server_meta, dump_ed2k_server_packet};
+use diagnostics::{dump_ed2k_server_loop_meta, dump_ed2k_server_meta, dump_ed2k_server_packet};
 use flags::{format_connect_options, format_server_flags, is_low_id};
 pub use loop_runtime::run_ed2k_server_loop;
 use obfuscation::{
