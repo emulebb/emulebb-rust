@@ -13,6 +13,9 @@ use super::{
     dump_ed2k_server_loop_meta, resolve_server_entry, run_one_server_session,
     session_driver::ServerSessionExit,
 };
+
+const ESTABLISHED_SESSION_RECONNECT_DELAY: Duration = Duration::from_secs(3);
+
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
 #[allow(clippy::cognitive_complexity)]
 pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
@@ -31,7 +34,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         target_server_endpoint,
         server_list_events,
     } = options;
-    let reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
+    let failed_attempt_reconnect_delay = Duration::from_secs(config.reconnect_interval_secs.max(1));
     let session_context = ServerSessionContext {
         bind_ip,
         nat,
@@ -76,11 +79,16 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 break;
             }
             attempted_any = true;
+            let mut retry_delay = failed_attempt_reconnect_delay;
+            let mut retry_reason = "connect_or_session_end";
             match resolve_server_entry(&configured_server).await {
                 Ok(server) => {
                     match run_one_server_session(&server, &session_context, &mut search_inbox).await
                     {
-                        Ok(ServerSessionExit::ContinueOrder) => {}
+                        Ok(ServerSessionExit::ContinueOrder) => {
+                            (retry_delay, retry_reason) =
+                                session_end_retry_delay(true, failed_attempt_reconnect_delay);
+                        }
                         Ok(ServerSessionExit::RestartPreferredOrder) => {
                             if reconnect_enabled && !shutdown.load(Ordering::Relaxed) {
                                 let endpoint = server.base_endpoint().to_string();
@@ -89,11 +97,11 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                                     "retry_delay",
                                     format!(
                                         "server loop retry delay reason=reconnect_signal delay_ms={}",
-                                        reconnect_delay.as_millis()
+                                        ESTABLISHED_SESSION_RECONNECT_DELAY.as_millis()
                                     ),
                                 );
                                 tokio::select! {
-                                    () = tokio::time::sleep(reconnect_delay) => {
+                                    () = tokio::time::sleep(ESTABLISHED_SESSION_RECONNECT_DELAY) => {
                                         dump_ed2k_server_loop_meta(
                                             &endpoint,
                                             "retry_delay_complete",
@@ -115,7 +123,12 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                             break;
                         }
                         Err(error) => {
+                            let was_connected = state.read().await.connected;
                             clear_server_connection_state(&state).await;
+                            (retry_delay, retry_reason) = session_end_retry_delay(
+                                was_connected,
+                                failed_attempt_reconnect_delay,
+                            );
                             let endpoint = server.base_endpoint().to_string();
                             dump_ed2k_server_loop_meta(
                                 &endpoint,
@@ -168,16 +181,17 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                     &endpoint,
                     "retry_delay",
                     format!(
-                        "server loop retry delay reason=connect_or_session_end delay_ms={}",
-                        reconnect_delay.as_millis()
+                        "server loop retry delay reason={} delay_ms={}",
+                        retry_reason,
+                        retry_delay.as_millis()
                     ),
                 );
                 tokio::select! {
-                    () = tokio::time::sleep(reconnect_delay) => {
+                    () = tokio::time::sleep(retry_delay) => {
                         dump_ed2k_server_loop_meta(
                             &endpoint,
                             "retry_delay_complete",
-                            "server loop retry delay completed reason=connect_or_session_end",
+                            format!("server loop retry delay completed reason={retry_reason}"),
                         );
                     }
                     () = session_context.reconnect_signal.notified() => {
@@ -206,10 +220,10 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
                 "retry_delay",
                 format!(
                     "server loop retry delay reason=no_configured_server_selected delay_ms={}",
-                    reconnect_delay.as_millis()
+                    failed_attempt_reconnect_delay.as_millis()
                 ),
             );
-            tokio::time::sleep(reconnect_delay).await;
+            tokio::time::sleep(failed_attempt_reconnect_delay).await;
             dump_ed2k_server_loop_meta(
                 "none",
                 "retry_delay_complete",
@@ -239,6 +253,20 @@ fn selected_configured_servers(
     ConfiguredServerEntry::from_endpoint_text(target_endpoint)
         .map(|target| vec![target])
         .unwrap_or_default()
+}
+
+fn session_end_retry_delay(
+    was_connected: bool,
+    failed_attempt_delay: Duration,
+) -> (Duration, &'static str) {
+    if was_connected {
+        (
+            ESTABLISHED_SESSION_RECONNECT_DELAY,
+            "established_session_drop",
+        )
+    } else {
+        (failed_attempt_delay, "connect_or_session_end")
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +308,19 @@ mod tests {
         let selected = selected_configured_servers(&servers, Some("not-a-server"));
 
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn established_session_drop_uses_fast_reconnect_delay() {
+        let failed_attempt_delay = Duration::from_secs(60);
+
+        assert_eq!(
+            session_end_retry_delay(true, failed_attempt_delay),
+            (Duration::from_secs(3), "established_session_drop")
+        );
+        assert_eq!(
+            session_end_retry_delay(false, failed_attempt_delay),
+            (failed_attempt_delay, "connect_or_session_end")
+        );
     }
 }
