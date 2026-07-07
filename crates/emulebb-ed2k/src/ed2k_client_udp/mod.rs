@@ -40,16 +40,16 @@ pub(crate) use codec::{
 };
 pub(crate) use dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 pub(crate) use outbound::{
-    ClientUdpDatagram, OutboundReaskTarget, build_file_not_found_datagram,
-    build_queue_full_datagram, build_reask_ack_datagram, build_reask_callback_udp_datagram,
-    build_reask_file_ping_datagram,
+    ClientUdpDatagram, OutboundReaskTarget, build_direct_callback_req_datagram,
+    build_file_not_found_datagram, build_queue_full_datagram, build_reask_ack_datagram,
+    build_reask_callback_udp_datagram, build_reask_file_ping_datagram,
 };
 pub(crate) use reciprocity::{InboundReaskAnswer, InboundReaskRequest, answer_inbound_reask};
 pub(crate) use registry::{PendingReask, ReaskPendingRegistry};
 pub use runtime::{
-    ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent, ReaskEventReceiver,
-    ReaskEventSender, ReaskSourceHandle, reask_command_channel, reask_event_channel,
-    run_ed2k_udp_reask_loop,
+    DirectCallbackArgs, ReaskCommand, ReaskCommandReceiver, ReaskDetachArgs, ReaskEvent,
+    ReaskEventReceiver, ReaskEventSender, ReaskSourceHandle, reask_command_channel,
+    reask_event_channel, run_ed2k_udp_reask_loop,
 };
 pub(crate) use service::{ReaskInboundOutcome, ReaskService, ReaskTickOutput, TransferReaskInfo};
 pub(crate) use source_set::ReaskSourceSet;

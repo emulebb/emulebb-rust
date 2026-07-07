@@ -383,6 +383,7 @@ mod tests {
             ed2k_kad_source_last_queried: HashMap::new(),
             ed2k_kad_callback_last_sent: HashMap::new(),
             ed2k_server_callback_last_sent: HashMap::new(),
+        ed2k_direct_callback_last_sent: HashMap::new(),
             shared_directories: Vec::new(),
             unshared_hashes: HashSet::new(),
             monitor_shared_hashes: HashMap::new(),

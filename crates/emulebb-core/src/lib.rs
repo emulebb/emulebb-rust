@@ -20,7 +20,7 @@ use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 #[cfg(test)]
 use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_ed2k::{
-    NatManager, NatManagerBuilder, ReaskSourceHandle,
+    DirectCallbackArgs, NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_upnp_port_mapping_providers,
     config::Ed2kConfig,
@@ -3157,9 +3157,21 @@ impl EmulebbCore {
             // requested_callback_sources set the reask/server-callback paths share.
             self.send_kad_buddy_callbacks(network, &transfer, file_hash, &sources)
                 .await;
+            // Originate direct UDP callbacks for firewalled type-6 sources
+            // (oracle CCS_DIRECTCALLBACK, the first-preference LowID connect
+            // path): send OP_DIRECTCALLBACKREQ to the source's Kad UDP endpoint
+            // so it TCP-connects back to us. This precedes and excludes the
+            // server-callback path below, exactly as MFC's TryToConnect orders
+            // direct callback (5) before server callback (6).
+            self.send_ed2k_direct_callbacks(network, &transfer, &sources)
+                .await;
             let callback_only_sources = sources
                 .iter()
-                .filter(|source| source.low_id && !source.has_kad_buddy_reask_target())
+                .filter(|source| {
+                    source.low_id
+                        && !source.has_kad_buddy_reask_target()
+                        && !source.is_direct_callback_source()
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             let callback_cancel = CancellationToken::new();
@@ -4323,6 +4335,92 @@ impl EmulebbCore {
             return tcp_firewalled;
         }
         false
+    }
+
+    /// Originate `OP_DIRECTCALLBACKREQ` to firewalled type-6 Kad sources (oracle
+    /// `BaseClient.cpp` `CCS_DIRECTCALLBACK`): send our TCP port + userhash +
+    /// connect options to the source's Kad UDP endpoint so it TCP-connects back
+    /// to us. This is the first-preference LowID connect path, ahead of the
+    /// server/Kad-buddy callbacks. A firewalled requester cannot receive the
+    /// connect-back, so it is skipped exactly like the Kad-buddy path.
+    async fn send_ed2k_direct_callbacks(
+        &self,
+        network: &Ed2kNetworkConfig,
+        transfer: &Transfer,
+        sources: &[Ed2kFoundSource],
+    ) {
+        if !sources.iter().any(Ed2kFoundSource::is_direct_callback_source) {
+            return;
+        }
+        if self.ed2k_self_tcp_firewalled().await {
+            return;
+        }
+        let Some(handle) = self.ed2k_reask_handle.lock().unwrap().clone() else {
+            return;
+        };
+        let our_tcp_port = self
+            .ed2k_reachability
+            .advertised_tcp_port(network.listen_port);
+        let our_user_hash = network.user_hash;
+        let our_connect_options = emule_connect_options(network.config.obfuscation_enabled);
+        for source in sources
+            .iter()
+            .filter(|source| source.is_direct_callback_source())
+        {
+            let Some(source_udp_port) = source.source_udp_port else {
+                continue;
+            };
+            let file_hash = match transfer.hash.parse::<Ed2kHash>() {
+                Ok(hash) => hash,
+                Err(_) => continue,
+            };
+            let key = (source.ip, source.tcp_port, file_hash);
+            let now = Instant::now();
+            {
+                let mut state = self.state.lock().await;
+                let last_sent = state.ed2k_direct_callback_last_sent.get(&key).copied();
+                if !should_send_kad_callback(last_sent, now, KAD_CALLBACK_INITIATOR_COOLDOWN) {
+                    continue;
+                }
+                state.ed2k_direct_callback_last_sent.insert(key, now);
+            }
+            // Register the callback intent so the source's inbound TCP connect-back
+            // (it hellos with its LowID client-id) is claimed as this download.
+            self.ed2k_transfers
+                .register_callback_intent(Ed2kCallbackIntent {
+                    client_id: source.client_id,
+                    file_hash: transfer.hash.clone(),
+                    canonical_name: transfer.name.clone(),
+                    file_size: transfer.size_bytes,
+                    source: Ed2kSourceHint {
+                        ip: source.ip.to_string(),
+                        tcp_port: source.tcp_port,
+                        user_hash: source.user_hash.map(hex::encode),
+                    },
+                })
+                .await;
+            let dest = SocketAddr::new(IpAddr::V4(source.ip), source_udp_port);
+            // Obfuscate toward the source when it advertised crypt support and we
+            // hold its user hash (oracle `ShouldReceiveCryptUDPPackets`).
+            let obfuscate = source
+                .obfuscation_options
+                .is_some_and(|options| options & 0x01 != 0)
+                && source.user_hash.is_some();
+            let queued = handle.send_direct_callback(DirectCallbackArgs {
+                dest,
+                our_tcp_port,
+                our_user_hash,
+                connect_options: our_connect_options,
+                dest_user_hash: source.user_hash,
+                obfuscate,
+            });
+            if queued {
+                tracing::info!(
+                    "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port}",
+                    transfer.hash
+                );
+            }
+        }
     }
 
     /// Originate outbound Kad callbacks (`KADEMLIA_CALLBACK_REQ`, oracle

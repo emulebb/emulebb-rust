@@ -50,6 +50,29 @@ pub enum ReaskCommand {
         dest: SocketAddr,
         file_hash: Ed2kHash,
     },
+    /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source's Kad
+    /// UDP endpoint so it TCP-connects back to us (oracle `CCS_DIRECTCALLBACK`).
+    /// Sent over the shared client-UDP socket, obfuscated toward the source when
+    /// its crypt key is known.
+    SendDirectCallback(DirectCallbackArgs),
+}
+
+/// Inputs for [`ReaskSourceHandle::send_direct_callback`]: everything the loop
+/// needs to encode and address a single `OP_DIRECTCALLBACKREQ`.
+#[derive(Debug, Clone)]
+pub struct DirectCallbackArgs {
+    /// The source's Kad UDP endpoint (its eD2k IP + advertised `FT_SOURCEUPORT`).
+    pub dest: SocketAddr,
+    /// Our externally-advertised eD2k TCP port the source connects back to.
+    pub our_tcp_port: u16,
+    /// Our eD2k user hash (identifies the connect-back to the source).
+    pub our_user_hash: [u8; 16],
+    /// Our connect options (`GetMyConnectOptions(true, false)`).
+    pub connect_options: u8,
+    /// The source's user hash — obfuscation key material.
+    pub dest_user_hash: Option<[u8; 16]>,
+    /// Whether to obfuscate toward the source (`ShouldReceiveCryptUDPPackets`).
+    pub obfuscate: bool,
 }
 
 /// Receiver end of the detach-command channel, owned by the reask loop.
@@ -113,6 +136,16 @@ impl ReaskSourceHandle {
         let _ = self
             .0
             .try_send(ReaskCommand::AnswerCallbackTcp { dest, file_hash });
+    }
+
+    /// Originate an `OP_DIRECTCALLBACKREQ` to a firewalled type-6 source. The
+    /// loop encodes/obfuscates it and sends it over the shared client-UDP
+    /// socket. Best-effort: a full/closed channel drops it (the source stays a
+    /// server/Kad-callback candidate). Returns whether it was queued.
+    pub fn send_direct_callback(&self, args: DirectCallbackArgs) -> bool {
+        self.0
+            .try_send(ReaskCommand::SendDirectCallback(args))
+            .is_ok()
     }
 }
 
@@ -244,14 +277,19 @@ pub async fn run_ed2k_udp_reask_loop(
             }
             maybe = commands.recv() => {
                 let Some(command) = maybe else { break };
-                // AnswerCallbackTcp needs async UDP I/O (handled here); the rest are sync.
-                if let ReaskCommand::AnswerCallbackTcp { dest, file_hash } = command {
-                    super::buddy_relay::answer_buddy_relayed_reask(
-                        &dht, &transfer_runtime, public_ip.octets(), dest, file_hash,
-                    )
-                    .await;
-                } else {
-                    apply_reask_command(&mut service, &events, command);
+                // AnswerCallbackTcp / SendDirectCallback need async UDP I/O
+                // (handled here); the rest are sync.
+                match command {
+                    ReaskCommand::AnswerCallbackTcp { dest, file_hash } => {
+                        super::buddy_relay::answer_buddy_relayed_reask(
+                            &dht, &transfer_runtime, public_ip.octets(), dest, file_hash,
+                        )
+                        .await;
+                    }
+                    ReaskCommand::SendDirectCallback(args) => {
+                        send_direct_callback_req(&dht, public_ip.octets(), args).await;
+                    }
+                    other => apply_reask_command(&mut service, &events, other),
                 }
             }
             _ = ticker.tick() => {
@@ -448,7 +486,39 @@ fn apply_reask_command(
             }
         }
         // Handled inline in the loop (needs async I/O); never routed here.
-        ReaskCommand::AnswerCallbackTcp { .. } => {}
+        ReaskCommand::AnswerCallbackTcp { .. } | ReaskCommand::SendDirectCallback(_) => {}
+    }
+}
+
+/// Originate one `OP_DIRECTCALLBACKREQ` over the shared client-UDP socket (we
+/// are a downloader asking a firewalled type-6 source to connect back). Mirrors
+/// the oracle `CCS_DIRECTCALLBACK` send: our TCP port + userhash + connect
+/// options, obfuscated toward the source when its crypt key is known.
+async fn send_direct_callback_req(
+    dht: &DhtNode,
+    our_public_ip: [u8; 4],
+    args: DirectCallbackArgs,
+) {
+    let target = super::outbound::OutboundReaskTarget {
+        dest_user_hash: args.dest_user_hash.unwrap_or([0u8; 16]),
+        our_public_ip,
+        obfuscate: args.obfuscate && args.dest_user_hash.is_some(),
+    };
+    let datagram = super::outbound::build_direct_callback_req_datagram(
+        args.our_tcp_port,
+        &args.our_user_hash,
+        args.connect_options,
+        &target,
+    );
+    match dht.send_raw_datagram(args.dest, &datagram.bytes).await {
+        Ok(()) => {
+            super::dump::dump_client_udp_send(args.dest, &datagram);
+            trace!("ed2k udp: sent OP_DIRECTCALLBACKREQ to {}", args.dest);
+        }
+        Err(err) => trace!(
+            "ed2k udp: OP_DIRECTCALLBACKREQ to {} failed: {err}",
+            args.dest
+        ),
     }
 }
 

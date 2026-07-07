@@ -9,8 +9,9 @@
 use emulebb_kad_proto::Ed2kHash;
 
 use super::codec::{
-    OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING,
-    encode_reask_ack, encode_reask_callback_udp, encode_reask_file_ping,
+    OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK, OP_REASKCALLBACKUDP,
+    OP_REASKFILEPING, encode_direct_callback_req, encode_reask_ack, encode_reask_callback_udp,
+    encode_reask_file_ping,
 };
 use crate::ed2k_client_udp_obfuscation::obfuscate_client_udp;
 
@@ -61,6 +62,20 @@ fn frame_packet(opcode: u8, body: &[u8], target: &OutboundReaskTarget) -> Client
         payload: body.to_vec(),
         obfuscated: target.obfuscate,
     }
+}
+
+/// Build an `OP_DIRECTCALLBACKREQ` datagram (downloader -> firewalled type-6
+/// source): asks the source to TCP-connect back to us. Obfuscated toward the
+/// source per `target` exactly like a reask ping (oracle sends it through
+/// `SendPacket(..., ShouldReceiveCryptUDPPackets(), GetUserHash(), ...)`).
+pub(crate) fn build_direct_callback_req_datagram(
+    our_tcp_port: u16,
+    our_user_hash: &[u8; 16],
+    connect_options: u8,
+    target: &OutboundReaskTarget,
+) -> ClientUdpDatagram {
+    let body = encode_direct_callback_req(our_tcp_port, our_user_hash, connect_options);
+    frame_packet(OP_DIRECTCALLBACKREQ, &body, target)
 }
 
 /// Build an `OP_REASKFILEPING` datagram (downloader -> source).

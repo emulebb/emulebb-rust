@@ -144,6 +144,23 @@ fn decode_part_status(buf: &[u8]) -> Result<(Option<Vec<bool>>, &[u8])> {
     Ok((Some(bitmap), &buf[end..]))
 }
 
+/// Encodes the `OP_DIRECTCALLBACKREQ` body
+/// `<TCPPort u16 LE><Userhash 16><ConnectOptions u8>` — the request WE send to a
+/// firewalled type-6 source so it TCP-connects back to us (oracle
+/// `BaseClient.cpp` `CCS_DIRECTCALLBACK`: our port, our userhash,
+/// `GetMyConnectOptions(true, false)`).
+pub(crate) fn encode_direct_callback_req(
+    our_tcp_port: u16,
+    our_user_hash: &[u8; 16],
+    connect_options: u8,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(19);
+    body.extend_from_slice(&our_tcp_port.to_le_bytes());
+    body.extend_from_slice(our_user_hash);
+    body.push(connect_options);
+    body
+}
+
 /// Encodes the `OP_REASKFILEPING` body. `sender_udp_version` is the TARGET
 /// peer's advertised UDP version: eMule's `UDPReaskForDownload` gates the
 /// optional tails on the remote client's `GetUDPVersion()` (`>3` part status,
@@ -313,6 +330,17 @@ mod tests {
         // 18 bytes is one short of the oracle HasUdpDirectCallbackRequest >= 19 gate.
         assert!(decode_direct_callback_req(&[0u8; 18]).is_err());
         assert!(decode_direct_callback_req(&[]).is_err());
+    }
+
+    #[test]
+    fn direct_callback_req_encode_decode_roundtrips() {
+        let user_hash = [0xA7u8; 16];
+        let body = encode_direct_callback_req(4662, &user_hash, 0x0B);
+        assert_eq!(body.len(), 19);
+        let decoded = decode_direct_callback_req(&body).unwrap();
+        assert_eq!(decoded.tcp_port, 4662);
+        assert_eq!(decoded.user_hash, user_hash);
+        assert_eq!(decoded.connect_options, 0x0B);
     }
 
     #[test]
