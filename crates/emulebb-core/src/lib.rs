@@ -1795,8 +1795,20 @@ impl EmulebbCore {
             .sources
             .max(self.ed2k_transfers.live_download_sources(hash).len() as u32);
         transfer.sources_transferring = self.ed2k_transfers.transferring_source_count(hash);
-        transfer.download_speed_ki_bps =
-            self.ed2k_transfers.download_speed_bytes_per_sec(hash) as f64 / 1024.0;
+        let speed_bps = self.ed2k_transfers.download_speed_bytes_per_sec(hash);
+        transfer.download_speed_ki_bps = speed_bps as f64 / 1024.0;
+        // Recompute ETA from the live speed + the overlaid completed_bytes (the
+        // cached value was computed at manifest-build time and goes stale), and
+        // refresh the live count of parts at least one source can serve.
+        let remaining = transfer.size_bytes.saturating_sub(transfer.completed_bytes);
+        transfer.eta = if speed_bps > 0 && remaining > 0 {
+            Some(remaining / speed_bps)
+        } else {
+            None
+        };
+        transfer.parts_available = self
+            .ed2k_transfers
+            .available_part_count(hash, transfer.parts_total);
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
