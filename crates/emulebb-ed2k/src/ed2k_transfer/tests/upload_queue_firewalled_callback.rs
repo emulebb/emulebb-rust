@@ -33,10 +33,12 @@ async fn fill_queue_past_threshold(
         .begin_upload_session_at(upload_peer(1, 0x01, 0x0A00_0001), file_hash, now)
         .await;
     assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
-    // 51 waiters (> 50) from distinct IPs/hashes (so the per-IP cap never fires).
+    // 51 waiters (> 50) from distinct IPs/hashes (so the per-IP cap never
+    // fires, and no waiter shares the granted peer's 0x01 user hash — a shared
+    // hash now resolves to the SAME client, oracle CUpDownClient::Compare).
     for index in 0..51u32 {
         let octet = (index % 200) as u8 + 50;
-        let user_marker = (index % 200) as u8 + 1;
+        let user_marker = (index % 200) as u8 + 2;
         let client_id = 0x0A01_0000 + index;
         let (_handle, status) = runtime
             .begin_upload_session_at(upload_peer(octet, user_marker, client_id), file_hash, now)

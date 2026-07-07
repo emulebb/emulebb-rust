@@ -95,6 +95,17 @@ impl Ed2kTransferRuntime {
             queue_size,
         };
 
+        // A located re-ask for the matching file refreshes the waiter's
+        // last-request time (oracle SetLastUpRequest, ClientUDPSocket.cpp:307):
+        // a disconnected waiter that keeps re-asking over UDP must not be
+        // purged by the waiting timeout (MAX_PURGEQUEUETIME).
+        if req.sender_located && req.file_matches {
+            self.upload_queue
+                .lock()
+                .await
+                .refresh_waiting_activity_by_udp(sender_ip, sender_udp_port, Instant::now());
+        }
+
         // Framing comes from the located client; for an unlocated FileNotFound /
         // QueueFull we have no hash/crypt context, so reply in the clear.
         let framing = ReciprocityReplyFraming {

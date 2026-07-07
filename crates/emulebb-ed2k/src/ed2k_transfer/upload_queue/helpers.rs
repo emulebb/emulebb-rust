@@ -57,7 +57,7 @@ pub(crate) fn credit_score_permille(
     (ratio * DEFAULT_CREDIT_SCORE_PERMILLE as f64).round() as i128
 }
 
-pub(super) fn is_low_id_client_id(client_id: u32) -> bool {
+pub(crate) fn is_low_id_client_id(client_id: u32) -> bool {
     client_id != 0 && client_id < 0x0100_0000
 }
 

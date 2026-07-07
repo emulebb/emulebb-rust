@@ -864,3 +864,199 @@ async fn upload_queue_friend_slot_bypasses_soft_limit_gate() {
         Ed2kUploadSessionStatus::Waiting { .. }
     ));
 }
+
+#[tokio::test]
+async fn upload_queue_waiter_survives_disconnect_with_wait_time_intact() {
+    let root = unique_test_dir("ed2k-upload-queue-waiter-survives-disconnect");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x7C; 16]);
+    // Timeline in the past so the synthetic instants stay comparable to the
+    // real `Instant::now()` used by snapshot-style entry points.
+    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x11, 0x0A00_0001), &file_hash, t0)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    // Older waiter: queued first, so its accumulated wait outranks the later one.
+    let (older_handle, older_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0x22, 0x0A00_0002), &file_hash, t0)
+        .await;
+    assert_eq!(older_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let (younger_handle, younger_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(3, 0x33, 0x0A00_0003),
+            &file_hash,
+            t0 + std::time::Duration::from_secs(5),
+        )
+        .await;
+    assert_eq!(younger_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    // The older waiter's connection drops: its queue entry must survive with
+    // its wait-start time (master keeps US_ONUPLOADQUEUE clients on disconnect,
+    // BaseClient.cpp:1229) instead of being erased with the connection.
+    runtime.release_upload_session(&older_handle).await;
+    assert_eq!(
+        runtime.upload_queue_snapshot().await.len(),
+        3,
+        "the disconnected waiter must keep its queue entry"
+    );
+    // Wait-start intact: the disconnected older waiter still outranks the
+    // connected younger one (rank derives from the waiting-time score).
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &younger_handle,
+                false,
+                t0 + std::time::Duration::from_secs(10)
+            )
+            .await,
+        Ed2kUploadSessionStatus::Waiting { rank: 2 },
+        "a disconnected waiter with more accumulated wait must keep rank 1"
+    );
+}
+
+#[tokio::test]
+async fn upload_queue_reask_reattaches_disconnected_waiter_without_wait_reset() {
+    let root = unique_test_dir("ed2k-upload-queue-reask-reattach");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x7D; 16]);
+    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(60);
+
+    let (_active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x11, 0x0A00_0001), &file_hash, t0)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (older_handle, older_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0x22, 0x0A00_0002), &file_hash, t0)
+        .await;
+    assert_eq!(older_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    let (_younger_handle, younger_status) = runtime
+        .begin_upload_session_at(
+            upload_peer(3, 0x33, 0x0A00_0003),
+            &file_hash,
+            t0 + std::time::Duration::from_secs(10),
+        )
+        .await;
+    assert_eq!(younger_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+
+    // The older waiter disconnects, then re-asks on a NEW connection with a new
+    // server-assigned client id (same user hash) — the oracle resolves the same
+    // client by user hash (CUpDownClient::Compare) and the re-ask lands on the
+    // persisted entry WITHOUT resetting its wait time (UploadQueue.cpp:1865-1869).
+    runtime.release_upload_session(&older_handle).await;
+    let mut returning = upload_peer(2, 0x22, 0x0A00_0002);
+    returning.client_id = Some(0x0B00_0099);
+    let (reattached_handle, reattached_status) = runtime
+        .begin_upload_session_at(
+            returning,
+            &file_hash,
+            t0 + std::time::Duration::from_secs(30),
+        )
+        .await;
+    assert_eq!(
+        reattached_status,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 },
+        "the re-ask must re-attach with the original wait time, not restart at the tail"
+    );
+    // The stale pre-disconnect handle no longer owns the session.
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &older_handle,
+                false,
+                t0 + std::time::Duration::from_secs(31)
+            )
+            .await,
+        Ed2kUploadSessionStatus::Stale
+    );
+    assert_eq!(
+        runtime
+            .poll_upload_session_at(
+                &reattached_handle,
+                false,
+                t0 + std::time::Duration::from_secs(31)
+            )
+            .await,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
+}
+
+#[tokio::test]
+async fn upload_queue_slot_grant_to_disconnected_waiter_queues_outbound_promotion() {
+    let root = unique_test_dir("ed2k-upload-queue-disconnected-promotion");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x7E; 16]);
+    let t0 = std::time::Instant::now() - std::time::Duration::from_secs(20);
+
+    let (active_handle, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x11, 0x0A00_0001), &file_hash, t0)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session_at(upload_peer(2, 0x22, 0x0A00_0002), &file_hash, t0)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    // The waiter disconnects, then the active slot frees: the disconnected
+    // waiter is promoted and handed to the outbound promote-connect path
+    // (master AddUpNextClient US_CONNECTING connect-out, UploadQueue.cpp:327-361).
+    runtime.release_upload_session(&waiting_handle).await;
+    runtime.release_upload_session(&active_handle).await;
+
+    let grants = runtime.take_pending_upload_promotions().await;
+    assert_eq!(
+        grants.len(),
+        1,
+        "one outbound promote-connect grant expected"
+    );
+    let grant = &grants[0];
+    assert_eq!(grant.peer.user_hash, Some([0x22; 16]));
+    assert_eq!(grant.file_hash, file_hash.to_string());
+    assert_eq!(
+        runtime.poll_upload_session(&grant.handle, false).await,
+        Ed2kUploadSessionStatus::Granted,
+        "the grant handle must own the promoted session"
+    );
+    // Draining is one-shot until another disconnected promotion happens.
+    assert!(runtime.take_pending_upload_promotions().await.is_empty());
+
+    // A failed outbound connect drops the grant entirely (master deletes the
+    // client on a failed TryToConnect), freeing the slot for the next waiter.
+    runtime.release_upload_session(&grant.handle).await;
+    assert!(
+        runtime.upload_queue_snapshot().await.is_empty(),
+        "a dropped grant must not linger in the queue"
+    );
+}
+
+#[tokio::test]
+async fn upload_queue_connected_waiter_promotion_needs_no_outbound_connect() {
+    let root = unique_test_dir("ed2k-upload-queue-connected-promotion");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x7F; 16]);
+
+    let (active_handle, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x11, 0x0A00_0001), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiting_handle, waiting_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x22, 0x0A00_0002), &file_hash)
+        .await;
+    assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    // The waiter still has its live connection when the slot frees: its own
+    // session loop observes the grant and sends OP_ACCEPTUPLOADREQ inline
+    // (master AddUpNextClient connected branch, UploadQueue.cpp:355-361), so
+    // no outbound promote-connect is queued.
+    runtime.release_upload_session(&active_handle).await;
+    assert_eq!(
+        runtime.poll_upload_session(&waiting_handle, true).await,
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert!(runtime.take_pending_upload_promotions().await.is_empty());
+}

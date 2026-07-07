@@ -268,12 +268,28 @@ impl Ed2kTransferRuntime {
             .reserve_upload_payload(byte_count, now)
     }
 
-    /// Release one upload slot or waiting entry after disconnect or explicit cancel.
+    /// Release one upload session after disconnect or explicit cancel: an
+    /// active slot is freed, while a WAITING entry survives with its wait-start
+    /// time (master keeps US_ONUPLOADQUEUE clients on disconnect,
+    /// BaseClient.cpp:1229) and ages out on the waiting timeout.
     pub(crate) async fn release_upload_session(&self, handle: &Ed2kUploadSessionHandle) {
         self.upload_queue
             .lock()
             .await
             .release_session(handle, Instant::now());
+    }
+
+    /// Drain the granted-but-disconnected waiter promotions that need an
+    /// outbound connect + OP_ACCEPTUPLOADREQ (master `AddUpNextClient`,
+    /// UploadQueue.cpp:327-361). Each grant is rebound to a fresh connection id
+    /// owned by the promote-connect driver.
+    pub(crate) async fn take_pending_upload_promotions(
+        &self,
+    ) -> Vec<super::Ed2kUploadPendingPromotion> {
+        self.upload_queue.lock().await.take_pending_promotions(|| {
+            self.next_upload_connection_id
+                .fetch_add(1, Ordering::Relaxed)
+        })
     }
 
     /// Release one queue-visible upload client selected from REST management state.

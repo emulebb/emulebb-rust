@@ -178,6 +178,19 @@ impl Ed2kUploadSessionHandle {
     }
 }
 
+/// One granted upload slot whose peer had no live connection at promotion:
+/// the promote-connect driver must dial the peer's advertised endpoint and
+/// push OP_ACCEPTUPLOADREQ after the handshake (master `AddUpNextClient`,
+/// UploadQueue.cpp:327-361; `ConnectionEstablished`, BaseClient.cpp:1634-1641).
+/// The handle owns the session: releasing it on a failed connect drops the
+/// grant like the master's failed `TryToConnect` path.
+#[derive(Debug, Clone)]
+pub(crate) struct Ed2kUploadPendingPromotion {
+    pub(crate) peer: Ed2kUploadPeerIdentity,
+    pub(crate) file_hash: String,
+    pub(crate) handle: Ed2kUploadSessionHandle,
+}
+
 /// Queue-visible state of one inbound upload session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kUploadSessionStatus {
@@ -234,6 +247,10 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub client_id: Option<u32>,
     pub friend_slot: bool,
     pub file_hash: String,
+    /// Whether a live connection currently owns this entry: a disconnected
+    /// waiter is kept on the queue (BaseClient.cpp:1229) with `connected: false`
+    /// until it re-asks or is dialed for a slot grant.
+    pub connected: bool,
     pub phase: Ed2kUploadSessionPhaseSnapshot,
     pub queue_rank: Option<u16>,
     pub wait_time_ms: u64,
@@ -258,6 +275,11 @@ pub struct Ed2kUploadQueueSnapshotEntry {
 struct Ed2kUploadSessionEntry {
     phase: Ed2kUploadSessionPhase,
     connection_id: u64,
+    /// Whether a live connection currently owns this session. A waiter whose
+    /// connection dropped keeps its queue entry (master `Disconnected` keeps
+    /// US_ONUPLOADQUEUE clients, BaseClient.cpp:1229) but is `connected = false`
+    /// until it re-asks or the promote-connect driver dials it for a slot grant.
+    connected: bool,
     queued_at: Instant,
     last_activity: Instant,
     waiting_sequence: u64,
@@ -321,6 +343,10 @@ pub(super) struct Ed2kUploadQueueState {
     config: Ed2kUploadQueueConfig,
     sessions: HashMap<Ed2kUploadSessionKey, Ed2kUploadSessionEntry>,
     waiting_order: Vec<Ed2kUploadSessionKey>,
+    /// Slots granted to waiters with no live connection, awaiting the
+    /// promote-connect driver's outbound connect + OP_ACCEPTUPLOADREQ (master
+    /// AddUpNextClient connect-out, UploadQueue.cpp:327-361).
+    pending_promotions: Vec<Ed2kUploadSessionKey>,
     next_waiting_sequence: u64,
     underfill_since: Option<Instant>,
     throttle_next_send_at: Option<Instant>,
@@ -332,6 +358,7 @@ impl Ed2kUploadQueueState {
             config,
             sessions: HashMap::new(),
             waiting_order: Vec::new(),
+            pending_promotions: Vec::new(),
             next_waiting_sequence: 1,
             underfill_since: None,
             throttle_next_send_at: None,
@@ -418,6 +445,11 @@ impl Ed2kUploadQueueState {
                 session.served_ranges.clear();
             }
             session.connection_id = connection_id;
+            // Re-ask on a persisted entry: rebind the live connection and refresh
+            // the last-request time, but keep `queued_at` (wait-start) so the
+            // accumulated waiting score survives a reconnect (master re-ask on the
+            // same queue entry, UploadQueue.cpp:1865-1869).
+            session.connected = true;
             session.last_activity = now;
             session.file_priority_score = file_priority_score;
             session.credit_score_permille = credit_score_permille;
@@ -449,6 +481,7 @@ impl Ed2kUploadQueueState {
             Ed2kUploadSessionEntry {
                 phase,
                 connection_id,
+                connected: true,
                 queued_at: now,
                 last_activity: now,
                 waiting_sequence,
@@ -606,17 +639,26 @@ impl Ed2kUploadQueueState {
         self.status_for_key(&handle.key, now)
     }
 
+    /// Handle a connection teardown (or explicit cancel) for one session.
+    /// Mirrors the master disconnect split: only an ACTIVE upload slot is
+    /// removed from the queue (`CUpDownClient::Disconnected` removes
+    /// US_UPLOADING/US_CONNECTING clients, BaseClient.cpp:1172-1175), while a
+    /// US_ONUPLOADQUEUE waiter KEEPS its queue entry with its wait-start time
+    /// (BaseClient.cpp:1229 `bDelete = (m_eUploadState != US_ONUPLOADQUEUE)`)
+    /// and ages out via the waiting timeout (MAX_PURGEQUEUETIME,
+    /// UploadQueue.cpp:223) unless the peer re-asks first.
     pub(super) fn release_session(&mut self, handle: &Ed2kUploadSessionHandle, now: Instant) {
-        let Some(session) = self.sessions.get(&handle.key) else {
+        let Some(session) = self.sessions.get_mut(&handle.key) else {
             return;
         };
         if session.connection_id != handle.connection_id {
             return;
         }
-        let phase = session.phase;
-        self.sessions.remove(&handle.key);
-        if phase == Ed2kUploadSessionPhase::Waiting {
-            self.waiting_order.retain(|key| key != &handle.key);
+        if session.phase == Ed2kUploadSessionPhase::Waiting {
+            // Waiter: keep the queue entry, drop only the connection binding.
+            session.connected = false;
+        } else {
+            self.sessions.remove(&handle.key);
         }
         self.reap_expired_sessions(now);
         self.promote_waiters(now);
@@ -651,6 +693,64 @@ impl Ed2kUploadQueueState {
         true
     }
 
+    /// Refresh the last-request time of the WAITING entry matched by a UDP
+    /// reask (oracle `SetLastUpRequest` on OP_REASKFILEPING,
+    /// ClientUDPSocket.cpp:307): a disconnected waiter that keeps re-asking
+    /// over UDP must not be purged by the waiting timeout (MAX_PURGEQUEUETIME).
+    pub(super) fn refresh_waiting_activity_by_udp(
+        &mut self,
+        ip: IpAddr,
+        udp_port: u16,
+        now: Instant,
+    ) {
+        for (key, session) in &mut self.sessions {
+            if session.phase == Ed2kUploadSessionPhase::Waiting
+                && key.peer.ip == ip
+                && key.peer.udp_port == Some(udp_port)
+            {
+                session.last_activity = now;
+            }
+        }
+    }
+
+    /// Drain the queued promote-connect grants: sessions promoted to an active
+    /// slot while their peer had no live connection. Each returned grant is
+    /// rebound to a fresh connection id from `next_connection_id` so the
+    /// outbound connect owns the session (a failed connect releases it). A
+    /// grant whose peer re-attached inbound in the meantime (or whose session
+    /// is gone) is skipped: the inbound connection already owns the slot.
+    pub(super) fn take_pending_promotions(
+        &mut self,
+        mut next_connection_id: impl FnMut() -> u64,
+    ) -> Vec<Ed2kUploadPendingPromotion> {
+        if self.pending_promotions.is_empty() {
+            return Vec::new();
+        }
+        let keys = std::mem::take(&mut self.pending_promotions);
+        let mut grants = Vec::new();
+        for key in keys {
+            let Some(session) = self.sessions.get_mut(&key) else {
+                continue;
+            };
+            if session.connected || session.phase != Ed2kUploadSessionPhase::Granted {
+                continue;
+            }
+            let connection_id = next_connection_id();
+            session.connection_id = connection_id;
+            session.connected = true;
+            grants.push(Ed2kUploadPendingPromotion {
+                peer: key.peer.clone(),
+                file_hash: key.file_hash.clone(),
+                handle: Ed2kUploadSessionHandle::new(
+                    key.peer.clone(),
+                    key.file_hash.clone(),
+                    connection_id,
+                ),
+            });
+        }
+        grants
+    }
+
     pub(super) fn snapshot(&mut self, now: Instant) -> Vec<Ed2kUploadQueueSnapshotEntry> {
         self.reap_expired_sessions(now);
         let mut entries = self
@@ -666,6 +766,7 @@ impl Ed2kUploadQueueState {
                 client_id: key.peer.client_id,
                 friend_slot: key.peer.friend_slot,
                 file_hash: key.file_hash.clone(),
+                connected: session.connected,
                 phase: phase_snapshot(session.phase),
                 queue_rank: (session.phase == Ed2kUploadSessionPhase::Waiting)
                     .then(|| self.rank_for_key(key, now)),
@@ -761,10 +862,17 @@ impl Ed2kUploadQueueState {
             .count()
     }
 
+    /// Resolve the queue entry of a (possibly reconnecting) peer the way the
+    /// oracle resolves the same client (`CUpDownClient::Compare`,
+    /// DownloadClient.cpp:275): when both sides know a user hash, the hash alone
+    /// decides; otherwise fall back to the endpoint (IP + advertised TCP port).
+    /// A returning peer may present a new server-assigned client id or connect
+    /// from a new source port and must still re-attach to its persisted waiting
+    /// entry (re-ask on the same queue entry, UploadQueue.cpp:1865-1869).
     fn session_key_for_peer(&self, peer: &Ed2kUploadPeerIdentity) -> Option<Ed2kUploadSessionKey> {
         self.sessions
             .keys()
-            .find(|existing_key| existing_key.peer == *peer)
+            .find(|existing_key| same_upload_client(&existing_key.peer, peer))
             .cloned()
     }
 
@@ -1054,6 +1162,14 @@ impl Ed2kUploadQueueState {
             // back to the queue rather than dropped — would thrash promote/recycle
             // between the two peers.
             next_session.queued_at = now;
+            if !next_session.connected && !self.pending_promotions.contains(&next_key) {
+                // Slot granted to a waiter with no live connection: it needs an
+                // OUTBOUND connect + OP_ACCEPTUPLOADREQ (master AddUpNextClient
+                // US_CONNECTING -> TryToConnect, UploadQueue.cpp:327-361). Queue
+                // it for the promote-connect driver; a failed connect drops the
+                // grant like the master's failed TryToConnect path.
+                self.pending_promotions.push(next_key);
+            }
         }
     }
 
@@ -1240,6 +1356,18 @@ impl Ed2kUploadQueueState {
     }
 }
 
+/// Oracle same-client resolution (`CUpDownClient::Compare`,
+/// DownloadClient.cpp:275): when both peers present a user hash, the hash alone
+/// decides (two same-endpoint clients with different hashes stay distinct);
+/// otherwise the connection endpoint (IP + advertised TCP port) identifies the
+/// client.
+fn same_upload_client(left: &Ed2kUploadPeerIdentity, right: &Ed2kUploadPeerIdentity) -> bool {
+    if let (Some(left_hash), Some(right_hash)) = (left.user_hash, right.user_hash) {
+        return left_hash == right_hash;
+    }
+    left.ip == right.ip && left.tcp_port == right.tcp_port
+}
+
 fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duration {
     let nanos = (u128::from(byte_count) * 1_000_000_000u128)
         .div_ceil(u128::from(limit_bytes_per_sec.max(1)));
@@ -1249,10 +1377,10 @@ fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duratio
 mod admission;
 mod helpers;
 mod score;
+pub(crate) use helpers::is_low_id_client_id;
 pub(super) use helpers::{credit_score_permille, upload_priority_score};
 use helpers::{
-    is_low_id_client_id, phase_snapshot, upload_client_id_matches, upload_snapshot_sort_key,
-    upload_speed_bytes_per_sec,
+    phase_snapshot, upload_client_id_matches, upload_snapshot_sort_key, upload_speed_bytes_per_sec,
 };
 use score::UploadScoreModifiers;
 
