@@ -100,8 +100,6 @@ pub struct KadListenerConfig {
     pub publish_shared_files_enabled: bool,
     pub republish_interval_secs: u64,
     pub publish_contact_fanout: usize,
-    pub hello_intro_interval_secs: u64,
-    pub hello_intro_fanout: usize,
     pub udp_firewall_check_enabled: bool,
     pub udp_firewall_check_interval_secs: u64,
     /// Requester-side Kad TCP firewall recheck (FIREWALLED2_REQ) driver.
@@ -177,8 +175,6 @@ impl Default for KadListenerConfig {
             publish_shared_files_enabled: true,
             republish_interval_secs: 1_800,
             publish_contact_fanout: DEFAULT_KAD_PUBLISH_CONTACT_FANOUT,
-            hello_intro_interval_secs: 300,
-            hello_intro_fanout: 2,
             udp_firewall_check_enabled: true,
             // Oracle re-check cadence: CKademlia::Process re-arms
             // m_tNextFirewallCheck at HR2S(1) — hourly, not every 10 minutes.
@@ -295,8 +291,6 @@ impl DaemonConfig {
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
             kad_republish_interval_secs: self.kad.republish_interval_secs.max(1),
             kad_publish_contact_fanout: self.kad.publish_contact_fanout.max(1),
-            kad_hello_intro_interval_secs: self.kad.hello_intro_interval_secs.max(1),
-            kad_hello_intro_fanout: self.kad.hello_intro_fanout,
             kad_udp_firewall_check_enabled: self.kad.udp_firewall_check_enabled,
             kad_udp_firewall_check_interval_secs: self.kad.udp_firewall_check_interval_secs.max(60),
             kad_tcp_firewall_check_enabled: self.kad.tcp_firewall_check_enabled,

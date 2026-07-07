@@ -112,8 +112,6 @@ localStoreNotesCapacity = 5000
 publishSharedFilesEnabled = true
 republishIntervalSecs = 120
 publishContactFanout = 5
-helloIntroIntervalSecs = 42
-helloIntroFanout = 3
 snoopQueueDedupWindowSecs = 28800
 snoopQueueGeneralMaxQueriesPer600s = 24
 snoopQueueGeneralDrainCooldownSecs = 900
@@ -175,8 +173,6 @@ externalIpOverride = "203.0.113.10"
     assert!(config.kad.publish_shared_files_enabled);
     assert_eq!(config.kad.republish_interval_secs, 120);
     assert_eq!(config.kad.publish_contact_fanout, 5);
-    assert_eq!(config.kad.hello_intro_interval_secs, 42);
-    assert_eq!(config.kad.hello_intro_fanout, 3);
     assert_eq!(config.kad.snoop_queue_dedup_window_secs, 28_800);
     assert_eq!(config.kad.snoop_queue_general_max_queries_per_600s, 24);
     assert_eq!(config.kad.snoop_queue_general_drain_cooldown_secs, 900);
@@ -491,8 +487,6 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
     assert!(network.kad_publish_shared_files);
     assert_eq!(network.kad_republish_interval_secs, 1_800);
     assert_eq!(network.kad_publish_contact_fanout, 10);
-    assert_eq!(network.kad_hello_intro_interval_secs, 300);
-    assert_eq!(network.kad_hello_intro_fanout, 2);
     // Default source TTL mirrors the master inbound source entry lifetime =
     // KADEMLIAREPUBLISHTIMES (5h), KademliaUDPListener.cpp:1349.
     assert_eq!(
@@ -897,8 +891,6 @@ fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
     config.kad.bootstrap_min_routing_contacts = 0;
     config.kad.republish_interval_secs = 0;
     config.kad.publish_contact_fanout = 0;
-    config.kad.hello_intro_interval_secs = 0;
-    config.kad.hello_intro_fanout = 0;
 
     let network = config
         .ed2k_network_config(&metadata_store(&config))
@@ -909,8 +901,6 @@ fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
     assert_eq!(network.kad_bootstrap_min_routing_contacts, 1);
     assert_eq!(network.kad_republish_interval_secs, 1);
     assert_eq!(network.kad_publish_contact_fanout, 1);
-    assert_eq!(network.kad_hello_intro_interval_secs, 1);
-    assert_eq!(network.kad_hello_intro_fanout, 0);
 }
 
 #[tokio::test]

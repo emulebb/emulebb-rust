@@ -57,8 +57,6 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         kad_publish_shared_files: true,
         kad_republish_interval_secs: 1_800,
         kad_publish_contact_fanout: 4,
-        kad_hello_intro_interval_secs: 300,
-        kad_hello_intro_fanout: 2,
         kad_routing_maintenance_enabled: true,
         kad_udp_firewall_check_enabled: true,
         kad_udp_firewall_check_interval_secs: 600,

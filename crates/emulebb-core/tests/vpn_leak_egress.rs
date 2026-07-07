@@ -180,8 +180,6 @@ fn tunnel_network_config(
         kad_publish_shared_files: false,
         kad_republish_interval_secs: 1_800,
         kad_publish_contact_fanout: 4,
-        kad_hello_intro_interval_secs: 300,
-        kad_hello_intro_fanout: 2,
         kad_routing_maintenance_enabled: false,
         kad_udp_firewall_check_enabled: false,
         kad_udp_firewall_check_interval_secs: 600,

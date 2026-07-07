@@ -122,8 +122,6 @@ fn test_network_config(
         kad_publish_shared_files: publish_shared_files,
         kad_republish_interval_secs: 1,
         kad_publish_contact_fanout: 4,
-        kad_hello_intro_interval_secs: 1,
-        kad_hello_intro_fanout: 0,
         kad_udp_firewall_check_enabled: false,
         kad_udp_firewall_check_interval_secs: 600,
         kad_tcp_firewall_check_enabled: false,

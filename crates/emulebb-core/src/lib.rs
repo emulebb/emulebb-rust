@@ -173,8 +173,8 @@ use kad_callback_initiator::{
     kad_callback_key, should_send_kad_callback,
 };
 use kad_hello::{
-    build_kad_hello_request, build_kad_hello_response, kad_publish_within_tolerance,
-    kad_req_masked_count, should_request_hello_res_ack, spawn_kad_firewalled_response,
+    build_kad_hello_response, kad_publish_within_tolerance, kad_req_masked_count,
+    should_request_hello_res_ack, spawn_kad_firewalled_response,
     spawn_modern_kad_firewalled_response,
 };
 #[cfg(test)]
@@ -969,16 +969,6 @@ impl EmulebbCore {
                     kad_buddy: Arc::clone(&kad_buddy),
                     network: network.clone(),
                 },
-                Arc::clone(&shutdown),
-            )));
-        }
-        if network.kad_hello_intro_fanout > 0 {
-            tasks.push(tokio::spawn(run_kad_hello_intro_loop(
-                dht.clone(),
-                Arc::clone(&ed2k_listener),
-                Arc::clone(&server_state),
-                Arc::clone(&kad_firewall),
-                network.clone(),
                 Arc::clone(&shutdown),
             )));
         }
@@ -4994,85 +4984,6 @@ async fn run_configured_kad_bootstrap(dht: DhtNode, shutdown: Arc<AtomicBool>) {
     }
 }
 
-#[allow(clippy::cognitive_complexity)]
-async fn run_kad_hello_intro_loop(
-    dht: DhtNode,
-    ed2k_listener: Arc<TcpListener>,
-    server_state: Arc<RwLock<Ed2kServerState>>,
-    kad_firewall: Arc<Mutex<KadFirewallState>>,
-    network: Ed2kNetworkConfig,
-    shutdown: Arc<AtomicBool>,
-) {
-    let interval = Duration::from_secs(network.kad_hello_intro_interval_secs.max(1));
-    let fanout = network.kad_hello_intro_fanout.max(1);
-    let mut introduced = HashSet::new();
-
-    while !shutdown.load(Ordering::SeqCst) {
-        tokio::time::sleep(interval).await;
-        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
-            continue;
-        }
-
-        let local_ip = match dht.bind_addr() {
-            Ok(bind_addr) => bind_addr.ip(),
-            Err(error) => {
-                tracing::debug!("kad hello intro skipped: failed to resolve bind addr: {error}");
-                continue;
-            }
-        };
-        let contacts = dht
-            .routing_contacts()
-            .await
-            .into_iter()
-            .filter_map(|contact| {
-                let addr = SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port);
-                (contact.udp_port != 0
-                    && contact.kad_version >= 6
-                    && IpAddr::V4(contact.ip) != local_ip
-                    && !introduced.contains(&addr))
-                .then_some((contact, addr))
-            })
-            .take(fanout)
-            .collect::<Vec<_>>();
-
-        for (contact, addr) in contacts {
-            let hello = match build_kad_hello_request(
-                &dht,
-                &ed2k_listener,
-                &server_state,
-                &kad_firewall,
-                false,
-            )
-            .await
-            {
-                Ok(hello) => hello,
-                Err(error) => {
-                    tracing::debug!("failed to build Kad hello request for {addr}: {error}");
-                    continue;
-                }
-            };
-            tracing::debug!(
-                "sending Kad hello request to={} contact_id={} contact_version={} request_ack=false",
-                addr,
-                contact.id,
-                contact.kad_version
-            );
-            if let Err(error) = dht
-                .send_packet_with_class(
-                    addr,
-                    &KadPacket::HelloReq(hello),
-                    RpcWorkClass::Maintenance,
-                )
-                .await
-            {
-                tracing::debug!("failed to send Kad hello request to {addr}: {error}");
-                continue;
-            }
-            introduced.insert(addr);
-        }
-    }
-}
-
 /// Shared inputs for the Kad shared-file (re)publish loop. Carries the
 /// firewall/buddy state so the loop can apply the master
 /// `CSharedFileList::Publish` gate (see [`kad_publish_schedule::kad_publish_allowed`]).
@@ -8022,8 +7933,6 @@ mod tests {
             kad_publish_shared_files: true,
             kad_republish_interval_secs: 1_800,
             kad_publish_contact_fanout: 4,
-            kad_hello_intro_interval_secs: 300,
-            kad_hello_intro_fanout: 2,
             kad_routing_maintenance_enabled: true,
             kad_udp_firewall_check_enabled: true,
             kad_udp_firewall_check_interval_secs: 600,

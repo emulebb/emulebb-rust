@@ -702,8 +702,6 @@ pub struct Ed2kNetworkConfig {
     pub kad_publish_shared_files: bool,
     pub kad_republish_interval_secs: u64,
     pub kad_publish_contact_fanout: usize,
-    pub kad_hello_intro_interval_secs: u64,
-    pub kad_hello_intro_fanout: usize,
     /// Whether the periodic routing-table maintenance loop runs (oracle
     /// `CRoutingZone` OnBigTimer/OnSmallTimer: bucket refresh + dead-contact
     /// expiry + stale-contact HELLO re-probe). Default on.
