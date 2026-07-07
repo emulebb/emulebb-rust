@@ -18,6 +18,10 @@ use crate::{
     TransferCreate, TransferPart, TransferSource, TransferUpdate,
 };
 
+// Builds one Transfer view from a resume manifest plus a handful of live-overlay
+// scalars (speed/sources/parts/bytes). The inputs are distinct primitives with no
+// natural grouping, so a params struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn transfer_from_manifest(
     manifest: &Ed2kResumeManifest,
     state_name: &str,
