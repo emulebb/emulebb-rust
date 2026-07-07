@@ -1758,13 +1758,45 @@ impl EmulebbCore {
     }
 
     pub async fn transfers(&self) -> Vec<Transfer> {
-        self.state
+        let mut transfers: Vec<Transfer> = self
+            .state
             .lock()
             .await
             .transfers
             .values()
             .cloned()
-            .collect()
+            .collect();
+        for transfer in &mut transfers {
+            self.apply_live_transfer_fields(transfer);
+        }
+        transfers
+    }
+
+    /// Overlay live in-flight download state onto a (possibly stale) cached
+    /// `Transfer`. The cache is only rebuilt on state changes, so an actively
+    /// downloading transfer otherwise reports the last-persisted manifest
+    /// snapshot (progress/sources 0 until whole 9.28 MB parts verify). The
+    /// verified-part `completed_bytes` remains the durable floor; the live
+    /// per-block session byte counter and live source set surface real in-flight
+    /// progress, speed, and source counts to REST/UI while the transfer runs.
+    fn apply_live_transfer_fields(&self, transfer: &mut Transfer) {
+        let hash = transfer.hash.as_str();
+        let live_bytes = self.ed2k_transfers.downloaded_session_bytes(hash);
+        transfer.completed_bytes = transfer
+            .completed_bytes
+            .max(live_bytes)
+            .min(transfer.size_bytes);
+        transfer.progress = if transfer.size_bytes == 0 {
+            0.0
+        } else {
+            transfer.completed_bytes as f64 / transfer.size_bytes as f64
+        };
+        transfer.sources = transfer
+            .sources
+            .max(self.ed2k_transfers.live_download_sources(hash).len() as u32);
+        transfer.sources_transferring = self.ed2k_transfers.transferring_source_count(hash);
+        transfer.download_speed_ki_bps =
+            self.ed2k_transfers.download_speed_bytes_per_sec(hash) as f64 / 1024.0;
     }
 
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
@@ -2193,16 +2225,20 @@ impl EmulebbCore {
     }
 
     pub async fn transfer(&self, hash: &str) -> Option<Transfer> {
-        if let Some(transfer) = self.state.lock().await.transfers.get(hash).cloned() {
-            return Some(transfer);
-        }
-        match self.refresh_transfer_from_manifest_default(hash).await {
-            Ok(transfer) => transfer,
-            Err(error) => {
-                tracing::warn!("failed to refresh ED2K transfer {hash} from manifest: {error}");
-                None
-            }
-        }
+        let cached = self.state.lock().await.transfers.get(hash).cloned();
+        let mut transfer = match cached {
+            Some(transfer) => transfer,
+            None => match self.refresh_transfer_from_manifest_default(hash).await {
+                Ok(Some(transfer)) => transfer,
+                Ok(None) => return None,
+                Err(error) => {
+                    tracing::warn!("failed to refresh ED2K transfer {hash} from manifest: {error}");
+                    return None;
+                }
+            },
+        };
+        self.apply_live_transfer_fields(&mut transfer);
+        Some(transfer)
     }
 
     pub async fn update_transfer(
