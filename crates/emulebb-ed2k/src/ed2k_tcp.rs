@@ -47,6 +47,7 @@ mod identity;
 mod listener;
 mod obfuscation;
 mod transport;
+mod upload_promote;
 pub(in crate::ed2k_tcp) use codec::{
     PeerSourceExchangeRequest, SourceExchangePeer, decode_aich_file_hash_answer,
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
@@ -127,7 +128,7 @@ pub(in crate::ed2k_tcp) use identity::{
 };
 pub(crate) use listener::reply_with_firewall_udp;
 #[cfg(test)]
-use listener::{Ed2kConnectionContext, handle_connection};
+use listener::{Ed2kConnectionContext, Ed2kSessionSource, handle_connection};
 pub use listener::{Ed2kListenerOptions, run_ed2k_listener};
 use obfuscation::{
     Rc4KeyStream, accept_incoming_obfuscation_handshake, is_plain_ed2k_protocol_marker,
@@ -220,10 +221,12 @@ pub(crate) const MAX_ED2K_PACKET_LEN: usize = 2_000_000;
 const MAX_PEER_DECOMPRESSED_PACKET_LEN: usize = 50_000;
 const ED2K_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const ED2K_UPLOAD_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
-#[cfg(not(test))]
-const ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
+/// Idle cutoff for a connection whose peer only holds a WAITING queue entry:
+/// the oracle closes an idle client socket after the connection timeout
+/// (`CClientReqSocket::CheckTimeOut`, `thePrefs.GetConnectionTimeout()` default
+/// 30 s on this fork) while the US_ONUPLOADQUEUE entry itself survives up to
+/// MAX_PURGEQUEUETIME between re-asks.
+const ED2K_WAITING_CONNECTION_IDLE_TIMEOUT: Duration = ED2K_CONNECTION_IDLE_TIMEOUT;
 const FIREWALL_HELPER_POST_REQUEST_KEEPALIVE_SECS: u64 = 10;
 const ED2K_UPLOAD_PACKET_SPLIT_THRESHOLD: usize = 13_000;
 const ED2K_UPLOAD_PACKET_FRAGMENT_LEN: usize = 10_240;

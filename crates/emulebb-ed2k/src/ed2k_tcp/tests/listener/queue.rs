@@ -120,9 +120,9 @@ async fn listener_upload_queue_obfuscated_waiter_promotes_after_cancel_transfer(
 }
 
 #[tokio::test]
-async fn listener_upload_queue_refreshes_waiting_rank_before_promotion() {
+async fn listener_upload_queue_sends_rank_only_on_reask() {
     let mut runtime = ListenerTestRuntime::new(
-        "ed2k-upload-listener-queue-refresh",
+        "ed2k-upload-listener-queue-rank-on-reask",
         listener_test_identity(0x51, 0x3141_5926, 41002, 41003),
         [0x4E; 16],
         0x2233_4455,
@@ -132,7 +132,7 @@ async fn listener_upload_queue_refreshes_waiting_rank_before_promotion() {
     let file = runtime
         .seed_verified_upload_file("queued.txt", vec![0x71; 4096])
         .await;
-    let server = runtime.spawn_listener_connections(2);
+    let server = runtime.spawn_listener_loop();
 
     let mut first_stream = connect_peer_until_upload_accepted(
         runtime.peer_addr,
@@ -147,15 +147,32 @@ async fn listener_upload_queue_refreshes_waiting_rank_before_promotion() {
         1,
     )
     .await;
+    let mut third_stream = connect_peer_until_queue_rank(
+        runtime.peer_addr,
+        listener_test_identity(0x63, 0x3333_4444, 4663, 4667),
+        &file.file_hash,
+        2,
+    )
+    .await;
 
-    wait_for_queue_rank_timeout(&mut second_stream, 1).await;
+    // No timer push while waiting (the initial rank above was the solicited
+    // OP_STARTUPLOADREQ reply).
+    assert_queue_rank_silence(&mut second_stream, Duration::from_millis(1200)).await;
 
+    // The slot frees and the second peer is promoted; the third peer's rank
+    // just improved to 1, but the oracle never pushes the new rank unsolicited.
     send_cancel_transfer(&mut first_stream).await;
     drop(first_stream);
-
     wait_for_upload_accept_timeout(&mut second_stream).await;
+    assert_queue_rank_silence(&mut third_stream, Duration::from_millis(1200)).await;
+
+    // Only a re-ask earns the fresh rank.
+    request_upload_file(&mut third_stream, &file.file_hash).await;
+    wait_for_queue_rank_timeout(&mut third_stream, 1).await;
+
     drop(second_stream);
-    server.await.unwrap();
+    drop(third_stream);
+    server.abort();
 }
 
 #[tokio::test]
@@ -195,6 +212,95 @@ async fn listener_upload_queue_keeps_waiter_queued_after_parts_request() {
 
     wait_for_upload_accept_timeout(&mut queued_stream).await;
     drop(queued_stream);
+    server.abort();
+}
+
+#[tokio::test]
+async fn listener_upload_queue_dials_disconnected_waiter_for_slot_grant() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-upload-listener-queue-promote-dial",
+        listener_test_identity(0x73, 0x4444_5555, 41002, 41003),
+        [0x7E; 16],
+        0x8899_AABB,
+    )
+    .await;
+    runtime.use_one_slot_upload_queue().await;
+    let file = runtime
+        .seed_verified_upload_file("promoted.txt", vec![0x5D; 4096])
+        .await;
+    let server = runtime.spawn_listener_loop();
+
+    // The waiter's own "client" listener: the promote driver must dial this
+    // advertised endpoint to deliver the slot grant.
+    let waiter_listener = TcpListener::bind((test_bind_ip(), 0)).await.unwrap();
+    let waiter_port = waiter_listener.local_addr().unwrap().port();
+
+    let mut first_stream = connect_peer_until_upload_accepted(
+        runtime.peer_addr,
+        listener_test_identity(0x81, 0x0102_0304, 4661, 4665),
+        &file.file_hash,
+    )
+    .await;
+    // HighID waiter advertising the listening port in its hello.
+    let waiter_identity = listener_test_identity(0x92, 0x0A0B_0C0D, waiter_port, 4666);
+    let queued_stream =
+        connect_peer_until_queue_rank(runtime.peer_addr, waiter_identity, &file.file_hash, 1).await;
+    // The waiter disconnects: its queue entry survives detached (master keeps
+    // US_ONUPLOADQUEUE clients across disconnects, BaseClient.cpp:1229).
+    drop(queued_stream);
+    let detach_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+        if snapshot
+            .iter()
+            .any(|entry| entry.user_hash == Some([0x92; 16]) && !entry.connected)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < detach_deadline,
+            "the waiter detach was never observed: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Free the slot: the disconnected waiter is promoted and queued for the
+    // outbound promote-connect (master AddUpNextClient, UploadQueue.cpp:327-361).
+    send_cancel_transfer(&mut first_stream).await;
+    drop(first_stream);
+
+    // Drive the promote driver until it dials the waiter's endpoint.
+    let driver = runtime.upload_promote_driver();
+    let mut waiter_side = None;
+    for _ in 0..50 {
+        driver.promote_pending_once().await;
+        match tokio::time::timeout(Duration::from_millis(200), waiter_listener.accept()).await {
+            Ok(accepted) => {
+                waiter_side = Some(accepted.unwrap().0);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let mut waiter_side = waiter_side.expect("the promote driver never dialed the waiter");
+
+    // The dialed connection announces us and delivers the grant: OP_HELLO
+    // first, then OP_ACCEPTUPLOADREQ (oracle ConnectionEstablished,
+    // BaseClient.cpp:1634-1641).
+    let hello = read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_HELLO).await;
+    assert!(!hello.is_empty());
+    let accept = read_until_opcode(&mut waiter_side, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ).await;
+    assert_eq!(accept.len(), 6, "OP_ACCEPTUPLOADREQ carries no payload");
+    let snapshot = runtime.transfer_runtime.upload_queue_snapshot().await;
+    assert!(
+        snapshot.iter().any(|entry| {
+            entry.user_hash == Some([0x92; 16])
+                && entry.phase == crate::ed2k_transfer::Ed2kUploadSessionPhaseSnapshot::Granted
+        }),
+        "the dialed waiter must hold the granted slot: {snapshot:?}"
+    );
+
+    drop(waiter_side);
     server.abort();
 }
 
@@ -277,6 +383,10 @@ async fn listener_upload_queue_preserves_waiter_rank_across_file_switch() {
 
     request_upload_file(&mut queued_stream, &second_file.file_hash).await;
     wait_for_queue_rank(&mut queued_stream, 1).await;
+    // The trailing waiter did not re-ask, so no rank is pushed to it; its rank
+    // is confirmed via a genuine re-ask below.
+    assert_queue_rank_silence(&mut trailing_stream, Duration::from_millis(800)).await;
+    request_upload_file(&mut trailing_stream, &first_file.file_hash).await;
     wait_for_queue_rank_timeout(&mut trailing_stream, 2).await;
 
     send_cancel_transfer(&mut first_stream).await;

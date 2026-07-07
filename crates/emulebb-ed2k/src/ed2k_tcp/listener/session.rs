@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use crate::{
     buddy_socket::BuddySocketRegistry,
     ed2k_server::Ed2kServerState,
-    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity},
+    ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion},
     kad_firewall::KadFirewallState,
 };
 
@@ -36,7 +36,7 @@ use super::super::dump::{
 };
 use super::super::hello::{
     DecodedHelloProfile, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
-    encode_emule_info_answer,
+    encode_emule_info_answer, encode_hello_request,
 };
 use super::super::identity::{Ed2kPeerSecureIdentState, begin_secure_ident_probe};
 use super::super::{
@@ -71,6 +71,20 @@ use shared_file::{
 use upload_payload::{UploadPayloadOutcome, UploadPayloadRequest, serve_upload_payload};
 use upload_queue::{ListenerQueuePoll, ListenerUploadQueue};
 
+/// Transport source for one eD2k peer session: an accepted inbound socket, or
+/// an already-established OUTBOUND connection dialed to hand an upload slot to
+/// a disconnected waiter (oracle `AddUpNextClient` US_CONNECTING connect-out,
+/// UploadQueue.cpp:327-361).
+pub(in crate::ed2k_tcp) enum Ed2kSessionSource {
+    Inbound(TcpStream),
+    PromotedUpload {
+        // Boxed: the established transport dwarfs the plain inbound socket
+        // (clippy::large_enum_variant).
+        transport: Box<Ed2kTransport>,
+        grant: Box<Ed2kUploadPendingPromotion>,
+    },
+}
+
 pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) dht: &'a DhtNode,
     pub(in crate::ed2k_tcp) server_state: &'a Arc<RwLock<Ed2kServerState>>,
@@ -87,7 +101,7 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
 
 #[allow(clippy::cognitive_complexity)]
 pub(in crate::ed2k_tcp) async fn handle_connection(
-    stream: TcpStream,
+    source: Ed2kSessionSource,
     peer_addr: SocketAddr,
     context: Ed2kConnectionContext<'_>,
 ) -> Result<()> {
@@ -101,15 +115,6 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         reachability,
         buddy_registry,
     } = context;
-    let local_addr = stream.local_addr().with_context(|| {
-        format!("failed to resolve local eD2k listener address for {peer_addr}")
-    })?;
-    dump_ed2k_tcp_listener_meta(
-        peer_addr,
-        None,
-        "tcp_accept",
-        format!("local_addr={local_addr}"),
-    );
     let kad_udp_port = dht
         .bind_addr()
         .context("failed to resolve Kad bind address for eD2k hello response")?
@@ -125,51 +130,83 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     };
     let response_identity =
         enrich_hello_identity(response_identity, server_state, kad_firewall).await;
-    let mut transport = match tokio::time::timeout(
-        ED2K_CONNECTION_IDLE_TIMEOUT,
-        Ed2kTransport::accept(stream, hello_identity.user_hash),
-    )
-    .await
-    {
-        Ok(Ok(transport)) => transport,
-        Ok(Err(error)) => {
+    let (mut transport, promoted_grant) = match source {
+        Ed2kSessionSource::Inbound(stream) => {
+            let local_addr = stream.local_addr().with_context(|| {
+                format!("failed to resolve local eD2k listener address for {peer_addr}")
+            })?;
             dump_ed2k_tcp_listener_meta(
                 peer_addr,
                 None,
-                "accept_failed",
-                format!("local_addr={local_addr} error={error:#}"),
+                "tcp_accept",
+                format!("local_addr={local_addr}"),
             );
-            return Err(error).with_context(|| {
-                format!("failed to accept inbound eD2k peer transport from {peer_addr}")
-            });
+            let transport = match tokio::time::timeout(
+                ED2K_CONNECTION_IDLE_TIMEOUT,
+                Ed2kTransport::accept(stream, hello_identity.user_hash),
+            )
+            .await
+            {
+                Ok(Ok(transport)) => transport,
+                Ok(Err(error)) => {
+                    dump_ed2k_tcp_listener_meta(
+                        peer_addr,
+                        None,
+                        "accept_failed",
+                        format!("local_addr={local_addr} error={error:#}"),
+                    );
+                    return Err(error).with_context(|| {
+                        format!("failed to accept inbound eD2k peer transport from {peer_addr}")
+                    });
+                }
+                Err(_) => {
+                    dump_ed2k_tcp_listener_meta(
+                        peer_addr,
+                        None,
+                        "accept_timeout",
+                        format!(
+                            "local_addr={local_addr} idle_timeout_secs={}",
+                            ED2K_CONNECTION_IDLE_TIMEOUT.as_secs()
+                        ),
+                    );
+                    anyhow::bail!("timed out waiting for initial eD2k peer bytes");
+                }
+            };
+            (transport, None)
         }
-        Err(_) => {
+        // A slot grant for a disconnected waiter arrives on a connection WE
+        // dialed (master AddUpNextClient US_CONNECTING connect-out); the
+        // transport handshake already happened in the promote driver.
+        Ed2kSessionSource::PromotedUpload { transport, grant } => {
             dump_ed2k_tcp_listener_meta(
                 peer_addr,
-                None,
-                "accept_timeout",
-                format!(
-                    "local_addr={local_addr} idle_timeout_secs={}",
-                    ED2K_CONNECTION_IDLE_TIMEOUT.as_secs()
-                ),
+                Some(transport.mode),
+                "promote_connect",
+                format!("file_hash={}", grant.file_hash),
             );
-            anyhow::bail!("timed out waiting for initial eD2k peer bytes");
+            (*transport, Some(*grant))
         }
     };
+    let local_addr = transport
+        .stream
+        .local_addr()
+        .with_context(|| format!("failed to resolve local eD2k session address for {peer_addr}"))?;
     transport
         .stream
         .set_nodelay(true)
-        .with_context(|| format!("failed to enable TCP_NODELAY for inbound peer {peer_addr}"))?;
+        .with_context(|| format!("failed to enable TCP_NODELAY for peer {peer_addr}"))?;
     debug!(
-        "accepted eD2k TCP peer from {peer_addr} transport={}",
+        "eD2k TCP peer session with {peer_addr} transport={}",
         transport.mode.as_str()
     );
-    dump_ed2k_tcp_listener_meta(
-        peer_addr,
-        Some(transport.mode),
-        "accept",
-        format!("udp_port={kad_udp_port}"),
-    );
+    if promoted_grant.is_none() {
+        dump_ed2k_tcp_listener_meta(
+            peer_addr,
+            Some(transport.mode),
+            "accept",
+            format!("udp_port={kad_udp_port}"),
+        );
+    }
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
     let mut requested_file_hash: Option<Ed2kHash> = None;
     let mut peer_supports_aich = false;
@@ -192,13 +229,52 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // a flood of these is a share-probe and the peer is banned (MFC file_request_flood).
     let mut failed_file_req_count: u32 = 0;
 
+    // A promoted-upload outbound session announces itself and pushes the slot
+    // grant before entering the dispatch loop: the oracle sends OP_HELLO and
+    // then OP_ACCEPTUPLOADREQ on the fresh connection it opened for the
+    // promoted waiter (ConnectionEstablished, BaseClient.cpp:1634-1641).
+    if let Some(grant) = promoted_grant {
+        peer_upload_identity = grant.peer.clone();
+        peer_upload_identity.should_crypt = transport.mode.is_obfuscated();
+        bound_user_hash = grant.peer.user_hash;
+        let file_hash = Ed2kHash::from_str(&grant.file_hash)
+            .with_context(|| format!("invalid promoted upload file hash {}", grant.file_hash))?;
+        requested_file_hash = Some(file_hash);
+        let hello_packet = encode_hello_request(response_identity);
+        dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "hello_request", &hello_packet);
+        transport.write_all(&hello_packet).await.with_context(|| {
+            format!("failed to send OP_HELLO to promoted upload peer {peer_addr}")
+        })?;
+        let attached = upload_queue
+            .attach_promoted_grant(
+                transfer_runtime,
+                &grant.peer,
+                grant.handle,
+                file_hash,
+                &mut transport,
+                peer_addr,
+            )
+            .await?;
+        if !attached {
+            // The grant went stale while connecting (aged out or re-owned by an
+            // inbound reconnect): nothing to serve on this connection.
+            return Ok(());
+        }
+    }
+
     // Run the session loop inside a fallible async scope so that EVERY exit
     // path -- a clean `break`, a propagated `?` I/O error, or any other early
     // return from the loop body -- lands in `result` and falls through to the
-    // unconditional `upload_queue.release(...)` below. The master always frees
-    // the slot on teardown (`CUpDownClient::Disconnected`, BaseClient.cpp:1172);
-    // without this wrapper an in-loop `?` would skip the release and leave the
-    // slot pinned until the idle reaper reclaimed it.
+    // unconditional `upload_queue.release(...)` below. The master frees an
+    // ACTIVE slot on teardown (`CUpDownClient::Disconnected` removes
+    // US_UPLOADING/US_CONNECTING, BaseClient.cpp:1172-1175) while a waiting
+    // queue entry survives the disconnect (BaseClient.cpp:1229); the runtime
+    // release applies exactly that split. Without this wrapper an in-loop `?`
+    // would skip the release and leave the slot pinned until the idle reaper
+    // reclaimed it.
+    // Last time the peer actually sent us a packet: feeds the waiting-connection
+    // idle close (oracle socket timeout) inside poll_on_timeout.
+    let mut last_packet_at = tokio::time::Instant::now();
     let result: Result<()> = async {
         loop {
         let read_timeout = upload_queue.read_timeout();
@@ -233,7 +309,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         Ok(packet) => packet
                             .with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?,
                         Err(_) => match upload_queue
-                            .poll_on_timeout(transfer_runtime, &mut transport, peer_addr)
+                            .poll_on_timeout(
+                                transfer_runtime,
+                                &mut transport,
+                                peer_addr,
+                                last_packet_at.elapsed(),
+                            )
                             .await?
                         {
                             ListenerQueuePoll::Continue => continue,
@@ -248,7 +329,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     packet.with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?
                 }
                 Err(_) => match upload_queue
-                    .poll_on_timeout(transfer_runtime, &mut transport, peer_addr)
+                    .poll_on_timeout(
+                        transfer_runtime,
+                        &mut transport,
+                        peer_addr,
+                        last_packet_at.elapsed(),
+                    )
                     .await?
                 {
                     ListenerQueuePoll::Continue => continue,
@@ -259,6 +345,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         let Some(packet) = packet else {
             break Ok(());
         };
+        last_packet_at = tokio::time::Instant::now();
         dump_ed2k_tcp_listener_recv(peer_addr, transport.mode, "session", &packet);
 
         match (packet.protocol, packet.opcode) {

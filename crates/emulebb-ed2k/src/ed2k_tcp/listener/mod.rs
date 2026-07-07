@@ -24,8 +24,9 @@ use super::{Ed2kHelloIdentity, Ed2kSecureIdent};
 mod session;
 
 pub(crate) use session::reply_with_firewall_udp;
-#[cfg(test)]
-pub(in crate::ed2k_tcp) use session::{Ed2kConnectionContext, handle_connection};
+pub(in crate::ed2k_tcp) use session::{
+    Ed2kConnectionContext, Ed2kSessionSource, handle_connection,
+};
 
 /// Inputs for the long-lived ED2K TCP listener task.
 pub struct Ed2kListenerOptions {
@@ -65,11 +66,11 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
     // a per-connection interface lookup.
-    let bind_if_index = match listener.local_addr() {
+    let (bind_ip, bind_if_index) = match listener.local_addr() {
         Ok(addr) => match addr.ip() {
             std::net::IpAddr::V4(v4) => {
                 match crate::networking::require_bind_if_index(v4, "eD2K listener") {
-                    Ok(index) => index,
+                    Ok(index) => (v4, index),
                     Err(error) => {
                         warn!("eD2K listener disabled: {error:#}");
                         return;
@@ -86,6 +87,25 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             return;
         }
     };
+    // Outbound promote-connect driver: hands upload slots to waiters whose
+    // connection is gone by dialing their advertised endpoint and pushing
+    // OP_ACCEPTUPLOADREQ (master AddUpNextClient connect-out,
+    // UploadQueue.cpp:327-361).
+    tokio::spawn(
+        super::upload_promote::UploadPromoteDriver {
+            dht: dht.clone(),
+            server_state: Arc::clone(&server_state),
+            kad_firewall: Arc::clone(&kad_firewall),
+            secure_ident: Arc::clone(&secure_ident),
+            transfer_runtime: Arc::clone(&transfer_runtime),
+            hello_identity,
+            reachability: reachability.clone(),
+            buddy_registry: buddy_registry.clone(),
+            bind_ip,
+            shutdown: Arc::clone(&shutdown),
+        }
+        .run(),
+    );
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -144,7 +164,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                     // inbound slot is released on every exit path (Drop).
                     let _inbound_guard = inbound_guard;
                     if let Err(error) = session::handle_connection(
-                        stream,
+                        session::Ed2kSessionSource::Inbound(stream),
                         peer_addr,
                         session::Ed2kConnectionContext {
                             dht: &dht,

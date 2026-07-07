@@ -145,6 +145,25 @@ impl ListenerTestRuntime {
         VerifiedUploadFile { file_hash, payload }
     }
 
+    /// Build the outbound promote-connect driver over this fixture's runtime,
+    /// for tests that drive the disconnected-waiter slot-grant path directly.
+    pub(super) fn upload_promote_driver(
+        &self,
+    ) -> Arc<crate::ed2k_tcp::upload_promote::UploadPromoteDriver> {
+        Arc::new(crate::ed2k_tcp::upload_promote::UploadPromoteDriver {
+            dht: self.dht.clone(),
+            server_state: Arc::clone(&self.server_state),
+            kad_firewall: Arc::clone(&self.kad_firewall),
+            secure_ident: Arc::clone(&self.secure_ident),
+            transfer_runtime: Arc::clone(&self.transfer_runtime),
+            hello_identity: self.hello_identity,
+            reachability: crate::reachability::ExternalReachability::new(),
+            buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),
+            bind_ip: test_bind_ip(),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
     pub(super) fn spawn_listener_connections(
         &mut self,
         connection_count: usize,
@@ -444,6 +463,21 @@ pub(super) async fn wait_for_queue_rank_timeout(stream: &mut TcpStream, expected
     )
     .await
     .unwrap();
+}
+
+/// Assert that NO queue ranking is pushed within `window`: the oracle sends
+/// rank only in response to a re-ask (SendRankingInfo call sites,
+/// UploadQueue.cpp:1866,1963,1986), never unsolicited on a timer.
+pub(super) async fn assert_queue_rank_silence(stream: &mut TcpStream, window: Duration) {
+    let pushed = tokio::time::timeout(
+        window,
+        read_until_opcode(stream, OP_EMULEPROT, OP_QUEUERANKING),
+    )
+    .await;
+    assert!(
+        pushed.is_err(),
+        "an unsolicited OP_QUEUERANKING was pushed on a waiting connection"
+    );
 }
 
 pub(super) async fn wait_for_upload_accept(stream: &mut TcpStream) -> Vec<u8> {

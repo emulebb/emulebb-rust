@@ -6,7 +6,7 @@ use emulebb_kad_proto::Ed2kHash;
 use crate::{
     ed2k_tcp::{
         ED2K_CONNECTION_IDLE_TIMEOUT, ED2K_UPLOAD_QUEUE_POLL_INTERVAL,
-        ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL, Ed2kTransport,
+        ED2K_WAITING_CONNECTION_IDLE_TIMEOUT, Ed2kTransport,
     },
     ed2k_transfer::{
         Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadRangeAdmission,
@@ -39,8 +39,6 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // was-granted peer from a never-granted one for the close-reason funnel, since
     // `granted_sent` is now reset on a demote-back-to-queue.
     ever_granted: bool,
-    last_queue_rank: Option<u16>,
-    last_queue_rank_sent_at: Option<tokio::time::Instant>,
     // Stable peer identity for the `sched` diag_event_v1 emits, captured from the
     // advertised upload peer identity (so slot events align with the upload-queue
     // session key, not the ephemeral socket source port).
@@ -64,8 +62,6 @@ impl ListenerUploadQueue {
             file_hash: None,
             granted_sent: false,
             ever_granted: false,
-            last_queue_rank: None,
-            last_queue_rank_sent_at: None,
             diag_peer: None,
             diag_peer_hash: None,
             verified_reader: None,
@@ -175,6 +171,7 @@ impl ListenerUploadQueue {
         transfer_runtime: &Ed2kTransferRuntime,
         transport: &mut Ed2kTransport,
         peer_addr: SocketAddr,
+        peer_idle_for: std::time::Duration,
     ) -> Result<ListenerQueuePoll> {
         let Some(upload_session_handle) = self.session.as_ref() else {
             return Ok(ListenerQueuePoll::Close);
@@ -187,14 +184,13 @@ impl ListenerUploadQueue {
                 self.send_accept_if_needed(transport, peer_addr).await?;
                 Ok(ListenerQueuePoll::Continue)
             }
-            Ed2kUploadSessionStatus::Waiting { rank } => {
-                let now = tokio::time::Instant::now();
+            Ed2kUploadSessionStatus::Waiting { .. } => {
                 // A slot we had granted was demoted back to the waiting queue (idle
                 // recycle): tell the downloader to go OnQueue with OP_OUTOFPARTREQS
                 // once, mirroring MFC SendOutOfPartReqsAndAddToWaitingQueue, then keep
-                // the connection and resume queue-ranking rather than closing and
-                // shedding the peer. `granted_sent` is cleared so a later re-grant
-                // re-sends OP_ACCEPTUPLOADREQ; `ever_granted` stays set for the funnel.
+                // the connection rather than closing and shedding the peer.
+                // `granted_sent` is cleared so a later re-grant re-sends
+                // OP_ACCEPTUPLOADREQ; `ever_granted` stays set for the funnel.
                 if self.granted_sent {
                     let packet = encode_out_of_part_reqs();
                     dump_ed2k_tcp_listener_send(
@@ -214,15 +210,16 @@ impl ListenerUploadQueue {
                         );
                     }
                     self.granted_sent = false;
-                    self.last_queue_rank = None;
                 }
-                let should_refresh = self.last_queue_rank != Some(rank)
-                    || self.last_queue_rank_sent_at.is_none_or(|sent_at| {
-                        now.duration_since(sent_at) >= ED2K_UPLOAD_QUEUE_REFRESH_INTERVAL
-                    });
-                if should_refresh {
-                    self.send_queue_rank(transport, peer_addr, rank, now)
-                        .await?;
+                // No unsolicited rank refresh: the oracle sends OP_QUEUERANK /
+                // OP_QUEUERANKING only in response to a re-ask (SendRankingInfo
+                // call sites, UploadQueue.cpp:1866,1963,1986), never on a timer.
+                // An idle waiting connection is closed like the oracle's socket
+                // timeout (CClientReqSocket::CheckTimeOut); the queue entry
+                // survives the close and is dialed back on a slot grant.
+                if peer_idle_for >= ED2K_WAITING_CONNECTION_IDLE_TIMEOUT {
+                    self.note_close_reason("waiting_socket_idle");
+                    return Ok(ListenerQueuePoll::Close);
                 }
                 Ok(ListenerQueuePoll::Continue)
             }
@@ -301,7 +298,7 @@ impl ListenerUploadQueue {
                 encode_accept_upload_req()
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
-                self.mark_waiting(rank);
+                self.mark_waiting();
                 self.emit_queue_rank(rank);
                 encode_queue_ranking(rank)
             }
@@ -310,14 +307,41 @@ impl ListenerUploadQueue {
             // OP_QUEUEFULL on the UDP reask path; on this TCP path it simply
             // does not admit, so report the maximum queue rank.
             Ed2kUploadSessionStatus::Rejected => {
-                self.mark_waiting(u16::MAX);
+                self.mark_waiting();
                 encode_queue_ranking(u16::MAX)
             }
             Ed2kUploadSessionStatus::Stale => {
-                self.mark_waiting(1);
+                self.mark_waiting();
                 encode_queue_ranking(1)
             }
         }
+    }
+
+    /// Attach a promoted-outbound slot grant (a waiter with no live connection
+    /// promoted by the runtime queue) to this fresh outbound connection and
+    /// push OP_ACCEPTUPLOADREQ (oracle `ConnectionEstablished`,
+    /// BaseClient.cpp:1634-1641). Returns `false` when the grant went stale
+    /// before the connect completed; the caller closes the connection.
+    pub(in crate::ed2k_tcp) async fn attach_promoted_grant(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        peer_identity: &Ed2kUploadPeerIdentity,
+        handle: Ed2kUploadSessionHandle,
+        file_hash: Ed2kHash,
+        transport: &mut Ed2kTransport,
+        peer_addr: SocketAddr,
+    ) -> Result<bool> {
+        if transfer_runtime.poll_upload_session(&handle, true).await
+            != Ed2kUploadSessionStatus::Granted
+        {
+            return Ok(false);
+        }
+        self.record_diag_peer(peer_identity);
+        self.session = Some(handle);
+        self.file_hash = Some(file_hash);
+        self.verified_reader = None;
+        self.send_accept_if_needed(transport, peer_addr).await?;
+        Ok(true)
     }
 
     pub(in crate::ed2k_tcp) async fn ensure_session_for_parts(
@@ -464,8 +488,6 @@ impl ListenerUploadQueue {
         self.file_hash = None;
         self.granted_sent = false;
         self.close_reason = None;
-        self.last_queue_rank = None;
-        self.last_queue_rank_sent_at = None;
         self.diag_peer = None;
         self.diag_peer_hash = None;
         self.verified_reader = None;
@@ -483,8 +505,7 @@ impl ListenerUploadQueue {
                 Ok(ListenerQueueDecision::Granted)
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
-                self.send_queue_rank(transport, peer_addr, rank, tokio::time::Instant::now())
-                    .await?;
+                self.send_queue_rank(transport, peer_addr, rank).await?;
                 Ok(ListenerQueueDecision::Waiting)
             }
             Ed2kUploadSessionStatus::Stale | Ed2kUploadSessionStatus::Rejected => {
@@ -509,8 +530,6 @@ impl ListenerUploadQueue {
         peer_addr: SocketAddr,
     ) -> Result<()> {
         if self.granted_sent {
-            self.last_queue_rank = None;
-            self.last_queue_rank_sent_at = None;
             return Ok(());
         }
         let reply = encode_accept_upload_req();
@@ -523,12 +542,14 @@ impl ListenerUploadQueue {
         Ok(())
     }
 
+    /// Send one queue rank in reply to a re-ask; rank is NEVER pushed on a
+    /// timer (oracle SendRankingInfo fires only from the re-ask paths,
+    /// UploadQueue.cpp:1866,1963,1986).
     async fn send_queue_rank(
         &mut self,
         transport: &mut Ed2kTransport,
         peer_addr: SocketAddr,
         rank: u16,
-        now: tokio::time::Instant,
     ) -> Result<()> {
         let reply = encode_queue_ranking(rank);
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "queue_ranking", &reply);
@@ -537,8 +558,6 @@ impl ListenerUploadQueue {
             .await
             .with_context(|| format!("failed to send OP_QUEUERANKING to {peer_addr}"))?;
         self.granted_sent = false;
-        self.last_queue_rank = Some(rank);
-        self.last_queue_rank_sent_at = Some(now);
         self.emit_queue_rank(rank);
         Ok(())
     }
@@ -547,17 +566,13 @@ impl ListenerUploadQueue {
         let newly_granted = !self.granted_sent;
         self.granted_sent = true;
         self.ever_granted = true;
-        self.last_queue_rank = None;
-        self.last_queue_rank_sent_at = None;
         if newly_granted {
             self.emit_slot_opened();
         }
     }
 
-    fn mark_waiting(&mut self, rank: u16) {
+    fn mark_waiting(&mut self) {
         self.granted_sent = false;
-        self.last_queue_rank = Some(rank);
-        self.last_queue_rank_sent_at = Some(tokio::time::Instant::now());
     }
 }
 
