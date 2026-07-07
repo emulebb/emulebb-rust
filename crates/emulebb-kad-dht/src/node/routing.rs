@@ -120,6 +120,21 @@ impl DhtNode {
             .get_closest(target, limit)
     }
 
+    /// Keyspace-spread contact sample for the `KADEMLIA2_BOOTSTRAP_RES`
+    /// responder, capped at `limit` (oracle `GetBootstrapContacts(20)`). Unlike
+    /// [`closest_contacts`](Self::closest_contacts), this spans the top of the
+    /// routing tree so a bootstrapping node receives a keyspace spread rather
+    /// than a cluster near our own ID.
+    pub async fn bootstrap_contacts(&self, limit: usize) -> Vec<Contact> {
+        use rand::Rng;
+        let table = self.inner.routing_table.lock().await;
+        // Create the (non-Send) RNG only after the await so it is never held
+        // across a suspension point.
+        let mut rng = rand::thread_rng();
+        let mut next_bit = || rng.r#gen::<bool>();
+        table.bootstrap_contacts(limit, &mut next_bit)
+    }
+
     /// Return the closest known contacts to the target, restricted to contacts
     /// whose oracle freshness type is at most `max_type` (oracle
     /// `GetClosestTo(uMaxType, ...)`). Used by the KADEMLIA2_REQ responder.

@@ -68,7 +68,7 @@ use emulebb_kad_dht::{NoteResult as KadNoteResult, SearchResult as KadSearchResu
 use emulebb_kad_proto::tag_name;
 use emulebb_kad_proto::{
     CallbackReq, Ed2kHash, FindBuddyReq, FindBuddyRes, HelloResAck, KAD_VERSION, KadPacket,
-    PublishRes, Tag, constants::K, packet::ContactEntry,
+    PublishRes, Tag, packet::ContactEntry,
 };
 #[cfg(test)]
 use emulebb_kad_proto::{
@@ -4944,6 +4944,9 @@ const KAD_BOOTSTRAP_INITIAL_DELAY_SECS: u64 = 2;
 /// re-drives the bootstrap self-lookup until the node is connected). Gentle by
 /// design so a node sitting on a stale `nodes.dat` keeps trying without flooding.
 const KAD_BOOTSTRAP_RETRY_SECS: u64 = 30;
+/// Max contacts returned in a `KADEMLIA2_BOOTSTRAP_RES` (oracle
+/// `Process_KADEMLIA2_BOOTSTRAP_REQ` -> `GetBootstrapContacts(contacts, 20)`).
+const KAD_BOOTSTRAP_RESPONSE_CONTACTS: usize = 20;
 
 /// Drive the Kad bootstrap self-lookup until the node reaches the bootstrapped
 /// (connected) state, then keep idling so a later table-collapse can re-trigger
@@ -6794,8 +6797,11 @@ async fn handle_kad_local_store_packet(
         }
         KadPacket::BootstrapReq => {
             let bind_addr = dht.bind_addr()?;
+            // Oracle GetBootstrapContacts(20): a keyspace-spread sample capped at
+            // 20, NOT the K contacts nearest our own id, so a bootstrapping node
+            // receives a spread of the keyspace to seed its buckets.
             let contacts = dht
-                .closest_contacts(&dht.own_id(), K)
+                .bootstrap_contacts(KAD_BOOTSTRAP_RESPONSE_CONTACTS)
                 .await
                 .into_iter()
                 .map(|contact| ContactEntry {

@@ -182,14 +182,47 @@ impl RoutingZone {
         }
     }
 
+    /// Collect a keyspace-spread contact sample for the `KADEMLIA2_BOOTSTRAP_RES`
+    /// responder, mirroring `CRoutingZone::TopDepth` (`RoutingZone.cpp:700-717`):
+    /// recurse into BOTH sub-zones while `depth > 0` (breadth over the top of the
+    /// tree), and once `depth` is exhausted descend a single RANDOM sub-zone per
+    /// branch down to a leaf (`RandomBin`). A leaf contributes all its contacts.
+    /// This yields a sample spread across the keyspace, unlike `get_closest`
+    /// which clusters near a target. `rng` returns a random bit to pick the
+    /// sub-zone at/below the depth cutoff.
+    pub(crate) fn top_depth_contacts(
+        &self,
+        depth: i32,
+        rng: &mut impl FnMut() -> bool,
+        result: &mut Vec<Contact>,
+    ) {
+        match &self.content {
+            ZoneContent::Leaf(bin) => {
+                for c in bin.iter() {
+                    result.push(c.clone());
+                }
+            }
+            ZoneContent::Branch { left, right } => {
+                if depth <= 0 {
+                    // RandomBin: descend one random sub-zone to a leaf.
+                    if rng() { right } else { left }.top_depth_contacts(depth, rng, result);
+                } else {
+                    left.top_depth_contacts(depth - 1, rng, result);
+                    right.top_depth_contacts(depth - 1, rng, result);
+                }
+            }
+        }
+    }
+
     /// Collect contacts closest to `target` whose oracle freshness type is at
     /// most `max_type` AND that are IP-verified — mirroring `CRoutingBin::
     /// GetClosestTo`'s `GetType() <= uMaxType && IsIpVerified()` gate
     /// (`RoutingBin.cpp:242`). This is the `KADEMLIA2_REQ` responder path; an
     /// unverified (potentially source-spoofed) contact is never handed out in
-    /// `KADEMLIA2_RES`, an anti-poisoning defense. Bootstrap uses the unfiltered
-    /// [`get_closest`](Self::get_closest) (oracle `GetBootstrapContacts`). The
-    /// caller sorts by XOR distance and truncates.
+    /// `KADEMLIA2_RES`, an anti-poisoning defense. Bootstrap uses the
+    /// keyspace-spread [`top_depth_contacts`](Self::top_depth_contacts) (oracle
+    /// `GetBootstrapContacts` -> `TopDepth`). The caller sorts by XOR distance
+    /// and truncates.
     pub fn get_closest_max_type(
         &self,
         target: &NodeId,

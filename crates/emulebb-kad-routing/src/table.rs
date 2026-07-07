@@ -266,6 +266,26 @@ impl RoutingTable {
         self.get_closest(&self.own_id, self.total_contacts)
     }
 
+    /// Keyspace-spread contact sample for the `KADEMLIA2_BOOTSTRAP_RES`
+    /// responder, capped at `max` (oracle `GetBootstrapContacts(20)` ->
+    /// `TopDepth(LOG_BASE_EXPONENT)`). Unlike [`all_contacts`](Self::all_contacts)
+    /// / `get_closest`, this samples across the top of the routing tree so a
+    /// bootstrapping newcomer receives a spread of the keyspace rather than a
+    /// cluster near this node's own ID. `rng` returns a random bit for the
+    /// `RandomBin` sub-zone choice below the depth cutoff. The oracle then sorts
+    /// the sample by a FastKad health/latency priority (an eMuleBB-specific,
+    /// non-wire extension) before truncating; we take the spread in traversal
+    /// order, which preserves the keyspace diversity that actually reaches the
+    /// wire.
+    pub fn bootstrap_contacts(&self, max: usize, rng: &mut impl FnMut() -> bool) -> Vec<Contact> {
+        const LOG_BASE_EXPONENT: i32 = 5;
+        let mut contacts = Vec::new();
+        self.root
+            .top_depth_contacts(LOG_BASE_EXPONENT, rng, &mut contacts);
+        contacts.truncate(max);
+        contacts
+    }
+
     /// Run the oracle small-timer maintenance sweep at `now`: seed expiry
     /// windows, drop dead+expired contacts, and pick one lowest-quality expired
     /// contact per leaf to HELLO-probe. Removals are applied to the tree and
@@ -369,6 +389,60 @@ mod tests {
         let b = ((i / 256) % 256) as u8;
         let c = (i % 256) as u8;
         format!("{}.{}.{}.1", a + 2, b, c)
+    }
+
+    #[test]
+    fn bootstrap_contacts_returns_the_whole_root_leaf_uncapped_below_the_limit() {
+        // A table whose contacts all fit in the root leaf (no split): the
+        // bootstrap sample is simply every contact, capped at the oracle max.
+        let own_id = NodeId::from_bytes([0x40; 16]);
+        let mut table = RoutingTable::new(own_id);
+        let mut added = 0usize;
+        for i in 0..8usize {
+            let mut id = [0u8; 16];
+            id[0] = if i % 2 == 0 { 0x10 } else { 0xF0 };
+            id[1] = (i as u8).wrapping_mul(17).wrapping_add(1);
+            if table.add_contact(make_contact(id, &unique_ip(added + 1))).is_ok() {
+                added += 1;
+            }
+        }
+        let mut rng = || true;
+        let contacts = table.bootstrap_contacts(20, &mut rng);
+        assert_eq!(contacts.len(), added, "root-leaf sample returns every contact");
+        // Spans both keyspace halves (the leaf holds both), unlike a
+        // closest-to-own-id selection which would cluster on one side.
+        assert!(contacts.iter().any(|c| c.id.0[0] & 0x80 == 0));
+        assert!(contacts.iter().any(|c| c.id.0[0] & 0x80 != 0));
+    }
+
+    #[test]
+    fn bootstrap_contacts_never_exceeds_the_oracle_cap() {
+        // A large, deep table: the sample must still respect the cap of 20
+        // (oracle GetBootstrapContacts(20)) and only return real contacts.
+        let own_id = NodeId::from_bytes([0x00; 16]);
+        let mut table = RoutingTable::new(own_id);
+        let mut added = 0usize;
+        for i in 0..300usize {
+            let mut id = [0u8; 16];
+            id[0] = (i.wrapping_mul(37) & 0xFF) as u8;
+            id[1] = (i.wrapping_mul(101) & 0xFF) as u8;
+            id[2] = i as u8;
+            if id != [0u8; 16] && table.add_contact(make_contact(id, &unique_ip(added + 1))).is_ok()
+            {
+                added += 1;
+            }
+        }
+        assert!(added > 20, "need a table larger than the cap, added={added}");
+        let mut flip = false;
+        let mut rng = || {
+            flip = !flip;
+            flip
+        };
+        let contacts = table.bootstrap_contacts(20, &mut rng);
+        assert!(contacts.len() <= 20, "bootstrap sample exceeded the cap of 20");
+        // Every returned entry is a real, distinct table contact.
+        let ids: std::collections::HashSet<_> = contacts.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), contacts.len(), "bootstrap sample has duplicates");
     }
 
     #[test]
