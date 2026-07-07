@@ -209,7 +209,7 @@ use search_query::{
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
-    SourcePublishSettings, build_source_publish_tags, emule_high_id_source_type,
+    SourcePublishReachability, SourcePublishSettings, build_source_publish_tags,
     source_publish_client_hash,
 };
 use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
@@ -5467,11 +5467,31 @@ async fn publish_kad_due_shared_files(
         tcp_port: network.listen_port,
         obfuscation_enabled: network.config.obfuscation_enabled,
     };
-    let source_publish_buddy_ip = if gate.tcp_firewalled && !gate.udp_open {
-        runtime.kad_buddy.lock().await.outgoing_buddy_ip()
+    // Select the oracle STOREFILE publish branch from the live firewall/buddy
+    // state (Search.cpp:700-745): open → direct UDP callback → buddy relay.
+    // `None` = firewalled with neither relay path usable right now (e.g. the
+    // buddy dropped after the gate check); source publishes skip this cycle,
+    // mirroring the oracle's PrepareToStop for that state.
+    let source_publish_reachability = if !gate.tcp_firewalled {
+        Some(SourcePublishReachability::Open)
+    } else if gate.udp_open {
+        Some(SourcePublishReachability::DirectUdpCallback)
     } else {
-        None
+        runtime
+            .kad_buddy
+            .lock()
+            .await
+            .outgoing_buddy_udp_endpoint()
+            .map(|(buddy_ip, buddy_kad_port)| SourcePublishReachability::BuddyRelay {
+                buddy_ip,
+                buddy_kad_port,
+            })
     };
+    let source_publish_buddy_ip = match source_publish_reachability {
+        Some(SourcePublishReachability::BuddyRelay { buddy_ip, .. }) => Some(buddy_ip),
+        _ => None,
+    };
+    let own_kad_id = runtime.dht.own_id();
     let mut keyword_totals = PublishAttemptStats::default();
     let mut source_totals = PublishAttemptStats::default();
     let mut notes_totals = PublishAttemptStats::default();
@@ -5585,7 +5605,8 @@ async fn publish_kad_due_shared_files(
         });
         let due_keyword = due_keyword.cloned();
         let keyword_due = due_keyword.is_some();
-        let source_due = schedule.source_due(&entry.file_hash, now, source_publish_buddy_ip);
+        let source_due = source_publish_reachability.is_some()
+            && schedule.source_due(&entry.file_hash, now, source_publish_buddy_ip);
         let notes_due =
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now);
@@ -5623,8 +5644,14 @@ async fn publish_kad_due_shared_files(
             } else {
                 source_attempted += 1;
                 attempted_this_file = true;
-                let source_tags =
-                    build_source_publish_tags(bind_addr, source_publish_settings, entry.file_size);
+                let source_tags = build_source_publish_tags(
+                    bind_addr.port(),
+                    source_publish_settings,
+                    entry.file_size,
+                    source_publish_reachability
+                        .expect("source_due implies a usable publish reachability"),
+                    own_kad_id,
+                );
                 let dht = runtime.dht.clone();
                 let file_hash_text = entry.file_hash.clone();
                 let fanout = network.kad_publish_contact_fanout;
@@ -7811,6 +7838,7 @@ mod tests {
     use md4::{Digest, Md4};
 
     use super::*;
+    use crate::source_publish::emule_high_id_source_type;
 
     #[test]
     fn path_is_within_classifies_incoming_vs_shared_dirs() {
@@ -8501,14 +8529,19 @@ mod tests {
     }
 
     #[test]
-    fn source_publish_tags_match_oracle_plaintext_shape() {
+    fn source_publish_tags_match_oracle_open_shape() {
+        // Oracle non-firewalled STOREFILE branch (Search.cpp:732-743):
+        // SOURCETYPE, SOURCEPORT, SOURCEUPORT, FILESIZE, ENCRYPTION — and no
+        // SOURCEIP tag (indexers take the IP from the datagram sender).
         let tags = build_source_publish_tags(
-            "10.54.206.206:41000".parse().unwrap(),
+            41000,
             SourcePublishSettings {
                 tcp_port: 41001,
                 obfuscation_enabled: false,
             },
             2_097_152,
+            SourcePublishReachability::Open,
+            NodeId::from_bytes([0x11; 16]),
         );
 
         assert_eq!(
@@ -8516,7 +8549,6 @@ mod tests {
             vec![
                 Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
                 Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(41001)),
-                Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0x0A36_CECE)),
                 Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
                 Tag::filesize(2_097_152),
                 Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(0)),
@@ -8527,17 +8559,105 @@ mod tests {
     #[test]
     fn source_publish_tags_set_obfuscated_encryption_bits() {
         let tags = build_source_publish_tags(
-            "10.54.206.206:41000".parse().unwrap(),
+            41000,
             SourcePublishSettings {
                 tcp_port: 41001,
                 obfuscation_enabled: true,
             },
             2_097_152,
+            SourcePublishReachability::Open,
+            NodeId::from_bytes([0x11; 16]),
         );
 
         assert_eq!(
             tags.last(),
             Some(&Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)))
+        );
+    }
+
+    #[test]
+    fn source_publish_tags_match_oracle_buddy_relay_shape() {
+        // Oracle firewalled-with-buddy STOREFILE branch (Search.cpp:717-730):
+        // SOURCETYPE 3 (uint8), SERVERIP = buddy in_addr DWORD, SERVERPORT =
+        // buddy Kad UDP port, BUDDYHASH = uppercase hex of ~KadID in wire
+        // order, then the common tail.
+        let own_id = NodeId::from_bytes([0xF0; 16]);
+        let tags = build_source_publish_tags(
+            41000,
+            SourcePublishSettings {
+                tcp_port: 41001,
+                obfuscation_enabled: false,
+            },
+            2_097_152,
+            SourcePublishReachability::BuddyRelay {
+                buddy_ip: "198.51.100.136".parse().unwrap(),
+                buddy_kad_port: 4672,
+            },
+            own_id,
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                Tag::new_short(tag_name::SOURCETYPE, TagValue::U8(3)),
+                Tag::new_short(tag_name::SERVERIP, TagValue::UInt(0x8864_33C6)),
+                Tag::new_short(tag_name::SERVERPORT, TagValue::UInt(4672)),
+                Tag::new_short(
+                    tag_name::BUDDYHASH,
+                    TagValue::String("0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F".to_string()),
+                ),
+                Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(41001)),
+                Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000)),
+                Tag::filesize(2_097_152),
+                Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_publish_tags_buddy_relay_uses_large_file_type_5() {
+        let tags = build_source_publish_tags(
+            41000,
+            SourcePublishSettings {
+                tcp_port: 41001,
+                obfuscation_enabled: false,
+            },
+            EMULE_LARGE_FILE_SIZE_THRESHOLD + 1,
+            SourcePublishReachability::BuddyRelay {
+                buddy_ip: "198.51.100.136".parse().unwrap(),
+                buddy_kad_port: 4672,
+            },
+            NodeId::from_bytes([0xF0; 16]),
+        );
+
+        assert_eq!(
+            tags.first(),
+            Some(&Tag::new_short(tag_name::SOURCETYPE, TagValue::U8(5)))
+        );
+    }
+
+    #[test]
+    fn source_publish_tags_direct_callback_sets_type_6_and_callback_bit() {
+        // Oracle direct-callback STOREFILE branch (Search.cpp:708-715) +
+        // GetMyConnectOptions(true, true): type 6 with connect options bit 3.
+        let tags = build_source_publish_tags(
+            41000,
+            SourcePublishSettings {
+                tcp_port: 41001,
+                obfuscation_enabled: true,
+            },
+            2_097_152,
+            SourcePublishReachability::DirectUdpCallback,
+            NodeId::from_bytes([0x11; 16]),
+        );
+
+        assert_eq!(
+            tags.first(),
+            Some(&Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(6)))
+        );
+        assert_eq!(
+            tags.last(),
+            Some(&Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(0x0B)))
         );
     }
 

@@ -157,13 +157,16 @@ impl KadBuddyState {
         self.outgoing.is_some()
     }
 
-    /// IP address of the buddy we acquired for ourselves, when present.
+    /// Kad UDP endpoint of the buddy we acquired for ourselves, when present —
+    /// the relay endpoint a buddy-relayed source publish advertises as
+    /// `SERVERIP`/`SERVERPORT` (oracle `GetBuddy()->GetIP()`/`GetUDPPort()`,
+    /// both captured from the `FINDBUDDY_RES` datagram source).
     #[must_use]
-    pub fn outgoing_buddy_ip(&self) -> Option<Ipv4Addr> {
+    pub fn outgoing_buddy_udp_endpoint(&self) -> Option<(Ipv4Addr, u16)> {
         self.outgoing
             .as_ref()
             .and_then(|buddy| match buddy.udp_addr.ip() {
-                std::net::IpAddr::V4(ip) => Some(ip),
+                std::net::IpAddr::V4(ip) => Some((ip, buddy.udp_addr.port())),
                 std::net::IpAddr::V6(_) => None,
             })
     }
