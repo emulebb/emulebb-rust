@@ -67,7 +67,6 @@ impl ReaskSourceSet {
         now: Instant,
         our_part_status: Option<&[bool]>,
         complete_source_count: u16,
-        our_udp_version: u8,
         our_public_ip: [u8; 4],
     ) -> Vec<(SocketAddr, ClientUdpDatagram)> {
         let mut out = Vec::new();
@@ -84,7 +83,6 @@ impl ReaskSourceSet {
                 source,
                 our_part_status,
                 complete_source_count,
-                our_udp_version,
             ) {
                 (buddy_addr, datagram)
             } else if source.low_id {
@@ -99,11 +97,16 @@ impl ReaskSourceSet {
                     // Only obfuscate when we actually hold the peer's key.
                     obfuscate: source.should_crypt && source.user_hash.is_some(),
                 };
+                // The optional part-status / complete-count tails are gated on
+                // the TARGET's advertised UDP version (oracle
+                // UDPReaskForDownload: `GetUDPVersion() > 3` / `> 2` on the
+                // remote client), so an old peer never receives a tail it
+                // cannot parse.
                 let datagram = build_reask_file_ping_packet(
                     &source.file_hash,
                     our_part_status,
                     complete_source_count,
-                    our_udp_version,
+                    source.udp_version,
                     &target,
                 );
                 (SocketAddr::new(ip.into(), udp_port), datagram)
@@ -291,6 +294,32 @@ mod tests {
     }
 
     #[test]
+    fn due_datagrams_gate_reask_tails_on_the_peers_udp_version() {
+        // Oracle UDPReaskForDownload keys the optional tails on the TARGET's
+        // GetUDPVersion(): v2 gets hash only, v3 gets hash+complete-count,
+        // v4 additionally gets the part status.
+        let now = Instant::now();
+        let our_ip = [203, 0, 113, 9];
+        let part_status = [true, false, true];
+        let mut lens = Vec::new();
+        for (index, version) in [2u8, 3, 4].into_iter().enumerate() {
+            let mut set = ReaskSourceSet::new();
+            set.insert(ReaskSource::new(
+                (ip(20 + index as u8), 4672),
+                hash(),
+                version,
+                now,
+            ));
+            let datagrams = set.due_datagrams(now, Some(&part_status), 2, our_ip);
+            assert_eq!(datagrams.len(), 1);
+            lens.push(datagrams[0].1.payload.len());
+        }
+        assert_eq!(lens[0], 16); // v2: hash only
+        assert_eq!(lens[1], 16 + 2); // v3: + complete-source count
+        assert_eq!(lens[2], 16 + 2 + 1 + 2); // v4: + u16 part count + 1 bitfield byte
+    }
+
+    #[test]
     fn due_datagrams_builds_pings_marks_pending_and_skips_tcp_fallback() {
         use super::super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 
@@ -303,7 +332,7 @@ mod tests {
         let endpoint = (ip(8), 4672);
         set.insert(ReaskSource::new(endpoint, hash(), 4, now).with_obfuscation(peer_hash, true));
 
-        let datagrams = set.due_datagrams(now, Some(&[true, false, true]), 2, 4, our_ip);
+        let datagrams = set.due_datagrams(now, Some(&[true, false, true]), 2, our_ip);
         assert_eq!(datagrams.len(), 1);
         // A HighID source's direct ping is destined to the source's own endpoint.
         assert_eq!(
@@ -332,7 +361,7 @@ mod tests {
         tcp_src.fallback_tcp_only = true;
         set.insert(tcp_src);
         let tcp_dest = SocketAddr::new(tcp_endpoint.0.into(), tcp_endpoint.1);
-        let next = set.due_datagrams(now, None, 0, 4, our_ip);
+        let next = set.due_datagrams(now, None, 0, our_ip);
         assert!(
             next.iter().all(|(dest, _)| *dest != tcp_dest),
             "tcp-fallback source must not get a UDP reask datagram"
@@ -359,7 +388,7 @@ mod tests {
             ),
         );
 
-        let datagrams = set.due_datagrams(now, Some(&[true, false]), 3, 4, our_ip);
+        let datagrams = set.due_datagrams(now, Some(&[true, false]), 3, our_ip);
         assert_eq!(datagrams.len(), 1);
         // The reask is targeted at the BUDDY endpoint, not the (unreachable) source.
         assert_eq!(
@@ -390,7 +419,7 @@ mod tests {
             Some(buddy_endpoint),
             None,
         ));
-        let next = set.due_datagrams(now, None, 0, 4, our_ip);
+        let next = set.due_datagrams(now, None, 0, our_ip);
         assert!(
             next.iter().all(
                 |(dest, _)| *dest != SocketAddr::new(no_id_endpoint.0.into(), no_id_endpoint.1)

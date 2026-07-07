@@ -144,8 +144,11 @@ fn decode_part_status(buf: &[u8]) -> Result<(Option<Vec<bool>>, &[u8])> {
     Ok((Some(bitmap), &buf[end..]))
 }
 
-/// Encodes the `OP_REASKFILEPING` body. `sender_udp_version` is *our* advertised
-/// UDP version (gates the optional tails, matching eMule's `UDPReaskForDownload`).
+/// Encodes the `OP_REASKFILEPING` body. `sender_udp_version` is the TARGET
+/// peer's advertised UDP version: eMule's `UDPReaskForDownload` gates the
+/// optional tails on the remote client's `GetUDPVersion()` (`>3` part status,
+/// `>2` complete-source count) so an old peer never receives bytes it cannot
+/// parse.
 pub(crate) fn encode_reask_file_ping(
     file_hash: &Ed2kHash,
     part_status: Option<&[bool]>,

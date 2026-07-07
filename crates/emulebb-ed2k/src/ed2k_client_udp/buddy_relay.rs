@@ -113,15 +113,17 @@ pub(super) fn build_downloader_callback_origination(
     source: &ReaskSource,
     our_part_status: Option<&[bool]>,
     complete_source_count: u16,
-    our_udp_version: u8,
 ) -> Option<(SocketAddr, ClientUdpDatagram)> {
     let ((buddy_ip, buddy_port), buddy_id) = source.buddy_reask_target()?;
+    // Tail gating keys on the firewalled SOURCE's advertised UDP version
+    // (oracle UDPReaskForDownload buddy branch: `GetUDPVersion()` of the
+    // source client, not ours).
     let datagram = build_reask_callback_udp_packet(
         &KadEd2kHash::from_bytes(buddy_id),
         &source.file_hash,
         our_part_status,
         complete_source_count,
-        our_udp_version,
+        source.udp_version,
     );
     Some((SocketAddr::new(buddy_ip.into(), buddy_port), datagram))
 }

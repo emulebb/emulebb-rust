@@ -292,7 +292,6 @@ impl ReaskService {
                 now,
                 info.part_status.as_deref(),
                 info.complete_source_count,
-                self.our_udp_version,
                 self.public_ip.octets(),
             ) {
                 out.send.push((dest, datagram));
