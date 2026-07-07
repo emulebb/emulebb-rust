@@ -103,14 +103,6 @@ reason = "downloadAutoBroadbandIo is an eMule GUI adaptive-IO convenience with n
 compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
 
 [[omissions]]
-id = "source-supplement-scarcity-gate"
-area = "ed2k"
-stock_behavior = "eMule supplements a download's sources via global UDP server source search and Kad source search up to the per-file UDP source cap (CDownloadQueue, GetMaxSourcePerFileUDP = min(maxSources*3/4, 100)), i.e. it keeps launching fresh global lookups until a file already has on the order of 100 sources."
-rust_behavior = "The Rust client issues the global UDP and Kad source supplements only while a file is source-scarce (existing source count <= kad_source_supplement_max_existing_sources, default 2); the always-on connected-server source reask is unaffected. A well-sourced file (>= 3 sources) does not trigger fresh global UDP / Kad source searches until it drops back to scarcity."
-reason = "Deliberate be-gentle / no-ban divergence, matching the conn-rate gentleness (see conn-rate-rolling-five-second-window): a VPN'd headless client should not fan out global UDP + Kad source searches for files that already have enough sources to make progress. The connected-server reask still refreshes sources continuously; only the scatter-shot UDP/Kad supplement is gated to the scarce case, which is strictly less network-aggressive than eMule's per-file-UDP-cap model."
-compatibility = "Does not affect eD2K or Kad wire compatibility; it only makes outbound source-discovery traffic equal-or-gentler than the master. A well-sourced file continues with its existing sources plus connected-server reasks instead of launching additional global lookups; a scarce file still gets the full UDP + Kad supplement."
-
-[[omissions]]
 id = "server-udp-description-poll"
 area = "ed2k"
 stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connected server (up to twice, GetLastDescPingedCount() < 2) with OP_SERVER_DESC_REQ carrying a uint32 challenge ((GetRandomUInt16() << 16) | INV_SERV_DESC_LEN=0xF0FF), and parses the OP_SERVER_DESC_RES answer (legacy <name_len><name><desc_len><desc> strings, or the eserver 16.45+ challenge-echo taglist with name/description/dynip/version/aux ports) to refresh server-list name/description/version metadata (UDPSocket.cpp:481-540)."

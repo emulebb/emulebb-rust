@@ -89,7 +89,6 @@ fn test_network_config(
         keyword_server_attempt_budget: 1,
         exact_hash_keyword_server_attempt_budget: 1,
         source_server_attempt_budget: 1,
-        kad_source_supplement_max_existing_sources: 2,
         upload_queue: Ed2kUploadQueuePolicyConfig {
             active_slots: 2,
             elastic_percent: 0,

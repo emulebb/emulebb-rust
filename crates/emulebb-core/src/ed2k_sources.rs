@@ -325,13 +325,12 @@ pub(crate) fn should_refresh_ed2k_server_sources(source_requery_round: usize) ->
 
 pub(crate) fn should_query_server_udp_source_supplement(
     existing_source_count: usize,
-    supplement_threshold: usize,
+    udp_source_cap: usize,
 ) -> bool {
-    // WHY: MFC keeps the global UDP server source walk active for files below
-    // their source cap. Until Rust has MFC-style multi-file UDP batching, use
-    // the same scarcity threshold as Kad supplementation so a single connected
-    // server source does not suppress UDP server discovery entirely.
-    existing_source_count <= supplement_threshold
+    // Oracle CPartFile::Process keeps the global UDP server source walk active
+    // while the file holds fewer sources than GetMaxSourcePerFileUDP()
+    // (= min(maxSources * 3/4, 100)). 0 = uncapped.
+    udp_source_cap == 0 || existing_source_count < udp_source_cap
 }
 
 pub(crate) fn global_udp_source_search_excluded_endpoint(
@@ -368,9 +367,11 @@ pub(crate) fn ed2k_server_callback_route(
 
 pub(crate) fn should_query_kad_source_supplement(
     existing_source_count: usize,
-    supplement_threshold: usize,
+    udp_source_cap: usize,
 ) -> bool {
-    existing_source_count == 0 || existing_source_count <= supplement_threshold
+    // Oracle CPartFile::Process gates the Kad file-source search on the same
+    // GetMaxSourcePerFileUDP() cap as the UDP server walk. 0 = uncapped.
+    udp_source_cap == 0 || existing_source_count < udp_source_cap
 }
 
 pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed2kFoundSource {

@@ -73,12 +73,6 @@ pub struct Ed2kConfig {
     /// This applies only to the initial source acquisition round; short source
     /// requery rounds do not open extra server source probes.
     pub source_server_attempt_budget: usize,
-    /// Only run global UDP + Kad source supplementation while a file is
-    /// source-scarce (existing sources <= this, default 2). Deliberate be-gentle
-    /// divergence from eMule's per-file UDP source cap (~100); the connected-server
-    /// reask is unaffected. Recorded as `source-supplement-scarcity-gate` in
-    /// `policy/rust-client-omissions.toml`.
-    pub kad_source_supplement_max_existing_sources: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
     pub upload_queue: Ed2kUploadQueuePolicyConfig,
     /// Global (cross-transfer) download payload budget in bytes per second.
@@ -136,6 +130,21 @@ pub struct Ed2kServerEntry {
     pub hard_files: u32,
 }
 
+impl Ed2kConfig {
+    /// Per-file UDP source cap (oracle `GetMaxSourcePerFileUDP` =
+    /// `min(maxSources * 3 / 4, MAX_SOURCES_FILE_UDP)`, default 100): global
+    /// UDP server walks and Kad source searches keep supplementing a file
+    /// until it holds this many sources. 0 means uncapped (like the derived
+    /// caps in `Ed2kDownloadCoordinatorConfig`).
+    #[must_use]
+    pub fn max_source_per_file_udp(&self) -> usize {
+        if self.max_sources_per_file == 0 {
+            return 0;
+        }
+        ((self.max_sources_per_file * 3) / 4).min(crate::ed2k_transfer::MAX_SOURCES_FILE_UDP)
+    }
+}
+
 impl Default for Ed2kConfig {
     fn default() -> Self {
         Self {
@@ -166,7 +175,6 @@ impl Default for Ed2kConfig {
             keyword_server_attempt_budget: 3,
             exact_hash_keyword_server_attempt_budget: 4,
             source_server_attempt_budget: 3,
-            kad_source_supplement_max_existing_sources: 2,
             upload_queue: Ed2kUploadQueuePolicyConfig::default(),
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
@@ -214,7 +222,7 @@ mod tests {
         assert_eq!(config.keyword_server_attempt_budget, 3);
         assert_eq!(config.exact_hash_keyword_server_attempt_budget, 4);
         assert_eq!(config.source_server_attempt_budget, 3);
-        assert_eq!(config.kad_source_supplement_max_existing_sources, 2);
+        assert_eq!(config.max_source_per_file_udp(), 100);
         assert!(config.enable_udp_reask);
         // Download throttle is unlimited (0) by default, matching today's
         // unbounded aggregate inbound behavior.

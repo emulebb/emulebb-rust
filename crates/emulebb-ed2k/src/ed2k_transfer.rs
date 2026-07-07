@@ -63,7 +63,7 @@ pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
 pub use deliver::Ed2kDeliveryOutcome;
 pub use download_activity::Ed2kLiveSource;
 use download_activity::{Ed2kDownloadActivity, Ed2kSourceActivity};
-pub use download_coordinator::Ed2kDownloadCoordinatorConfig;
+pub use download_coordinator::{Ed2kDownloadCoordinatorConfig, MAX_SOURCES_FILE_UDP};
 use download_coordinator::{
     DEFAULT_CONNECTION_WINDOW, DEFAULT_REASK_PACING_INTERVAL, Ed2kDownloadCoordinator,
 };

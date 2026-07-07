@@ -4038,7 +4038,7 @@ impl EmulebbCore {
             && has_background_search
             && should_query_server_udp_source_supplement(
                 sources.len(),
-                config.kad_source_supplement_max_existing_sources,
+                config.max_source_per_file_udp(),
             )
         {
             let claimed_batch = {
@@ -4048,7 +4048,7 @@ impl EmulebbCore {
                     transfer,
                     file_hash,
                     sources.len(),
-                    config.kad_source_supplement_max_existing_sources,
+                    config.max_source_per_file_udp(),
                     Instant::now(),
                 )
             };
@@ -4099,7 +4099,7 @@ impl EmulebbCore {
         if file_size != 0
             && should_query_kad_source_supplement(
                 sources.len(),
-                config.kad_source_supplement_max_existing_sources,
+                config.max_source_per_file_udp(),
             )
             && {
                 let mut state = self.state.lock().await;
@@ -11380,11 +11380,14 @@ mod tests {
     }
 
     #[test]
-    fn server_udp_source_supplement_runs_for_empty_or_scarce_server_sources() {
-        assert!(should_query_server_udp_source_supplement(0, 2));
-        assert!(should_query_server_udp_source_supplement(1, 2));
-        assert!(should_query_server_udp_source_supplement(2, 2));
-        assert!(!should_query_server_udp_source_supplement(3, 2));
+    fn server_udp_source_supplement_runs_below_the_udp_source_cap() {
+        // Oracle: GetMaxSourcePerFileUDP() > GetSourceCount() (default cap 100).
+        assert!(should_query_server_udp_source_supplement(0, 100));
+        assert!(should_query_server_udp_source_supplement(99, 100));
+        assert!(!should_query_server_udp_source_supplement(100, 100));
+        assert!(!should_query_server_udp_source_supplement(150, 100));
+        // 0 = uncapped.
+        assert!(should_query_server_udp_source_supplement(10_000, 0));
     }
 
     #[test]
@@ -11426,11 +11429,13 @@ mod tests {
     }
 
     #[test]
-    fn kad_source_supplement_runs_for_empty_or_scarce_server_sources() {
-        assert!(should_query_kad_source_supplement(0, 2));
-        assert!(should_query_kad_source_supplement(1, 2));
-        assert!(should_query_kad_source_supplement(2, 2));
-        assert!(!should_query_kad_source_supplement(3, 2));
+    fn kad_source_supplement_runs_below_the_udp_source_cap() {
+        // Same GetMaxSourcePerFileUDP gate as the server UDP walk.
+        assert!(should_query_kad_source_supplement(0, 100));
+        assert!(should_query_kad_source_supplement(99, 100));
+        assert!(!should_query_kad_source_supplement(100, 100));
+        // 0 = uncapped.
+        assert!(should_query_kad_source_supplement(10_000, 0));
     }
 
     #[test]

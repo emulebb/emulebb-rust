@@ -28,7 +28,6 @@ excluded_surface_ids = [
     "conn-rate-rolling-five-second-window",
     "conn-rate-spike-modifier",
     "upload-throttle-focus-slot-distribution",
-    "source-supplement-scarcity-gate",
     "server-udp-description-poll",
     "kad-flood-lan-exemption",
     "upload-slow-cooldown-suppression",

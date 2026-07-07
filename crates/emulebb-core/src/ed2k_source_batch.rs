@@ -33,7 +33,7 @@ pub(crate) fn claim_ed2k_udp_source_batch(
     current_transfer: &Transfer,
     current_file_hash: Ed2kHash,
     current_source_count: usize,
-    supplement_threshold: usize,
+    udp_source_cap: usize,
     now: Instant,
 ) -> ClaimedEd2kUdpSourceBatch {
     state
@@ -68,7 +68,10 @@ pub(crate) fn claim_ed2k_udp_source_batch(
     }
 
     for (file_hash, transfer, source_count) in candidates {
-        if source_count > supplement_threshold || was_recently_queried(state, &transfer.hash, now) {
+        // Oracle GetMaxSourcePerFileUDP gate: only walk files still under
+        // their UDP source cap (0 = uncapped).
+        let under_cap = udp_source_cap == 0 || source_count < udp_source_cap;
+        if !under_cap || was_recently_queried(state, &transfer.hash, now) {
             continue;
         }
         state
