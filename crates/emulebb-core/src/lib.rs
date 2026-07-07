@@ -209,7 +209,8 @@ use search_query::{
 use search_queue::{SearchQueue, SearchQueueLane};
 use search_queue_runtime::Ed2kServerSearchOutcome;
 use source_publish::{
-    SourcePublishSettings, build_source_publish_tags, source_publish_client_hash,
+    SourcePublishSettings, build_source_publish_tags, emule_high_id_source_type,
+    source_publish_client_hash,
 };
 use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
 
@@ -255,7 +256,10 @@ const ED2K_LOCAL_SERVER_SEARCH_TIMEOUT_SECS: u64 = 50;
 /// Max oracle freshness type returned to a KADEMLIA2_REQ (oracle passes 2 to
 /// `GetClosestTo`), filtering out contacts staler than two age buckets.
 const KAD_REQ_MAX_TYPE: u8 = 2;
-const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
+/// Oracle `OLD_MAX_EMULE_FILE_SIZE` (Opcodes.h): `(4294967295/PARTSIZE)*PARTSIZE`,
+/// the pre-large-file limit. Kad source types switch to their large-file
+/// variants (4/5) strictly above this, NOT above the raw u32 ceiling.
+const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = 4_290_048_000;
 const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// Upper bound on awaiting the initial UPnP reconcile before the first eD2k server
 /// login (connection ordering: bind -> VPN guard -> UPnP await -> connect). Covers
@@ -8486,6 +8490,14 @@ mod tests {
             configured_kad_bootstrap_nodes_text(&["bad".to_string()]),
             None
         );
+    }
+
+    #[test]
+    fn source_type_switches_to_large_file_variant_at_old_max_emule_file_size() {
+        // Oracle IsLargeFile(): strictly greater than OLD_MAX_EMULE_FILE_SIZE
+        // (4290048000), not the raw u32 ceiling.
+        assert_eq!(emule_high_id_source_type(4_290_048_000), 1);
+        assert_eq!(emule_high_id_source_type(4_290_048_001), 4);
     }
 
     #[test]
