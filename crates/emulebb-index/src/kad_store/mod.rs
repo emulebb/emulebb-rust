@@ -25,8 +25,9 @@ mod source;
 
 use entry_store::{purge_expired, upsert_entry};
 use keyword::{
-    STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish, has_stock_keyword_filename, keyword_dedup_key,
-    keyword_entry_matches_restrictive_payload, keyword_result_tags, stock_keyword_file_size,
+    KeywordPublishTracker, STOCK_MAX_KEYWORD_ENTRIES, StoredKeywordPublish,
+    has_stock_keyword_filename, keyword_dedup_key, keyword_entry_matches_restrictive_payload,
+    keyword_result_tags, stock_keyword_file_size, stock_keyword_first_filename,
     stock_keyword_publish_decision,
 };
 use notes::{
@@ -111,6 +112,9 @@ pub struct KadLocalStore {
     keyword_entries: Vec<StoredKeywordPublish>,
     source_entries: Vec<StoredSourcePublish>,
     notes_entries: Vec<StoredNotesPublish>,
+    /// Live per-keyword-entry publish diversity feeding the `FT_PUBLISHINFO`
+    /// search-result tag. Not persisted; rebuilt from republishes.
+    keyword_tracker: KeywordPublishTracker,
 }
 
 impl KadLocalStore {
@@ -121,6 +125,7 @@ impl KadLocalStore {
             keyword_entries: Vec::new(),
             source_entries: Vec::new(),
             notes_entries: Vec::new(),
+            keyword_tracker: KeywordPublishTracker::default(),
         }
     }
 
@@ -133,6 +138,7 @@ impl KadLocalStore {
         &mut self,
         target: NodeId,
         entries: &[PublishEntry],
+        publisher_ip: Ipv4Addr,
         observed_at: DateTime<Utc>,
     ) -> u8 {
         let mut load = 0;
@@ -170,8 +176,28 @@ impl KadLocalStore {
                     dedup_key,
                 },
             );
+            // Track this publisher IP + filename for the FT_PUBLISHINFO tag
+            // (oracle CKeyEntry publish tracking).
+            self.keyword_tracker.record(
+                target,
+                entry.hash,
+                publisher_ip,
+                stock_keyword_first_filename(&entry.tags),
+            );
         }
+        self.reconcile_keyword_tracker();
         load
+    }
+
+    /// Prune the keyword publish tracker to the surviving entry set (after any
+    /// purge / capacity eviction), keeping its global /24 counter consistent.
+    fn reconcile_keyword_tracker(&mut self) {
+        let live_keys: std::collections::HashSet<(NodeId, Ed2kHash)> = self
+            .keyword_entries
+            .iter()
+            .map(|entry| (entry.target, entry.file_hash))
+            .collect();
+        self.keyword_tracker.retain_keys(&live_keys);
     }
 
     pub fn record_source_publish(
@@ -278,7 +304,10 @@ impl KadLocalStore {
         let restrictive_payload = ((request.start_position & 0x8000) != 0)
             .then_some(request.restrictive_payload.as_slice());
         purge_expired(&mut self.keyword_entries, self.config.keyword_ttl, now);
+        // Keep the publish tracker consistent with entries dropped by the purge.
+        self.reconcile_keyword_tracker();
         let offset = usize::from(request.start_position & 0x7FFF);
+        let tracker = &self.keyword_tracker;
         let results = self
             .keyword_entries
             .iter()
@@ -288,7 +317,7 @@ impl KadLocalStore {
             .take(limit)
             .map(|entry| SearchResultEntry {
                 entry_id: entry.file_hash,
-                tags: keyword_result_tags(entry),
+                tags: keyword_result_tags(entry, tracker),
             })
             .collect::<Vec<_>>();
         search_response(sender_id, request.target, results)
@@ -540,6 +569,10 @@ mod tests {
         Utc.timestamp_opt(seconds, 0).single().unwrap()
     }
 
+    fn publisher_ip() -> Ipv4Addr {
+        Ipv4Addr::new(198, 51, 100, 7)
+    }
+
     #[test]
     fn default_source_ttl_matches_master_kademliarepublishtimes() {
         // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
@@ -560,11 +593,11 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(0)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
             1
         );
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(5)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(5)),
             0
         );
         assert_eq!(store.keyword_entry_count(), 1);
@@ -622,6 +655,7 @@ mod tests {
             store.record_keyword_publish_batch(
                 target,
                 &[missing_name, missing_size, zero_size, empty_name],
+                publisher_ip(),
                 ts(0),
             ),
             0
@@ -652,11 +686,11 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&first), ts(0)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&first), publisher_ip(), ts(0)),
             1
         );
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&replacement), ts(5)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&replacement), publisher_ip(), ts(5)),
             0
         );
         assert_eq!(store.keyword_entry_count(), 1);
@@ -697,7 +731,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(0)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
             1
         );
         let response = store
@@ -735,7 +769,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(0)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
             1
         );
         let response = store
@@ -771,7 +805,7 @@ mod tests {
             ],
         };
 
-        store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(0));
+        store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0));
         let response = store
             .keyword_search_response(
                 NodeId::from_bytes([9; 16]),
@@ -814,7 +848,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), ts(0)),
+            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
             1
         );
         let response = store
@@ -2051,6 +2085,114 @@ mod tests {
     }
 
     #[test]
+    fn keyword_search_reports_computed_publish_info_not_a_constant() {
+        // Two distinct-/24 publishers of the same (keyword, file) with two
+        // distinct filenames: FT_PUBLISHINFO must report names=2, publishers=2,
+        // and trust = 10/1 + 10/1 = 20.0 (*100 = 2000), NOT the old fixed
+        // (names=1, publishers=1, trust=10.0) constant.
+        let mut store = KadLocalStore::new(config());
+        let target = NodeId::from_bytes([1; 16]);
+        let file = Ed2kHash::from_bytes([2; 16]);
+        store.record_keyword_publish_batch(
+            target,
+            &[PublishEntry {
+                hash: file,
+                tags: vec![Tag::filename("ubuntu linux.iso"), Tag::filesize(123)],
+            }],
+            Ipv4Addr::new(198, 51, 100, 7),
+            ts(1),
+        );
+        store.record_keyword_publish_batch(
+            target,
+            &[PublishEntry {
+                hash: file,
+                tags: vec![Tag::filename("ubuntu-linux.iso"), Tag::filesize(123)],
+            }],
+            Ipv4Addr::new(203, 0, 113, 9),
+            ts(2),
+        );
+
+        let response = store
+            .keyword_search_response(
+                NodeId::from_bytes([9; 16]),
+                &SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+                10,
+                ts(3),
+            )
+            .expect("keyword response");
+        assert_eq!(response.results.len(), 1);
+        let publish_info = response.results[0]
+            .tags
+            .iter()
+            .find_map(|tag| match (&tag.name, &tag.value) {
+                (TagName::Short(name), TagValue::U32(v)) if *name == tag_name::PUBLISHINFO => {
+                    Some(*v)
+                }
+                _ => None,
+            })
+            .expect("PUBLISHINFO tag present");
+        let names = (publish_info >> 24) & 0xFF;
+        let publishers = (publish_info >> 16) & 0xFF;
+        let trust_times_100 = publish_info & 0xFFFF;
+        assert_eq!(names, 2, "two distinct filenames");
+        assert_eq!(publishers, 2, "two distinct publisher IPs");
+        assert_eq!(trust_times_100, 2000, "trust = 10/1 + 10/1 = 20.0");
+    }
+
+    #[test]
+    fn keyword_search_publish_info_penalises_a_spammy_subnet() {
+        // One /24 that has published MANY distinct files (spam) yields a low
+        // per-entry trust: each of its entries scores 10 / (global /24 count).
+        let mut store = KadLocalStore::new(KadLocalStoreConfig {
+            keyword_capacity: 50,
+            ..config()
+        });
+        let target = NodeId::from_bytes([1; 16]);
+        let spam_ip = Ipv4Addr::new(203, 0, 113, 50);
+        for i in 0..5u8 {
+            store.record_keyword_publish_batch(
+                target,
+                &[PublishEntry {
+                    hash: Ed2kHash::from_bytes([10 + i; 16]),
+                    tags: vec![Tag::filename(format!("spam-{i}.iso")), Tag::filesize(1)],
+                }],
+                spam_ip,
+                ts(1),
+            );
+        }
+        let response = store
+            .keyword_search_response(
+                NodeId::from_bytes([9; 16]),
+                &SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+                10,
+                ts(2),
+            )
+            .expect("keyword response");
+        // Each spam entry: 1 publisher whose /24 published 5 entries -> 10/5 = 2.0.
+        for result in &response.results {
+            let info = result
+                .tags
+                .iter()
+                .find_map(|tag| match (&tag.name, &tag.value) {
+                    (TagName::Short(name), TagValue::U32(v)) if *name == tag_name::PUBLISHINFO => {
+                        Some(*v)
+                    }
+                    _ => None,
+                })
+                .expect("PUBLISHINFO tag");
+            assert_eq!(info & 0xFFFF, 200, "spammy-subnet entry trust = 10/5 = 2.0");
+        }
+    }
+
+    #[test]
     fn restrictive_keyword_searches_filter_local_results_like_stock() {
         let mut store = KadLocalStore::new(config());
         let target = NodeId::from_bytes([1; 16]);
@@ -2066,6 +2208,7 @@ mod tests {
                     tags: vec![Tag::filename("fedora workstation.iso"), Tag::filesize(456)],
                 },
             ],
+            publisher_ip(),
             ts(1),
         );
 
@@ -2101,6 +2244,7 @@ mod tests {
                     tags: vec![Tag::filename("debian linux.iso"), Tag::filesize(456)],
                 },
             ],
+            publisher_ip(),
             ts(1),
         );
 
@@ -2130,6 +2274,7 @@ mod tests {
                 hash: Ed2kHash::from_bytes([2; 16]),
                 tags: vec![Tag::filename("ubuntu linux.iso"), Tag::filesize(123)],
             }],
+            publisher_ip(),
             ts(1),
         );
 

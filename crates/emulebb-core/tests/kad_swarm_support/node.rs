@@ -206,9 +206,14 @@ async fn handle_packet(
             send_search_response(dht, from, response).await;
         }
         KadPacket::PublishKeyReq(req) => {
+            let publisher_ip = match from.ip() {
+                IpAddr::V4(ip) => ip,
+                IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+            };
             let load = store.lock().await.record_keyword_publish_batch(
                 req.target,
                 &req.entries,
+                publisher_ip,
                 Utc::now(),
             );
             send_publish_response(dht, from, req.target, load).await;

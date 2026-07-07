@@ -6920,7 +6920,18 @@ async fn handle_kad_local_store_packet(
             }
             let load = {
                 let mut store = local_store.lock().await;
-                store.record_keyword_publish_batch(req.target, &req.entries, Utc::now())
+                // The publisher IP feeds the FT_PUBLISHINFO publish-diversity /
+                // anti-spam trust accounting (oracle CKeyEntry m_uIP tracking).
+                let publisher_ip = match from.ip() {
+                    IpAddr::V4(ip) => ip,
+                    IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+                };
+                store.record_keyword_publish_batch(
+                    req.target,
+                    &req.entries,
+                    publisher_ip,
+                    Utc::now(),
+                )
             };
             if network.kad_local_store.enabled {
                 persist_kad_publish_cache(&runtime.metadata_store, local_store).await;
