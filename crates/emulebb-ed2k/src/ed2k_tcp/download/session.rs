@@ -851,6 +851,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EDONKEYPROT, OP_QUEUERANK) => {
                     let rank = decode_edonkey_queue_rank_payload(&packet.payload)?;
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    transfer_runtime.note_download_source_queue_rank(file_hash_hex, peer_addr, rank);
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),
@@ -861,6 +862,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 (OP_EMULEPROT, OP_QUEUERANKING) => {
                     let rank = decode_emule_queue_ranking_payload(&packet.payload)?;
                     session_state.queued_until = Some(tokio::time::Instant::now() + QUEUE_RANK_GRACE);
+                    transfer_runtime.note_download_source_queue_rank(
+                        file_hash_hex,
+                        peer_addr,
+                        u32::from(rank),
+                    );
                     dump_ed2k_tcp_download_meta(
                         peer_addr,
                         Some(transport.mode),

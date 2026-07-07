@@ -80,6 +80,9 @@ pub(super) struct Ed2kSourceActivity {
     /// Per-part availability advertised by the peer (OP_FILESTATUS). `None`
     /// until a status frame is seen.
     part_bitmap: Option<Vec<bool>>,
+    /// Our queue position at this peer (OP_QUEUERANK / OP_QUEUERANKING). `None`
+    /// until the peer sends a ranking.
+    queue_rank: Option<u32>,
 }
 
 /// Snapshot of one live source for the REST transfer-source/detail views.
@@ -91,6 +94,7 @@ pub struct Ed2kLiveSource {
     pub download_speed_bytes_per_sec: u64,
     pub transferring: bool,
     pub available_parts: u32,
+    pub queue_rank: Option<u32>,
 }
 
 impl Ed2kTransferRuntime {
@@ -185,6 +189,7 @@ impl Ed2kTransferRuntime {
                 last_payload_at: None,
                 window: DatarateWindow::default(),
                 part_bitmap: None,
+                queue_rank: None,
             });
         entry.endpoint = peer;
         if user_hash.is_some() {
@@ -225,6 +230,7 @@ impl Ed2kTransferRuntime {
                 last_payload_at: None,
                 window: DatarateWindow::default(),
                 part_bitmap: None,
+                queue_rank: None,
             });
         entry.endpoint = peer;
         if user_hash.is_some() {
@@ -235,6 +241,37 @@ impl Ed2kTransferRuntime {
         }
         entry.last_seen_at = now;
         entry.part_bitmap = Some(bitmap);
+    }
+
+    /// Record our queue position at a peer (OP_QUEUERANK / OP_QUEUERANKING) so the
+    /// REST source list can show it. The session entry usually already exists from
+    /// a payload/status frame; create a minimal one if the ranking arrives first.
+    pub(crate) fn note_download_source_queue_rank(
+        &self,
+        file_hash: &str,
+        peer: SocketAddr,
+        rank: u32,
+    ) {
+        let now = Instant::now();
+        let Ok(mut sources) = self.download_sources.lock() else {
+            return;
+        };
+        let peers = sources.entry(file_hash.to_string()).or_default();
+        evict_stale_sources(peers, now);
+        let entry = peers
+            .entry(peer.to_string())
+            .or_insert_with(|| Ed2kSourceActivity {
+                endpoint: peer,
+                user_hash: None,
+                connect_options: None,
+                last_seen_at: now,
+                last_payload_at: None,
+                window: DatarateWindow::default(),
+                part_bitmap: None,
+                queue_rank: None,
+            });
+        entry.last_seen_at = now;
+        entry.queue_rank = Some(rank);
     }
 
     /// Drop the live-source registry for a file (e.g. on transfer removal).
@@ -274,6 +311,7 @@ impl Ed2kTransferRuntime {
                     .as_ref()
                     .map(|bitmap| bitmap.iter().filter(|present| **present).count() as u32)
                     .unwrap_or(0),
+                queue_rank: peer.queue_rank,
             })
             .collect()
     }

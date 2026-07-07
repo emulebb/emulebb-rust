@@ -315,6 +315,9 @@ pub(crate) fn enrich_sources_with_live(
         source.download_speed_ki_bps = live_source.download_speed_bytes_per_sec as f64 / 1024.0;
         source.available_parts = live_source.available_parts;
         source.part_count = part_count;
+        if let Some(rank) = live_source.queue_rank {
+            source.queue_rank = rank;
+        }
         let state = if live_source.transferring {
             "downloading"
         } else {
