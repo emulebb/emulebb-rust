@@ -127,6 +127,9 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     /// eq/hash. Defaults to a non-firewalled state, so the guard never fires until
     /// the listener supplies real state.
     pub firewall_context: Ed2kUploadFirewallContext,
+    /// Peer software string from the HELLO CT_EMULE_VERSION tag (e.g.
+    /// `eMule v0.60.0`); display-only, excluded from identity eq/hash.
+    pub client_software: Option<String>,
 }
 
 impl PartialEq for Ed2kUploadPeerIdentity {
@@ -247,6 +250,8 @@ pub struct Ed2kUploadQueueSnapshotEntry {
     pub low_id_penalty_applied: bool,
     pub low_id_divisor: u32,
     pub old_client_penalty_applied: bool,
+    /// Peer software string (HELLO CT_EMULE_VERSION), display-only.
+    pub client_software: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -681,6 +686,7 @@ impl Ed2kUploadQueueState {
                 low_id_penalty_applied: session.score_modifiers.low_id,
                 low_id_divisor: score::low_id_divisor_value(session.score_modifiers.low_id),
                 old_client_penalty_applied: session.score_modifiers.old_client,
+                client_software: key.peer.client_software.clone(),
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
@@ -1272,6 +1278,7 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         is_emule_client: false,
         kad_port: 0,
         firewall_context: Ed2kUploadFirewallContext::default(),
+        client_software: None,
     }
 }
 

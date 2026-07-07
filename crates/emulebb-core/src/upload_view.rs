@@ -65,7 +65,10 @@ pub(crate) fn upload_from_snapshot(
         client_id,
         user_name: format!("{}:{}", entry.ip, entry.tcp_port),
         user_hash,
-        client_software: "unknown".to_string(),
+        client_software: entry
+            .client_software
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
         client_mod: String::new(),
         upload_state,
         upload_speed_ki_bps: entry.upload_speed_bytes_per_sec as f64 / 1024.0,

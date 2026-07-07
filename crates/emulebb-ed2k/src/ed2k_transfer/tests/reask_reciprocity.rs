@@ -56,6 +56,7 @@ fn reasking_peer(udp_port: u16) -> Ed2kUploadPeerIdentity {
         is_emule_client: true,
         kad_port: 0,
         firewall_context: Default::default(),
+        client_software: None,
     }
 }
 

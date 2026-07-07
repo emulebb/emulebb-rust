@@ -1016,6 +1016,7 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         is_emule_client: false,
         kad_port: 0,
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
+        client_software: None,
     }
 }
 
@@ -1055,6 +1056,7 @@ fn upload_peer_identity_from_hello(
         // Set per-request by the OP_STARTUPLOADREQ / OP_REQUESTPARTS handlers from
         // the live server/Kad firewall state; defaults to non-firewalled here.
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
+        client_software: profile.client_software.clone(),
     }
 }
 
