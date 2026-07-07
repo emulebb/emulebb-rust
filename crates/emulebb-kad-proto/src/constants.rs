@@ -17,6 +17,12 @@ pub const KADEMLIA_VERSION2_47A: u8 = 2;
 /// Highest pre-obfuscation Kad version (`KADEMLIA_VERSION5_48a`); a contact on
 /// UDP port 53 is only accepted above this ("No DNS Port without encryption").
 pub const KADEMLIA_VERSION5_48A: u8 = 5;
+/// First Kad version that carries `TAG_KADMISCOPTIONS` and completes the
+/// `KADEMLIA2_HELLO_RES_ACK` three-way handshake (`KADEMLIA_VERSION8_49b`).
+/// `SendMyDetails` only writes the misc-options tag toward a contact at or
+/// above this version; older contacts are IP-verified via PING / legacy
+/// challenge instead.
+pub const KADEMLIA_VERSION8_49B: u8 = 8;
 
 /// K — k-bucket size.
 pub const K: usize = 10;

@@ -147,6 +147,8 @@ async fn run_small_timer_sweep(
             kad_firewall,
             // Request an ACK so a successful re-probe can re-verify the contact.
             true,
+            // The contact's version gates the KADMISCOPTIONS tag (v8+ only).
+            probe.kad_version,
         )
         .await
         {

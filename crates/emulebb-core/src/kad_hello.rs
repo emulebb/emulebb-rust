@@ -25,7 +25,7 @@ use emulebb_ed2k::{
 use emulebb_kad_dht::DhtNode;
 use emulebb_kad_proto::{
     Firewalled2Req, FirewalledRes, HelloReq, HelloRes, KAD_VERSION, KadPacket, NodeId, Tag,
-    TagValue, tag_name,
+    TagValue, constants::KADEMLIA_VERSION8_49B, tag_name,
 };
 use tokio::{
     net::{TcpListener, TcpSocket},
@@ -79,28 +79,29 @@ pub(crate) fn kad_publish_within_tolerance(
     own_id.distance(&target).chunk_u32(0) <= emulebb_kad_proto::constants::SEARCHTOLERANCE
 }
 
-pub(crate) fn build_kad_hello_response_tags(
+/// Append the shared `SendMyDetails` tag set (SOURCEUPORT + KADMISCOPTIONS) to
+/// `tags`. `contact_version` is the version of the peer we are addressing:
+/// `TAG_KADMISCOPTIONS` is written ONLY toward a v8+ contact (oracle
+/// `SendMyDetails` gates both the tag and its tag-count on
+/// `byKadVersion >= KADEMLIA_VERSION8_49b`); a pre-v8 contact is IP-verified via
+/// a PING / legacy challenge instead and never receives the tag.
+fn push_send_my_details_tags(
+    tags: &mut Vec<Tag>,
     kad_udp_port: u16,
     can_advertise_source_udp_port: bool,
     udp_firewalled: bool,
     tcp_firewalled: bool,
     request_ack: bool,
-) -> Vec<Tag> {
-    // HELLO_RES is emitted by the same oracle `SendMyDetails`
-    // (KademliaUDPListener.cpp:146-168) as HELLO_REQ, so the two tags carry the
-    // identical gates: SOURCEUPORT only when advertising our intern Kad port
-    // (`!GetUseExternKadPort()`), and KADMISCOPTIONS only on v8+ AND when we
-    // request an ACK or are UDP/TCP firewalled. (KAD_VERSION is well past v8, so
-    // the version gate is always satisfied here.) Previously this builder always
-    // emitted both, unlike the request builder and the oracle.
-    let mut tags = Vec::new();
+    contact_version: u8,
+) {
     if can_advertise_source_udp_port {
         tags.push(Tag::new_short(
             tag_name::SOURCEUPORT,
             TagValue::U16(kad_udp_port),
         ));
     }
-    if request_ack || udp_firewalled || tcp_firewalled {
+    if contact_version >= KADEMLIA_VERSION8_49B && (request_ack || udp_firewalled || tcp_firewalled)
+    {
         let misc_options = u8::from(udp_firewalled)
             | (u8::from(tcp_firewalled) << 1)
             | (u8::from(request_ack) << 2);
@@ -109,6 +110,29 @@ pub(crate) fn build_kad_hello_response_tags(
             TagValue::U8(misc_options),
         ));
     }
+}
+
+pub(crate) fn build_kad_hello_response_tags(
+    kad_udp_port: u16,
+    can_advertise_source_udp_port: bool,
+    udp_firewalled: bool,
+    tcp_firewalled: bool,
+    request_ack: bool,
+    contact_version: u8,
+) -> Vec<Tag> {
+    // HELLO_RES is emitted by the same oracle `SendMyDetails`
+    // (KademliaUDPListener.cpp:146-168) as HELLO_REQ; both carry the identical
+    // gates (see push_send_my_details_tags).
+    let mut tags = Vec::new();
+    push_send_my_details_tags(
+        &mut tags,
+        kad_udp_port,
+        can_advertise_source_udp_port,
+        udp_firewalled,
+        tcp_firewalled,
+        request_ack,
+        contact_version,
+    );
     tags
 }
 
@@ -118,28 +142,18 @@ pub(crate) fn build_kad_hello_request_tags(
     udp_firewalled: bool,
     tcp_firewalled: bool,
     request_ack: bool,
+    contact_version: u8,
 ) -> Vec<Tag> {
-    // Mirror the oracle SendMyDetails (KademliaUDPListener.cpp:146-169): the two
-    // tags are independent and additive, not mutually exclusive. SOURCEUPORT is
-    // written whenever we advertise our intern Kad port (!GetUseExternKadPort),
-    // and KADMISCOPTIONS is written (v8+) whenever we request an ACK or are
-    // firewalled. A firewalled node on its intern port therefore emits BOTH.
     let mut tags = Vec::new();
-    if can_advertise_source_udp_port {
-        tags.push(Tag::new_short(
-            tag_name::SOURCEUPORT,
-            TagValue::U16(kad_udp_port),
-        ));
-    }
-    if request_ack || udp_firewalled || tcp_firewalled {
-        let misc_options = u8::from(udp_firewalled)
-            | (u8::from(tcp_firewalled) << 1)
-            | (u8::from(request_ack) << 2);
-        tags.push(Tag::new_short(
-            tag_name::KADMISCOPTIONS,
-            TagValue::U8(misc_options),
-        ));
-    }
+    push_send_my_details_tags(
+        &mut tags,
+        kad_udp_port,
+        can_advertise_source_udp_port,
+        udp_firewalled,
+        tcp_firewalled,
+        request_ack,
+        contact_version,
+    );
     tags
 }
 
@@ -149,6 +163,7 @@ pub(crate) async fn build_kad_hello_request(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
     request_ack: bool,
+    contact_version: u8,
 ) -> Result<HelloReq> {
     let bind_addr = dht.bind_addr()?;
     let tcp_port = ed2k_listener
@@ -178,6 +193,7 @@ pub(crate) async fn build_kad_hello_request(
             firewall.udp_verified && !firewall.udp_open,
             tcp_firewalled,
             request_ack,
+            contact_version,
         ),
     })
 }
@@ -209,6 +225,7 @@ pub(crate) async fn build_kad_hello_response(
     server_state: &Arc<RwLock<Ed2kServerState>>,
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
     request_ack: bool,
+    contact_version: u8,
 ) -> Result<HelloRes> {
     let bind_addr = dht.bind_addr()?;
     let tcp_port = ed2k_listener
@@ -236,6 +253,7 @@ pub(crate) async fn build_kad_hello_response(
             firewall.udp_verified && !firewall.udp_open,
             tcp_firewalled,
             request_ack,
+            contact_version,
         ),
     })
 }
@@ -413,10 +431,11 @@ mod tests {
         // (!GetUseExternKadPort), independent of the firewall verdict. A firewalled
         // node therefore still emits SOURCEUPORT (plus KADMISCOPTIONS).
         for build in [
-            build_kad_hello_request_tags as fn(u16, bool, bool, bool, bool) -> Vec<Tag>,
+            build_kad_hello_request_tags as fn(u16, bool, bool, bool, bool, u8) -> Vec<Tag>,
             build_kad_hello_response_tags,
         ] {
-            let tags = build(4672, true, true, true, false);
+            // A v8+ contact receives KADMISCOPTIONS; SOURCEUPORT is version-independent.
+            let tags = build(4672, true, true, true, false, KAD_VERSION);
             use emulebb_kad_proto::TagName::Short;
             assert!(
                 tags.iter()

@@ -6605,6 +6605,9 @@ async fn handle_kad_local_store_packet(
                 server_state,
                 kad_firewall,
                 request_ack,
+                // The requester's version gates the KADMISCOPTIONS tag (v8+ only),
+                // matching SendMyDetails(..., byContactVersion, ...).
+                req.version,
             )
             .await?;
             dht.send_packet(from, &KadPacket::HelloRes(response))
@@ -8694,7 +8697,7 @@ mod tests {
 
     #[test]
     fn kad_hello_request_tags_advertise_source_udp_port_when_verified_open() {
-        let tags = build_kad_hello_request_tags(41000, true, false, false, false);
+        let tags = build_kad_hello_request_tags(41000, true, false, false, false, KAD_VERSION);
 
         assert_eq!(
             tags,
@@ -8706,7 +8709,7 @@ mod tests {
     fn kad_hello_request_tags_emit_source_port_and_misc_bits_additively() {
         // Oracle SendMyDetails writes SOURCEUPORT (intern port) AND KADMISCOPTIONS
         // (firewalled/ack) together, not one or the other.
-        let tags = build_kad_hello_request_tags(41000, true, true, false, true);
+        let tags = build_kad_hello_request_tags(41000, true, true, false, true, KAD_VERSION);
 
         assert_eq!(
             tags,
@@ -8715,6 +8718,31 @@ mod tests {
                 Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05)),
             ]
         );
+    }
+
+    #[test]
+    fn kad_hello_tags_omit_misc_options_toward_pre_v8_contacts() {
+        // Oracle SendMyDetails only writes (and counts) TAG_KADMISCOPTIONS when
+        // byKadVersion >= KADEMLIA_VERSION8_49b. A v7 (or older) contact that
+        // would otherwise get the ACK/firewall bits receives SOURCEUPORT only;
+        // it is IP-verified via a PING / legacy challenge instead.
+        for build in [
+            build_kad_hello_request_tags as fn(u16, bool, bool, bool, bool, u8) -> Vec<Tag>,
+            build_kad_hello_response_tags,
+        ] {
+            assert_eq!(
+                build(41000, true, true, true, true, 7),
+                vec![Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000))],
+                "pre-v8 contact must not receive KADMISCOPTIONS"
+            );
+            // v8 exactly is the first version that receives it.
+            assert!(
+                build(41000, true, true, true, true, 8)
+                    .iter()
+                    .any(|tag| tag.name
+                        == emulebb_kad_proto::TagName::Short(tag_name::KADMISCOPTIONS))
+            );
+        }
     }
 
     #[test]
@@ -8771,7 +8799,7 @@ mod tests {
     fn kad_hello_request_tags_emit_only_misc_bits_when_on_extern_port() {
         // When we advertise our extern Kad port (GetUseExternKadPort), the oracle
         // omits SOURCEUPORT but still emits KADMISCOPTIONS while firewalled.
-        let tags = build_kad_hello_request_tags(41000, false, true, false, true);
+        let tags = build_kad_hello_request_tags(41000, false, true, false, true, KAD_VERSION);
 
         assert_eq!(
             tags,
@@ -8781,7 +8809,7 @@ mod tests {
 
     #[test]
     fn kad_hello_response_tags_include_source_udp_port_and_misc_bits() {
-        let tags = build_kad_hello_response_tags(41000, true, true, true, true);
+        let tags = build_kad_hello_response_tags(41000, true, true, true, true, KAD_VERSION);
 
         assert_eq!(
             tags,
@@ -8796,13 +8824,13 @@ mod tests {
     fn kad_hello_response_tags_gate_both_tags_like_request_and_oracle() {
         // Oracle SendMyDetails gates HELLO_RES tags as HELLO_REQ: SOURCEUPORT
         // only when advertising the intern port; KADMISCOPTIONS only on ACK/fw.
-        assert!(build_kad_hello_response_tags(41000, false, false, false, false).is_empty());
+        assert!(build_kad_hello_response_tags(41000, false, false, false, false, KAD_VERSION).is_empty());
         assert_eq!(
-            build_kad_hello_response_tags(41000, true, false, false, false),
+            build_kad_hello_response_tags(41000, true, false, false, false, KAD_VERSION),
             vec![Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000))]
         );
         assert_eq!(
-            build_kad_hello_response_tags(41000, false, true, false, true),
+            build_kad_hello_response_tags(41000, false, true, false, true, KAD_VERSION),
             vec![Tag::new_short(tag_name::KADMISCOPTIONS, TagValue::U8(0x05))]
         );
     }
