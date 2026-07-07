@@ -180,9 +180,11 @@ impl Default for KadListenerConfig {
             hello_intro_interval_secs: 300,
             hello_intro_fanout: 2,
             udp_firewall_check_enabled: true,
-            udp_firewall_check_interval_secs: 600,
+            // Oracle re-check cadence: CKademlia::Process re-arms
+            // m_tNextFirewallCheck at HR2S(1) — hourly, not every 10 minutes.
+            udp_firewall_check_interval_secs: 3_600,
             tcp_firewall_check_enabled: true,
-            tcp_firewall_check_interval_secs: 600,
+            tcp_firewall_check_interval_secs: 3_600,
             buddy_enabled: true,
             routing_maintenance_enabled: true,
             snoop_queue_dedup_window_secs: 28_800,
