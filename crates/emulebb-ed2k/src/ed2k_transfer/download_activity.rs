@@ -62,6 +62,10 @@ impl DatarateWindow {
 pub(super) struct Ed2kDownloadActivity {
     last_seen_at: Instant,
     window: DatarateWindow,
+    /// Total payload bytes received this session for the file (live, per-block).
+    /// Lets the REST transfer surface in-flight progress before whole 9.28 MB
+    /// parts verify (the persisted manifest only counts verified parts).
+    session_bytes: u64,
 }
 
 /// Live per-source download state for one peer of one file. In-memory only.
@@ -114,9 +118,22 @@ impl Ed2kTransferRuntime {
             .or_insert_with(|| Ed2kDownloadActivity {
                 last_seen_at: now,
                 window: DatarateWindow::default(),
+                session_bytes: 0,
             });
         entry.last_seen_at = now;
         entry.window.record(now, byte_count);
+        entry.session_bytes = entry.session_bytes.saturating_add(byte_count);
+    }
+
+    /// Total download payload bytes received this session for a file (live,
+    /// per-block; resets on restart). Surfaced in the REST transfer so in-flight
+    /// progress is visible even before whole parts verify.
+    pub fn downloaded_session_bytes(&self, file_hash: &str) -> u64 {
+        self.download_activity
+            .lock()
+            .ok()
+            .and_then(|activity| activity.get(file_hash).map(|entry| entry.session_bytes))
+            .unwrap_or(0)
     }
 
     /// Record live payload from a specific peer for the per-source registry.

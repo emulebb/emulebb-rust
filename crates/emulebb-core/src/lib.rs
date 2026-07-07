@@ -2621,6 +2621,11 @@ impl EmulebbCore {
                 .transferring_source_count(&manifest.file_hash),
             self.ed2k_transfers
                 .available_part_count(&manifest.file_hash, parts_total),
+            self.ed2k_transfers
+                .downloaded_session_bytes(&manifest.file_hash),
+            self.ed2k_transfers
+                .live_download_sources(&manifest.file_hash)
+                .len() as u32,
         );
         // Surface persisted addedAt/completedAt from the metadata store.
         if let Ok(Some((created_ms, completed_ms))) = self

@@ -25,12 +25,19 @@ pub(crate) fn transfer_from_manifest(
     download_speed_bytes_per_sec: u64,
     sources_transferring: u32,
     parts_available: u32,
+    live_downloaded_bytes: u64,
+    live_source_count: u32,
 ) -> Transfer {
+    // The manifest only counts WHOLE verified 9.28 MB parts, so a large download
+    // still in its first parts reports 0 there. Surface the live per-block session
+    // byte count (max, never below the durable verified floor) so in-flight
+    // progress is visible in REST/UI instead of sitting at 0% for the first parts.
     let completed_bytes = manifest
         .pieces
         .iter()
         .map(|piece| piece.bytes_written)
         .sum::<u64>()
+        .max(live_downloaded_bytes)
         .min(manifest.file_size);
     let progress = if manifest.file_size == 0 {
         0.0
@@ -76,7 +83,7 @@ pub(crate) fn transfer_from_manifest(
         completed_bytes,
         state: emitted_state.to_string(),
         progress,
-        sources: manifest.sources.len() as u32,
+        sources: (manifest.sources.len() as u32).max(live_source_count),
         sources_transferring,
         download_speed_ki_bps: download_speed_bytes_per_sec as f64 / 1024.0,
         upload_speed_ki_bps: 0.0,
