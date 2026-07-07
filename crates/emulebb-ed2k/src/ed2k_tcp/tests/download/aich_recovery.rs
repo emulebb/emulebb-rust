@@ -119,5 +119,10 @@ async fn corrupt_part_triggers_aich_recovery_request() {
     // The corrupt part was reset for re-download, not left verified.
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(!manifest.completed);
+    // An MD4 part failure alone must NOT ban the sender: the oracle only gaps
+    // the part and requests AICH recovery (PartFile.cpp:5184-5199); a ban
+    // requires AICH block attribution crossing the CorruptionBlackBox 32%
+    // corrupt-share threshold (CorruptionBlackBox.cpp:233-309).
+    assert!(!transfer_runtime.is_client_banned(Some(test_bind_ip()), None));
     server.await.unwrap();
 }

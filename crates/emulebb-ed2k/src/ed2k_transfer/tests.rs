@@ -18,6 +18,7 @@ use std::{
 mod aich_tree;
 mod aich_trust_corroboration;
 mod ban_store_runtime;
+mod corruption_blackbox;
 mod deliver_runtime;
 mod download_throttle;
 mod file_status_parts;

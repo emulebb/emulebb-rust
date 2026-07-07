@@ -111,6 +111,20 @@ impl Ed2kTransferRuntime {
             &trusted_block_hashes,
         )?;
 
+        // Feed the per-block AICH verdicts into the corruption blackbox and
+        // evaluate the senders: good blocks credit their recorded senders, bad
+        // blocks debit them, and a sender whose corrupt share crosses 32% is
+        // banned (oracle `CPartFile::AICHRecoveryDataAvailable` ->
+        // `VerifiedData`/`CorruptedData` per block + `EvaluateData`,
+        // PartFile.cpp:6555-6566).
+        for (block_start, block_end) in &recovery.recovered_ranges {
+            self.cbb_record_verified_data(file_hash, *block_start, *block_end);
+        }
+        for (block_start, block_end) in &recovery.corrupt_ranges {
+            self.cbb_record_corrupted_data(file_hash, *block_start, *block_end);
+        }
+        self.cbb_evaluate_part(file_hash, part);
+
         // Build the per-part bitmap from the good/bad verdict: good blocks become
         // present, corrupt blocks become missing/needed.
         let mut bitmap = PartBlockBitmap::empty(part_len);
@@ -250,6 +264,10 @@ impl Ed2kTransferRuntime {
             piece.block_bitmap = None;
             piece.state = Ed2kTransferState::Verified;
             outcome = PieceWriteOutcome::Verified;
+            // Credit every recorded sender of the ICH-saved part (oracle
+            // `HashSinglePart` success on a corrupted part ->
+            // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5225).
+            self.cbb_record_verified_data(file_hash, part_start, part_end);
         } else {
             piece.apply_block_bitmap(&bitmap);
             piece.state = if bitmap.all_present() {

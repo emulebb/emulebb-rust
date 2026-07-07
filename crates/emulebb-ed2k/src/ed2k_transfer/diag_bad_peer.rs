@@ -84,6 +84,20 @@ pub(crate) fn identity_userhash_changed(peer: &str, peer_hash: Option<[u8; 16]>)
     emit("bad_peer", "identity_userhash_changed", "high", keys, body);
 }
 
+/// `client_ban`: a peer was banned by the CorruptionBlackBox corrupt-data
+/// attribution (its AICH-attributed corrupt share crossed `CBB_BANTHRESHOLD`).
+/// Mirrors MFC `CUpDownClient::Ban` -> bad_peer `client_ban`
+/// (UploadClient.cpp:1050, severity high, `action:"ban"`); `reason` carries the
+/// oracle's exact ban reason string so soak diffing lines up.
+pub(crate) fn client_ban(peer: &str, peer_hash: Option<[u8; 16]>, reason: &str) {
+    let keys = packet_keys(peer, peer_hash);
+    let body = json!({
+        "action": "ban",
+        "reason": reason,
+    });
+    emit("bad_peer", "client_ban", "high", keys, body);
+}
+
 /// `packet_invalid_multipacket_subopcode`: a peer sent a multipacket carrying a
 /// sub-opcode the decoder does not accept. Mirrors MFC
 /// `packet_invalid_multipacket_subopcode` (severity medium). rust aborts the

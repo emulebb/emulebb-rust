@@ -78,6 +78,14 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         // tasks together (mirrors the upload side reserving before each payload
         // write). A no-op when the download limit is 0 (unlimited).
         reserve_download_budget(transfer_runtime, request.response_bytes.len()).await;
+        record_received_range(
+            transfer_runtime,
+            file_hash_hex,
+            peer_addr,
+            peer_user_hash,
+            request.start,
+            request.end,
+        );
         let (outcome, refreshed_manifest) = transfer_runtime
             .append_or_salvage_block_with_manifest(
                 file_hash_hex,
@@ -91,10 +99,14 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
         if outcome.is_completed() {
             *active_piece_request = None;
         }
+        if manifest.completed {
+            // The oracle frees the blackbox when the part file completes
+            // (`m_CorruptionBlackBox.Free()`, PartFile.cpp:3800).
+            transfer_runtime.cbb_free(file_hash_hex);
+        }
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
-            ban_corrupt_data_sender(transfer_runtime, peer_addr, peer_user_hash);
         }
         dump_ed2k_tcp_download_meta(
             peer_addr,
@@ -139,24 +151,32 @@ async fn reserve_download_budget(transfer_runtime: &Ed2kTransferRuntime, byte_co
     }
 }
 
-/// Ban the peer that just sent a part whose MD4 verification failed, mirroring
-/// the eMule `CorruptionBlackBox` -> `CUpDownClient::Ban("Identified as a sender
-/// of corrupt data")` path (`CorruptionBlackBox.cpp:290`). MD4 part-hash failure
-/// is the clearest unambiguous attribution available in the rust download model:
-/// the failing part's bytes all arrived on this one connected source over this
-/// session (single-source-per-part request window), so it is the rust analogue
-/// of eMule's guilty-client identification. The ban covers both the peer IP and
-/// (when known) its user hash, with the 4h `CLIENTBANTIME` TTL.
-fn ban_corrupt_data_sender(
+/// Record which peer sent the byte range `[start, end)` in the per-transfer
+/// corruption blackbox (oracle `CPartFile::WriteToBuffer` ->
+/// `m_CorruptionBlackBox.ReceivedData`, PartFile.cpp:4951). An MD4 part-hash
+/// failure alone never bans the sender: the oracle only gaps the part and
+/// solicits AICH recovery (PartFile.cpp:5184-5199); the ban decision is the
+/// AICH-verdict `EvaluateData` 32%-corrupt-share path
+/// (CorruptionBlackBox.cpp:233-309), fed from the salvage flow. Recording the
+/// actual writer per range keeps parts resumed across peers attributed to the
+/// correct sender for each byte range.
+fn record_received_range(
     transfer_runtime: &Ed2kTransferRuntime,
+    file_hash_hex: &str,
     peer_addr: SocketAddr,
     peer_user_hash: Option<[u8; 16]>,
+    start: u64,
+    end: u64,
 ) {
-    let ip = match peer_addr {
-        SocketAddr::V4(v4) => Some(*v4.ip()),
-        SocketAddr::V6(_) => None,
-    };
-    transfer_runtime.ban_client(ip, peer_user_hash);
+    if let SocketAddr::V4(v4) = peer_addr {
+        transfer_runtime.cbb_record_received_data(
+            file_hash_hex,
+            start,
+            end,
+            *v4.ip(),
+            peer_user_hash,
+        );
+    }
 }
 
 /// Map a write outcome to a verification-failed part index (as a u16 part) so
@@ -226,6 +246,14 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         // payload before consuming it, so the shared token bucket paces all
         // concurrent transfer tasks together. A no-op when unlimited.
         reserve_download_budget(transfer_runtime, bytes.len()).await;
+        record_received_range(
+            transfer_runtime,
+            file_hash_hex,
+            peer_addr,
+            peer_user_hash,
+            start,
+            end,
+        );
         let (outcome, refreshed_manifest) = transfer_runtime
             .append_piece_block_with_manifest(file_hash_hex, piece_index, start, end, &bytes)
             .await?;
@@ -233,10 +261,14 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
         if outcome.is_completed() {
             *active_piece_request = None;
         }
+        if manifest.completed {
+            // The oracle frees the blackbox when the part file completes
+            // (`m_CorruptionBlackBox.Free()`, PartFile.cpp:3800).
+            transfer_runtime.cbb_free(file_hash_hex);
+        }
         if let Some(failed_part) = verification_failed_part(outcome) {
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
-            ban_corrupt_data_sender(transfer_runtime, peer_addr, peer_user_hash);
         }
         if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;

@@ -463,7 +463,15 @@ impl Ed2kTransferRuntime {
                 piece.state = Ed2kTransferState::Verified;
                 outcome = PieceWriteOutcome::Verified;
                 checkpoint_reason = Some("piece_verified");
+                // Credit every recorded sender of this part in the corruption
+                // blackbox (oracle MD4 part success ->
+                // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5205).
+                self.cbb_record_verified_data(file_hash, piece_start, piece_end);
             } else {
+                // MD4 failure alone never bans: the part is gapped for
+                // re-download and the caller solicits AICH recovery
+                // (PartFile.cpp:5184-5199); ban attribution is the AICH-verdict
+                // `EvaluateData` path.
                 piece.state = Ed2kTransferState::Missing;
                 piece.bytes_written = 0;
                 outcome = PieceWriteOutcome::VerificationFailed {

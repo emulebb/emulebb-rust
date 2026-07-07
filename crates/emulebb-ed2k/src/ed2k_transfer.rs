@@ -34,6 +34,7 @@ mod aich_trust;
 mod block_bitmap;
 mod callback;
 mod catalog;
+mod corruption_blackbox;
 mod deliver;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
@@ -229,6 +230,12 @@ pub struct Ed2kTransferRuntime {
     /// the download driver, the UDP reask runtime, and core via this runtime's
     /// `Arc`. Not persisted across restart, matching the master.
     ban_store: Arc<crate::ban_store::BanStore>,
+    /// Per-transfer corruption blackbox (eMule `CCorruptionBlackBox`), keyed by
+    /// file hash: which sender IP wrote which byte ranges, credited/debited by
+    /// AICH block verdicts, evaluated for the 32%-corrupt-share ban. In-memory
+    /// only (live per part file at runtime, never persisted), matching the
+    /// master.
+    corruption_blackbox: Arc<StdMutex<HashMap<String, corruption_blackbox::CorruptionBlackBox>>>,
 }
 
 /// Lightweight notification handle for shared-file demand changes that can
@@ -347,6 +354,7 @@ impl Ed2kTransferRuntime {
             shared_publish_demand_notify: Arc::new(Notify::new()),
             credit_system_enabled: AtomicBool::new(true),
             ban_store: Arc::new(crate::ban_store::BanStore::new()),
+            corruption_blackbox: Arc::new(StdMutex::new(HashMap::new())),
         };
         // Credit aging on startup: drop peer credit rows last seen > 150 days ago
         // (eMule CClientCreditsList::LoadList, ClientCredits.cpp:240-251). The
