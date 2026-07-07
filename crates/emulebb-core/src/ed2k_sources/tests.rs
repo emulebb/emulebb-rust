@@ -32,15 +32,42 @@ fn kad_source(udp_port: u16) -> SourceResult {
 
 #[test]
 fn kad_high_id_source_preserves_nonzero_source_udp_port() {
-    let source = kad_source_result_to_ed2k_found_source(kad_source(4672));
+    let source = kad_source_result_to_ed2k_found_source(kad_source(4672)).expect("mapped");
 
     assert!(!source.low_id);
     assert!(source.is_direct_dialable());
     assert_eq!(source.source_udp_port, Some(4672));
     assert_eq!(
-        kad_source_result_to_ed2k_found_source(kad_source(0)).source_udp_port,
+        kad_source_result_to_ed2k_found_source(kad_source(0))
+            .expect("mapped")
+            .source_udp_port,
         None
     );
+}
+
+#[test]
+fn kad_source_type_6_maps_to_direct_callback_only_and_gates_on_crypt_bit() {
+    // Oracle KademliaSearchFile case 6: firewalled, reachable only by direct
+    // UDP callback; dropped when the connect options lack bit 0x08.
+    let mut result = kad_source(4672);
+    result.source_type = 6;
+    result.obfuscation_options = Some(0x0B);
+    let source = kad_source_result_to_ed2k_found_source(result.clone()).expect("mapped");
+    assert!(source.low_id, "type 6 must never be direct-dialed");
+    assert!(!source.is_direct_dialable());
+    assert!(!source.has_kad_buddy_reask_target());
+    assert!(source.is_direct_callback_source());
+
+    result.obfuscation_options = Some(0x03); // no direct-callback bit
+    assert!(kad_source_result_to_ed2k_found_source(result).is_none());
+}
+
+#[test]
+fn kad_source_type_2_is_dropped() {
+    // Oracle: "Don't use this type... Some clients will process it wrong."
+    let mut result = kad_source(4672);
+    result.source_type = 2;
+    assert!(kad_source_result_to_ed2k_found_source(result).is_none());
 }
 
 #[test]

@@ -125,7 +125,8 @@ mod tests {
             buddy_id: Some(buddy_id),
             buddy_ip: Some(Ipv4Addr::new(198, 51, 100, 9)),
             buddy_port: 5000,
-        });
+        })
+        .expect("mapped source");
 
         assert!(source.low_id);
         assert_eq!(source.buddy_id, Some(buddy_id));

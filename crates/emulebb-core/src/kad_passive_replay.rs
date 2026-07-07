@@ -230,7 +230,9 @@ pub(crate) async fn remember_passive_source_results(
     results: &[SourceResult],
 ) {
     for result in results {
-        let source = kad_source_result_to_ed2k_found_source(result.clone());
+        let Some(source) = kad_source_result_to_ed2k_found_source(result.clone()) else {
+            continue;
+        };
         if !source.is_direct_dialable() {
             continue;
         }

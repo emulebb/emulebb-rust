@@ -159,6 +159,20 @@ impl Ed2kFoundSource {
     pub fn has_kad_buddy_reask_target(&self) -> bool {
         self.low_id && self.buddy_id.is_some() && self.buddy_endpoint.is_some()
     }
+
+    /// Returns `true` when this is a firewalled Kad source reachable only via a
+    /// direct UDP callback (oracle Kad source type 6): firewalled, no buddy,
+    /// direct-callback connect-options bit set, and a known Kad UDP endpoint to
+    /// send `OP_DIRECTCALLBACKREQ` to.
+    #[must_use]
+    pub fn is_direct_callback_source(&self) -> bool {
+        self.low_id
+            && self.buddy_id.is_none()
+            && self.source_udp_port.is_some()
+            && self
+                .obfuscation_options
+                .is_some_and(|options| options & 0x08 != 0)
+    }
 }
 
 /// Inputs for the long-lived ED2K server session loop.

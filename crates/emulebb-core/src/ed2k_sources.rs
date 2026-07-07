@@ -374,11 +374,28 @@ pub(crate) fn should_query_kad_source_supplement(
     udp_source_cap == 0 || existing_source_count < udp_source_cap
 }
 
-pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed2kFoundSource {
+pub(crate) fn kad_source_result_to_ed2k_found_source(
+    result: SourceResult,
+) -> Option<Ed2kFoundSource> {
     // Oracle `CDownloadQueue::KademliaSearchFile`: types 3/5 are firewalled LowID
     // sources reachable only through their Kad buddy (server-/buddy-assisted
     // callback). For those we carry the buddy id + buddy relay endpoint so the
     // source can be reasked via its buddy (OP_REASKCALLBACKUDP) rather than dialed.
+    // Type 2 is never used ("Some clients will process it wrong"); type 6 is a
+    // firewalled peer reachable ONLY via a direct UDP callback and is dropped
+    // when its connect options lack the direct-callback bit (0x08), both
+    // mirroring the oracle switch.
+    match result.source_type {
+        2 => return None,
+        6 if result.obfuscation_options.is_none_or(|options| options & 0x08 == 0) => {
+            tracing::debug!(
+                "dropping Kad source type 6 without the direct-callback connect-options bit"
+            );
+            return None;
+        }
+        _ => {}
+    }
+    let direct_callback_only = result.source_type == 6;
     let firewalled_buddy = result.is_firewalled_buddy_source();
     let buddy_endpoint = match (result.buddy_ip, result.buddy_port) {
         (Some(buddy_ip), buddy_port) if firewalled_buddy && buddy_port != 0 => {
@@ -391,12 +408,14 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed
     } else {
         None
     };
-    Ed2kFoundSource {
+    Some(Ed2kFoundSource {
         file_hash: result.file_hash,
         ip: result.ip,
         tcp_port: result.tcp_port,
         client_id: u32::from(result.ip),
-        low_id: firewalled_buddy,
+        // Buddy-relayed (3/5) and direct-callback (6) sources are firewalled:
+        // never direct-dial them.
+        low_id: firewalled_buddy || direct_callback_only,
         obfuscated: result.obfuscation_options.is_some(),
         obfuscation_options: result.obfuscation_options,
         user_hash: Some(result.source_id.0),
@@ -404,7 +423,7 @@ pub(crate) fn kad_source_result_to_ed2k_found_source(result: SourceResult) -> Ed
         buddy_id,
         buddy_endpoint,
         source_udp_port: (result.udp_port != 0).then_some(result.udp_port),
-    }
+    })
 }
 
 pub(crate) async fn collect_kad_ed2k_metadata(
@@ -489,7 +508,9 @@ pub(crate) async fn collect_kad_ed2k_sources(
                 Ok(Some(result)) => {
                     merge_download_sources(
                         &mut sources,
-                        vec![kad_source_result_to_ed2k_found_source(result)],
+                        kad_source_result_to_ed2k_found_source(result)
+                            .into_iter()
+                            .collect(),
                     );
                     if sources.len() >= ED2K_DOWNLOAD_KAD_SOURCE_CAP {
                         cancel.cancel();

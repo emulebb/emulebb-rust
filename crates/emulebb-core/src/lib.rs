@@ -11453,7 +11453,8 @@ mod tests {
             buddy_id: None,
             buddy_ip: None,
             buddy_port: 0,
-        });
+        })
+        .expect("mapped source");
 
         assert_eq!(source.file_hash, file_hash);
         assert_eq!(source.ip, Ipv4Addr::new(192, 0, 2, 55));
