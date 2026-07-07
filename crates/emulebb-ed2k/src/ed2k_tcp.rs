@@ -360,7 +360,12 @@ impl Ed2kFileIdentifier {
     const INCLUDE_MD4: u8 = 1 << 0;
     const INCLUDE_SIZE: u8 = 1 << 1;
     const INCLUDE_AICH: u8 = 1 << 2;
-    const RESERVED_BITS: u8 = 0xF8;
+    /// Mandatory-option bits 3-4: an identifier carrying unknown MANDATORY
+    /// options is invalid (oracle `ReadIdentifier` aborts on `byMOpt > 0`).
+    const MANDATORY_OPTION_BITS: u8 = 0x18;
+    /// Plain-option bits 5-7: unknown values are forward-compatible — the
+    /// oracle only logs a warning and keeps parsing (`byOpts`).
+    const PLAIN_OPTION_BITS: u8 = 0xE0;
 
     fn from_manifest(manifest: &Ed2kResumeManifest) -> Result<Self> {
         Ok(Self {
@@ -409,8 +414,13 @@ impl Ed2kFileIdentifier {
         let Some((&descriptor, mut rest)) = payload.split_first() else {
             anyhow::bail!("short ED2K FileIdentifier descriptor");
         };
-        if descriptor & Self::RESERVED_BITS != 0 {
+        if descriptor & Self::MANDATORY_OPTION_BITS != 0 {
             anyhow::bail!("unsupported ED2K FileIdentifier descriptor 0x{descriptor:02X}");
+        }
+        if descriptor & Self::PLAIN_OPTION_BITS != 0 {
+            tracing::debug!(
+                "unknown plain options on ED2K FileIdentifier descriptor 0x{descriptor:02X}; ignoring"
+            );
         }
         if descriptor & Self::INCLUDE_MD4 == 0 {
             anyhow::bail!("ED2K FileIdentifier missing mandatory MD4 hash");

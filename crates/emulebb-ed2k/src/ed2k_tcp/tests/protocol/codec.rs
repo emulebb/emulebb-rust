@@ -431,10 +431,28 @@ fn file_identifier_relaxed_match_tolerates_missing_optional_fields() {
 }
 
 #[test]
-fn file_identifier_rejects_reserved_descriptor_bits() {
-    let mut payload = vec![0x08];
+fn file_identifier_rejects_mandatory_option_bits() {
+    // Descriptor bit 3 (unknown MANDATORY option) invalidates the identifier
+    // (oracle ReadIdentifier aborts on byMOpt > 0). Note 0x08 alone also lacks
+    // the MD4 bit; 0x09 isolates the mandatory-option rejection.
+    let mut payload = vec![0x09];
     payload.extend_from_slice(&[0x11; 16]);
     assert!(super::Ed2kFileIdentifier::decode(&payload).is_err());
+}
+
+#[test]
+fn file_identifier_ignores_unknown_plain_option_bits() {
+    // Descriptor bits 5-7 are forward-compatible plain options: the oracle
+    // warns and keeps parsing (ReadIdentifier byOpts), so 0x21 = MD4 + bit 5
+    // must decode like a plain MD4-only identifier.
+    let mut payload = vec![0x21];
+    payload.extend_from_slice(&[0x11; 16]);
+    let (identifier, rest) =
+        super::Ed2kFileIdentifier::decode(&payload).expect("plain option bits are ignorable");
+    assert_eq!(identifier.file_hash, Ed2kHash([0x11; 16]));
+    assert!(identifier.file_size.is_none());
+    assert!(identifier.aich_root.is_none());
+    assert!(rest.is_empty());
 }
 
 #[test]
