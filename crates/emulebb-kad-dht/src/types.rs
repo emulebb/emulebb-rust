@@ -245,11 +245,16 @@ impl SourceResult {
                 // For a firewalled buddy source (types 3/5) the buddy relay
                 // endpoint is carried in FT_SERVERIP/FT_SERVERPORT (oracle
                 // CSearch::ProcessResultFile maps these to uBuddyIP/uBuddyPort).
+                // Unlike FT_SOURCEIP (Kad host order, `htonl`-ed on consume),
+                // FT_SERVERIP carries the publisher's `GetBuddy()->GetIP()`
+                // in_addr DWORD verbatim (first octet in the low byte): the
+                // oracle feeds it straight to `ipstr`/`IsFiltered` with no
+                // byte swap (DownloadQueue.cpp KademliaSearchFile).
                 TagName::Short(n) if *n == tag_name::SERVERIP => match &tag.value {
                     TagValue::UInt(v) if u32::try_from(*v).is_ok() => {
-                        buddy_ip = Some(Ipv4Addr::from((*v as u32).to_be_bytes()));
+                        buddy_ip = Some(Ipv4Addr::from((*v as u32).to_le_bytes()));
                     }
-                    TagValue::U32(v) => buddy_ip = Some(Ipv4Addr::from(v.to_be_bytes())),
+                    TagValue::U32(v) => buddy_ip = Some(Ipv4Addr::from(v.to_le_bytes())),
                     _ => {}
                 },
                 TagName::Short(n) if *n == tag_name::SERVERPORT => match &tag.value {
@@ -439,14 +444,15 @@ mod tests {
     fn test_source_result_parses_firewalled_buddy_fields() {
         // A master-shaped firewalled LowID source entry (CSearch::ProcessResultFile
         // type 3): FT_SOURCETYPE + buddy id (FT_BUDDYHASH) + buddy relay endpoint
-        // (FT_SERVERIP/FT_SERVERPORT).
+        // (FT_SERVERIP/FT_SERVERPORT). FT_SERVERIP is an in_addr DWORD (low
+        // byte = first octet), NOT the Kad host order FT_SOURCEIP uses.
         let hash = Ed2kHash::from_bytes([9u8; 16]);
         let source_id = Ed2kHash::from_bytes([10u8; 16]);
         let tags = vec![
             Tag::new_short(tag_name::SOURCEIP, TagValue::U32(0x0A0B0C0D)),
             Tag::new_short(tag_name::SOURCEPORT, TagValue::U16(4662)),
             Tag::new_short(tag_name::SOURCETYPE, TagValue::U8(3)),
-            Tag::new_short(tag_name::SERVERIP, TagValue::U32(0xC6336488)),
+            Tag::new_short(tag_name::SERVERIP, TagValue::U32(0x886433C6)),
             Tag::new_short(tag_name::SERVERPORT, TagValue::U16(5000)),
             Tag::new_short(
                 tag_name::BUDDYHASH,
