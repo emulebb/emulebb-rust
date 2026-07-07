@@ -318,6 +318,9 @@ pub(crate) fn enrich_sources_with_live(
         if let Some(rank) = live_source.queue_rank {
             source.queue_rank = rank;
         }
+        if let Some(software) = &live_source.client_software {
+            source.client_software = software.clone();
+        }
         let state = if live_source.transferring {
             "downloading"
         } else {

@@ -344,6 +344,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
             match (packet.protocol, packet.opcode) {
                 (OP_EDONKEYPROT, OP_HELLO) => {
                     let hello_profile = decode_hello_profile(&packet.payload)?;
+                    if let Some(software) = &hello_profile.client_software {
+                        transfer_runtime.note_download_source_software(
+                            file_hash_hex,
+                            peer_addr,
+                            software.clone(),
+                        );
+                    }
                     for reply in build_hello_responses(&packet.payload, hello_identity)? {
                         dump_ed2k_tcp_download_send(peer_addr, transport.mode, "hello_reply", &reply);
                         transport.write_all(&reply).await.with_context(|| {
@@ -389,6 +396,13 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 }
                 (OP_EDONKEYPROT, OP_HELLOANSWER) => {
                     let hello_profile = decode_hello_answer_profile(&packet.payload)?;
+                    if let Some(software) = &hello_profile.client_software {
+                        transfer_runtime.note_download_source_software(
+                            file_hash_hex,
+                            peer_addr,
+                            software.clone(),
+                        );
+                    }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
                     session_state.peer_connect_options = Some(hello_profile.connect_options);

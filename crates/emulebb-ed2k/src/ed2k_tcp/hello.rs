@@ -388,7 +388,7 @@ pub(super) struct DecodedHelloIdentity {
     pub(super) kad_port: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DecodedHelloProfile {
     pub(super) identity: DecodedHelloIdentity,
     pub(super) is_mule_hello: bool,
@@ -404,6 +404,9 @@ pub(super) struct DecodedHelloProfile {
     pub(super) gpl_evildoer: bool,
     pub(super) misc_options1: MiscOptions1,
     pub(super) buddy: Option<super::hello_buddy::DecodedHelloBuddy>,
+    /// Peer software string derived from CT_EMULE_VERSION (e.g. `eMule v0.60.0`).
+    /// `None` for pure-eDonkey peers that send no eMule version tag.
+    pub(super) client_software: Option<String>,
 }
 
 fn decode_hello_tag_u32(tag: &DecodedHelloTag<'_>) -> Option<u32> {
@@ -494,6 +497,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     cursor = &cursor[4..];
 
     let mut is_mule_hello = false;
+    let mut client_software = None;
     let mut supports_ext_multipacket = false;
     let mut source_exchange_version = 0;
     let mut supports_source_exchange = false;
@@ -507,6 +511,10 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         let tag = decode_hello_tag(cursor)?;
         if tag.tag_name == Some(CT_EMULE_VERSION) {
             is_mule_hello = true;
+            if let Some(version_tag) = decode_hello_tag_u32(&tag) {
+                client_software =
+                    Some(super::client_software::client_software_from_emule_version(version_tag));
+            }
         }
         if tag.tag_name == Some(CT_MOD_VERSION)
             && let Ok(mod_version) = std::str::from_utf8(tag.value)
@@ -559,6 +567,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         gpl_evildoer,
         misc_options1,
         buddy: super::hello_buddy::DecodedHelloBuddy::from_tag_values(buddy_ip, buddy_udp),
+        client_software,
     })
 }
 

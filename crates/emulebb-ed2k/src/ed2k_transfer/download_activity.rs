@@ -83,6 +83,9 @@ pub(super) struct Ed2kSourceActivity {
     /// Our queue position at this peer (OP_QUEUERANK / OP_QUEUERANKING). `None`
     /// until the peer sends a ranking.
     queue_rank: Option<u32>,
+    /// Peer software string from the HELLO CT_EMULE_VERSION tag (e.g.
+    /// `eMule v0.60.0`). `None` until the peer's hello is seen.
+    client_software: Option<String>,
 }
 
 /// Snapshot of one live source for the REST transfer-source/detail views.
@@ -95,6 +98,7 @@ pub struct Ed2kLiveSource {
     pub transferring: bool,
     pub available_parts: u32,
     pub queue_rank: Option<u32>,
+    pub client_software: Option<String>,
 }
 
 impl Ed2kTransferRuntime {
@@ -190,6 +194,7 @@ impl Ed2kTransferRuntime {
                 window: DatarateWindow::default(),
                 part_bitmap: None,
                 queue_rank: None,
+                client_software: None,
             });
         entry.endpoint = peer;
         if user_hash.is_some() {
@@ -231,6 +236,7 @@ impl Ed2kTransferRuntime {
                 window: DatarateWindow::default(),
                 part_bitmap: None,
                 queue_rank: None,
+                client_software: None,
             });
         entry.endpoint = peer;
         if user_hash.is_some() {
@@ -269,9 +275,41 @@ impl Ed2kTransferRuntime {
                 window: DatarateWindow::default(),
                 part_bitmap: None,
                 queue_rank: None,
+                client_software: None,
             });
         entry.last_seen_at = now;
         entry.queue_rank = Some(rank);
+    }
+
+    /// Record the peer's software string (from the HELLO CT_EMULE_VERSION tag) so
+    /// the REST source list can show which client each source runs.
+    pub(crate) fn note_download_source_software(
+        &self,
+        file_hash: &str,
+        peer: SocketAddr,
+        software: String,
+    ) {
+        let now = Instant::now();
+        let Ok(mut sources) = self.download_sources.lock() else {
+            return;
+        };
+        let peers = sources.entry(file_hash.to_string()).or_default();
+        evict_stale_sources(peers, now);
+        let entry = peers
+            .entry(peer.to_string())
+            .or_insert_with(|| Ed2kSourceActivity {
+                endpoint: peer,
+                user_hash: None,
+                connect_options: None,
+                last_seen_at: now,
+                last_payload_at: None,
+                window: DatarateWindow::default(),
+                part_bitmap: None,
+                queue_rank: None,
+                client_software: None,
+            });
+        entry.last_seen_at = now;
+        entry.client_software = Some(software);
     }
 
     /// Drop the live-source registry for a file (e.g. on transfer removal).
@@ -312,6 +350,7 @@ impl Ed2kTransferRuntime {
                     .map(|bitmap| bitmap.iter().filter(|present| **present).count() as u32)
                     .unwrap_or(0),
                 queue_rank: peer.queue_rank,
+                client_software: peer.client_software.clone(),
             })
             .collect()
     }

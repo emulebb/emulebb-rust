@@ -33,6 +33,7 @@ use emulebb_kad_proto::Ed2kHash;
 
 mod aich_salvage;
 mod buddy_link;
+mod client_software;
 mod codec;
 mod diag_event;
 mod download;
