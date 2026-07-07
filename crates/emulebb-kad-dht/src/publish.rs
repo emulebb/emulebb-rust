@@ -41,12 +41,25 @@ pub struct PublishAttemptStats {
     pub attempted_contacts: u32,
     pub acked_contacts: u32,
     pub timed_out_contacts: u32,
+    /// Sum of the `KADEMLIA2_PUBLISH_RES` load bytes received (oracle
+    /// `CSearch::m_uTotalLoad`). Not every ack carries a load response.
+    pub total_load: u32,
+    /// Number of acks that carried a load byte (oracle
+    /// `CSearch::m_uTotalLoadResponses`).
+    pub load_responses: u32,
 }
 
 impl PublishAttemptStats {
     #[must_use]
     pub fn failed_contacts(self) -> u32 {
         self.attempted_contacts.saturating_sub(self.acked_contacts)
+    }
+
+    /// Average index load reported by the answering nodes (oracle
+    /// `CSearch::GetNodeLoad`): 0 when no node returned a load byte.
+    #[must_use]
+    pub fn node_load(self) -> u32 {
+        self.total_load.checked_div(self.load_responses).unwrap_or(0)
     }
 }
 
@@ -214,6 +227,8 @@ fn record_publish_success(
     match packet {
         KadPacket::PublishRes(response) => {
             stats.acked_contacts += 1;
+            stats.total_load += u32::from(response.load);
+            stats.load_responses += 1;
             log_publish_response_ack(family, &attempt, response.target, response.load);
         }
         other => {

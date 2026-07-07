@@ -410,6 +410,8 @@ mod tests {
             attempted_contacts: 8,
             acked_contacts: 5,
             timed_out_contacts: 3,
+            total_load: 0,
+            load_responses: 0,
         };
         publish(KadPublishKind::Keyword, "abc123", 7, stats);
         publish(KadPublishKind::Source, "abc123", 1, stats);

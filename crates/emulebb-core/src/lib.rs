@@ -5061,6 +5061,9 @@ impl KadSharedPublishKind {
 struct KadSharedPublishOutcome {
     kind: KadSharedPublishKind,
     file_hashes: Vec<String>,
+    /// The published keyword (`Keyword` kind only), so the drain can apply the
+    /// oracle load deferral to it.
+    keyword: Option<String>,
     started_at: Instant,
     result: Result<PublishAttemptStats, KadSharedPublishError>,
 }
@@ -5500,6 +5503,7 @@ async fn publish_kad_due_shared_files(
     let mut notes_published = 0usize;
     drain_completed_kad_publish_tasks(
         runtime,
+        schedule,
         publish_tasks,
         &mut keyword_totals,
         &mut source_totals,
@@ -5680,6 +5684,7 @@ async fn publish_kad_due_shared_files(
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Source,
                         file_hashes: vec![file_hash_text],
+                        keyword: None,
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
@@ -5747,6 +5752,7 @@ async fn publish_kad_due_shared_files(
                         KadSharedPublishOutcome {
                             kind: KadSharedPublishKind::Keyword,
                             file_hashes: keyword_file_hashes,
+                            keyword: Some(keyword),
                             started_at,
                             result: match result {
                                 Ok(stats) => Ok(stats),
@@ -5820,6 +5826,7 @@ async fn publish_kad_due_shared_files(
                     KadSharedPublishOutcome {
                         kind: KadSharedPublishKind::Notes,
                         file_hashes: vec![file_hash_text],
+                        keyword: None,
                         started_at,
                         result: match result {
                             Ok(stats) => Ok(stats),
@@ -5945,6 +5952,7 @@ async fn publish_kad_due_shared_files(
 #[allow(clippy::too_many_arguments)]
 async fn drain_completed_kad_publish_tasks(
     runtime: &KadPublishLoopRuntime,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     keyword_totals: &mut PublishAttemptStats,
     source_totals: &mut PublishAttemptStats,
@@ -5979,6 +5987,20 @@ async fn drain_completed_kad_publish_tasks(
                         outcome.file_hashes.len(),
                         stats,
                     );
+                    // Oracle load feedback (Search.cpp:166-167): a hot keyword
+                    // (average answering-node load > 20) is deferred up to 7
+                    // days instead of republishing on the base interval.
+                    if let Some(keyword) = outcome.keyword.as_deref() {
+                        let node_load = stats.node_load();
+                        schedule.defer_keyword_by_load(keyword, node_load, Instant::now());
+                        if node_load > 20 {
+                            tracing::debug!(
+                                keyword,
+                                node_load,
+                                "Kad keyword republish load-deferred (oracle AddLoad)"
+                            );
+                        }
+                    }
                     accumulate_publish_stats(keyword_totals, stats);
                     diag_kad_event::publish(
                         diag_kad_event::KadPublishKind::Keyword,
@@ -6299,6 +6321,8 @@ fn accumulate_publish_stats(total: &mut PublishAttemptStats, stats: PublishAttem
     total.attempted_contacts += stats.attempted_contacts;
     total.acked_contacts += stats.acked_contacts;
     total.timed_out_contacts += stats.timed_out_contacts;
+    total.total_load += stats.total_load;
+    total.load_responses += stats.load_responses;
 }
 
 fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {

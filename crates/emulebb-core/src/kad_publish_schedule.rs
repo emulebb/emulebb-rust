@@ -85,12 +85,24 @@ struct FilePublishState {
     last_notes: Option<Instant>,
 }
 
+/// Node-load average above which a completed keyword store defers that
+/// keyword's republish (oracle `GetNodeLoad() > 20`, Search.cpp:166).
+const KEYWORD_LOAD_DEFER_THRESHOLD: u32 = 20;
+
+/// Full-scale keyword load deferral (oracle `DAY2S(7)`): a keyword whose
+/// answering nodes average load 100 is not republished for 7 days; lower
+/// averages defer proportionally (`DAY2S(7) * (load / 100.0)`).
+const KEYWORD_LOAD_DEFER_FULL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// Tracks per-file keyword/source last-publish times so each kind is only
 /// republished once its master interval has elapsed.
 #[derive(Debug, Default)]
 pub(crate) struct KadPublishSchedule {
     files: HashMap<String, FilePublishState>,
     keywords: HashMap<(String, String), Instant>,
+    /// Per-keyword load deferrals (oracle `CIndexed::AddLoad` keyed by the
+    /// keyword target id — global across files sharing the keyword).
+    keyword_load_deferrals: HashMap<String, Instant>,
     next_cursor: usize,
 }
 
@@ -100,8 +112,15 @@ impl KadPublishSchedule {
     }
 
     /// Whether the file's keyword publish is due (never published, or the 24h
-    /// keyword interval has elapsed since the last keyword publish).
+    /// keyword interval has elapsed since the last keyword publish) and the
+    /// keyword itself is not load-deferred (oracle `CIndexed::SendStoreRequest`
+    /// refuses a keyword with a live load entry).
     pub(crate) fn keyword_due(&self, file_hash: &str, keyword: &str, now: Instant) -> bool {
+        if let Some(deferred_until) = self.keyword_load_deferrals.get(keyword)
+            && now < *deferred_until
+        {
+            return false;
+        }
         match self
             .keywords
             .get(&(file_hash.to_string(), keyword.to_string()))
@@ -110,6 +129,20 @@ impl KadPublishSchedule {
             None => true,
             Some(last) => now.duration_since(last) >= KAD_KEYWORD_REPUBLISH_INTERVAL,
         }
+    }
+
+    /// Apply the average `KADEMLIA2_PUBLISH_RES` load of a completed keyword
+    /// store: above the oracle threshold the keyword is deferred
+    /// proportionally, up to 7 days at load 100 (Search.cpp:166-167 →
+    /// `CIndexed::AddLoad`). Expired/low-load results clear nothing — the
+    /// oracle keeps existing load entries until they lapse.
+    pub(crate) fn defer_keyword_by_load(&mut self, keyword: &str, node_load: u32, now: Instant) {
+        if node_load <= KEYWORD_LOAD_DEFER_THRESHOLD {
+            return;
+        }
+        let deferral = KEYWORD_LOAD_DEFER_FULL.mul_f64(f64::from(node_load.min(100)) / 100.0);
+        self.keyword_load_deferrals
+            .insert(keyword.to_string(), now + deferral);
     }
 
     /// Whether the file's source publish is due (never published, or the 5h
@@ -307,6 +340,32 @@ mod tests {
         // At exactly the interval: due.
         let due = t0 + KAD_KEYWORD_REPUBLISH_INTERVAL;
         assert!(sched.keyword_due(HASH, KEYWORD, due));
+    }
+
+    #[test]
+    fn keyword_load_defers_republish_proportionally_and_across_files() {
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        sched.mark_keyword_published(HASH, KEYWORD, t0);
+
+        // Load at/below the oracle threshold (20): no deferral recorded.
+        sched.defer_keyword_by_load(KEYWORD, 20, t0);
+        let base_due = t0 + KAD_KEYWORD_REPUBLISH_INTERVAL;
+        assert!(sched.keyword_due(HASH, KEYWORD, base_due));
+
+        // Load 50 -> deferred 3.5 days from completion (7d * 50/100), which
+        // outlasts the base 24h interval, and applies to EVERY file sharing
+        // the keyword (oracle AddLoad keys on the keyword target).
+        sched.defer_keyword_by_load(KEYWORD, 50, t0);
+        assert!(!sched.keyword_due(HASH, KEYWORD, base_due));
+        assert!(!sched.keyword_due("otherfilehash", KEYWORD, base_due));
+        let after_deferral = t0 + Duration::from_secs(7 * 24 * 60 * 60 / 2);
+        assert!(sched.keyword_due(HASH, KEYWORD, after_deferral));
+
+        // Load is clamped at 100: never defers beyond 7 days.
+        sched.defer_keyword_by_load(KEYWORD, 250, t0);
+        assert!(!sched.keyword_due(HASH, KEYWORD, t0 + Duration::from_secs(6 * 24 * 60 * 60)));
+        assert!(sched.keyword_due(HASH, KEYWORD, t0 + Duration::from_secs(7 * 24 * 60 * 60)));
     }
 
     #[test]
