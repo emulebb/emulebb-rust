@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use emulebb_kad_proto::NodeId;
 
@@ -311,14 +312,22 @@ impl RoutingTable {
         merges
     }
 
-    /// One random `FindNode` target per leaf passing the oracle big-timer fill
-    /// gate (`CRoutingZone::OnBigTimer` -> `RandomLookup`). `rng` supplies random
-    /// bytes for the in-zone target suffix.
-    pub fn random_lookup_targets(&self, rng: &mut impl FnMut() -> u8) -> Vec<NodeId> {
-        let mut targets = Vec::new();
+    /// Take the next due big-timer random `FindNode` target, if any leaf both
+    /// passes the oracle fill gate (`CRoutingZone::OnBigTimer` ->
+    /// `RandomLookup`) and has an elapsed per-zone big timer; the fired leaf
+    /// is re-armed one hour out (oracle `m_tNextBigTimer = tNow + HR2S(1)`,
+    /// Kademlia.cpp:293). At most one target per call, matching the master's
+    /// one-zone-per-10s global slot. `rng` supplies random bytes for the
+    /// in-zone target suffix.
+    pub fn take_due_random_lookup_target(
+        &mut self,
+        now: std::time::SystemTime,
+        rng: &mut impl FnMut() -> u8,
+    ) -> Option<NodeId> {
+        const BIG_TIMER_REARM: Duration = Duration::from_secs(3600);
+        let own_id = self.own_id;
         self.root
-            .random_lookup_targets(&self.own_id, rng, &mut targets);
-        targets
+            .take_due_random_lookup_target(&own_id, now, BIG_TIMER_REARM, rng)
     }
 
     /// Advance a contact's `CheckingType` staleness counter after a maintenance

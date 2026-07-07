@@ -45,6 +45,11 @@ pub struct RoutingZone {
     depth: u32,
     zone_index: usize,
     content: ZoneContent,
+    /// Earliest time this leaf may fire its next big-timer random lookup
+    /// (oracle `m_tNextBigTimer`). `None` = due immediately (a freshly created
+    /// zone is armed `tNow + SEC(10)` by the oracle, i.e. essentially due).
+    /// Meaningful for leaves only; ignored once the zone splits.
+    next_big_timer: Option<std::time::SystemTime>,
 }
 
 impl RoutingZone {
@@ -54,6 +59,7 @@ impl RoutingZone {
             depth: 0,
             zone_index: 0,
             content: ZoneContent::Leaf(RoutingBin::new()),
+            next_big_timer: None,
         }
     }
 
@@ -62,6 +68,7 @@ impl RoutingZone {
             depth,
             zone_index,
             content: ZoneContent::Leaf(RoutingBin::new()),
+            next_big_timer: None,
         }
     }
 
@@ -335,36 +342,45 @@ impl RoutingZone {
         }
     }
 
-    /// Collect one random `FindNode` target per leaf zone that passes the
-    /// oracle big-timer fill gate (`OnBigTimer`: leaf and `zone_index < KK ||
-    /// level < KBASE || GetRemaining() >= 0.8*K`), mirroring `RandomLookup`.
+    /// Take the next due big-timer random `FindNode` target: the first leaf (in
+    /// tree order) that passes the oracle fill gate (`OnBigTimer`: leaf and
+    /// `zone_index < KK || level < KBASE || GetRemaining() >= 0.8*K`,
+    /// mirroring `RandomLookup`) AND whose per-zone big timer has elapsed. The
+    /// fired leaf is re-armed `now + rearm` (oracle `m_tNextBigTimer = tNow +
+    /// HR2S(1)`, Kademlia.cpp:293), so successive calls rotate across due
+    /// zones instead of hammering the first qualifying one.
+    ///
     /// `GetRemaining() = K - size` (FREE slots, RoutingBin.cpp:195), so the
-    /// third disjunct fires when the bin is nearly EMPTY (`size <= 0.2*K`), i.e.
-    /// the tree fills sparse zones first. NOTE: this is the inverse of a
+    /// third disjunct fires when the bin is nearly EMPTY (`size <= 0.2*K`),
+    /// i.e. the tree fills sparse zones first. NOTE: this is the inverse of a
     /// fill-when-full gate.
-    pub(crate) fn random_lookup_targets(
-        &self,
+    pub(crate) fn take_due_random_lookup_target(
+        &mut self,
         own_id: &NodeId,
+        now: std::time::SystemTime,
+        rearm: std::time::Duration,
         rng: &mut impl FnMut() -> u8,
-        targets: &mut Vec<NodeId>,
-    ) {
-        match &self.content {
+    ) -> Option<NodeId> {
+        match &mut self.content {
             ZoneContent::Leaf(bin) => {
                 let fill_gate =
                     self.zone_index < KK || (self.depth as usize) < KBASE || bin.len() * 5 <= K; // GetRemaining() >= 0.8*K <=> size <= 0.2*K
-                if fill_gate {
-                    targets.push(crate::maintenance::random_target_in_zone(
+                let due = self.next_big_timer.is_none_or(|at| now >= at);
+                if fill_gate && due {
+                    self.next_big_timer = Some(now + rearm);
+                    Some(crate::maintenance::random_target_in_zone(
                         own_id,
                         self.depth,
                         self.zone_index,
                         rng,
-                    ));
+                    ))
+                } else {
+                    None
                 }
             }
-            ZoneContent::Branch { left, right } => {
-                left.random_lookup_targets(own_id, rng, targets);
-                right.random_lookup_targets(own_id, rng, targets);
-            }
+            ZoneContent::Branch { left, right } => left
+                .take_due_random_lookup_target(own_id, now, rearm, rng)
+                .or_else(|| right.take_due_random_lookup_target(own_id, now, rearm, rng)),
         }
     }
 
@@ -613,6 +629,7 @@ mod tests {
             depth,
             zone_index,
             content: ZoneContent::Leaf(RoutingBin::new()),
+            next_big_timer: None,
         };
         for i in 0..K as u8 {
             let wants_right_child = usize::from(i >= (K - right_contacts) as u8) != 0;
@@ -671,6 +688,7 @@ mod tests {
             depth: KBASE as u32,
             zone_index: KK,
             content: ZoneContent::Leaf(RoutingBin::new()),
+            next_big_timer: None,
         };
         for i in 0..size as u8 {
             let id = make_id_with_bit(KBASE as u32, false, i + 1);
@@ -686,18 +704,61 @@ mod tests {
         zone
     }
 
-    fn gate_fires(zone: &RoutingZone) -> bool {
-        let mut targets = Vec::new();
-        zone.random_lookup_targets(&OWN, &mut || 0u8, &mut targets);
-        !targets.is_empty()
+    fn gate_fires(zone: &mut RoutingZone) -> bool {
+        zone.take_due_random_lookup_target(
+            &OWN,
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::Duration::from_secs(3600),
+            &mut || 0u8,
+        )
+        .is_some()
     }
 
     #[test]
     fn big_timer_random_lookup_selects_sparse_leaf_not_full_leaf() {
-        assert!(gate_fires(&make_leaf_with_size(0)));
-        assert!(gate_fires(&make_leaf_with_size(2))); // exactly 0.2*K
-        assert!(!gate_fires(&make_leaf_with_size(3)));
-        assert!(!gate_fires(&make_leaf_with_size(K - 2))); // nearly full
+        assert!(gate_fires(&mut make_leaf_with_size(0)));
+        assert!(gate_fires(&mut make_leaf_with_size(2))); // exactly 0.2*K
+        assert!(!gate_fires(&mut make_leaf_with_size(3)));
+        assert!(!gate_fires(&mut make_leaf_with_size(K - 2))); // nearly full
+    }
+
+    #[test]
+    fn big_timer_rearms_fired_leaf_and_rotates_to_the_next_due_zone() {
+        // Build a branch with two sparse (always-qualifying) leaves; the first
+        // take fires the left leaf and re-arms it, the second take must move on
+        // to the right leaf instead of hammering the left one again (oracle
+        // m_tNextBigTimer = tNow + HR2S(1)).
+        let mut zone = make_leaf_with_size(0);
+        zone.depth = 0;
+        zone.zone_index = 0;
+        zone.add(side_contact(1, true), &OWN, K, usize::MAX)
+            .unwrap();
+        zone.add(side_contact(2, false), &OWN, K + 1, usize::MAX)
+            .unwrap();
+        // Force a split so we get two leaves (sparse: 1 contact each).
+        zone.split(&OWN).unwrap();
+
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        let rearm = std::time::Duration::from_secs(3600);
+        let first = zone
+            .take_due_random_lookup_target(&OWN, now, rearm, &mut || 0u8)
+            .expect("left leaf due");
+        let second = zone
+            .take_due_random_lookup_target(&OWN, now, rearm, &mut || 0u8)
+            .expect("right leaf due");
+        // Targets land in different zones: distance-bit 0 differs (OWN is
+        // zero, so the target's own top bit is the zone path bit).
+        assert_ne!(first.bit(0), second.bit(0));
+        // Both leaves are now re-armed: nothing due within the hour.
+        assert!(
+            zone.take_due_random_lookup_target(&OWN, now, rearm, &mut || 0u8)
+                .is_none()
+        );
+        // After the re-arm window both fire again.
+        assert!(
+            zone.take_due_random_lookup_target(&OWN, now + rearm, rearm, &mut || 0u8)
+                .is_some()
+        );
     }
 
     /// One contact whose distance-bit-0 (== high bit of `id[0]`, since OWN is

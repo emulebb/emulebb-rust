@@ -37,12 +37,6 @@ const SMALL_TIMER_SECS: u64 = 60;
 /// Kademlia.cpp:157,309-314): merge sparse sibling leaf zones back into their
 /// parent to keep the tree compact over long uptimes.
 const CONSOLIDATE_SECS: u64 = 45 * 60;
-/// Bound the number of random-target lookups we kick off per big-timer tick.
-/// The master fires at most ONE zone's `OnBigTimer` per scheduler pass: the
-/// `tNow >= m_tBigTimer` guard plus `m_tBigTimer = tNow + SEC(10)` after a
-/// successful zone (Kademlia.cpp:289-294) rate-limits it to one zone random
-/// lookup per SEC(10). Round-robined across ticks via the target rotation.
-const MAX_RANDOM_LOOKUPS_PER_TICK: usize = 1;
 /// Bound the number of stale contacts we HELLO-probe per small-timer sweep so a
 /// large table stays gentle (the master probes one per leaf; we cap the total).
 const MAX_PROBES_PER_SWEEP: usize = 16;
@@ -89,29 +83,30 @@ pub(crate) async fn run_kad_routing_maintenance_loop(
     }
 }
 
-/// Kick off a bounded number of random-target `FindNode` lookups, one per
-/// refreshable leaf zone, to keep buckets populated (oracle `RandomLookup`).
+/// Kick off at most one random-target `FindNode` lookup per tick, into the
+/// next due refreshable leaf zone, to keep buckets populated (oracle
+/// `RandomLookup`). The master fires at most ONE zone's `OnBigTimer` per
+/// scheduler pass (`tNow >= m_tBigTimer` + `m_tBigTimer = tNow + SEC(10)`,
+/// Kademlia.cpp:289-294) and re-arms the fired zone one hour out
+/// (`m_tNextBigTimer = tNow + HR2S(1)`); the per-zone re-arm lives in the
+/// routing table, so ticks naturally rotate across due zones.
 async fn run_bucket_refresh(dht: &DhtNode) {
-    let mut targets = dht.routing_random_lookup_targets().await;
-    if targets.is_empty() {
+    let Some(target) = dht.routing_take_due_random_lookup_target().await else {
         return;
-    }
-    targets.truncate(MAX_RANDOM_LOOKUPS_PER_TICK);
-    for target in targets {
-        let dht = dht.clone();
-        tokio::spawn(async move {
-            // A bucket-refresh lookup is best-effort maintenance traffic; the
-            // discovered + answered contacts are folded into the routing table by
-            // the lookup itself (final closest-set) and by the AddUnfiltered RES
-            // sink (every answered contact).
-            if let Err(error) = dht
-                .lookup_nodes_with_class(&target, RpcWorkClass::Maintenance)
-                .await
-            {
-                tracing::debug!("kad routing refresh lookup failed target={target}: {error}");
-            }
-        });
-    }
+    };
+    let dht = dht.clone();
+    tokio::spawn(async move {
+        // A bucket-refresh lookup is best-effort maintenance traffic; the
+        // discovered + answered contacts are folded into the routing table by
+        // the lookup itself (final closest-set) and by the AddUnfiltered RES
+        // sink (every answered contact).
+        if let Err(error) = dht
+            .lookup_nodes_with_class(&target, RpcWorkClass::Maintenance)
+            .await
+        {
+            tracing::debug!("kad routing refresh lookup failed target={target}: {error}");
+        }
+    });
 }
 
 /// Run the small-timer sweep: drop dead+expired contacts and HELLO-probe the

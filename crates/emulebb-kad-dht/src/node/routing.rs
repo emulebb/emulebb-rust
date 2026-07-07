@@ -74,17 +74,19 @@ impl DhtNode {
             .probes
     }
 
-    /// One random `FindNode` target per leaf zone that passes the oracle
-    /// big-timer fill gate (`CRoutingZone::OnBigTimer` -> `RandomLookup`). Used
-    /// by the maintenance loop to keep buckets populated.
-    pub async fn routing_random_lookup_targets(&self) -> Vec<NodeId> {
+    /// Take the next due big-timer random `FindNode` target: the first leaf
+    /// zone passing the oracle fill gate (`CRoutingZone::OnBigTimer` ->
+    /// `RandomLookup`) whose per-zone hourly big timer has elapsed; that leaf
+    /// is re-armed. Used by the maintenance loop to keep buckets populated
+    /// without hammering one zone or starving the others.
+    pub async fn routing_take_due_random_lookup_target(&self) -> Option<NodeId> {
         use rand::Rng;
-        let table = self.inner.routing_table.lock().await;
+        let mut table = self.inner.routing_table.lock().await;
         // Create the (non-Send) RNG only after the await so it is never held
         // across a suspension point.
         let mut rng = rand::thread_rng();
         let mut next = || rng.r#gen::<u8>();
-        table.random_lookup_targets(&mut next)
+        table.take_due_random_lookup_target(std::time::SystemTime::now(), &mut next)
     }
 
     /// Merge sparse sibling leaf zones back into their parent (oracle
