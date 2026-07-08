@@ -213,7 +213,7 @@ impl ListenerUploadQueue {
                 self.send_accept_if_needed(transport, peer_addr).await?;
                 Ok(ListenerQueuePoll::Continue)
             }
-            Ed2kUploadSessionStatus::Waiting { .. } => {
+            Ed2kUploadSessionStatus::Waiting { rank } => {
                 // A slot we had granted was demoted back to the waiting queue (idle
                 // recycle or session-cap rotation): tell the downloader to go OnQueue
                 // with OP_OUTOFPARTREQS once, mirroring MFC
@@ -241,15 +241,35 @@ impl ListenerUploadQueue {
                                 &file_hash.to_string(),
                             );
                         }
+                        // REG-2: the recycle demote sends OP_QUEUERANKING right after
+                        // OP_OUTOFPARTREQS (master SendOutOfPartReqsAndAddToWaitingQueue
+                        // -> AddClientToQueue(this, true) -> SendRankingInfo(),
+                        // UploadQueue.cpp:883-885,1980-1986). `rank_packet` gates it on
+                        // the eMule extended protocol exactly like every other rank send
+                        // (round-17 339764d): a plain-eDonkey waiter's SendRankingInfo
+                        // early-returns (`!ExtProtocolAvailable()`), so it gets the
+                        // OUTOFPARTREQS but no rank. A banned peer reaches neither send:
+                        // `should_send_out_of_part_reqs` already excludes it (oracle
+                        // bRequeue=false).
+                        if let Some(rank_packet) = self.rank_packet(rank) {
+                            dump_ed2k_tcp_listener_send(
+                                peer_addr,
+                                transport.mode,
+                                "queue_ranking",
+                                &rank_packet,
+                            );
+                            transport.write_all(&rank_packet).await?;
+                        }
                     }
                     self.granted_sent = false;
                 }
-                // No unsolicited rank refresh: the oracle sends OP_QUEUERANK /
-                // OP_QUEUERANKING only in response to a re-ask (SendRankingInfo
-                // call sites, UploadQueue.cpp:1866,1963,1986), never on a timer.
-                // An idle waiting connection is closed like the oracle's socket
-                // timeout (CClientReqSocket::CheckTimeOut); the queue entry
-                // survives the close and is dialed back on a slot grant.
+                // No further unsolicited rank refresh: outside the demote transition
+                // above, the oracle sends OP_QUEUERANK / OP_QUEUERANKING only in
+                // response to a re-ask (SendRankingInfo call sites,
+                // UploadQueue.cpp:1866,1963,1986), never on a plain timer for a peer
+                // that was already waiting. An idle waiting connection is closed like
+                // the oracle's socket timeout (CClientReqSocket::CheckTimeOut); the
+                // queue entry survives the close and is dialed back on a slot grant.
                 if peer_idle_for >= ED2K_WAITING_CONNECTION_IDLE_TIMEOUT {
                     self.note_close_reason("waiting_socket_idle");
                     return Ok(ListenerQueuePoll::Close);
@@ -736,6 +756,36 @@ mod tests {
         // Granted + not banned: the packet is owed.
         queue.peer_banned = false;
         assert!(queue.should_send_out_of_part_reqs());
+    }
+
+    /// REG-2: on a recycle demote the oracle sends OP_OUTOFPARTREQS AND THEN
+    /// OP_QUEUERANKING (SendOutOfPartReqsAndAddToWaitingQueue ->
+    /// AddClientToQueue(this, true) -> SendRankingInfo(),
+    /// UploadQueue.cpp:883-885,1980-1986). The rank is gated on the eMule extended
+    /// protocol exactly like every other rank (round-17 339764d), and a banned
+    /// peer reaches neither send (oracle bRequeue=false). This checks the two
+    /// composed gates the demote path emits through.
+    #[test]
+    fn recycle_demote_rank_follows_out_of_part_reqs_only_for_emule_and_never_banned() {
+        let mut queue = ListenerUploadQueue::new();
+        queue.granted_sent = true;
+
+        // eMule waiter: the courtesy OP_OUTOFPARTREQS is owed AND the rank follows.
+        queue.peer_ext_protocol = true;
+        queue.peer_banned = false;
+        assert!(queue.should_send_out_of_part_reqs());
+        assert_eq!(queue.rank_packet(3), Some(encode_queue_ranking(3)));
+
+        // Plain-eDonkey waiter: OUTOFPARTREQS is owed but the rank is suppressed
+        // (SendRankingInfo `!ExtProtocolAvailable()` early return).
+        queue.peer_ext_protocol = false;
+        assert!(queue.should_send_out_of_part_reqs());
+        assert_eq!(queue.rank_packet(3), None);
+
+        // Banned waiter: neither the courtesy packet nor the rank.
+        queue.peer_banned = true;
+        queue.peer_ext_protocol = true;
+        assert!(!queue.should_send_out_of_part_reqs());
     }
 
     #[test]
