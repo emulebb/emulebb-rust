@@ -41,6 +41,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
                 },
                 bytes_written: if verified { end - start } else { 0 },
                 block_bitmap: None,
+                ich_corrupted: false,
             }
         })
         .collect();

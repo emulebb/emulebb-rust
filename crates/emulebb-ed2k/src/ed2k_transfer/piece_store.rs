@@ -9,6 +9,7 @@ use tracing::debug;
 use crate::long_path::long_path;
 
 use super::hashset::refresh_completed_manifest_aich_hashset;
+use super::ich_salvage::IchRehashResult;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::{
     ED2K_EMBLOCK_SIZE, Ed2kClaimedPart, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferRuntime,
@@ -275,6 +276,7 @@ impl Ed2kTransferRuntime {
             if verified {
                 piece.bytes_written = expected_piece_len;
                 piece.state = Ed2kTransferState::Verified;
+                piece.ich_corrupted = false;
             } else {
                 // Demote a part that no longer verifies so it is re-downloaded.
                 piece.bytes_written = 0;
@@ -461,6 +463,7 @@ impl Ed2kTransferRuntime {
             if verified {
                 piece.bytes_written = expected_piece_len;
                 piece.state = Ed2kTransferState::Verified;
+                piece.ich_corrupted = false;
                 outcome = PieceWriteOutcome::Verified;
                 checkpoint_reason = Some("piece_verified");
                 // Credit every recorded sender of this part in the corruption
@@ -471,9 +474,13 @@ impl Ed2kTransferRuntime {
                 // MD4 failure alone never bans: the part is gapped for
                 // re-download and the caller solicits AICH recovery
                 // (PartFile.cpp:5184-5199); ban attribution is the AICH-verdict
-                // `EvaluateData` path.
+                // `EvaluateData` path. The on-disk bytes are RETAINED (the gap
+                // is logical only) and the part is flagged for MD4-only ICH
+                // salvage so overlaying replacement data can re-verify it
+                // early (oracle corrupted_list add, PartFile.cpp:5188-5190).
                 piece.state = Ed2kTransferState::Missing;
                 piece.bytes_written = 0;
+                piece.ich_corrupted = true;
                 outcome = PieceWriteOutcome::VerificationFailed {
                     part_index: piece_index,
                 };
@@ -491,13 +498,45 @@ impl Ed2kTransferRuntime {
                 self.upsert_verified_catalog_entry(&manifest).await;
             }
         } else {
-            let piece = manifest
-                .pieces
-                .iter_mut()
-                .find(|piece| piece.piece_index == piece_index)
-                .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
-            piece.bytes_written = next_piece_bytes_written;
-            piece.state = Ed2kTransferState::Requested;
+            let ich_candidate = {
+                let piece = manifest
+                    .pieces
+                    .iter_mut()
+                    .find(|piece| piece.piece_index == piece_index)
+                    .with_context(|| {
+                        format!("missing piece index {piece_index} in {file_hash}")
+                    })?;
+                piece.bytes_written = next_piece_bytes_written;
+                piece.state = Ed2kTransferState::Requested;
+                piece.ich_corrupted
+            };
+            // MD4-only ICH fallback: a flush that touched a corrupted part
+            // re-runs the part MD4 check over the overlaid prefix plus the
+            // retained stale remainder, salvaging the gap early when it now
+            // matches (oracle FlushBuffer ICH branch, PartFile.cpp:5214-5232).
+            if ich_candidate {
+                // Drain the write handle so the just-written bytes are
+                // visible to the re-hash read handle.
+                file.flush().await?;
+                match self
+                    .ich_try_rehash_part_unlocked(&mut manifest, piece_index)
+                    .await?
+                {
+                    IchRehashResult::Salvaged { salvaged_bytes } => {
+                        outcome = PieceWriteOutcome::IchSalvaged {
+                            part_index: piece_index,
+                            salvaged_bytes,
+                        };
+                        checkpoint_reason = Some("ich_salvaged");
+                    }
+                    IchRehashResult::Failed => {
+                        outcome = PieceWriteOutcome::IchRehashFailed {
+                            part_index: piece_index,
+                        };
+                    }
+                    IchRehashResult::NotAttempted => {}
+                }
+            }
 
             let should_checkpoint = checkpoint_reason.is_some()
                 || self.should_checkpoint_manifest_unlocked(&manifest).await;

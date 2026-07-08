@@ -5,6 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use super::hashset::refresh_completed_manifest_aich_hashset;
+use super::ich_salvage::IchRehashResult;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::piece_store::{AppendPieceBlockLog, log_append_piece_block};
 use super::{
@@ -121,11 +122,12 @@ impl Ed2kTransferRuntime {
             .find(|piece| piece.piece_index == piece_index)
             .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
         let mut outcome = PieceWriteOutcome::Incomplete;
-        let checkpoint_reason;
+        let mut checkpoint_reason;
         if verified {
             piece.bytes_written = expected_piece_len;
             piece.block_bitmap = None;
             piece.state = Ed2kTransferState::Verified;
+            piece.ich_corrupted = false;
             outcome = PieceWriteOutcome::Verified;
             checkpoint_reason = Some("piece_verified");
             // Credit every recorded sender of this part in the corruption
@@ -133,9 +135,13 @@ impl Ed2kTransferRuntime {
             // `m_CorruptionBlackBox.VerifiedData`, PartFile.cpp:5205).
             self.cbb_record_verified_data(file_hash, piece_start, piece_end);
         } else if bitmap.all_present() {
+            // The on-disk bytes are retained (logical gap only) and the part
+            // is flagged for MD4-only ICH salvage (oracle corrupted_list add,
+            // PartFile.cpp:5188-5190).
             piece.bytes_written = 0;
             piece.block_bitmap = None;
             piece.state = Ed2kTransferState::Missing;
+            piece.ich_corrupted = true;
             outcome = PieceWriteOutcome::VerificationFailed {
                 part_index: piece_index,
             };
@@ -144,6 +150,30 @@ impl Ed2kTransferRuntime {
             piece.apply_block_bitmap(&bitmap);
             piece.state = Ed2kTransferState::Requested;
             checkpoint_reason = Some("out_of_order_block");
+        }
+        // MD4-only ICH fallback on a mid-part flush into a corrupted part
+        // (oracle FlushBuffer ICH branch, PartFile.cpp:5214-5232). The write
+        // handle was already flushed above, so the re-hash read sees this
+        // block's bytes.
+        if matches!(outcome, PieceWriteOutcome::Incomplete) {
+            match self
+                .ich_try_rehash_part_unlocked(manifest, piece_index)
+                .await?
+            {
+                IchRehashResult::Salvaged { salvaged_bytes } => {
+                    outcome = PieceWriteOutcome::IchSalvaged {
+                        part_index: piece_index,
+                        salvaged_bytes,
+                    };
+                    checkpoint_reason = Some("ich_salvaged");
+                }
+                IchRehashResult::Failed => {
+                    outcome = PieceWriteOutcome::IchRehashFailed {
+                        part_index: piece_index,
+                    };
+                }
+                IchRehashResult::NotAttempted => {}
+            }
         }
 
         rebuild_verified_ranges(manifest);

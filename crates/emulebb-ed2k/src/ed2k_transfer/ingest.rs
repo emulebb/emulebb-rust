@@ -122,6 +122,7 @@ impl Ed2kTransferRuntime {
                     u64::from(piece_index),
                 ),
                 block_bitmap: None,
+                ich_corrupted: false,
             })
             .collect();
         rebuild_verified_ranges(&mut manifest);

@@ -477,6 +477,23 @@ impl Ed2kTransferRuntime {
         })
     }
 
+    /// Test-only: total bytes currently attributed to `ip` with a VERIFIED
+    /// verdict in the file's blackbox. Lets tests assert that an ICH-salvaged
+    /// part credited its recorded senders (`VerifiedData`).
+    #[cfg(test)]
+    pub(crate) fn cbb_verified_bytes_for_test(&self, file_hash: &str, ip: Ipv4Addr) -> u64 {
+        let map = self.lock_corruption_blackbox();
+        map.get(file_hash).map_or(0, |blackbox| {
+            blackbox
+                .records
+                .iter()
+                .flatten()
+                .filter(|record| record.ip == ip && record.status == BbrStatus::Verified)
+                .map(|record| record.end - record.start + 1)
+                .sum()
+        })
+    }
+
     fn lock_corruption_blackbox(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, CorruptionBlackBox>> {

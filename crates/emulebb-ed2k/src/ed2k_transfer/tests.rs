@@ -22,6 +22,7 @@ mod corruption_blackbox;
 mod deliver_runtime;
 mod download_throttle;
 mod file_status_parts;
+mod ich_salvage;
 mod inbound_admission;
 mod reask_reciprocity;
 mod salvage;

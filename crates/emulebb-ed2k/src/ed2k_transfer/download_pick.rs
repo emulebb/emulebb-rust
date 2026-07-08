@@ -124,6 +124,7 @@ mod tests {
             state: Ed2kTransferState::Missing,
             bytes_written,
             block_bitmap: None,
+            ich_corrupted: false,
         }
     }
 
@@ -133,6 +134,7 @@ mod tests {
             state: Ed2kTransferState::Verified,
             bytes_written: ED2K_PART_SIZE,
             block_bitmap: None,
+            ich_corrupted: false,
         }
     }
 

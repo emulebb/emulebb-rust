@@ -1342,6 +1342,7 @@ mod tests {
                 state: *state,
                 bytes_written: 0,
                 block_bitmap: None,
+                ich_corrupted: false,
             })
             .collect();
         manifest

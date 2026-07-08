@@ -42,13 +42,29 @@ pub(crate) enum PieceWriteOutcome {
     /// The full part was written but failed MD4 verification. Carries the part
     /// index so the session can request AICH recovery for it.
     VerificationFailed { part_index: u32 },
+    /// A mid-part flush into an ICH-corrupted part re-ran the part MD4 check
+    /// and it now matches: the remaining gap was filled from the retained
+    /// stale bytes and the part is complete/verified (oracle `FlushBuffer` ICH
+    /// branch success, PartFile.cpp:5214-5232). `salvaged_bytes` is the gap
+    /// size recovered without re-download (`GetTotalGapSizeInPart`,
+    /// PartFile.cpp:5220).
+    IchSalvaged { part_index: u32, salvaged_bytes: u64 },
+    /// A mid-part flush into an ICH-corrupted part re-ran the part MD4 check
+    /// and it still fails: the part stays gapped and re-download continues
+    /// (oracle `HashSinglePart` returning false in the ICH branch). Otherwise
+    /// identical to `Incomplete`; surfaced so the session can emit the ICH
+    /// re-hash attempt diag event.
+    IchRehashFailed { part_index: u32 },
 }
 
 impl PieceWriteOutcome {
     /// `true` when the part is now complete and verified (legacy `bool` form).
     #[must_use]
     pub(crate) fn is_completed(self) -> bool {
-        matches!(self, PieceWriteOutcome::Verified)
+        matches!(
+            self,
+            PieceWriteOutcome::Verified | PieceWriteOutcome::IchSalvaged { .. }
+        )
     }
 
     /// The part index whose MD4 verification just failed, if any.
@@ -90,6 +106,16 @@ pub struct Ed2kPieceState {
     /// backward compatibility for manifests written before block-level salvage.
     #[serde(default)]
     pub block_bitmap: Option<String>,
+    /// Whether this part previously failed its MD4 flush check and is pending
+    /// MD4-only ICH salvage. The stale on-disk bytes are RETAINED (the part is
+    /// only logically gapped: `bytes_written` restarts at 0) so replacement
+    /// data overlays them and each subsequent flush can re-run the part MD4
+    /// check, salvaging the remaining gap early when it now matches (oracle
+    /// `corrupted_list` + the `FlushBuffer` ICH branch, PartFile.cpp:5188-5190
+    /// and :5214-5232; persisted like `FT_CORRUPTEDPARTS`,
+    /// PartFile.cpp:1445-1462). Cleared when the part verifies.
+    #[serde(default)]
+    pub ich_corrupted: bool,
 }
 
 impl Ed2kPieceState {
@@ -315,6 +341,7 @@ impl Ed2kResumeManifest {
                     state: Ed2kTransferState::Missing,
                     bytes_written: 0,
                     block_bitmap: None,
+                    ich_corrupted: false,
                 })
                 .collect(),
             sources: Vec::new(),

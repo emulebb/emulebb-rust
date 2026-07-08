@@ -263,6 +263,7 @@ impl Ed2kTransferRuntime {
             piece.bytes_written = part_len;
             piece.block_bitmap = None;
             piece.state = Ed2kTransferState::Verified;
+            piece.ich_corrupted = false;
             outcome = PieceWriteOutcome::Verified;
             // Credit every recorded sender of the ICH-saved part (oracle
             // `HashSinglePart` success on a corrupted part ->
@@ -275,13 +276,38 @@ impl Ed2kTransferRuntime {
                 // reconstruct the part. Drop back to a clean re-download and
                 // signal the verification failure so the session can re-request
                 // AICH recovery (a fresh, possibly different, recovery answer).
+                // The bytes stay on disk and the part stays flagged for the
+                // MD4-only ICH fallback (oracle keeps it in corrupted_list).
                 piece.bytes_written = 0;
                 piece.block_bitmap = None;
+                piece.ich_corrupted = true;
                 outcome = PieceWriteOutcome::VerificationFailed { part_index };
                 Ed2kTransferState::Missing
             } else {
                 Ed2kTransferState::Requested
             };
+        }
+        // The MD4-only ICH re-hash also runs on a flush into a part mid AICH
+        // salvage (the oracle's FlushBuffer ICH branch is gated only on
+        // corrupted_list membership, PartFile.cpp:5214). It can only succeed
+        // once the AICH-identified bad blocks hold good bytes, so a miss
+        // leaves the salvage bitmap untouched and the AICH flow proceeds.
+        if matches!(outcome, PieceWriteOutcome::Incomplete) {
+            match self
+                .ich_try_rehash_part_unlocked(&mut manifest, part_index)
+                .await?
+            {
+                super::ich_salvage::IchRehashResult::Salvaged { salvaged_bytes } => {
+                    outcome = PieceWriteOutcome::IchSalvaged {
+                        part_index,
+                        salvaged_bytes,
+                    };
+                }
+                super::ich_salvage::IchRehashResult::Failed => {
+                    outcome = PieceWriteOutcome::IchRehashFailed { part_index };
+                }
+                super::ich_salvage::IchRehashResult::NotAttempted => {}
+            }
         }
 
         rebuild_verified_ranges(&mut manifest);

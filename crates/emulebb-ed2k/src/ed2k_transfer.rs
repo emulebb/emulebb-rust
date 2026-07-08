@@ -43,6 +43,7 @@ mod download_coordinator;
 mod download_pick;
 mod download_throttle;
 mod hashset;
+mod ich_salvage;
 mod inbound_admission;
 mod ingest;
 mod manifest;
@@ -225,6 +226,11 @@ pub struct Ed2kTransferRuntime {
     /// the queue order. Set from the upload-queue policy at startup and on every
     /// preferences update; an atomic so the lock-free credit-score path reads it.
     credit_system_enabled: AtomicBool,
+    /// Whether MD4-only ICH salvage of corrupted parts is enabled (eMule
+    /// `thePrefs.IsICHEnabled()`; ini default true, Preferences.cpp:3187).
+    /// When false a corrupted part is fully re-downloaded, never re-hashed
+    /// early against its retained stale bytes.
+    ich_enabled: AtomicBool,
     /// In-memory client ban store (eMule `CClientList` ban lists), keyed by IP +
     /// user hash with a 4h `CLIENTBANTIME` TTL. Shared with the inbound listener,
     /// the download driver, the UDP reask runtime, and core via this runtime's
@@ -353,6 +359,7 @@ impl Ed2kTransferRuntime {
             shared_publish_demand_revision: Arc::new(AtomicU64::new(0)),
             shared_publish_demand_notify: Arc::new(Notify::new()),
             credit_system_enabled: AtomicBool::new(true),
+            ich_enabled: AtomicBool::new(true),
             ban_store: Arc::new(crate::ban_store::BanStore::new()),
             corruption_blackbox: Arc::new(StdMutex::new(HashMap::new())),
         };

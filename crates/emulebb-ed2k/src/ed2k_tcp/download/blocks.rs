@@ -114,6 +114,13 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
         }
+        note_ich_outcome(
+            outcome,
+            aich_recovery_parts,
+            peer_addr,
+            transport_mode,
+            file_hash_hex,
+        );
         dump_ed2k_tcp_download_meta(
             peer_addr,
             Some(transport_mode),
@@ -202,6 +209,47 @@ fn push_unique(parts: &mut Vec<u16>, part: u16) {
     }
 }
 
+/// Emit the MD4-only ICH diag events for a flushed block's write outcome
+/// (naming consistent with the `aich_salvage_*` events): `ich_rehash_attempt`
+/// when the re-hash over the corrupted part still misses, and
+/// `ich_salvage_success` when the part re-verified and the remaining gap was
+/// filled from the retained bytes (oracle FlushBuffer ICH branch,
+/// PartFile.cpp:5214-5232). A salvaged part no longer needs AICH recovery, so
+/// it is dropped from the pending recovery queue.
+fn note_ich_outcome(
+    outcome: PieceWriteOutcome,
+    aich_recovery_parts: &mut Vec<u16>,
+    peer_addr: SocketAddr,
+    transport_mode: Ed2kTransportMode,
+    file_hash_hex: &str,
+) {
+    match outcome {
+        PieceWriteOutcome::IchSalvaged {
+            part_index,
+            salvaged_bytes,
+        } => {
+            aich_recovery_parts.retain(|part| u32::from(*part) != part_index);
+            dump_ed2k_tcp_download_meta(
+                peer_addr,
+                Some(transport_mode),
+                "ich_salvage_success",
+                format!(
+                    "file_hash={file_hash_hex} part={part_index} bytes_salvaged={salvaged_bytes}"
+                ),
+            );
+        }
+        PieceWriteOutcome::IchRehashFailed { part_index } => {
+            dump_ed2k_tcp_download_meta(
+                peer_addr,
+                Some(transport_mode),
+                "ich_rehash_attempt",
+                format!("file_hash={file_hash_hex} part={part_index}"),
+            );
+        }
+        _ => {}
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     transfer_runtime: &Ed2kTransferRuntime,
@@ -276,6 +324,13 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             *active_piece_request = None;
             push_unique(aich_recovery_parts, failed_part);
         }
+        note_ich_outcome(
+            outcome,
+            aich_recovery_parts,
+            peer_addr,
+            transport_mode,
+            file_hash_hex,
+        );
         if let Some(user_hash) = credit_user_hash {
             transfer_runtime.add_peer_credit_delta(user_hash, 0, end.saturating_sub(start))?;
         }
