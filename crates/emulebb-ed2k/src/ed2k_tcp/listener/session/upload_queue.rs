@@ -44,6 +44,12 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // session key, not the ephemeral socket source port).
     diag_peer: Option<String>,
     diag_peer_hash: Option<[u8; 16]>,
+    // Whether the peer bound to the current session was BANNED at admission
+    // (mirrors the queue session key's `banned` flag). A banned client's slot
+    // recycle must NOT get the OP_OUTOFPARTREQS courtesy packet (oracle
+    // bRequeue=false, CheckForTimeOver, UploadQueue.cpp:2320-2321; requeue guard
+    // in Process, UploadQueue.cpp:883-884).
+    peer_banned: bool,
     verified_reader: Option<(Ed2kHash, Ed2kVerifiedRangeReader)>,
     // Per-connection ledger of requested upload blocks (fileHash, start, end,
     // count, first-seen) for MFC repeat_block_request parity. Bounded and pruned
@@ -64,6 +70,7 @@ impl ListenerUploadQueue {
             ever_granted: false,
             diag_peer: None,
             diag_peer_hash: None,
+            peer_banned: false,
             verified_reader: None,
             block_request_ledger: Vec::new(),
             close_reason: None,
@@ -111,13 +118,25 @@ impl ListenerUploadQueue {
         None
     }
 
-    /// Capture the advertised peer identity for the `sched` diag emits.
+    /// Capture the advertised peer identity for the `sched` diag emits and the
+    /// banned-recycle packet suppression.
     fn record_diag_peer(&mut self, peer_identity: &Ed2kUploadPeerIdentity) {
         self.diag_peer = Some(diag_sched::peer_label(
             peer_identity.ip,
             peer_identity.tcp_port,
         ));
         self.diag_peer_hash = peer_identity.user_hash;
+        self.peer_banned = peer_identity.banned;
+    }
+
+    /// Whether a slot demotion/recycle owes the peer the OP_OUTOFPARTREQS
+    /// courtesy packet: only a peer that actually saw OP_ACCEPTUPLOADREQ, and
+    /// never a BANNED one (oracle bRequeue=false for `IsBanned()`,
+    /// UploadQueue.cpp:2320-2321 -> the Process requeue guard skips
+    /// SendOutOfPartReqsAndAddToWaitingQueue, UploadQueue.cpp:883-884; the
+    /// banned client's queue entry is dropped, not re-added).
+    const fn should_send_out_of_part_reqs(&self) -> bool {
+        self.granted_sent && !self.peer_banned
     }
 
     /// Emit `upload_slot_opened` once per grant transition (peer + file known).
@@ -186,28 +205,32 @@ impl ListenerUploadQueue {
             }
             Ed2kUploadSessionStatus::Waiting { .. } => {
                 // A slot we had granted was demoted back to the waiting queue (idle
-                // recycle): tell the downloader to go OnQueue with OP_OUTOFPARTREQS
-                // once, mirroring MFC SendOutOfPartReqsAndAddToWaitingQueue, then keep
-                // the connection rather than closing and shedding the peer.
-                // `granted_sent` is cleared so a later re-grant re-sends
-                // OP_ACCEPTUPLOADREQ; `ever_granted` stays set for the funnel.
+                // recycle or session-cap rotation): tell the downloader to go OnQueue
+                // with OP_OUTOFPARTREQS once, mirroring MFC
+                // SendOutOfPartReqsAndAddToWaitingQueue, then keep the connection
+                // rather than closing and shedding the peer. A BANNED peer gets no
+                // packet (oracle bRequeue=false). `granted_sent` is cleared so a later
+                // re-grant re-sends OP_ACCEPTUPLOADREQ; `ever_granted` stays set for
+                // the funnel.
                 if self.granted_sent {
-                    let packet = encode_out_of_part_reqs();
-                    dump_ed2k_tcp_listener_send(
-                        peer_addr,
-                        transport.mode,
-                        "out_of_part_reqs",
-                        &packet,
-                    );
-                    transport.write_all(&packet).await?;
-                    if let (Some(peer), Some(file_hash)) =
-                        (self.diag_peer.as_deref(), self.file_hash.as_ref())
-                    {
-                        diag_sched::out_of_part_reqs(
-                            peer,
-                            self.diag_peer_hash,
-                            &file_hash.to_string(),
+                    if self.should_send_out_of_part_reqs() {
+                        let packet = encode_out_of_part_reqs();
+                        dump_ed2k_tcp_listener_send(
+                            peer_addr,
+                            transport.mode,
+                            "out_of_part_reqs",
+                            &packet,
                         );
+                        transport.write_all(&packet).await?;
+                        if let (Some(peer), Some(file_hash)) =
+                            (self.diag_peer.as_deref(), self.file_hash.as_ref())
+                        {
+                            diag_sched::out_of_part_reqs(
+                                peer,
+                                self.diag_peer_hash,
+                                &file_hash.to_string(),
+                            );
+                        }
                     }
                     self.granted_sent = false;
                 }
@@ -238,8 +261,10 @@ impl ListenerUploadQueue {
                 // MFC CUpDownClient::SendOutOfPartReqsAndAddToWaitingQueue. Without it
                 // the downloader is dropped silently and reconnects immediately (churn)
                 // instead of re-queueing with the stock out-of-part-reqs cooldown. A
-                // never-granted (Rejected) peer gets nothing, matching the master.
-                if self.granted_sent {
+                // never-granted (Rejected) peer gets nothing, matching the master --
+                // and so does a BANNED peer, whose recycle is dropped without the
+                // packet (oracle bRequeue=false, UploadQueue.cpp:2320-2321).
+                if self.should_send_out_of_part_reqs() {
                     let packet = encode_out_of_part_reqs();
                     dump_ed2k_tcp_listener_send(
                         peer_addr,
@@ -490,6 +515,7 @@ impl ListenerUploadQueue {
         self.close_reason = None;
         self.diag_peer = None;
         self.diag_peer_hash = None;
+        self.peer_banned = false;
         self.verified_reader = None;
     }
 
@@ -589,6 +615,28 @@ mod tests {
     use super::ListenerUploadQueue;
     use crate::ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime};
     use crate::paths::unique_test_dir;
+
+    /// Oracle bRequeue=false (CheckForTimeOver, UploadQueue.cpp:2320-2321): a
+    /// BANNED client's slot recycle must not get the OP_OUTOFPARTREQS courtesy
+    /// packet, while a normal granted peer must. A never-granted peer gets
+    /// nothing either way.
+    #[test]
+    fn out_of_part_reqs_is_suppressed_for_banned_peers() {
+        let mut queue = ListenerUploadQueue::new();
+
+        // Never granted: no packet, banned or not.
+        assert!(!queue.should_send_out_of_part_reqs());
+        queue.peer_banned = true;
+        assert!(!queue.should_send_out_of_part_reqs());
+
+        // Granted + banned: suppressed (oracle bRequeue=false).
+        queue.granted_sent = true;
+        assert!(!queue.should_send_out_of_part_reqs());
+
+        // Granted + not banned: the packet is owed.
+        queue.peer_banned = false;
+        assert!(queue.should_send_out_of_part_reqs());
+    }
 
     #[test]
     fn note_block_request_flags_repeat_within_window() {
