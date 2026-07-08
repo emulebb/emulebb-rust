@@ -43,28 +43,38 @@ const DEAD_SOURCE_CLEANUP: Duration = Duration::from_secs(60 * 60);
 /// Identity of a dead source, mirroring oracle `CDeadSource`
 /// (`DeadSourceList.cpp:47-80`): a HighID client is identified by its public
 /// endpoint (oracle `m_dwID`==IP + `m_nPort`); a LowID client with a known
-/// server by the server-scoped (server, client id) pair keyed on `m_dwServerIP`
-/// plus `m_dwID`, NOT the reported port (`operator==` matches LowID on
-/// `m_dwID`/`m_dwServerIP`, so a re-reported port change still resolves to the
-/// same source); a LowID client without server context only by its user hash,
-/// and then ONLY when it is reachable via a buddy or direct UDP callback
+/// server by the server-scoped (server, client id, tcp port) triple keyed on
+/// `m_dwServerIP` + `m_dwID` + `m_nPort`. The oracle `operator==` branch 1
+/// requires `m_dwID` AND (`m_nPort` OR `m_nKadPort`) AND `m_dwServerIP`
+/// (`DeadSourceList.cpp:75-77`), and for a LowID client `m_nKadPort` is forced
+/// to 0 (`DeadSourceList.cpp:54`), so the `m_nKadPort` alternative is inert and
+/// the reported TCP port (`m_nPort`) match is effectively REQUIRED — a
+/// re-reported port change resolves to a DIFFERENT source, which the oracle
+/// retries. A LowID client without server context is keyed only by its user
+/// hash, and then ONLY when it is reachable via a buddy or direct UDP callback
 /// (`DeadSourceList.cpp:56-57`, `HasValidBuddyID() || SupportsDirectUDPCallback()`,
 /// otherwise `md4clr` yields no valid key). A source with none of those has no
 /// valid key and is never dead-listed (oracle `HasValidKey`, `DeadSourceList.cpp:93-96`).
 ///
 /// Residual divergence: the oracle `operator==` also accepts a `m_nKadPort`
-/// alternative when the reported TCP port differs (`DeadSourceList.cpp:76`). That
-/// is an OR-match between two ports, which this hash-keyed identity cannot express
-/// (a single key cannot match on either of two ports), so the Kad-port fallback is
-/// not mirrored here; the (server, client-id) LowID key and endpoint HighID key
-/// carry the common cases.
+/// alternative to `m_nPort` (`DeadSourceList.cpp:76`). That is an OR-match
+/// between two ports, which this hash-keyed identity cannot express (a single
+/// key cannot match on either of two ports). It is inert for the LowID
+/// server-scoped case handled here (`m_nKadPort == 0`), so no divergence
+/// applies to `ServerScoped`; it would only matter for a HighID-Kad shape that
+/// is not represented on this path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DeadSourceKey {
     /// HighID / directly-addressable peer: public endpoint.
     Endpoint { ip: Ipv4Addr, tcp_port: u16 },
-    /// LowID peer behind a known eD2K server: server-scoped client id (oracle
-    /// `m_dwServerIP` + `m_dwID`, port-independent).
-    ServerScoped { server: SocketAddr, client_id: u32 },
+    /// LowID peer behind a known eD2K server: server-scoped client id with the
+    /// reported TCP port (oracle `m_dwServerIP` + `m_dwID` + `m_nPort`; the
+    /// port match is effectively required because `m_nKadPort == 0` for LowID).
+    ServerScoped {
+        server: SocketAddr,
+        client_id: u32,
+        tcp_port: u16,
+    },
     /// LowID peer without server context: eD2K user hash (only for a
     /// buddy/direct-callback-capable source, per the oracle capability gate).
     UserHash([u8; 16]),
@@ -82,6 +92,7 @@ impl DeadSourceKey {
             return Some(Self::ServerScoped {
                 server,
                 client_id: source.client_id,
+                tcp_port: source.tcp_port,
             });
         }
         // LowID Kad source without a server: the oracle keys on the user hash
@@ -268,13 +279,14 @@ mod tests {
         assert!(!list.is_dead_source(now, FILE_A, &other_hash));
     }
 
-    /// REG-5(b): a LowID server-scoped source is keyed on (server, client-id),
-    /// NOT the reported TCP port (oracle `operator==` matches LowID on
-    /// `m_dwID`/`m_dwServerIP`, DeadSourceList.cpp:73-78). A port change on a
-    /// later re-report of the same server-scoped source still resolves to the
-    /// dead-listed identity.
+    /// A LowID server-scoped source is keyed on (server, client-id, tcp port).
+    /// The oracle `operator==` branch 1 requires `m_dwID` AND `m_nPort` AND
+    /// `m_dwServerIP` for a LowID source, because `m_nKadPort == 0` makes the
+    /// Kad-port alternative inert (DeadSourceList.cpp:54, :75-77). A re-report of
+    /// the same (server, client-id) on a DIFFERENT TCP port is a different
+    /// identity the oracle would retry; only the same port matches.
     #[test]
-    fn low_id_server_scoped_source_matches_after_a_port_change() {
+    fn low_id_server_scoped_source_is_keyed_by_tcp_port() {
         let mut list = DeadSourceList::default();
         let now = Instant::now();
         let server: SocketAddr = "203.0.113.2:4661".parse().unwrap();
@@ -284,12 +296,14 @@ mod tests {
         source.client_id = 4242;
         source.source_server = Some(server);
         assert!(list.add_dead_source(now, FILE_A, &source));
+        // Same (server, client-id, tcp port): the dead-listed identity.
+        assert!(list.is_dead_source(now, FILE_A, &source));
 
         // The server re-reports the same LowID (server, client-id) on a fresh
-        // TCP port: still the same dead source.
+        // TCP port: a different source the oracle would retry (m_nPort differs).
         let mut reported = source.clone();
         reported.tcp_port = 5000;
-        assert!(list.is_dead_source(now, FILE_A, &reported));
+        assert!(!list.is_dead_source(now, FILE_A, &reported));
     }
 
     /// REG-5(c): a LowID Kad source (no server) with NO buddy/direct-callback
