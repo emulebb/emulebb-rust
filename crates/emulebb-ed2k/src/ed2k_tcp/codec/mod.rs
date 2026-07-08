@@ -199,9 +199,15 @@ pub(super) fn decode_reask_callback_tcp_payload(payload: &[u8]) -> Result<ReaskC
     if payload.len() < 22 {
         anyhow::bail!("short OP_REASKCALLBACKTCP payload {}", payload.len());
     }
-    let raw_dest_ip = u32::from_le_bytes(payload[..4].try_into().unwrap());
+    // The dest IP travels in natural network byte order: the oracle buddy relay
+    // wrote sockAddr.sin_addr.s_addr verbatim via PokeUInt32 (ClientUDPSocket.cpp
+    // OP_REASKCALLBACKUDP relay) and ListenSocket.cpp OP_REASKCALLBACKTCP reads it
+    // straight back as a network-order address. Read the four octets as-is
+    // (a.b.c.d -> [a,b,c,d]). Contrast the sibling OP_CALLBACK field, which carries
+    // the IP in Kad host order and is byte-reversed on decode.
+    let dest_ip = Ipv4Addr::from(<[u8; 4]>::try_from(&payload[..4]).unwrap());
     Ok(ReaskCallbackTcp {
-        dest_ip: Ipv4Addr::from(raw_dest_ip.to_be_bytes()),
+        dest_ip,
         dest_port: u16::from_le_bytes(payload[4..6].try_into().unwrap()),
         file_hash: Ed2kHash(payload[6..22].try_into().unwrap()),
         extended_info_len: payload.len() - 22,

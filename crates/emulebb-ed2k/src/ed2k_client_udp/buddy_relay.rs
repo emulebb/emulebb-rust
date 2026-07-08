@@ -74,10 +74,13 @@ pub(crate) fn encode_reask_callback_tcp_relay(
     let forwarded_tail = &inbound_body[16..]; // strip the buddy-id prefix
 
     let mut body = Vec::with_capacity(4 + 2 + forwarded_tail.len());
-    // PokeUInt32(ip): the oracle holds the address in host byte order and writes
-    // it little-endian on the wire (the receiving source reads it back with the
-    // matching host-order convention; see ed2k_tcp::codec decode_reask_callback_tcp).
-    body.extend_from_slice(&u32::from_be_bytes(requester_ip.octets()).to_le_bytes());
+    // PokeUInt32(ip): the oracle passes the requester's IP as sockAddr.sin_addr.s_addr
+    // — already in network byte order — and PokeUInt32 writes those bytes to the wire
+    // as-is (ClientUDPSocket.cpp OP_REASKCALLBACKUDP relay). The firewalled source
+    // reads it straight back as network order (ListenSocket.cpp OP_REASKCALLBACKTCP),
+    // so emit the octets in natural network order (a.b.c.d -> [a,b,c,d]). This is the
+    // client-UDP order; contrast the sibling OP_CALLBACK IP, which is Kad host order.
+    body.extend_from_slice(&requester_ip.octets());
     body.extend_from_slice(&requester_port.to_le_bytes());
     body.extend_from_slice(forwarded_tail);
 
@@ -246,8 +249,8 @@ mod tests {
         let body = &frame[6..];
         assert_eq!(declared_len, body.len() + 1, "len counts opcode + body");
 
-        // Body: [ip u32 LE host-order][port u16 LE][file_hash 16][tail].
-        assert_eq!(&body[..4], &u32::from_be_bytes(ip.octets()).to_le_bytes());
+        // Body: [ip 4 network-order][port u16 LE][file_hash 16][tail].
+        assert_eq!(&body[..4], &ip.octets());
         assert_eq!(&body[4..6], &port.to_le_bytes());
         // The buddy-id must NOT appear; the file hash leads the forwarded tail.
         assert_eq!(&body[6..22], &file().0);
@@ -264,7 +267,7 @@ mod tests {
         let frame = encode_reask_callback_tcp_relay(&callback(None, None), ip, port, 2);
         let body = &frame[6..];
         let mut expected = Vec::new();
-        expected.extend_from_slice(&[0x04, 0x03, 0x02, 0x01]); // 1.2.3.4 host-order LE
+        expected.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]); // 1.2.3.4 network order
         expected.extend_from_slice(&[0x34, 0x12]); // port LE
         expected.extend_from_slice(&file().0);
         assert_eq!(body, expected.as_slice());
@@ -332,9 +335,9 @@ mod tests {
         let frame =
             encode_reask_callback_tcp_relay(&callback(Some(vec![true]), Some(3)), ip, port, 4);
         let body = &frame[6..];
-        // Manually mirror the source-side decode of the leading fixed fields.
-        let dest_ip =
-            Ipv4Addr::from(u32::from_le_bytes(body[..4].try_into().unwrap()).to_be_bytes());
+        // Manually mirror the source-side decode of the leading fixed fields
+        // (dest IP is natural network order).
+        let dest_ip = Ipv4Addr::from(<[u8; 4]>::try_from(&body[..4]).unwrap());
         let dest_port = u16::from_le_bytes(body[4..6].try_into().unwrap());
         let file_hash = Ed2kHash(body[6..22].try_into().unwrap());
         assert_eq!(dest_ip, ip);

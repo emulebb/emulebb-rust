@@ -232,7 +232,8 @@ fn kad_callback_decodes_stock_buddy_forward_shape() {
 fn reask_callback_tcp_decodes_buddy_forwarded_udp_reask_shape() {
     let file_hash = Ed2kHash([0x46; 16]);
     let mut payload = Vec::new();
-    payload.extend_from_slice(&u32::from_be_bytes([198, 51, 100, 8]).to_le_bytes());
+    // dest IP in natural network byte order (198.51.100.8 -> [198,51,100,8]).
+    payload.extend_from_slice(&[198, 51, 100, 8]);
     payload.extend_from_slice(&4672u16.to_le_bytes());
     payload.extend_from_slice(&file_hash.0);
     payload.extend_from_slice(&9u16.to_le_bytes());
