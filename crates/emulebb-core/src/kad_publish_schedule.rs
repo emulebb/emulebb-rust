@@ -219,6 +219,31 @@ impl KadPublishSchedule {
         }
     }
 
+    /// Reset the file's SOURCE publish clock so `source_due` becomes true on the
+    /// next tick. The analog of the oracle `SetLastPublishTimeKadSrc(0, 0)` called
+    /// when the source store search could not be CREATED
+    /// (`PrepareLookup(STOREFILE, ...) == NULL`, SharedFileList.cpp:3389-3390) —
+    /// nothing was sent, so the advanced-at-admission clock is rolled back for an
+    /// immediate retry instead of waiting the 5h interval. Only the source clock
+    /// is touched; keyword/notes timers are unaffected.
+    pub(crate) fn reset_source(&mut self, file_hash: &str) {
+        if let Some(state) = self.files.get_mut(file_hash) {
+            state.last_source = None;
+            state.last_source_buddy_ip = None;
+        }
+    }
+
+    /// Reset the file's KEYWORD publish clock for one keyword so `keyword_due`
+    /// becomes true on the next tick. Used to roll back the advanced-at-admission
+    /// keyword clock when the keyword store search could not be CREATED (no search
+    /// permit — nothing was sent), the oracle `PrepareLookup == NULL` analog for
+    /// the keyword kind. Only this (file, keyword) pair is affected; sibling
+    /// keywords and the source/notes timers are unaffected.
+    pub(crate) fn reset_keyword(&mut self, file_hash: &str, keyword: &str) {
+        self.keywords
+            .remove(&(file_hash.to_string(), keyword.to_string()));
+    }
+
     /// Record that the file's notes were (re)published at `now`.
     pub(crate) fn mark_notes_published(&mut self, file_hash: &str, now: Instant) {
         self.files
@@ -511,6 +536,43 @@ mod tests {
         // Resetting an unknown file is a harmless no-op (stays due-by-default).
         sched.reset_notes("unknownhash");
         assert!(sched.notes_due("unknownhash", t0));
+    }
+
+    #[test]
+    fn reset_source_makes_source_due_again() {
+        // A source store that could not be CREATED (oracle PrepareLookup==NULL ->
+        // SetLastPublishTimeKadSrc(0,0)) rolls the admission-advanced clock back to
+        // due, without disturbing the notes clock.
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        sched.mark_source_published(HASH, t0, None);
+        sched.mark_notes_published(HASH, t0);
+        assert!(!sched.source_due(HASH, t0, None));
+
+        sched.reset_source(HASH);
+        assert!(sched.source_due(HASH, t0, None));
+        // Notes timer untouched by a source reset.
+        assert!(!sched.notes_due(HASH, t0));
+
+        // Resetting an unknown file is a harmless no-op (stays due-by-default).
+        sched.reset_source("unknownhash");
+        assert!(sched.source_due("unknownhash", t0, None));
+    }
+
+    #[test]
+    fn reset_keyword_makes_only_that_keyword_due_again() {
+        // A keyword store that could not be CREATED rolls only that (file,keyword)
+        // clock back to due; a sibling keyword on the same file keeps its clock.
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        sched.mark_keyword_published(HASH, "ubuntu", t0);
+        sched.mark_keyword_published(HASH, "python", t0);
+        assert!(!sched.keyword_due(HASH, "ubuntu", t0));
+        assert!(!sched.keyword_due(HASH, "python", t0));
+
+        sched.reset_keyword(HASH, "ubuntu");
+        assert!(sched.keyword_due(HASH, "ubuntu", t0));
+        assert!(!sched.keyword_due(HASH, "python", t0));
     }
 
     #[test]

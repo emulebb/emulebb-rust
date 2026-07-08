@@ -5679,6 +5679,55 @@ fn mark_kad_file_publish_started(
     persist_kad_outbound_publish(metadata_store, file_hash, publish_kind, "", published_at_ms);
 }
 
+/// Roll back a Kad publish clock that was advanced at admission when the store
+/// search could not be CREATED (a `Busy` outcome: no search permit acquired, so
+/// no STORE packet was ever sent). Mirrors the oracle's immediate-retry reset for
+/// the `CSearchManager::PrepareLookup(...) == NULL` case — source
+/// `SetLastPublishTimeKadSrc(0, 0)` (SharedFileList.cpp:3389-3390) and notes
+/// `SetLastPublishTimeKadNotes(0)` (:3436-3437); the keyword kind is reset the
+/// same way so a permit-starved keyword store retries next tick rather than
+/// waiting the 24h interval. The persisted admission row is cleared too so a
+/// restart cannot re-hydrate the advanced clock. `TimedOut`/`Failed` are NOT
+/// rolled back: the oracle only resets when the lookup could not be created, and
+/// a search that WAS created and sent keeps its advanced clock (KnownFile.cpp:1839
+/// / SharedFileList.cpp:3342), which also avoids retrying timeout-heavy targets
+/// every tick.
+fn rollback_kad_publish_admission_on_busy(
+    metadata_store: &MetadataStore,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
+    kind: KadSharedPublishKind,
+    file_hashes: &[String],
+    keyword: Option<&str>,
+) {
+    let persist_kind = match kind {
+        KadSharedPublishKind::Keyword => MetadataKadOutboundPublishKind::Keyword,
+        KadSharedPublishKind::Source => MetadataKadOutboundPublishKind::Source,
+        KadSharedPublishKind::Notes => MetadataKadOutboundPublishKind::Notes,
+    };
+    for file_hash in file_hashes {
+        match kind {
+            KadSharedPublishKind::Keyword => {
+                if let Some(keyword) = keyword {
+                    schedule.reset_keyword(file_hash, keyword);
+                }
+            }
+            KadSharedPublishKind::Source => schedule.reset_source(file_hash),
+            KadSharedPublishKind::Notes => schedule.reset_notes(file_hash),
+        }
+        // Clear the persisted admission row so a restart before the retry cannot
+        // re-hydrate the advanced clock. For keyword this drops the file's whole
+        // keyword row set (the store lacks a keyword-scoped delete); at worst a
+        // sibling keyword republishes early after a restart, which stays budgeted.
+        if let Err(error) = metadata_store.delete_kad_outbound_publish(file_hash, persist_kind) {
+            tracing::warn!(
+                file_hash = %file_hash,
+                kind = kind.label(),
+                "failed to clear Kad publish row after busy rollback: {error:#}"
+            );
+        }
+    }
+}
+
 /// Build the master `CSharedFileList::Publish` firewall/buddy gate input from the
 /// current firewall + buddy state.
 async fn kad_publish_gate_input(
@@ -6421,6 +6470,17 @@ async fn drain_completed_kad_publish_tasks(
             },
             Err(KadSharedPublishError::Busy) => {
                 record_kad_publish_failure(runtime, outcome.kind, KadPublishFailureClass::Busy);
+                // A `Busy` outcome means the store search could not be created (no
+                // permit acquired, no packet sent) — the oracle `PrepareLookup ==
+                // NULL` case. Roll the clock advanced at admission back to due so
+                // the file retries next tick instead of waiting the full interval.
+                rollback_kad_publish_admission_on_busy(
+                    &runtime.metadata_store,
+                    schedule,
+                    outcome.kind,
+                    &outcome.file_hashes,
+                    outcome.keyword.as_deref(),
+                );
                 diag_kad_event::publish_failure(
                     diag_publish_kind(outcome.kind),
                     &primary_file_hash,
@@ -10843,6 +10903,93 @@ mod tests {
                 && publish.keyword.is_empty()
                 && publish.published_at_ms == published_at_ms
         }));
+    }
+
+    #[test]
+    fn busy_rollback_makes_publish_due_again_while_timeout_keeps_it_advanced() {
+        // Publish-G2: a `Busy` outcome (store search could not be created, no
+        // packet sent -> oracle PrepareLookup==NULL) rolls the admission-advanced
+        // clock back to due so the file retries next tick; a `TimedOut`/`Failed`
+        // outcome does NOT roll back (the search WAS created and sent), so that
+        // file keeps waiting its interval.
+        let store = MetadataStore::in_memory().unwrap();
+        let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
+        let started_at = Instant::now();
+        let published_at_ms = 42;
+        let keyword = "ubuntu";
+        let busy_keyword_hash = Ed2kHash::from_bytes([0x11; 16]).to_string();
+        let busy_source_hash = Ed2kHash::from_bytes([0x22; 16]).to_string();
+        let busy_notes_hash = Ed2kHash::from_bytes([0x33; 16]).to_string();
+        let timeout_source_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
+
+        // Admission advances every clock (keyword/source/notes).
+        mark_kad_keyword_publish_started(
+            &store,
+            &mut schedule,
+            std::slice::from_ref(&busy_keyword_hash),
+            keyword,
+            started_at,
+            published_at_ms,
+        );
+        for (hash, kind) in [
+            (&busy_source_hash, MetadataKadOutboundPublishKind::Source),
+            (&timeout_source_hash, MetadataKadOutboundPublishKind::Source),
+            (&busy_notes_hash, MetadataKadOutboundPublishKind::Notes),
+        ] {
+            mark_kad_file_publish_started(
+                &store,
+                &mut schedule,
+                hash,
+                kind,
+                started_at,
+                published_at_ms,
+                None,
+            );
+        }
+        assert!(!schedule.keyword_due(&busy_keyword_hash, keyword, started_at));
+        assert!(!schedule.source_due(&busy_source_hash, started_at, None));
+        assert!(!schedule.source_due(&timeout_source_hash, started_at, None));
+        assert!(!schedule.notes_due(&busy_notes_hash, started_at));
+
+        // Busy rollback on the keyword/source/notes stores that never sent a packet.
+        rollback_kad_publish_admission_on_busy(
+            &store,
+            &mut schedule,
+            KadSharedPublishKind::Keyword,
+            std::slice::from_ref(&busy_keyword_hash),
+            Some(keyword),
+        );
+        rollback_kad_publish_admission_on_busy(
+            &store,
+            &mut schedule,
+            KadSharedPublishKind::Source,
+            std::slice::from_ref(&busy_source_hash),
+            None,
+        );
+        rollback_kad_publish_admission_on_busy(
+            &store,
+            &mut schedule,
+            KadSharedPublishKind::Notes,
+            std::slice::from_ref(&busy_notes_hash),
+            None,
+        );
+
+        // Busy targets are due again immediately (re-selectable next tick).
+        assert!(schedule.keyword_due(&busy_keyword_hash, keyword, started_at));
+        assert!(schedule.source_due(&busy_source_hash, started_at, None));
+        assert!(schedule.notes_due(&busy_notes_hash, started_at));
+        // The timed-out source (created + sent, no rollback) keeps its clock.
+        assert!(!schedule.source_due(&timeout_source_hash, started_at, None));
+
+        // Persistence mirrors the in-memory rollback: busy rows are cleared, the
+        // timed-out source row survives.
+        let persisted = store.load_kad_outbound_publish_schedule().unwrap();
+        assert_eq!(persisted.publishes.len(), 1);
+        assert_eq!(persisted.publishes[0].file_hash, timeout_source_hash);
+        assert_eq!(
+            persisted.publishes[0].publish_kind,
+            MetadataKadOutboundPublishKind::Source
+        );
     }
 
     #[test]
