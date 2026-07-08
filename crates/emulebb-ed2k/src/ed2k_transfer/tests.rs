@@ -30,6 +30,7 @@ mod share_in_place;
 mod shared_entry;
 mod source_exchange;
 mod source_hints;
+mod upload_cooldown;
 mod upload_queue;
 mod upload_queue_credit;
 mod upload_queue_firewalled_callback;

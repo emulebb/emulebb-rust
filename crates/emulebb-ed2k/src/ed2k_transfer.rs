@@ -59,6 +59,7 @@ mod source_exchange;
 mod store;
 mod transfer_sql;
 mod upload;
+mod upload_cooldown;
 mod upload_queue;
 
 pub use catalog::{Ed2kSharedCatalog, Ed2kSharedEntry, Ed2kSharedRange};
@@ -332,6 +333,12 @@ impl Ed2kTransferRuntime {
         let shared_catalog = Arc::new(RwLock::new(
             transfer_sql::completed_catalog_from_metadata_store(&metadata)?,
         ));
+        // The ban store is built before the upload queue so the queue state can
+        // hand a no-request repeat-offender straight to the shared ban list
+        // (RUST-PAR-020 U-GAP3, mirroring `client->Ban(...)`, UploadQueue.cpp:1640).
+        let ban_store = Arc::new(crate::ban_store::BanStore::new());
+        let mut upload_queue_state = Ed2kUploadQueueState::new(upload_queue_config);
+        upload_queue_state.set_ban_store(Arc::clone(&ban_store));
         let runtime = Self {
             root_dir: root_dir.to_path_buf(),
             metadata,
@@ -345,7 +352,7 @@ impl Ed2kTransferRuntime {
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
-            upload_queue: Arc::new(Mutex::new(Ed2kUploadQueueState::new(upload_queue_config))),
+            upload_queue: Arc::new(Mutex::new(upload_queue_state)),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,
             ))),
@@ -360,7 +367,7 @@ impl Ed2kTransferRuntime {
             shared_publish_demand_notify: Arc::new(Notify::new()),
             credit_system_enabled: AtomicBool::new(true),
             ich_enabled: AtomicBool::new(true),
-            ban_store: Arc::new(crate::ban_store::BanStore::new()),
+            ban_store,
             corruption_blackbox: Arc::new(StdMutex::new(HashMap::new())),
         };
         // Credit aging on startup: drop peer credit rows last seen > 150 days ago

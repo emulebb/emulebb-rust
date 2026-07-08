@@ -303,6 +303,17 @@ impl Ed2kTransferRuntime {
             .release_session(handle, Instant::now());
     }
 
+    /// Seed the upload churn cooldown for a promoted waiter whose outbound
+    /// promote-connect could not be established (RUST-PAR-020 U-GAP3: the fork's
+    /// failed-admission / no-socket removal, UploadQueue.cpp:330-339,841-856).
+    /// Called from the promote-connect driver's failure path.
+    pub(crate) async fn note_failed_upload_promotion(&self, peer: &Ed2kUploadPeerIdentity) {
+        self.upload_queue
+            .lock()
+            .await
+            .note_failed_promotion(peer, Instant::now());
+    }
+
     /// Drain the granted-but-disconnected waiter promotions that need an
     /// outbound connect + OP_ACCEPTUPLOADREQ (master `AddUpNextClient`,
     /// UploadQueue.cpp:327-361). Each grant is rebound to a fresh connection id

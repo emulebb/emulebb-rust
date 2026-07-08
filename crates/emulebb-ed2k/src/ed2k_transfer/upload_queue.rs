@@ -2,8 +2,12 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     net::IpAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+use super::upload_cooldown::{CooldownBan, UploadCooldownTracker};
+use crate::ban_store::BanStore;
 
 const DEFAULT_FILE_PRIORITY_SCORE: i128 = 7;
 const VERY_LOW_FILE_PRIORITY_SCORE: i128 = 2;
@@ -407,6 +411,14 @@ pub(super) struct Ed2kUploadQueueState {
     /// (UploadQueue.cpp:370). Drives the 1/sec slot-open pacing gate.
     last_slot_open: Option<Instant>,
     throttle_next_send_at: Option<Instant>,
+    /// Per-IP upload anti-abuse cooldown + no-request repeat-offender strike
+    /// tracker (RUST-PAR-020 U-GAP3). Gates slot promotion and drives the
+    /// repeat-offender ban.
+    cooldown: UploadCooldownTracker,
+    /// Shared client ban list the no-request repeat-offender ban is wired to
+    /// (`client->Ban(...)` -> `CClientList::AddBannedClient`, UploadQueue.cpp:1640).
+    /// `None` in the queue-state unit tests that do not exercise banning.
+    ban_store: Option<Arc<BanStore>>,
 }
 
 impl Ed2kUploadQueueState {
@@ -420,7 +432,15 @@ impl Ed2kUploadQueueState {
             underfill_since: None,
             last_slot_open: None,
             throttle_next_send_at: None,
+            cooldown: UploadCooldownTracker::new(),
+            ban_store: None,
         }
+    }
+
+    /// Attach the shared ban store so a no-request repeat offender that crosses
+    /// the strike threshold is added to the client ban list.
+    pub(super) fn set_ban_store(&mut self, ban_store: Arc<BanStore>) {
+        self.ban_store = Some(ban_store);
     }
 
     pub(super) fn configure(&mut self, config: Ed2kUploadQueueConfig) {
@@ -530,11 +550,19 @@ impl Ed2kUploadQueueState {
         }
 
         self.refresh_elastic_underfill(now);
-        let phase = if self.active_session_count() < self.effective_active_slot_limit(now) {
+        // RUST-PAR-020 U-GAP3: a cooled-down peer is NOT granted a slot inline
+        // even when one is free -- the fork routes every requester through the
+        // waiting list and `FindBestClientInQueue` skips a cooled client
+        // (UploadQueue.cpp:228), so a reconnecting abuser cannot bypass its
+        // cooldown by racing a free slot. It joins the queue and is gated by the
+        // same cooldown (or re-promoted via the cooldown probe) until it expires.
+        let slot_free = self.active_session_count() < self.effective_active_slot_limit(now);
+        let cooled = self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now);
+        let phase = if slot_free && !cooled {
             Ed2kUploadSessionPhase::Granted
         } else {
-            // No free slot: this peer would join the waiting queue, so apply the
-            // master AddClientToQueue admission gates. First the firewalled-LowID
+            // No grant: this peer joins the waiting queue, so apply the master
+            // AddClientToQueue admission gates. First the firewalled-LowID
             // callback guard (opening check), then the per-IP cap + soft/hard
             // combined-score limit.
             if self.reject_firewalled_callback_admission(&key) {
@@ -740,6 +768,24 @@ impl Ed2kUploadQueueState {
         }
         self.reap_expired_sessions(now);
         self.promote_waiters(now);
+    }
+
+    /// Seed the churn cooldown for a promoted waiter whose outbound
+    /// promote-connect could NOT be established (RUST-PAR-020 U-GAP3): the fork's
+    /// failed-admission (`AddUpNextClient` `TryToConnect` failure,
+    /// UploadQueue.cpp:330-339) and no-socket (`Process`, :841-856) removals both
+    /// seed the IP-scoped churn cooldown so a peer that consumes slot-open
+    /// attempts without ever accepting an upload connection stops winning
+    /// selection. rust's connection-per-op model surfaces exactly this signal as
+    /// a failed promote-connect, and -- unlike a plain socket disconnect -- it
+    /// never fires on a normal slot handover, so it does not cool an unrelated
+    /// sibling behind a shared source IP.
+    pub(super) fn note_failed_promotion(&mut self, peer: &Ed2kUploadPeerIdentity, now: Instant) {
+        if peer.friend_slot {
+            return;
+        }
+        let budget = self.config.upload_limit_bytes_per_sec;
+        self.cooldown.set_churn_cooldown(peer.ip, false, budget, now);
     }
 
     pub(super) fn release_client(
@@ -1083,6 +1129,7 @@ impl Ed2kUploadQueueState {
 
     fn reap_expired_sessions(&mut self, now: Instant) {
         self.refresh_elastic_underfill(now);
+        self.cooldown.purge_expired(now);
         let active_before = self.active_session_count();
         let waiting_before = self.waiting_session_count();
         let expired = self
@@ -1143,12 +1190,51 @@ impl Ed2kUploadQueueState {
                     recycle.reason,
                 );
             }
+            // RUST-PAR-020 U-GAP3: seed the upload anti-abuse cooldown for a
+            // recycled slot. A never-requested slot (noRequestUnderfill, 0 bytes
+            // served) accrues a rolling-window strike and either a bounded
+            // no-request cooldown or, past the threshold, a repeat-offender ban
+            // (TrackNoRequestRepeatOffender + client->Ban, UploadQueue.cpp:1586-1656);
+            // a productive-but-slow slot (slowUnderfill) gets the slow-upload
+            // retry cooldown only (UploadQueue.cpp:2358-2366). A session-cap
+            // rotation is fair scheduling and is never penalised.
+            let budget = self.config.upload_limit_bytes_per_sec;
+            let mut force_drop = false;
+            match recycle.reason {
+                "noRequestUnderfill" => {
+                    // noRequestUnderfill fires only for a 0-byte slot, so the
+                    // recycle is always non-productive (the fork's productive
+                    // no-request path corresponds to slowUnderfill here).
+                    let outcome = self.cooldown.register_no_request_recycle(
+                        key.peer.ip,
+                        key.peer.user_hash,
+                        key.peer.friend_slot,
+                        budget,
+                        now,
+                        false,
+                    );
+                    if outcome.ban != CooldownBan::None {
+                        self.apply_cooldown_ban(&key.peer, outcome.ban, now);
+                        force_drop = true;
+                    }
+                }
+                "slowUnderfill" => {
+                    self.cooldown
+                        .set_slow_cooldown(key.peer.ip, key.peer.friend_slot, budget, now);
+                }
+                _ => {}
+            }
             let (file_priority_score, credit_score_permille) = self
                 .sessions
                 .get(&key)
                 .map(|session| (session.file_priority_score, session.credit_score_permille))
                 .unwrap_or_default();
-            let requeue = !key.peer.banned
+            // A banned offender is dropped, not requeued (oracle bRequeue=false
+            // for `client->Ban(...); return true;`). The cooldown itself does NOT
+            // drop the peer: it stays on the waiting list, just skipped for
+            // promotion until the cooldown expires.
+            let requeue = !force_drop
+                && !key.peer.banned
                 && !self.reject_queue_admission(
                     &key,
                     file_priority_score,
@@ -1191,6 +1277,28 @@ impl Ed2kUploadQueueState {
         }
         self.trim_waiting_queue(now);
         self.promote_waiters(now);
+    }
+
+    /// Apply a no-request repeat-offender ban to the shared ban list, mirroring
+    /// `client->Ban(reason, scope)` -> `CClientList::AddBannedClient`
+    /// (ClientList.cpp:361-373): a hash-scoped ban targets the user hash (or the
+    /// IP when no valid hash is present), a hash-rotation ban targets both keys.
+    /// The `BanStore` owns the 4h TTL, matching `CLIENTBANTIME`.
+    fn apply_cooldown_ban(&self, peer: &Ed2kUploadPeerIdentity, ban: CooldownBan, now: Instant) {
+        let Some(store) = self.ban_store.as_ref() else {
+            return;
+        };
+        // IPv4-only client policy: a non-IPv4 peer bans by hash only.
+        let ip_v4 = match peer.ip {
+            IpAddr::V4(v4) => Some(v4),
+            _ => None,
+        };
+        match ban {
+            CooldownBan::None => {}
+            CooldownBan::ByHash => store.ban_at(None, peer.user_hash, now),
+            CooldownBan::ByIp => store.ban_at(ip_v4, None, now),
+            CooldownBan::Both => store.ban_at(ip_v4, peer.user_hash, now),
+        }
     }
 
     fn underfilled_active_recycle_diagnostics(
@@ -1264,8 +1372,11 @@ impl Ed2kUploadQueueState {
         // UploadQueue.cpp:2412/2442). Under this queue's eager `promote_waiters`
         // model the capacity half is saturated by construction (active == the
         // effective limit whenever a waiter exists), so the surviving condition
-        // is replacement availability.
-        self.best_waiting_key(now)?;
+        // is replacement availability. A cooled-only waiting queue is NOT a
+        // replacement -- rotating a productive capped slot for a peer that cannot
+        // be promoted (all cooled, no probe) would idle the slot -- so the
+        // admissible selection gates the rotation (RUST-PAR-020 U-GAP3).
+        self.best_admissible_waiting_key(now)?;
         // Retain a productive capped slot while the upload line is underfilled:
         // rotating known throughput for an unknown replacement would widen the
         // underfill (UploadQueueSeams.h:683-684). `underfill_since` is refreshed
@@ -1374,7 +1485,7 @@ impl Ed2kUploadQueueState {
             if !self.slot_open_paced(now) {
                 break;
             }
-            let Some(next_key) = self.best_waiting_key(now) else {
+            let Some(next_key) = self.best_admissible_waiting_key(now) else {
                 break;
             };
             self.waiting_order.retain(|queued| queued != &next_key);
@@ -1455,10 +1566,56 @@ impl Ed2kUploadQueueState {
         ranked
     }
 
-    fn best_waiting_key(&self, now: Instant) -> Option<Ed2kUploadSessionKey> {
-        self.ranked_waiting_keys(now)
-            .first()
-            .map(|key| (*key).clone())
+    /// Best waiter eligible for a slot grant, applying the RUST-PAR-020 U-GAP3
+    /// cooldown gate (oracle `FindBestClientInQueue`, UploadQueue.cpp:201-257):
+    /// the highest-score waiter whose IP is NOT under an active upload cooldown.
+    /// When every eligible waiter is cooled down, fall back to the cooldown
+    /// PROBE -- the best probeable no-request-cooldown waiter -- but only while a
+    /// base slot would otherwise idle behind the cooled-only queue
+    /// (`cooldownProbeClient`, :235-243,257). Rank display is unaffected: a
+    /// cooled waiter keeps its queue rank, it is only skipped for promotion.
+    fn best_admissible_waiting_key(&self, now: Instant) -> Option<Ed2kUploadSessionKey> {
+        let ranked = self.ranked_waiting_keys(now);
+        for key in &ranked {
+            if !self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now) {
+                return Some((*key).clone());
+            }
+        }
+        // Everyone eligible is cooled down: probe only while a base slot idles.
+        if !self.open_base_slot_underfill() {
+            return None;
+        }
+        let mut best: Option<(&&Ed2kUploadSessionKey, Duration)> = None;
+        for key in &ranked {
+            if !self.cooldown.can_probe(key.peer.ip, now, true) {
+                continue;
+            }
+            let remaining = self
+                .cooldown
+                .cooldown_remaining(key.peer.ip, now)
+                .unwrap_or_default();
+            // `ranked` is score-descending, so on an equal remaining cooldown the
+            // earlier (higher-score) waiter is kept -- only a strictly-lower
+            // remaining replaces it (fork PreferHigherUploadQueueScore tie-break).
+            if best.is_none_or(|(_, best_remaining)| remaining < best_remaining) {
+                best = Some((key, remaining));
+            }
+        }
+        best.map(|(key, _)| (**key).clone())
+    }
+
+    /// Whether a base upload slot would idle behind an all-cooled waiting queue,
+    /// gating the cooldown probe (oracle
+    /// `HasOpenBaseUploadSlotDuringBroadbandUnderfill`, UploadQueueSeams.h:129).
+    /// Requires spare room below the base slot target AND an underfilled pipe;
+    /// with no configured budget any idle base slot qualifies, so an all-cooled
+    /// queue never permanently starves an open slot.
+    fn open_base_slot_underfill(&self) -> bool {
+        let base_slots = self.config.active_slots.max(1);
+        if self.active_session_count() >= base_slots {
+            return false;
+        }
+        self.config.upload_limit_bytes_per_sec == 0 || self.underfill_since.is_some()
     }
 
     fn worst_waiting_key(&self, now: Instant) -> Option<Ed2kUploadSessionKey> {

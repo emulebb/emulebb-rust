@@ -170,10 +170,17 @@ impl UploadPromoteDriver {
         grant: Ed2kUploadPendingPromotion,
     ) {
         let handle = grant.handle.clone();
+        let peer = grant.peer.clone();
         if let Err(error) = self.serve_promoted_upload(peer_endpoint, grant).await {
             debug!("outbound upload promote-connect to {peer_endpoint} failed: {error:#}");
-            // Drop the grant like the oracle's failed TryToConnect path; the
-            // release is a no-op when the session loop already released it.
+            // Seed the IP-scoped churn cooldown for a promoted waiter we could not
+            // hand the slot to (RUST-PAR-020 U-GAP3: failed-admission / no-socket,
+            // UploadQueue.cpp:330-339,841-856), then drop the grant like the
+            // oracle's failed TryToConnect path. The release is a no-op when the
+            // session loop already released it.
+            self.transfer_runtime
+                .note_failed_upload_promotion(&peer)
+                .await;
             self.transfer_runtime.release_upload_session(&handle).await;
         }
     }
