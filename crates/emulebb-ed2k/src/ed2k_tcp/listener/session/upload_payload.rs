@@ -229,6 +229,17 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     match queue_decision {
         ListenerQueueDecision::Granted => {}
         ListenerQueueDecision::Waiting => {
+            // RUST-PAR-021 GAP4: a cooled queued peer that sends a valid block
+            // request proves renewed demand, which clears its retry/slow/no-request
+            // upload cooldown once per window (oracle AddReqBlock ->
+            // ClearUploadRetryCooldown, UploadClient.cpp:613-627). The servable
+            // entry above establishes the file is known; a range with end > start
+            // is the valid block request (bRequestRangeValid).
+            if ranges.iter().any(|&(start, end)| end > start) {
+                upload_queue
+                    .note_queued_block_request(transfer_runtime, &peer_upload_identity)
+                    .await;
+            }
             let outcome = "queueWaitingBeforeRequest";
             request_diag.note_skip(outcome);
             emit_upload_request_outcome(&peer_upload_identity, &requested, outcome, &request_diag);

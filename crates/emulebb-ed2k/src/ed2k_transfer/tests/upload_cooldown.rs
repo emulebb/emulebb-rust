@@ -316,6 +316,37 @@ fn idle_no_request_slot_is_retained_when_all_waiters_are_hard_cooled() {
     );
 }
 
+/// RUST-PAR-021 GAP4: a cooled WAITING peer that sends a valid queued block
+/// request clears its retry/slow cooldown once per window (oracle AddReqBlock ->
+/// ClearUploadRetryCooldown), so it becomes promotable again -- proving genuine
+/// renewed demand escapes the retry cooldown.
+#[test]
+fn queued_block_request_clears_a_waiting_peers_cooldown() {
+    let mut state = Ed2kUploadQueueState::new(cooldown_config());
+    let t0 = Instant::now();
+
+    let (a, a_status) = begin(&mut state, upload_peer(1, 1, 0x0A00_0001), 1, t0);
+    assert_eq!(a_status, Ed2kUploadSessionStatus::Granted);
+
+    // A waiter whose IP carries a churn (retry) cooldown.
+    let peer_b = upload_peer(2, 2, 0x0A00_0002);
+    state.note_failed_promotion(&peer_b, t0);
+    let (b, b_status) = begin(&mut state, peer_b.clone(), 2, t0);
+    assert!(is_waiting(b_status));
+
+    // Free the slot: B stays queued because its churn cooldown gates promotion.
+    state.release_session(&a, t0 + Duration::from_secs(1));
+    assert!(is_waiting(state.poll_session(&b, t0 + Duration::from_secs(1), false)));
+
+    // B sends a valid queued block request: its cooldown clears and it promotes.
+    let cleared = state.note_queued_block_request(&peer_b, t0 + Duration::from_secs(2));
+    assert!(cleared, "a valid queued block request must clear the cooldown");
+    assert_eq!(
+        state.poll_session(&b, t0 + Duration::from_secs(2), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
 /// Direct unit coverage of the `UploadCooldownTracker` policy (tiers, strike
 /// thresholds, rolling window, probe eligibility), confirmed against
 /// `UploadQueueSeams.h`.
@@ -488,5 +519,58 @@ mod tracker {
         assert_eq!(tracker.repeat_cooldown_secs(1, BROADBAND_BUDGET), 30);
         assert_eq!(tracker.repeat_cooldown_secs(2, BROADBAND_BUDGET), 45);
         assert_eq!(tracker.repeat_cooldown_secs(5, BROADBAND_BUDGET), 45);
+    }
+
+    /// GAP4: a retry/churn cooldown is always clearable once per window by a
+    /// queued block request (oracle ClearUploadRetryCooldown retry path,
+    /// UploadQueue.cpp:1401-1415).
+    #[test]
+    fn queued_request_clears_a_retry_cooldown_once() {
+        let mut tracker = UploadCooldownTracker::new();
+        let t0 = Instant::now();
+        let peer = ip(11);
+        tracker.set_churn_cooldown(peer, false, STANDARD_BUDGET, t0);
+        assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
+        assert!(tracker.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(!tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
+    }
+
+    /// GAP4: an active UNPRODUCTIVE no-request cooldown blocks the clear while no
+    /// base slot is open (ShouldBlockQueuedRequestRetryClearForActiveNoRequest),
+    /// and the once-per-window clear is consumed so a later attempt is rejected
+    /// even once a slot opens (ShouldAllowNoRequestCooldownClear).
+    #[test]
+    fn queued_request_blocked_by_unproductive_no_request_cooldown_and_consumes_the_window() {
+        let mut tracker = UploadCooldownTracker::new();
+        let t0 = Instant::now();
+        let peer = ip(12);
+        tracker.register_no_request_recycle(peer, Some([1u8; 16]), false, STANDARD_BUDGET, t0, false);
+        // No open base slot: the unproductive no-request cooldown blocks the clear.
+        assert!(!tracker.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
+        // The window is consumed: even with an open slot now, the clear is refused.
+        assert!(!tracker.clear_retry_cooldown_on_queued_request(peer, true, t0 + Duration::from_secs(2)));
+        assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(2)));
+    }
+
+    /// GAP4: an active no-request cooldown clears when a base slot is open under
+    /// underfill, or when the recycle was productive
+    /// (ShouldClearActiveNoRequestCooldownOnQueuedRequest).
+    #[test]
+    fn queued_request_clears_no_request_cooldown_when_open_slot_or_productive() {
+        let t0 = Instant::now();
+
+        let mut open_slot = UploadCooldownTracker::new();
+        let peer = ip(13);
+        open_slot.register_no_request_recycle(peer, Some([2u8; 16]), false, STANDARD_BUDGET, t0, false);
+        assert!(open_slot.clear_retry_cooldown_on_queued_request(peer, true, t0 + Duration::from_secs(1)));
+        assert!(!open_slot.is_cooled(peer, false, t0 + Duration::from_secs(1)));
+
+        let mut productive = UploadCooldownTracker::new();
+        let peer = ip(14);
+        productive.register_no_request_recycle(peer, Some([3u8; 16]), false, STANDARD_BUDGET, t0, true);
+        // Productive clears even with no open base slot.
+        assert!(productive.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(!productive.is_cooled(peer, false, t0 + Duration::from_secs(1)));
     }
 }

@@ -103,6 +103,9 @@ pub(super) struct NoRequestRecycleOutcome {
 struct RetryCooldownState {
     until: Instant,
     track_until: Instant,
+    /// Whether the once-per-window queued-block-request clear has been consumed
+    /// for this cooldown (oracle `UploadRetryCooldownState::bQueuedRequestClearUsed`).
+    queued_request_clear_used: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +113,9 @@ struct NoRequestCooldownState {
     until: Instant,
     track_until: Instant,
     productive: bool,
+    /// Whether the once-per-window queued-block-request clear has been consumed
+    /// (oracle `NoRequestUploadRetryCooldownState::bQueuedRequestClearUsed`).
+    queued_request_clear_used: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +185,70 @@ impl UploadCooldownTracker {
             .get(&ip)
             .is_some_and(|state| state.until > now)
             && open_base_slot_underfill
+    }
+
+    /// Clear this IP's retry / slow / no-request upload cooldown once per window
+    /// when a queued peer sends a valid block request, mirroring
+    /// `CUploadQueue::ClearUploadRetryCooldown` (`UploadQueue.cpp:1348-1424`, via
+    /// `AddReqBlock`, `UploadClient.cpp:613-627`): genuine renewed demand escapes
+    /// the retry cooldown. The retry/slow/churn cooldown is always clearable once
+    /// per window; an active no-request cooldown clears once per window ONLY when
+    /// the recycle was productive OR a base slot is open under sustained underfill
+    /// (`ShouldClearActiveNoRequestCooldownOnQueuedRequest`) -- a bare unproductive
+    /// no-request cooldown blocks the clear
+    /// (`ShouldBlockQueuedRequestRetryClearForActiveNoRequest`). Repeat-offender
+    /// BANS are not touched: they live in the shared `BanStore`, not here. Returns
+    /// whether any cooldown was cleared.
+    pub(super) fn clear_retry_cooldown_on_queued_request(
+        &mut self,
+        ip: IpAddr,
+        open_base_slot_underfill: bool,
+        now: Instant,
+    ) -> bool {
+        let mut remove_no_request = false;
+        let mut had_no_request = false;
+        let mut cleared_no_request = false;
+        if let Some(state) = self.no_request_by_ip.get_mut(&ip) {
+            if state.track_until <= now {
+                remove_no_request = true;
+            } else if state.until > now {
+                had_no_request = true;
+                if state.queued_request_clear_used {
+                    return false;
+                }
+                state.queued_request_clear_used = true;
+                if state.productive || open_base_slot_underfill {
+                    state.until = now;
+                    cleared_no_request = true;
+                }
+            }
+        }
+        if remove_no_request {
+            self.no_request_by_ip.remove(&ip);
+        }
+        // An active-but-unproductive no-request cooldown with no open base slot
+        // stays: renewed demand has not been proven under sustained underfill.
+        if had_no_request && !cleared_no_request {
+            return false;
+        }
+        let mut remove_retry = false;
+        let mut cleared_retry = false;
+        if let Some(state) = self.retry_by_ip.get_mut(&ip) {
+            if state.track_until <= now {
+                remove_retry = true;
+            } else if state.until > now {
+                if state.queued_request_clear_used {
+                    return false;
+                }
+                state.queued_request_clear_used = true;
+                state.until = now;
+                cleared_retry = true;
+            }
+        }
+        if remove_retry {
+            self.retry_by_ip.remove(&ip);
+        }
+        cleared_retry || cleared_no_request
     }
 
     /// Seed the short churn cooldown used by the failed-admission, no-socket,
@@ -341,6 +411,7 @@ impl UploadCooldownTracker {
             RetryCooldownState {
                 until,
                 track_until: until,
+                queued_request_clear_used: false,
             },
         );
     }
@@ -367,6 +438,7 @@ impl UploadCooldownTracker {
             RetryCooldownState {
                 until,
                 track_until: until,
+                queued_request_clear_used: false,
             },
         );
         self.no_request_by_ip.insert(
@@ -375,6 +447,7 @@ impl UploadCooldownTracker {
                 until,
                 track_until,
                 productive,
+                queued_request_clear_used: false,
             },
         );
     }

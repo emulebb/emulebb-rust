@@ -541,6 +541,18 @@ impl ListenerUploadQueue {
         self.send_status(transport, peer_addr, status).await
     }
 
+    /// RUST-PAR-021 GAP4: forward a valid queued block request from a WAITING peer
+    /// so its retry/slow/no-request upload cooldown is cleared once per window
+    /// (oracle AddReqBlock -> ClearUploadRetryCooldown, UploadClient.cpp:613-627).
+    /// Returns whether a cooldown was cleared.
+    pub(in crate::ed2k_tcp) async fn note_queued_block_request(
+        &self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        peer: &Ed2kUploadPeerIdentity,
+    ) -> bool {
+        transfer_runtime.note_queued_upload_block_request(peer).await
+    }
+
     pub(in crate::ed2k_tcp) async fn note_range_request(
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,

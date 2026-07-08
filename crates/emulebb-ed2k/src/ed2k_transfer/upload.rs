@@ -175,6 +175,20 @@ impl Ed2kTransferRuntime {
             .note_request_parts(handle, Instant::now())
     }
 
+    /// RUST-PAR-021 GAP4: a cooled queued peer that sends a valid OP_REQUESTPARTS
+    /// block request clears its retry/slow/no-request upload cooldown once per
+    /// window (oracle ClearUploadRetryCooldown via AddReqBlock). Returns whether a
+    /// cooldown was cleared.
+    pub(crate) async fn note_queued_upload_block_request(
+        &self,
+        peer: &Ed2kUploadPeerIdentity,
+    ) -> bool {
+        self.upload_queue
+            .lock()
+            .await
+            .note_queued_block_request(peer, Instant::now())
+    }
+
     pub(crate) async fn note_upload_range_request(
         &self,
         handle: &Ed2kUploadSessionHandle,

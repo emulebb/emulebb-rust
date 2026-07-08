@@ -686,6 +686,37 @@ impl Ed2kUploadQueueState {
         self.status_for_key(&handle.key, now)
     }
 
+    /// RUST-PAR-021 GAP4: a cooled WAITING peer that sends a valid OP_REQUESTPARTS
+    /// block request clears its retry / slow / no-request cooldown once per window,
+    /// proving genuine renewed demand (oracle `ClearUploadRetryCooldown` invoked
+    /// from `AddReqBlock` for a US_ONUPLOADQUEUE client with a valid range,
+    /// UploadQueue.cpp:1348-1424, UploadClient.cpp:613-627). Only a peer currently
+    /// on the waiting queue attempts the clear; an already-granted peer has no
+    /// cooldown to escape. Returns whether a cooldown was cleared; a cleared waiter
+    /// is then eligible for the paced promote. Repeat-offender bans are untouched.
+    pub(super) fn note_queued_block_request(
+        &mut self,
+        peer: &Ed2kUploadPeerIdentity,
+        now: Instant,
+    ) -> bool {
+        let is_waiting = self.sessions.iter().any(|(key, session)| {
+            session.phase == Ed2kUploadSessionPhase::Waiting && same_upload_client(&key.peer, peer)
+        });
+        if !is_waiting {
+            return false;
+        }
+        let open_base_slot_underfill = self.open_base_slot_underfill();
+        let cleared = self.cooldown.clear_retry_cooldown_on_queued_request(
+            peer.ip,
+            open_base_slot_underfill,
+            now,
+        );
+        if cleared {
+            self.promote_waiters(now);
+        }
+        cleared
+    }
+
     pub(super) fn note_requested_range(
         &mut self,
         handle: &Ed2kUploadSessionHandle,
