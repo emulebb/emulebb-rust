@@ -6938,7 +6938,19 @@ async fn handle_kad_local_store_packet(
             .await?;
         }
         KadPacket::FirewalledReq(req) => {
-            spawn_kad_firewalled_response(dht.clone(), network.bind_ip, from, req.tcp_port);
+            let our_tcp_port = ed2k_listener
+                .local_addr()
+                .context("failed to read eD2K listener address while handling Kad FIREWALLED_REQ")?
+                .port();
+            spawn_kad_firewalled_response(
+                dht.clone(),
+                network.bind_ip,
+                runtime.reachability.clone(),
+                Arc::clone(kad_firewall),
+                our_tcp_port,
+                from,
+                req.tcp_port,
+            );
         }
         KadPacket::Firewalled2Req(req) => {
             spawn_modern_kad_firewalled_response(
@@ -6948,6 +6960,7 @@ async fn handle_kad_local_store_packet(
                 )?,
                 Arc::clone(server_state),
                 Arc::clone(kad_firewall),
+                runtime.reachability.clone(),
                 network.clone(),
                 from,
                 req,

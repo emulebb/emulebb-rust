@@ -15,12 +15,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use emulebb_ed2k::{
     ed2k_server::Ed2kServerState,
     ed2k_tcp::{
         Ed2kHelloIdentity, emule_connect_options, enrich_hello_identity, send_kad_firewall_tcp_ack,
     },
     kad_firewall::KadFirewallState,
+    reachability::ExternalReachability,
 };
 use emulebb_kad_dht::DhtNode;
 use emulebb_kad_proto::{
@@ -309,13 +311,74 @@ async fn probe_kad_firewalled_tcp(
     Ok(())
 }
 
+/// LOWID-G6 `RequestTCP` gate (oracle `CClientList::RequestTCP`,
+/// `ClientList.cpp:836-866`), applied before answering a Kad firewalled-check
+/// request (`KADEMLIA_FIREWALLED_RES` + the TCP connect-back probe). The oracle
+/// gates the entire answer (both call sites, `KademliaUDPListener.cpp:1635` and
+/// `:1668`) on `RequestTCP`; when it returns false, no response and no probe are
+/// sent. Refuse when
+///   (a) the requester `(IP, TCP port)` is our own endpoint (self-check,
+///       `ClientList.cpp:840`), or
+///   (b) we are already in a Kad relationship with this IP — a TCP
+///       firewall-check we are running against it (`is_tcp_firewall_check_ip`,
+///       the oracle `KS_QUEUED_FWCHECK` / buddy collision, `ClientList.cpp:848`).
+///
+/// Residual: the existing-outbound-socket refusal (`ClientList.cpp:850-851`,
+/// "already existing socket can give false high ID") has no rust equivalent —
+/// the responder opens a fresh probe socket per request and keeps no global
+/// per-endpoint socket table to consult — so condition (c) is not wired.
+async fn kad_firewalled_request_allowed(
+    reachability: &ExternalReachability,
+    kad_firewall: &Arc<Mutex<KadFirewallState>>,
+    our_tcp_port: u16,
+    from: SocketAddr,
+    requester_tcp_port: u16,
+) -> bool {
+    let IpAddr::V4(from_ip) = from.ip() else {
+        // Non-IPv4 requesters are already unanswered (send_kad_firewalled_response
+        // only replies to IPv4); stay silent.
+        return false;
+    };
+    // (a) self-endpoint.
+    if reachability.get() == Some(from_ip) && requester_tcp_port == our_tcp_port {
+        tracing::debug!("ignoring Kad firewalled-check from {from}: self endpoint");
+        return false;
+    }
+    // (b) Kad TCP firewall-check collision (we are probing this IP for our own
+    // firewall recheck / buddy stuff), so don't also connect back to it.
+    if kad_firewall
+        .lock()
+        .await
+        .is_tcp_firewall_check_ip(from.ip(), Utc::now())
+    {
+        tracing::debug!("ignoring Kad firewalled-check from {from}: TCP firewall-check collision");
+        return false;
+    }
+    true
+}
+
 pub(crate) fn spawn_kad_firewalled_response(
     dht: DhtNode,
     bind_ip: Ipv4Addr,
+    reachability: ExternalReachability,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    our_tcp_port: u16,
     from: SocketAddr,
     tcp_port: u16,
 ) {
     tokio::spawn(async move {
+        // Oracle RequestTCP gate (ClientList.cpp:836-866): silent when refused.
+        if !kad_firewalled_request_allowed(
+            &reachability,
+            &kad_firewall,
+            our_tcp_port,
+            from,
+            tcp_port,
+        )
+        .await
+        {
+            return;
+        }
         if let Err(error) = send_kad_firewalled_response(&dht, from).await {
             tracing::debug!("Kad FIREWALLED_RES failed for {from}: {error:#}");
             return;
@@ -362,16 +425,30 @@ async fn kad_firewall_ack_hello_identity(
     Ok(enrich_hello_identity(identity, server_state, kad_firewall).await)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_modern_kad_firewalled_response(
     dht: DhtNode,
     listener_addr: SocketAddr,
     server_state: Arc<RwLock<Ed2kServerState>>,
     kad_firewall: Arc<Mutex<KadFirewallState>>,
+    reachability: ExternalReachability,
     network: Ed2kNetworkConfig,
     from: SocketAddr,
     req: Firewalled2Req,
 ) {
     tokio::spawn(async move {
+        // Oracle RequestTCP gate (ClientList.cpp:836-866): silent when refused.
+        if !kad_firewalled_request_allowed(
+            &reachability,
+            &kad_firewall,
+            listener_addr.port(),
+            from,
+            req.tcp_port,
+        )
+        .await
+        {
+            return;
+        }
         if let Err(error) = send_kad_firewalled_response(&dht, from).await {
             tracing::debug!("Kad FIREWALLED_RES failed for modern request from {from}: {error:#}");
             return;
@@ -463,6 +540,66 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("not assigned to a local interface")
+        );
+    }
+
+    /// LOWID-G6: the RequestTCP gate refuses (silent: caller sends no RES/probe)
+    /// when the firewalled-check requester is our own endpoint, or when we are
+    /// already running a Kad TCP firewall check against that IP (collision).
+    #[tokio::test]
+    async fn firewalled_request_gate_refuses_self_and_collision() {
+        let our_ip = Ipv4Addr::new(198, 51, 100, 7);
+        let our_tcp_port = 4662u16;
+        let reachability = ExternalReachability::new();
+        reachability.set(our_ip);
+        let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+
+        // (a) self-endpoint: same IP + our TCP port -> refused.
+        let self_from = SocketAddr::new(IpAddr::V4(our_ip), 55000);
+        assert!(
+            !kad_firewalled_request_allowed(
+                &reachability,
+                &kad_firewall,
+                our_tcp_port,
+                self_from,
+                our_tcp_port,
+            )
+            .await
+        );
+
+        // (b) collision: an IP we are mid TCP firewall-check with -> refused.
+        let peer_ip = Ipv4Addr::new(203, 0, 113, 20);
+        let peer_from = SocketAddr::new(IpAddr::V4(peer_ip), 55000);
+        kad_firewall
+            .lock()
+            .await
+            .add_tcp_firewall_check_ip(IpAddr::V4(peer_ip), Utc::now());
+        assert!(
+            !kad_firewalled_request_allowed(
+                &reachability,
+                &kad_firewall,
+                our_tcp_port,
+                peer_from,
+                our_tcp_port,
+            )
+            .await
+        );
+    }
+
+    /// LOWID-G6: a normal requester (not us, no in-flight firewall-check
+    /// collision) is allowed, so the responder answers with RES + the probe.
+    #[tokio::test]
+    async fn firewalled_request_gate_allows_normal_requester() {
+        let reachability = ExternalReachability::new();
+        reachability.set(Ipv4Addr::new(198, 51, 100, 7));
+        let kad_firewall = Arc::new(Mutex::new(KadFirewallState::default()));
+        let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 30)), 55000);
+        assert!(
+            kad_firewalled_request_allowed(&reachability, &kad_firewall, 4662, from, 4662).await
+        );
+        // A matching TCP port but a different IP than ours is not a self-endpoint.
+        assert!(
+            kad_firewalled_request_allowed(&reachability, &kad_firewall, 4662, from, 4662).await
         );
     }
 }
