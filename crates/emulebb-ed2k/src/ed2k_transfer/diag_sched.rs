@@ -111,6 +111,27 @@ pub(crate) fn queue_rank(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &st
     emit(FAMILY, "queue_rank", "info", keys, body);
 }
 
+/// `queue_rank_suppressed` (schema extension, rust-local): a waiting peer's rank
+/// was NOT put on the wire because the peer lacks the eMule extended protocol —
+/// the oracle's `SendRankingInfo` early return (`!ExtProtocolAvailable()`,
+/// UploadClient.cpp:962-963), which sends nothing to plain-eDonkey clients.
+/// Emitted so the soak diff can still see the waiting transition locally even
+/// though no OP_QUEUERANKING packet exists to dump.
+pub(crate) fn queue_rank_suppressed(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    rank: u16,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "outcome": "waiting",
+        "queueRank": rank,
+        "suppressed": "no_ext_protocol",
+    });
+    emit(FAMILY, "queue_rank_suppressed", "low", keys, body);
+}
+
 /// `upload_admission_rejected` (schema extension, rust-local): an upload-queue
 /// admission was refused and — matching the oracle's silent
 /// `CUploadQueue::AddClientToQueue` early returns (banned client

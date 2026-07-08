@@ -50,6 +50,14 @@ pub(in crate::ed2k_tcp) struct ListenerUploadQueue {
     // bRequeue=false, CheckForTimeOver, UploadQueue.cpp:2320-2321; requeue guard
     // in Process, UploadQueue.cpp:883-884).
     peer_banned: bool,
+    // Whether the peer speaks the eMule extended protocol (mule hello with
+    // CT_EMULEVERSION, or OP_EMULEINFO). OP_QUEUERANKING is ONLY sent to such
+    // peers: the oracle's SendRankingInfo early-returns for everyone else
+    // (`!ExtProtocolAvailable()`, UploadClient.cpp:962-963) and this oracle
+    // never sends the legacy edonkey OP_QUEUERANK, so a plain-eDonkey waiter
+    // hears nothing. Refreshed on every ask because OP_EMULEINFO may upgrade
+    // the peer to eMule after admission.
+    peer_ext_protocol: bool,
     verified_reader: Option<(Ed2kHash, Ed2kVerifiedRangeReader)>,
     // Per-connection ledger of requested upload blocks (fileHash, start, end,
     // count, first-seen) for MFC repeat_block_request parity. Bounded and pruned
@@ -71,6 +79,7 @@ impl ListenerUploadQueue {
             diag_peer: None,
             diag_peer_hash: None,
             peer_banned: false,
+            peer_ext_protocol: false,
             verified_reader: None,
             block_request_ledger: Vec::new(),
             close_reason: None,
@@ -118,8 +127,8 @@ impl ListenerUploadQueue {
         None
     }
 
-    /// Capture the advertised peer identity for the `sched` diag emits and the
-    /// banned-recycle packet suppression.
+    /// Capture the advertised peer identity for the `sched` diag emits, the
+    /// banned-recycle packet suppression and the rank-packet family gate.
     fn record_diag_peer(&mut self, peer_identity: &Ed2kUploadPeerIdentity) {
         self.diag_peer = Some(diag_sched::peer_label(
             peer_identity.ip,
@@ -127,6 +136,7 @@ impl ListenerUploadQueue {
         ));
         self.diag_peer_hash = peer_identity.user_hash;
         self.peer_banned = peer_identity.banned;
+        self.peer_ext_protocol = peer_identity.is_emule_client;
     }
 
     /// Whether a slot demotion/recycle owes the peer the OP_OUTOFPARTREQS
@@ -291,13 +301,18 @@ impl ListenerUploadQueue {
     /// Answer one OP_STARTUPLOADREQ for a served file. Returns the packet to
     /// put on the wire, or `None` where the oracle is silent: a rejected
     /// admission (AddClientToQueue early returns, UploadQueue.cpp:1854,
-    /// 1905-1915, 1939-1941 — no packet).
+    /// 1905-1915, 1939-1941 — no packet) and a waiting rank toward a
+    /// non-eMule peer (SendRankingInfo `!ExtProtocolAvailable()` early return,
+    /// UploadClient.cpp:962-963).
     pub(in crate::ed2k_tcp) async fn start_upload_reply(
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         peer_identity: Ed2kUploadPeerIdentity,
         requested: &Ed2kHash,
     ) -> Option<Vec<u8>> {
+        // OP_EMULEINFO may upgrade the peer to eMule after admission; refresh
+        // the rank-packet family gate on every ask.
+        self.peer_ext_protocol = peer_identity.is_emule_client;
         let mut status = if self.file_hash.as_ref() == Some(requested) {
             match self.session.as_ref() {
                 Some(upload_session_handle) => {
@@ -329,8 +344,7 @@ impl ListenerUploadQueue {
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
                 self.mark_waiting();
-                self.emit_queue_rank(rank);
-                Some(encode_queue_ranking(rank))
+                self.rank_packet(rank)
             }
             // Admission refused (master AddClientToQueue returned without
             // queuing): the oracle sends NOTHING on this TCP path
@@ -379,6 +393,30 @@ impl ListenerUploadQueue {
         status
     }
 
+    /// Family-gated waiting-rank packet: OP_QUEUERANKING (emule prot) for an
+    /// eMule extended-protocol peer, NOTHING for a plain-eDonkey peer — the
+    /// oracle's SendRankingInfo early-returns for `!ExtProtocolAvailable()`
+    /// (UploadClient.cpp:962-963) and never sends the legacy edonkey
+    /// OP_QUEUERANK variant.
+    fn rank_packet(&self, rank: u16) -> Option<Vec<u8>> {
+        if self.peer_ext_protocol {
+            self.emit_queue_rank(rank);
+            Some(encode_queue_ranking(rank))
+        } else {
+            if let (Some(peer), Some(file_hash)) =
+                (self.diag_peer.as_deref(), self.file_hash.as_ref())
+            {
+                diag_sched::queue_rank_suppressed(
+                    peer,
+                    self.diag_peer_hash,
+                    &file_hash.to_string(),
+                    rank,
+                );
+            }
+            None
+        }
+    }
+
     /// Attach a promoted-outbound slot grant (a waiter with no live connection
     /// promoted by the runtime queue) to this fresh outbound connection and
     /// push OP_ACCEPTUPLOADREQ (oracle `ConnectionEstablished`,
@@ -414,6 +452,9 @@ impl ListenerUploadQueue {
         transport: &mut Ed2kTransport,
         peer_addr: SocketAddr,
     ) -> Result<ListenerQueueDecision> {
+        // OP_EMULEINFO may upgrade the peer to eMule after admission; refresh
+        // the rank-packet family gate on every ask.
+        self.peer_ext_protocol = peer_identity.is_emule_client;
         if self.file_hash.as_ref() == Some(requested) {
             // WHY: queued peers remember the requested file before they own a slot; a later
             // OP_REQUESTPARTS must re-check the global queue state instead of bypassing limits.
@@ -553,6 +594,7 @@ impl ListenerUploadQueue {
         self.diag_peer = None;
         self.diag_peer_hash = None;
         self.peer_banned = false;
+        self.peer_ext_protocol = false;
         self.verified_reader = None;
     }
 
@@ -607,21 +649,24 @@ impl ListenerUploadQueue {
 
     /// Send one queue rank in reply to a re-ask; rank is NEVER pushed on a
     /// timer (oracle SendRankingInfo fires only from the re-ask paths,
-    /// UploadQueue.cpp:1866,1963,1986).
+    /// UploadQueue.cpp:1866,1963,1986) and ONLY to an eMule extended-protocol
+    /// peer (`!ExtProtocolAvailable()` early return, UploadClient.cpp:962-963;
+    /// a plain-eDonkey waiter hears nothing).
     async fn send_queue_rank(
         &mut self,
         transport: &mut Ed2kTransport,
         peer_addr: SocketAddr,
         rank: u16,
     ) -> Result<()> {
-        let reply = encode_queue_ranking(rank);
+        self.granted_sent = false;
+        let Some(reply) = self.rank_packet(rank) else {
+            return Ok(());
+        };
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "queue_ranking", &reply);
         transport
             .write_all(&reply)
             .await
             .with_context(|| format!("failed to send OP_QUEUERANKING to {peer_addr}"))?;
-        self.granted_sent = false;
-        self.emit_queue_rank(rank);
         Ok(())
     }
 
@@ -788,6 +833,62 @@ mod tests {
         assert_eq!(reply, None, "a rejected admission must stay silent");
         assert!(rejected.session.is_none());
         assert_eq!(runtime.upload_queue_snapshot().await.len(), 4);
+    }
+
+    /// UP-3: OP_QUEUERANKING is gated on the eMule extended protocol — the
+    /// oracle's SendRankingInfo early-returns for a plain-eDonkey peer
+    /// (`!ExtProtocolAvailable()`, UploadClient.cpp:962-963) and never sends
+    /// the legacy edonkey OP_QUEUERANK — while a tracked eMule waiter's
+    /// re-ask still earns its real rank (UP-1 re-attach).
+    #[tokio::test]
+    async fn queue_rank_is_sent_only_to_emule_extended_protocol_peers() {
+        let root = unique_test_dir("ed2k-listener-rank-family-gate");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        use_one_slot_queue(&runtime).await;
+        let file_hash = Ed2kHash::from_bytes([0x66; 16]);
+
+        // Slot occupant.
+        let mut granted = ListenerUploadQueue::new();
+        let occupant_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41)), 4661);
+        let reply = granted
+            .start_upload_reply(&runtime, emule_identity(occupant_addr), &file_hash)
+            .await;
+        assert_eq!(reply, Some(encode_accept_upload_req()));
+
+        // A plain-eDonkey waiter is enqueued but hears nothing.
+        let edonkey_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)), 4662);
+        let edonkey_identity = super::super::upload_peer_identity_from_socket(edonkey_addr);
+        assert!(!edonkey_identity.is_emule_client);
+        let mut edonkey_queue = ListenerUploadQueue::new();
+        let reply = edonkey_queue
+            .start_upload_reply(&runtime, edonkey_identity.clone(), &file_hash)
+            .await;
+        assert_eq!(reply, None, "a plain-eDonkey waiter must hear nothing");
+        assert!(
+            edonkey_queue.session.is_some(),
+            "the silent waiter is still enqueued"
+        );
+
+        // An eMule waiter behind it gets its real rank on the wire.
+        let emule_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 43)), 4663);
+        let mut emule_queue = ListenerUploadQueue::new();
+        let reply = emule_queue
+            .start_upload_reply(&runtime, emule_identity(emule_addr), &file_hash)
+            .await;
+        assert_eq!(reply, Some(encode_queue_ranking(2)));
+
+        // A tracked eMule waiter's re-ask still answers with the real rank...
+        let reply = emule_queue
+            .start_upload_reply(&runtime, emule_identity(emule_addr), &file_hash)
+            .await;
+        assert_eq!(reply, Some(encode_queue_ranking(2)));
+
+        // ...and the eDonkey waiter's re-ask stays silent.
+        let reply = edonkey_queue
+            .start_upload_reply(&runtime, edonkey_identity, &file_hash)
+            .await;
+        assert_eq!(reply, None);
+        assert_eq!(runtime.upload_queue_snapshot().await.len(), 3);
     }
 
     /// FIX 5 invariant: the upload slot must be reclaimed on EVERY exit path.
