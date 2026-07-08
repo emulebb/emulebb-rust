@@ -6809,6 +6809,7 @@ async fn handle_kad_local_store_packet(
         packet,
         from,
         receiver_verify_key_valid,
+        sender_verify_key,
         ..
     } = received;
     if let IpAddr::V4(ip) = from.ip()
@@ -7269,9 +7270,14 @@ async fn handle_kad_local_store_packet(
                 kad_firewall,
                 kad_buddy,
                 buddy_registry,
+                &runtime.reachability,
                 network,
                 from,
                 req,
+                // LOWID-G11: the oracle appends the connect-options byte only when
+                // the requester carried a UDP key (senderUDPKey non-empty); the
+                // recovered sender verify key is that signal.
+                sender_verify_key.is_some(),
             )
             .await?;
         }
@@ -7340,6 +7346,33 @@ async fn handle_kad_local_store_packet(
 /// (not TCP- or UDP-firewalled) and do not already serve a buddy. On acceptance
 /// we register the requester and reply `FINDBUDDY_RES` echoing its `buddy_id`,
 /// our eD2k client hash, and our TCP port (plus our connect options).
+/// LOWID-G12 self-endpoint pre-check: refuse a `FINDBUDDY_REQ` whose `(IP, TCP
+/// port)` is our own advertised endpoint (oracle `ClientList.cpp:906`,
+/// `serverconnect->GetLocalIP() == nContactIP && thePrefs.GetPort() == TCPPort`).
+/// IPv4-only; a non-IPv4 source or an unknown public IP can never be us.
+fn find_buddy_req_is_self_endpoint(
+    from_ip: IpAddr,
+    req_tcp_port: u16,
+    our_public_ip: Option<Ipv4Addr>,
+    our_tcp_port: u16,
+) -> bool {
+    matches!(
+        (from_ip, our_public_ip),
+        (IpAddr::V4(from), Some(ours)) if from == ours
+    ) && req_tcp_port == our_tcp_port
+}
+
+/// LOWID-G11 `FINDBUDDY_RES` connect-options byte: present only when the requester
+/// carried a UDP key (oracle `if (!senderUDPKey.IsEmpty())`,
+/// `KademliaUDPListener.cpp:1757-1758`), so a keyless legacy requester receives
+/// the 34-byte response with no trailing byte.
+fn find_buddy_res_connect_options(
+    requester_has_udp_key: bool,
+    obfuscation_enabled: bool,
+) -> Option<u8> {
+    requester_has_udp_key.then(|| emule_connect_options(obfuscation_enabled))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_kad_find_buddy_req(
     dht: &DhtNode,
@@ -7348,9 +7381,11 @@ async fn handle_kad_find_buddy_req(
     kad_firewall: &Arc<Mutex<KadFirewallState>>,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
     buddy_registry: &BuddySocketRegistry,
+    reachability: &ExternalReachability,
     network: &Ed2kNetworkConfig,
     from: SocketAddr,
     req: FindBuddyReq,
+    requester_has_udp_key: bool,
 ) -> Result<()> {
     // We cannot relay for others while firewalled ourselves (oracle refuses with
     // GetFirewalled() || IsFirewalledUDP(true) || !IsVerified()). IsFirewalledUDP
@@ -7364,6 +7399,29 @@ async fn handle_kad_find_buddy_req(
         .local_addr()
         .context("failed to read eD2K listener address while handling Kad FINDBUDDY_REQ")?
         .port();
+
+    // LOWID-G12: oracle IncomingBuddy pre-checks (ClientList.cpp:895-907), each a
+    // silent abort before accepting a new incoming buddy.
+    //   - Kad-fwcheck collision (ClientList.cpp:902): we are mid TCP firewall
+    //     check with this IP; RequestTCP owns the client, so refuse.
+    //   - self-endpoint (ClientList.cpp:906): never buddy with ourselves.
+    // The known-client-by-IP guard (ClientList.cpp:900, FindClientByIP) has no
+    // rust equivalent: this client is connection-per-operation and keeps no
+    // global CUpDownClient list to look a peer up in, so that pre-check is not
+    // wired (the fwcheck-collision guard covers the main conflicting relationship).
+    {
+        let firewall = kad_firewall.lock().await;
+        if firewall.is_tcp_firewall_check_ip(from.ip(), Utc::now()) {
+            tracing::debug!(
+                "ignoring Kad FINDBUDDY_REQ from {from}: Kad TCP firewall-check collision"
+            );
+            return Ok(());
+        }
+    }
+    if find_buddy_req_is_self_endpoint(from.ip(), req.tcp_port, reachability.get(), tcp_port) {
+        tracing::debug!("ignoring Kad FINDBUDDY_REQ from {from}: self endpoint");
+        return Ok(());
+    }
 
     let buddy = IncomingBuddy {
         client_hash: req.client_hash,
@@ -7394,7 +7452,13 @@ async fn handle_kad_find_buddy_req(
         buddy_id: req.buddy_id,
         client_hash: Ed2kHash::from_bytes(network.user_hash),
         tcp_port,
-        connect_options: Some(emule_connect_options(network.config.obfuscation_enabled)),
+        // LOWID-G11: the oracle appends the connect-options byte only when the
+        // requester carried a UDP key (KademliaUDPListener.cpp:1757-1758). A
+        // keyless legacy requester gets the 34-byte response with no trailing byte.
+        connect_options: find_buddy_res_connect_options(
+            requester_has_udp_key,
+            network.config.obfuscation_enabled,
+        ),
     };
     // The oracle establishes the buddy relationship only as part of replying;
     // if the send fails, release the slot we optimistically claimed (and skip
@@ -8199,6 +8263,55 @@ mod tests {
             connected_server_keyword_search_timeout(&config),
             Duration::from_secs(75)
         );
+    }
+
+    #[test]
+    fn find_buddy_res_connect_options_present_only_for_keyed_requester() {
+        // LOWID-G11: a keyless legacy requester gets no trailing options byte.
+        assert_eq!(find_buddy_res_connect_options(false, true), None);
+        assert_eq!(find_buddy_res_connect_options(false, false), None);
+        // A keyed requester gets the 0.49a+ connect-options byte.
+        assert_eq!(
+            find_buddy_res_connect_options(true, true),
+            Some(emule_connect_options(true))
+        );
+        assert_eq!(
+            find_buddy_res_connect_options(true, false),
+            Some(emule_connect_options(false))
+        );
+    }
+
+    #[test]
+    fn find_buddy_req_self_endpoint_matches_only_our_ip_and_port() {
+        // LOWID-G12: refuse a request whose (IP, TCP port) is our own endpoint.
+        let ours = Ipv4Addr::new(203, 0, 113, 5);
+        let our_port = 4662u16;
+        assert!(find_buddy_req_is_self_endpoint(
+            IpAddr::V4(ours),
+            our_port,
+            Some(ours),
+            our_port
+        ));
+        // Different IP or port is not us.
+        assert!(!find_buddy_req_is_self_endpoint(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)),
+            our_port,
+            Some(ours),
+            our_port
+        ));
+        assert!(!find_buddy_req_is_self_endpoint(
+            IpAddr::V4(ours),
+            4663,
+            Some(ours),
+            our_port
+        ));
+        // Unknown public IP: can never match (we cannot be sure it is us).
+        assert!(!find_buddy_req_is_self_endpoint(
+            IpAddr::V4(ours),
+            our_port,
+            None,
+            our_port
+        ));
     }
 
     fn test_network_config_with_store(
