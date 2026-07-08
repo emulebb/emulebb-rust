@@ -6692,17 +6692,16 @@ async fn current_buddy_need(runtime: &KadBuddyRuntime) -> BuddyNeedInput {
     }
 }
 
-/// Run one buddy search: look up Kad nodes near our derived buddy target and
-/// send `KADEMLIA_FINDBUDDY_REQ` to the closest reachable candidate.
+/// Run one buddy search (oracle `CSearchManager::FindBuddy` -> `CSearch` type
+/// FINDBUDDY): a full Kad walk near our derived buddy target whose routing
+/// `KADEMLIA2_REQ`s carry the STORE contact count, sending
+/// `KADEMLIA_FINDBUDDY_REQ` to each tolerance-passing responded contact up to
+/// the oracle answer target within the FINDBUDDY search lifetime
+/// (Search.cpp:864-896,1653-1657). Each `FINDBUDDY_RES` reply is recorded by
+/// the unsolicited inbound dispatch into [`KadBuddyState`].
 async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
     let own_id = runtime.dht.own_id();
     let target = buddy_search_target(own_id);
-    let candidates = runtime
-        .dht
-        .lookup_nodes(&target)
-        .await
-        .context("Kad buddy lookup failed")?;
-
     let our_tcp_port = runtime
         .ed2k_listener
         .local_addr()
@@ -6713,21 +6712,13 @@ async fn run_kad_buddy_search(runtime: &KadBuddyRuntime) -> Result<()> {
         client_hash: Ed2kHash::from_bytes(runtime.network.user_hash),
         tcp_port: our_tcp_port,
     };
-
-    // The buddy must not be ourselves; pick the closest other candidate.
-    let Some(candidate) = candidates.into_iter().find(|contact| contact.id != own_id) else {
-        tracing::debug!("Kad buddy search found no candidate near {target}");
-        return Ok(());
-    };
+    tracing::info!(
+        "starting Kad FINDBUDDY walk near {target} (we are firewalled, seeking a buddy)"
+    );
     runtime
         .dht
-        .send_packet(candidate.addr, &KadPacket::FindBuddyReq(request))
-        .await
-        .with_context(|| format!("failed to send Kad FINDBUDDY_REQ to {}", candidate.addr))?;
-    tracing::info!(
-        "sent Kad FINDBUDDY_REQ to candidate {} (we are firewalled, seeking a buddy)",
-        candidate.addr
-    );
+        .find_buddy_search(request, RpcWorkClass::Interactive)
+        .await;
     Ok(())
 }
 
