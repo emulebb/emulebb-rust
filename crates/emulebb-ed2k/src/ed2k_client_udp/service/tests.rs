@@ -261,6 +261,35 @@ fn junk_and_non_ipv4_are_ignored() {
 }
 
 #[test]
+fn mark_no_needed_parts_routes_by_endpoint_and_doubles_the_cadence() {
+    use crate::ed2k_client_udp::state::FILE_REASK_TIME;
+    let now = Instant::now();
+    let mut svc = service();
+    register(&mut svc, now);
+    let (ip, port) = peer_v4();
+
+    assert!(svc.mark_no_needed_parts(ip, port, now));
+    // Not due at the single interval: no ping goes out.
+    let out = svc.tick(now + FILE_REASK_TIME, Duration::from_secs(20), |_| {
+        TransferReaskInfo {
+            part_status: None,
+            complete_source_count: 0,
+        }
+    });
+    assert!(out.send.is_empty());
+    // Due after the doubled interval (oracle FILEREASKTIME * 2).
+    let out = svc.tick(now + FILE_REASK_TIME * 2, Duration::from_secs(20), |_| {
+        TransferReaskInfo {
+            part_status: None,
+            complete_source_count: 0,
+        }
+    });
+    assert_eq!(out.send.len(), 1);
+    // Unknown endpoint is a no-op.
+    assert!(!svc.mark_no_needed_parts(Ipv4Addr::new(198, 51, 100, 99), port, now));
+}
+
+#[test]
 fn timed_out_reask_surfaces_in_tick_output() {
     let now = Instant::now();
     let timeout = Duration::from_secs(20);

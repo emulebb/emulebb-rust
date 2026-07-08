@@ -43,6 +43,11 @@ pub enum ReaskCommand {
     Register(ReaskDetachArgs),
     /// Drop a source by endpoint (transfer completed / no longer wanted).
     Remove { endpoint: (Ipv4Addr, u16) },
+    /// Flag a source as No Needed Parts by endpoint (a TCP session just learned
+    /// the peer serves no part we still need, oracle `DS_NONEEDEDPARTS`): its
+    /// reask cadence doubles to `FILEREASKTIME * 2` (oracle `GetTimeUntilReask`,
+    /// DownloadClient.cpp:2425-2431). Unknown endpoints are a no-op.
+    MarkNoNeededParts { endpoint: (Ipv4Addr, u16) },
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the firewalled
     /// *source*): answer the downloader at `dest` like an inbound `OP_REASKFILEPING`
     /// (oracle ListenSocket.cpp). Only the file hash is carried (reciprocity key).
@@ -128,6 +133,15 @@ impl ReaskSourceHandle {
     /// Drop a source from reask state by endpoint. Best-effort.
     pub(crate) fn remove(&self, endpoint: (Ipv4Addr, u16)) {
         let _ = self.0.try_send(ReaskCommand::Remove { endpoint });
+    }
+
+    /// Flag a detached source as No Needed Parts (oracle `DS_NONEEDEDPARTS`):
+    /// its UDP reasks switch to the doubled `FILEREASKTIME * 2` cadence (oracle
+    /// `GetTimeUntilReask`, DownloadClient.cpp:2425-2431). Best-effort: a
+    /// full/closed channel or an unknown endpoint silently no-ops (the source
+    /// keeps its normal cadence).
+    pub fn mark_no_needed_parts(&self, endpoint: (Ipv4Addr, u16)) {
+        let _ = self.0.try_send(ReaskCommand::MarkNoNeededParts { endpoint });
     }
 
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
@@ -503,6 +517,11 @@ fn apply_reask_command(
             if service.remove_source(endpoint.0, endpoint.1) {
                 let _ = events.send(ReaskEvent::SourceReleased { endpoint });
             }
+        }
+        ReaskCommand::MarkNoNeededParts { endpoint } => {
+            // NNP flag (oracle DS_NONEEDEDPARTS): double the source's reask
+            // cadence. No event owed — the lease/registry hold is core-side.
+            service.mark_no_needed_parts(endpoint.0, endpoint.1, Instant::now());
         }
         // Handled inline in the loop (needs async I/O); never routed here.
         ReaskCommand::AnswerCallbackTcp { .. } | ReaskCommand::SendDirectCallback(_) => {}

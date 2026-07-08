@@ -169,6 +169,24 @@ impl ReaskSourceSet {
             .collect()
     }
 
+    /// Flag a source as No Needed Parts (oracle `DS_NONEEDEDPARTS`): the TCP
+    /// session just learned the peer serves no part we still need, so its reask
+    /// cadence doubles (`FILEREASKTIME * 2`, oracle `GetTimeUntilReask`,
+    /// DownloadClient.cpp:2425-2431) and the next ask is rescheduled one doubled
+    /// interval out from `now` (the oracle stamps `SetLastAskedTime()` at the
+    /// NNP verdict, DownloadClient.cpp:848-852). Returns whether the source was
+    /// present. The flag is not cleared here: a fresh registration (the source
+    /// re-queued us with needed parts) starts un-flagged, mirroring the oracle
+    /// reset to `DS_ONQUEUE` at reask time (PartFile.cpp:3067-3068).
+    pub(crate) fn mark_no_needed_parts(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+        let Some(source) = self.sources.get_mut(&(ip, udp_port)) else {
+            return false;
+        };
+        source.no_needed_parts = true;
+        source.schedule_next(now);
+        true
+    }
+
     /// Explicitly drop a source (e.g. the transfer no longer needs it).
     pub(crate) fn remove(&mut self, ip: Ipv4Addr, udp_port: u16) {
         self.sources.remove(&(ip, udp_port));
@@ -430,6 +448,23 @@ mod tests {
             set.due(now).contains(&no_id_endpoint),
             "skipped LowID source stays due because no UDP request was sent"
         );
+    }
+
+    #[test]
+    fn mark_no_needed_parts_doubles_the_next_due_and_sets_the_flag() {
+        use super::super::state::FILE_REASK_TIME;
+
+        let now = Instant::now();
+        let mut set = ReaskSourceSet::new();
+        let (a, pa) = source(&mut set, 10, now);
+        assert!(set.mark_no_needed_parts(a, pa, now));
+        let src = set.get(a, pa).unwrap();
+        assert!(src.no_needed_parts);
+        // Not due at the single interval; due after the doubled one.
+        assert!(set.due(now + FILE_REASK_TIME).is_empty());
+        assert_eq!(set.due(now + FILE_REASK_TIME * 2), vec![(a, pa)]);
+        // Unknown endpoint is a no-op.
+        assert!(!set.mark_no_needed_parts(ip(99), 4672, now));
     }
 
     #[test]

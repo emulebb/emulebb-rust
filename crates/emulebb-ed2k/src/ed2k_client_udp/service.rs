@@ -171,6 +171,20 @@ impl ReaskService {
         }
     }
 
+    /// Flag a registered source as No Needed Parts, routed by endpoint (a TCP
+    /// session just learned the peer serves no part we still need): its reask
+    /// cadence doubles to `FILEREASKTIME * 2` (oracle `DS_NONEEDEDPARTS` +
+    /// `GetTimeUntilReask`, DownloadClient.cpp:2425-2431). Returns whether a
+    /// source was present at that endpoint.
+    pub(crate) fn mark_no_needed_parts(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+        let Some(file_hash) = self.endpoint_index.get(&(ip, udp_port)) else {
+            return false;
+        };
+        self.per_file
+            .get_mut(file_hash)
+            .is_some_and(|set| set.mark_no_needed_parts(ip, udp_port, now))
+    }
+
     /// Route an inbound datagram. Downloader replies are applied to the matching
     /// source (correlated by endpoint); an inbound reask ping is handed back for
     /// the caller to answer.
