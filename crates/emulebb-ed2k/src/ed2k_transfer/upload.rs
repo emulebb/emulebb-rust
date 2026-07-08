@@ -105,7 +105,7 @@ impl Ed2kTransferRuntime {
             }
         }
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
-        let file_priority_score = self.file_priority_score(file_hash);
+        let file_priority_score = self.file_priority_score(file_hash, 0);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
         let file_size = self.shared_file_size(file_hash);
         let status = self.upload_queue.lock().await.begin_session(
@@ -424,13 +424,19 @@ impl Ed2kTransferRuntime {
             .unwrap_or(0)
     }
 
-    fn file_priority_score(&self, file_hash: &Ed2kHash) -> i128 {
+    fn file_priority_score(&self, file_hash: &Ed2kHash, queued_count: u64) -> i128 {
         self.metadata
             .transfer_manifest_by_hash(&file_hash.to_string())
             .ok()
             .flatten()
-            .map(|manifest| upload_priority_score(&manifest.upload_priority))
-            .unwrap_or_else(|| upload_priority_score("normal"))
+            .map(|manifest| {
+                upload_priority_score(
+                    &manifest.upload_priority,
+                    manifest.auto_upload_priority,
+                    queued_count,
+                )
+            })
+            .unwrap_or_else(|| upload_priority_score("normal", false, queued_count))
     }
 
     /// The requested file's all-time upload ratio in permille (eMule

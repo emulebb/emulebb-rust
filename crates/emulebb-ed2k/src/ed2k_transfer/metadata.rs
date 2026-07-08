@@ -359,7 +359,11 @@ impl Ed2kTransferRuntime {
         if priority.is_some() {
             self.upload_queue.lock().await.update_file_priority(
                 &manifest.file_hash,
-                upload_priority_score(&manifest.upload_priority),
+                upload_priority_score(
+                    &manifest.upload_priority,
+                    manifest.auto_upload_priority,
+                    0,
+                ),
             );
         }
         Ok(manifest)

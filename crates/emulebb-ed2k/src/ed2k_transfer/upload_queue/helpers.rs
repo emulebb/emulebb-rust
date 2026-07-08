@@ -9,13 +9,25 @@ use super::{
     RELEASE_FILE_PRIORITY_SCORE, VERY_LOW_FILE_PRIORITY_SCORE,
 };
 
-pub(crate) fn upload_priority_score(priority: &str) -> i128 {
-    match priority {
+/// The upload-queue waiting-score priority multiplier
+/// (`CUpDownClient::GetFilePrioAsNumber`, UploadClient.cpp:401-425): PR_VERYHIGH
+/// ->18, PR_HIGH->9, PR_LOW->6, PR_VERYLOW->2, default (PR_NORMAL) ->7. An auto
+/// file is resolved to its dynamic tier first (`UpdateAutoUpPriority`,
+/// KnownFile.cpp:1377-1392) exactly as the publish ranker does, so `auto` and the
+/// publish ranker stay consistent — an empty/short queue resolves to HIGH (9),
+/// not the NORMAL (7) it used to collapse to.
+pub(crate) fn upload_priority_score(priority: &str, auto: bool, queued_count: u64) -> i128 {
+    let effective = if auto || priority == "auto" {
+        crate::shared_publish_rank::resolve_auto_up_priority_tier(queued_count)
+    } else {
+        priority
+    };
+    match effective {
         "verylow" => VERY_LOW_FILE_PRIORITY_SCORE,
         "low" => LOW_FILE_PRIORITY_SCORE,
         "high" => HIGH_FILE_PRIORITY_SCORE,
         "release" | "veryhigh" => RELEASE_FILE_PRIORITY_SCORE,
-        "normal" | "auto" => DEFAULT_FILE_PRIORITY_SCORE,
+        "normal" => DEFAULT_FILE_PRIORITY_SCORE,
         _ => DEFAULT_FILE_PRIORITY_SCORE,
     }
 }

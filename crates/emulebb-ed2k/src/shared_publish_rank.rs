@@ -36,7 +36,11 @@ pub fn shared_publish_rank(input: SharedPublishRankInput<'_>) -> SharedPublishRa
         publish_upload_ratio(input.all_time_uploaded_bytes, input.file_size);
     let session_upload_ratio = publish_upload_ratio(input.session_uploaded_bytes, input.file_size);
     SharedPublishRank {
-        priority: mfc_real_upload_priority(input.upload_priority, input.auto_upload_priority),
+        priority: mfc_real_upload_priority(
+            input.upload_priority,
+            input.auto_upload_priority,
+            input.queued_count,
+        ),
         balanced_score: publish_balanced_score(input, all_time_upload_ratio, session_upload_ratio),
         all_time_upload_ratio,
         session_upload_ratio,
@@ -67,11 +71,39 @@ pub fn compare_shared_publish_rank(
         .reverse()
 }
 
-pub fn mfc_real_upload_priority(priority: &str, auto_upload_priority: bool) -> i32 {
-    if auto_upload_priority || priority == "auto" {
-        return 0;
+/// Resolve an auto-upload-priority file's effective tier from its upload-queue
+/// depth, mirroring `CKnownFile::UpdateAutoUpPriority` (KnownFile.cpp:1377-1392):
+/// `GetQueuedCount() > 20 -> PR_LOW`, `> 1 -> PR_NORMAL`, else `-> PR_HIGH`. An
+/// auto file's `m_iUpPriority` is dynamically overwritten with this resolved tier
+/// (a separate `m_bAutoUpPriority` flag records that it is auto), so every ranker
+/// that reads `GetUpPriority()` sees the resolved tier — NOT a distinct auto
+/// sentinel. A freshly shared auto file with no queue therefore resolves to HIGH.
+pub fn resolve_auto_up_priority_tier(queued_count: u64) -> &'static str {
+    if queued_count > 20 {
+        "low"
+    } else if queued_count > 1 {
+        "normal"
+    } else {
+        "high"
     }
-    match priority {
+}
+
+/// The oracle's realprio used for publish/offer ordering:
+/// `CSharedFileList::GetRealPrio(GetUpPriority())` (SharedFileList.h:350,
+/// `(in < 4) ? in + 1 : 0`) over the priority enum
+/// (PartFile.h:41-46 — PR_LOW=0, PR_NORMAL=1, PR_HIGH=2, PR_VERYHIGH=3,
+/// PR_VERYLOW=4). An auto file is resolved to its dynamic tier first
+/// (`UpdateAutoUpPriority`), so `GetUpPriority()` already yields LOW/NORMAL/HIGH;
+/// with an empty/short queue that is HIGH -> realprio 3 (near the FRONT), never 0.
+pub fn mfc_real_upload_priority(priority: &str, auto_upload_priority: bool, queued_count: u64) -> i32 {
+    let effective = if auto_upload_priority || priority == "auto" {
+        resolve_auto_up_priority_tier(queued_count)
+    } else {
+        priority
+    };
+    match effective {
+        // GetRealPrio: PR_LOW(0)->1, PR_NORMAL(1)->2, PR_HIGH(2)->3,
+        // PR_VERYHIGH(3)->4, PR_VERYLOW(4)->0.
         "low" => 1,
         "normal" => 2,
         "high" => 3,
@@ -200,8 +232,45 @@ mod tests {
         assert!(compare_shared_publish_rank(&rank("release", 0, 0), &rank("high", 0, 1)).is_lt());
         assert!(compare_shared_publish_rank(&rank("high", 0, 0), &rank("normal", 0, 1)).is_lt());
         assert!(compare_shared_publish_rank(&rank("normal", 0, 0), &rank("low", 0, 1)).is_lt());
-        assert_eq!(mfc_real_upload_priority("verylow", false), 0);
-        assert_eq!(mfc_real_upload_priority("normal", true), 0);
+        // GetRealPrio over the explicit tiers (PartFile.h:41-46, SharedFileList.h:350).
+        assert_eq!(mfc_real_upload_priority("verylow", false, 0), 0);
+        assert_eq!(mfc_real_upload_priority("low", false, 0), 1);
+        assert_eq!(mfc_real_upload_priority("normal", false, 0), 2);
+        assert_eq!(mfc_real_upload_priority("high", false, 0), 3);
+        assert_eq!(mfc_real_upload_priority("veryhigh", false, 0), 4);
+        assert_eq!(mfc_real_upload_priority("release", false, 0), 4);
+    }
+
+    #[test]
+    fn auto_priority_resolves_through_queue_depth_like_update_auto_up_priority() {
+        // Freshly shared auto file, empty queue -> PR_HIGH -> realprio 3 (near the
+        // FRONT), NOT the bottom 0 that verylow/auto used to share.
+        assert_eq!(mfc_real_upload_priority("normal", true, 0), 3);
+        assert_eq!(mfc_real_upload_priority("auto", false, 0), 3);
+        assert_eq!(mfc_real_upload_priority("normal", true, 1), 3);
+        // GetQueuedCount() > 1 -> PR_NORMAL -> realprio 2.
+        assert_eq!(mfc_real_upload_priority("normal", true, 2), 2);
+        // GetQueuedCount() > 20 -> PR_LOW -> realprio 1.
+        assert_eq!(mfc_real_upload_priority("normal", true, 21), 1);
+        // An empty-queue auto file outranks an explicit normal file in publish order.
+        let auto = shared_publish_rank(SharedPublishRankInput {
+            file_hash: "00112233445566778899aabbccddeeff",
+            file_size: 1_000,
+            upload_priority: "normal",
+            auto_upload_priority: true,
+            queued_count: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_request_count: 0,
+            all_time_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            session_uploaded_bytes: 0,
+            last_request_unix_ms: 0,
+            last_publish_unix_ms: 0,
+            sequence: 1,
+            now_unix_ms: 4_000,
+        });
+        assert!(compare_shared_publish_rank(&auto, &rank("normal", 0, 0)).is_lt());
     }
 
     #[test]
