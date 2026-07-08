@@ -5636,7 +5636,7 @@ async fn publish_kad_due_shared_files(
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
-    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime).await?;
+    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     let available_search_permits = runtime.dht.available_search_permits();
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -5868,6 +5868,16 @@ async fn publish_kad_due_shared_files(
     let start = schedule.cursor(item_count);
     let mut inspected = 0usize;
     let mut attempted_files = 0usize;
+    // Notes budget is 1/tick: the oracle publishes only the single best-ranked
+    // notes-due file per Publish() tick, ranked on its own notes clock
+    // (SharedFileList.cpp:3412-3435). Pick that file once up front so the notes
+    // lane is not merely "first notes-due in the source-ordered scan".
+    let best_notes_hash = select_best_notes_publish_candidate(
+        &shared_files,
+        schedule,
+        Instant::now(),
+        Utc::now().timestamp_millis(),
+    );
 
     for offset in 0..item_count.min(KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET) {
         let entry = &shared_files[(start + offset) % item_count];
@@ -5885,11 +5895,16 @@ async fn publish_kad_due_shared_files(
         let notes_due =
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now);
+        // Only the single best-ranked notes-due file publishes this tick (oracle
+        // notes budget 1, ranked on the notes clock); `notes_due` still counts
+        // every due file for diagnostics parity.
+        let notes_selected =
+            notes_due && best_notes_hash.as_deref() == Some(entry.file_hash.as_str());
         keyword_due_count += usize::from(keyword_due);
         source_due_count += usize::from(source_due);
         notes_due_count += usize::from(notes_due);
         inspected = offset + 1;
-        if !keyword_due && !source_due && !notes_due {
+        if !keyword_due && !source_due && !notes_selected {
             continue;
         }
         let file_hash: Ed2kHash = match entry.file_hash.parse() {
@@ -6042,8 +6057,9 @@ async fn publish_kad_due_shared_files(
         // Notes (comment/rating) publish: only for files that actually carry a
         // user-set comment/rating, on the 24h notes interval (master
         // CKnownFile::PublishNotes + STORENOTES tags). Per-file gated like keyword
-        // and source so an un-annotated file never emits a notes publish.
-        if notes_due {
+        // and source so an un-annotated file never emits a notes publish, and
+        // restricted to the single best-ranked notes candidate this tick.
+        if notes_selected {
             if notes_attempted >= KAD_NOTES_PUBLISH_BUDGET
                 || available_publish_starts == 0
                 || publish_tasks.len() >= in_flight_budget
@@ -6462,6 +6478,7 @@ fn record_kad_publish_failure(
 
 async fn kad_publishable_shared_files(
     runtime: &Ed2kTransferRuntime,
+    schedule: &kad_publish_schedule::KadPublishSchedule,
 ) -> Result<Vec<MetadataTransferPublishEntry>> {
     let shared_catalog = runtime.shared_catalog();
     let entries = shared_catalog
@@ -6471,7 +6488,18 @@ async fn kad_publishable_shared_files(
         .filter(|entry| entry.verified_complete && !entry.compatibility_hint)
         .map(kad_publish_entry_from_shared_entry)
         .collect::<Vec<_>>();
-    Ok(kad_publishable_shared_file_entries(entries))
+    // The Kad publish scan is driven by the SOURCE lane (every file, 5h
+    // interval), so the shared scan order uses the source last-publish clock —
+    // the oracle source selection ranks due files by `GetLastPublishTimeKadSrc()`
+    // (SharedFileList.cpp:3377). The NOTES lane selects its own best candidate by
+    // the notes clock separately (see `select_best_notes_publish_candidate`).
+    let now_instant = Instant::now();
+    let now_unix_ms = Utc::now().timestamp_millis();
+    Ok(kad_publishable_shared_file_entries(
+        entries,
+        now_unix_ms,
+        |file_hash| schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms),
+    ))
 }
 
 fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTransferPublishEntry {
@@ -6494,10 +6522,17 @@ fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTrans
     }
 }
 
+/// Rank the publishable shared files by the balanced publish rank, ordered best
+/// first. `last_publish_unix_ms` supplies the per-file last-publish wall time for
+/// the age/staleness term, keyed by file hash — the caller passes the SOURCE or
+/// NOTES Kad clock (or a constant for lanes whose oracle age term is constant),
+/// so the longest-unpublished file wins within its priority tier
+/// (SharedFileList.cpp:3374-3379,3421-3426, `GetPublishAgeScore`).
 fn kad_publishable_shared_file_entries(
     entries: Vec<MetadataTransferPublishEntry>,
+    now_unix_ms: i64,
+    last_publish_unix_ms: impl Fn(&str) -> i64,
 ) -> Vec<MetadataTransferPublishEntry> {
-    let now_unix_ms = Utc::now().timestamp_millis();
     let mut ranked = entries
         .into_iter()
         .enumerate()
@@ -6515,7 +6550,7 @@ fn kad_publishable_shared_file_entries(
                 all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
                 session_uploaded_bytes: entry.session_uploaded_bytes,
                 last_request_unix_ms: entry.last_upload_request_ms,
-                last_publish_unix_ms: 0,
+                last_publish_unix_ms: last_publish_unix_ms(&entry.file_hash),
                 sequence,
                 now_unix_ms,
             });
@@ -6524,6 +6559,37 @@ fn kad_publishable_shared_file_entries(
         .collect::<Vec<_>>();
     ranked.sort_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right));
     ranked.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// Select the single best-ranked notes-due file for this publish tick, mirroring
+/// the oracle notes selection loop (SharedFileList.cpp:3412-3435): among files
+/// carrying a user comment/rating whose 24h notes interval is due, pick the
+/// best-ranked hash using the NOTES last-publish clock
+/// (`GetLastPublishTimeKadNotes`) so the longest-unpublished note wins within its
+/// priority tier. Returns `None` when no annotated file is notes-due.
+fn select_best_notes_publish_candidate(
+    shared_files: &[MetadataTransferPublishEntry],
+    schedule: &kad_publish_schedule::KadPublishSchedule,
+    now_instant: Instant,
+    now_unix_ms: i64,
+) -> Option<String> {
+    let candidates = shared_files
+        .iter()
+        .filter(|entry| {
+            kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
+                && schedule.notes_due(&entry.file_hash, now_instant)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    kad_publishable_shared_file_entries(candidates, now_unix_ms, |file_hash| {
+        schedule.notes_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
+    })
+    .into_iter()
+    .next()
+    .map(|entry| entry.file_hash)
 }
 
 fn kad_keyword_publish_entries_for_keyword(
@@ -9344,9 +9410,147 @@ mod tests {
             ..shared.clone()
         };
 
-        let publishable = kad_publishable_shared_file_entries(vec![shared.clone(), other.clone()]);
+        let publishable =
+            kad_publishable_shared_file_entries(vec![shared.clone(), other.clone()], 4_000, |_| 0);
 
         assert_eq!(publishable, vec![other, shared]);
+    }
+
+    #[test]
+    fn kad_publish_rank_age_term_favors_longest_unpublished() {
+        // Two files identical except their last Kad-publish wall time. The
+        // longer-unpublished file must rank higher on the age term (ordered
+        // first), and a never-published file (last-publish 0) must rank as the
+        // most-overdue of all — the age term is no longer a flat constant.
+        let now_unix_ms = 100_000_000i64;
+        let hour_ms = 3_600_000i64;
+        let recent = MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0xA1; 16]).to_string(),
+            canonical_name: "recent.bin".to_string(),
+            file_size: 1_000,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
+            comment: String::new(),
+            rating: 0,
+        };
+        let stale = MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0xB2; 16]).to_string(),
+            canonical_name: "stale.bin".to_string(),
+            ..recent.clone()
+        };
+        let never = MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([0xC3; 16]).to_string(),
+            canonical_name: "never.bin".to_string(),
+            ..recent.clone()
+        };
+
+        // recent: published 1h ago; stale: published 30h ago (age capped later);
+        // never: never published (0). Age boost: never (80) > stale > recent.
+        let last_publish = |file_hash: &str| -> i64 {
+            if file_hash == recent.file_hash {
+                now_unix_ms - hour_ms
+            } else if file_hash == stale.file_hash {
+                now_unix_ms - 30 * hour_ms
+            } else {
+                0
+            }
+        };
+
+        let ordered = kad_publishable_shared_file_entries(
+            vec![recent.clone(), stale.clone(), never.clone()],
+            now_unix_ms,
+            last_publish,
+        );
+
+        assert_eq!(
+            ordered.iter().map(|e| e.file_hash.clone()).collect::<Vec<_>>(),
+            vec![
+                never.file_hash.clone(),
+                stale.file_hash.clone(),
+                recent.file_hash.clone()
+            ]
+        );
+
+        // Sanity: feeding the same constant to every file (the old bug) flattens
+        // the age term so ordering falls back to the deterministic jitter/sequence
+        // rather than staleness.
+        let flat = kad_publishable_shared_file_entries(
+            vec![recent.clone(), stale.clone(), never.clone()],
+            now_unix_ms,
+            |_| 0,
+        );
+        assert!(flat.iter().all(|e| {
+            e.file_hash == recent.file_hash
+                || e.file_hash == stale.file_hash
+                || e.file_hash == never.file_hash
+        }));
+    }
+
+    #[test]
+    fn best_notes_candidate_uses_notes_clock_not_source_clock() {
+        use crate::kad_publish_schedule::KadPublishSchedule;
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let now_unix_ms = 200_000_000i64;
+        let annotated = |tag: u8, name: &str| MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([tag; 16]).to_string(),
+            canonical_name: name.to_string(),
+            file_size: 1_000,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
+            comment: "synthetic note".to_string(),
+            rating: 3,
+        };
+        let recent_notes = annotated(0x51, "recent-notes.bin");
+        let stale_notes = annotated(0x62, "stale-notes.bin");
+        let un_annotated = MetadataTransferPublishEntry {
+            comment: String::new(),
+            rating: 0,
+            ..annotated(0x73, "plain.bin")
+        };
+
+        let mut schedule = KadPublishSchedule::new();
+        // NOTES clock: recent published 1h ago, stale 30h ago -> stale is the best
+        // notes candidate. SOURCE clock is deliberately the opposite so a bug that
+        // read the source clock would pick `recent_notes` instead.
+        schedule.mark_notes_published(&recent_notes.file_hash, now - Duration::from_secs(3_600));
+        schedule.mark_notes_published(&stale_notes.file_hash, now - Duration::from_secs(30 * 3_600));
+        schedule.mark_source_published(
+            &stale_notes.file_hash,
+            now - Duration::from_secs(60),
+            None,
+        );
+
+        let best = select_best_notes_publish_candidate(
+            &[recent_notes.clone(), stale_notes.clone(), un_annotated.clone()],
+            &schedule,
+            now,
+            now_unix_ms,
+        );
+        assert_eq!(best, Some(stale_notes.file_hash.clone()));
+
+        // No annotated file -> no notes candidate.
+        assert_eq!(
+            select_best_notes_publish_candidate(&[un_annotated], &schedule, now, now_unix_ms),
+            None
+        );
     }
 
     #[test]

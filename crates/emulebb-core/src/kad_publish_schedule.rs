@@ -78,6 +78,15 @@ pub(crate) fn file_has_publishable_note(comment: &str, rating: u8) -> bool {
     !comment.is_empty() || rating > 0
 }
 
+/// Convert a monotonic last-publish `Instant` to wall-clock unix-ms relative to
+/// the current instant/wall time. Only the elapsed interval matters to the
+/// publish-rank age term, so this stays correct across a clock with no fixed
+/// epoch. Saturates rather than panicking if `last` is somehow in the future.
+fn instant_to_wall_ms(last: Instant, now_instant: Instant, now_unix_ms: i64) -> i64 {
+    let elapsed_ms = now_instant.saturating_duration_since(last).as_millis();
+    now_unix_ms.saturating_sub(i64::try_from(elapsed_ms).unwrap_or(i64::MAX))
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct FilePublishState {
     last_source: Option<Instant>,
@@ -204,6 +213,43 @@ impl KadPublishSchedule {
             .entry(file_hash.to_string())
             .or_default()
             .last_notes = Some(now);
+    }
+
+    /// Wall-clock ms of the file's last **source** publish (0 = never), for the
+    /// balanced publish-rank age term. Mirrors the oracle source selection which
+    /// ranks due files by `GetLastPublishTimeKadSrc()` (SharedFileList.cpp:3377);
+    /// a never-published file returns 0 so `GetPublishAgeScore` treats it as
+    /// most-overdue (max age boost). The stored instant is converted to
+    /// wall-clock ms relative to `now_instant`/`now_unix_ms` so the rank only
+    /// depends on the elapsed interval.
+    pub(crate) fn source_last_publish_unix_ms(
+        &self,
+        file_hash: &str,
+        now_instant: Instant,
+        now_unix_ms: i64,
+    ) -> i64 {
+        self.files
+            .get(file_hash)
+            .and_then(|state| state.last_source)
+            .map(|last| instant_to_wall_ms(last, now_instant, now_unix_ms))
+            .unwrap_or(0)
+    }
+
+    /// Wall-clock ms of the file's last **notes** publish (0 = never), for the
+    /// balanced publish-rank age term. Mirrors the oracle notes selection which
+    /// ranks due files by `GetLastPublishTimeKadNotes()` (SharedFileList.cpp:3424)
+    /// — a clock distinct from the source clock above.
+    pub(crate) fn notes_last_publish_unix_ms(
+        &self,
+        file_hash: &str,
+        now_instant: Instant,
+        now_unix_ms: i64,
+    ) -> i64 {
+        self.files
+            .get(file_hash)
+            .and_then(|state| state.last_notes)
+            .map(|last| instant_to_wall_ms(last, now_instant, now_unix_ms))
+            .unwrap_or(0)
     }
 
     pub(crate) fn hydrate_keyword_published(
@@ -432,6 +478,35 @@ mod tests {
         // reset the notes timer.
         sched.mark_keyword_published(HASH, KEYWORD, almost);
         assert!(!sched.notes_due(HASH, almost));
+    }
+
+    #[test]
+    fn source_and_notes_last_publish_report_distinct_wall_times() {
+        // The publish-rank age term reads the source clock for source publishes
+        // and the notes clock for notes publishes; the two must not alias.
+        let mut sched = KadPublishSchedule::new();
+        let now = Instant::now();
+        let now_unix_ms = 10_000_000i64;
+
+        // Never published on either kind reads as 0 (most-overdue) for both.
+        assert_eq!(sched.source_last_publish_unix_ms(HASH, now, now_unix_ms), 0);
+        assert_eq!(sched.notes_last_publish_unix_ms(HASH, now, now_unix_ms), 0);
+
+        // Source published 3h ago, notes published 1h ago: each clock reports its
+        // own elapsed interval, independent of the other.
+        let source_at = now - Duration::from_secs(3 * 60 * 60);
+        let notes_at = now - Duration::from_secs(60 * 60);
+        sched.mark_source_published(HASH, source_at, None);
+        sched.mark_notes_published(HASH, notes_at);
+
+        assert_eq!(
+            sched.source_last_publish_unix_ms(HASH, now, now_unix_ms),
+            now_unix_ms - 3 * 60 * 60 * 1000
+        );
+        assert_eq!(
+            sched.notes_last_publish_unix_ms(HASH, now, now_unix_ms),
+            now_unix_ms - 60 * 60 * 1000
+        );
     }
 
     #[test]
