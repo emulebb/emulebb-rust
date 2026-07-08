@@ -1,9 +1,9 @@
 # emulebb-rust
 
 `emulebb-rust` is the Rust headless client for the eMuleBB product family and the
-forward eD2K/Kad core. It owns the capability-gated `/api/v1` contract (the
-superset / source of truth) and is driven by **TrackMuleBB**, the forward eMuleBB
-Suite controller; it keeps local client state plus indexing data in SQLite.
+forward eD2K/Kad core. It owns the Rust-forward `/api/v1` contract and is driven
+by **TrackMuleBB**, the forward eMuleBB Suite controller; it keeps local client
+state plus indexing data in SQLite.
 
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The 0.0.x line does not expose a coordinator API.
@@ -14,10 +14,15 @@ local SQLite/FTS indexing, and REST controller visibility. It is not legacy
 HTML WebServer parity, a qBittorrent/Torznab adapter host, a coordinator, or a
 remote indexer fleet.
 
+Active product docs, backlog, design notes, release scope, and the Rust OpenAPI
+contract live in
+`EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust`.
+The repo-local `docs` directory is only a pointer.
+
 ## 0.0.x Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
-- `emulebb-rest`: eMuleBB-compatible `/api/v1` routes, envelopes, and API-key
+- `emulebb-rest`: Rust-native `/api/v1` routes, envelopes, and API-key
   auth.
 - `emulebb-core`: local app state, capabilities, searches, and transfer
   summaries.
@@ -57,9 +62,9 @@ python tools\check_rust_client_policy.py
 ```
 
 Compatibility proof for this line is local and deterministic first: Rust to
-Rust, Rust to eMuleBB through the common REST contract, and Rust to aMule as a
-short-path compatibility witness. Public hide.me live-wire proof is a future
-nonblocking smoke lane until Rust has first-class configured VPN evidence.
+Rust, stock-compatible eD2K/Kad interop witnesses, and REST conformance against
+the Rust OpenAPI contract. Public hide.me live-wire proof is a smoke lane layered
+on top of the fail-closed VPN gates.
 
 ## Binding Contract
 
