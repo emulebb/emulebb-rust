@@ -178,6 +178,31 @@ pub(crate) fn source_dropped(file_hash_hex: &str, source: &Ed2kFoundSource) {
     emit(FAMILY, "source_dropped", "info", Value::Object(keys), body);
 }
 
+/// `source_dead_listed` (source-drop family, §3.5 shape): a source answered our
+/// file request with file-not-found — TCP `OP_FILEREQANSNOFIL`, UDP
+/// `OP_FILENOTFOUND`, or an AICH-root mismatch treated like FNF — and was put on
+/// the per-file dead-source list for the 45-minute oracle block
+/// (`CPartFile::m_DeadSourceList.AddDeadSource`, `ListenSocket.cpp:645-661` /
+/// `DownloadClient.cpp:1781` / `:2979`). The matching registry removal still
+/// emits `source_dropped`; this event carries the WHY (`reason`) + block length
+/// so soak diffing can attribute the drop to the FNF path.
+pub(crate) fn source_dead_listed(file_hash_hex: &str, source: &Ed2kFoundSource, reason: &str) {
+    let mut keys = Map::new();
+    insert_source_keys(&mut keys, source, file_hash_hex);
+    let body = json!({
+        "outcome": "dead_listed",
+        "reason": reason,
+        "blockSecs": crate::ed2k_dead_source_list::DEAD_SOURCE_BLOCK.as_secs(),
+    });
+    emit(
+        FAMILY,
+        "source_dead_listed",
+        "info",
+        Value::Object(keys),
+        body,
+    );
+}
+
 /// `source_swapped` (schema §3.5): an A4AF / NoNeededParts move of a source to a
 /// different wanted file (`swapReason:"nnp"`).
 pub(crate) fn source_swapped(

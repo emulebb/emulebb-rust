@@ -119,7 +119,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
 }
 
 #[tokio::test]
-async fn nofile_answer_for_requested_file_is_incomplete_not_error() {
+async fn nofile_answer_for_requested_file_is_file_not_found_not_error() {
     let root = unique_test_dir("ed2k-download-nofile-answer");
     let transfer_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let file_hash = Ed2kHash::from_bytes([0x6A; 16]);
@@ -143,6 +143,12 @@ async fn nofile_answer_for_requested_file_is_incomplete_not_error() {
             .write_all(&encode_file_req_ans_nofil(&file_hash))
             .await
             .unwrap();
+        // Hold the socket open until the downloader has processed the FNF answer
+        // and closed its side: dropping immediately can RST away the still
+        // buffered packets (the downloader keeps writing startup requests this
+        // scripted peer never reads).
+        let mut sink = [0u8; 256];
+        while !matches!(stream.read(&mut sink).await, Ok(0) | Err(_)) {}
     });
 
     let result = download_file_from_peer_test!(
@@ -183,7 +189,9 @@ async fn nofile_answer_for_requested_file_is_incomplete_not_error() {
     .await
     .unwrap();
 
-    assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+    // OP_FILEREQANSNOFIL is a distinct outcome (oracle ListenSocket.cpp:645-661):
+    // the driver dead-lists the (source, file) pair for 45 minutes and drops it.
+    assert_eq!(result, Ed2kPeerDownloadOutcome::FileNotFound);
     server.await.unwrap();
 }
 
@@ -257,7 +265,7 @@ async fn legacy_peer_without_aich_support_does_not_receive_aich_hash_request() {
     .await
     .unwrap();
 
-    assert_eq!(result, Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+    assert_eq!(result, Ed2kPeerDownloadOutcome::FileNotFound);
     server.await.unwrap();
 }
 

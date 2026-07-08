@@ -211,6 +211,34 @@ impl DownloadSourceRegistry {
             .cloned()
     }
 
+    /// Remove this peer's candidate for `file_hash` (a genuine source removal:
+    /// the source answered FNF and was dead-listed, the rust analogue of the
+    /// oracle `RemoveSource` after `AddDeadSource`, `ListenSocket.cpp:645-661`).
+    /// Emits `source_dropped` per removed candidate like the other genuine
+    /// removal paths; the peer is forgotten when no candidate remains. Its
+    /// lease, if held, stays with the caller's endpoint-release lifecycle.
+    /// Returns whether a candidate was removed.
+    pub(crate) fn remove_candidate(&mut self, source: &Ed2kFoundSource, file_hash: &str) -> bool {
+        let peer_key = DownloadPeerKey::from_source(source);
+        let Some(candidates) = self.peers.get_mut(&peer_key) else {
+            return false;
+        };
+        let before = candidates.len();
+        candidates.retain(|candidate| {
+            if candidate.file_hash == file_hash {
+                crate::diag_sched::source_dropped(&candidate.file_hash, &candidate.source);
+                false
+            } else {
+                true
+            }
+        });
+        let removed = candidates.len() != before;
+        if candidates.is_empty() {
+            self.peers.remove(&peer_key);
+        }
+        removed
+    }
+
     pub(crate) fn release_peer(&mut self, source: &Ed2kFoundSource) {
         self.leased_peers
             .remove(&DownloadPeerKey::from_source(source));

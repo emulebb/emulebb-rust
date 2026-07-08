@@ -25,6 +25,11 @@ pub(crate) struct DirectDownloadOutcome {
     /// Sources that reported No Needed Parts for this file. The driver runs the
     /// A4AF-lite swap on each.
     pub(crate) no_needed_parts_sources: Vec<Ed2kFoundSource>,
+    /// Sources that answered the file request with `OP_FILEREQANSNOFIL` (or an
+    /// AICH-root mismatch treated like FNF). The driver dead-lists each for the
+    /// oracle 45-minute block and drops it from the source registry
+    /// (`ListenSocket.cpp:645-661`).
+    pub(crate) file_not_found_sources: Vec<Ed2kFoundSource>,
 }
 
 pub(crate) struct DirectDownloadOptions {

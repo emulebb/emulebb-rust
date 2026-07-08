@@ -485,6 +485,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         // Inbound callback downloads have no cross-transfer driver to
                         // run the A4AF-lite swap; treat NNP like accepted-incomplete.
                         Ed2kPeerDownloadOutcome::NoNeededParts => break Ok(()),
+                        // Same for FNF: the session already ends here; dead-listing
+                        // is driven from the outbound download driver.
+                        Ed2kPeerDownloadOutcome::FileNotFound => break Ok(()),
                     }
                 }
             }

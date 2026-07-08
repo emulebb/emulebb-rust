@@ -98,6 +98,14 @@ pub enum Ed2kPeerDownloadOutcome {
     /// (`CUpDownClient::SwapToAnotherFile`): if the source serves another wanted
     /// file in the registry it is swapped to that file instead of being dropped.
     NoNeededParts,
+    /// The peer answered our file request with `OP_FILEREQANSNOFIL` (it no longer
+    /// has the file), or advertised an AICH root that conflicts with our trusted
+    /// one — which the oracle treats exactly like an FNF answer
+    /// (`DownloadClient.cpp:2971-3004`). The driver dead-lists the (source, file)
+    /// pair for 45 minutes and drops the source (oracle `ListenSocket.cpp:645-661`:
+    /// `m_DeadSourceList.AddDeadSource` + swap-or-`RemoveSource`; rust maps
+    /// swap-or-remove to plain drop, A4AF being intentionally parked).
+    FileNotFound,
 }
 
 pub(in crate::ed2k_tcp) struct DownloadSessionOptions<'a> {
@@ -713,6 +721,18 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr.ip(),
                         )
                         .await?;
+                    // AICH root mismatch against our TRUSTED root is treated like
+                    // an FNF answer (oracle DownloadClient.cpp:2971-3004): the
+                    // driver dead-lists + drops the source.
+                    if advertised_aich_root_conflicts(&manifest, returned_aich_root) {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "aich_root_mismatch_fnf",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
+                    }
                     manifest = transfer_runtime
                         .reconcile_job_metadata(
                             file_hash_hex,
@@ -826,6 +846,18 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr.ip(),
                         )
                         .await?;
+                    // AICH root mismatch against our TRUSTED root is treated like
+                    // an FNF answer (oracle DownloadClient.cpp:2971-3004): the
+                    // driver dead-lists + drops the source.
+                    if advertised_aich_root_conflicts(&manifest, Some(aich_root)) {
+                        dump_ed2k_tcp_download_meta(
+                            peer_addr,
+                            Some(transport.mode),
+                            "aich_root_mismatch_fnf",
+                            format!("file_hash={file_hash_hex}"),
+                        );
+                        return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
+                    }
                     request_file_identifier = Ed2kFileIdentifier::from_manifest(&manifest)?;
                 }
                 (OP_EDONKEYPROT, OP_SETREQFILEID) => {
@@ -1090,7 +1122,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         "file_req_ans_nofil",
                         format!("file_hash={file_hash_hex}"),
                     );
-                    return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
+                    // Oracle OP_FILEREQANSNOFIL handling (ListenSocket.cpp:645-661):
+                    // the source is dead-listed on the part file and removed. The
+                    // distinct outcome lets the driver do both.
+                    return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
                 }
                 (OP_EDONKEYPROT, OP_SENDINGPART)
                 | (OP_EMULEPROT, OP_SENDINGPART_I64)
@@ -1262,6 +1297,28 @@ fn peer_holds_needed_part(manifest: &Ed2kResumeManifest, peer_bitmap: &[bool]) -
         piece.state != Ed2kTransferState::Verified
             && peer_bitmap.get(position).copied().unwrap_or(false)
     })
+}
+
+/// Whether the peer's advertised AICH root conflicts with our TRUSTED one.
+///
+/// Oracle `CUpDownClient::ProcessAICHFileHash` (`DownloadClient.cpp:2971-3004`):
+/// when the part file's file identifier already carries a verified AICH hash and
+/// the peer sent a different one, the file identifiers differ — the peer is
+/// serving a different file, so it is handled exactly like an FNF answer
+/// (dead-list + remove source). `manifest.aich_root` is rust's trusted root: it
+/// is only populated authoritatively (local hash / persisted metadata) or after
+/// multi-peer corroboration, mirroring the oracle's verified-hash gate. No
+/// trusted root or no advertised root means nothing to compare (the untrusted
+/// proposal is still tracked for corroboration by `record_network_aich_root`).
+#[must_use]
+fn advertised_aich_root_conflicts(
+    manifest: &Ed2kResumeManifest,
+    advertised: Option<[u8; 20]>,
+) -> bool {
+    match (manifest.aich_root.as_deref(), advertised) {
+        (Some(trusted), Some(advertised)) => trusted != hex::encode(advertised),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

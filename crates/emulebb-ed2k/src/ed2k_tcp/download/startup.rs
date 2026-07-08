@@ -173,6 +173,12 @@ pub async fn download_file_from_peer(
                 "no_needed_parts",
                 format!("file_hash={file_hash_hex}"),
             ),
+            Ok(Ed2kPeerDownloadOutcome::FileNotFound) => dump_ed2k_tcp_download_meta(
+                peer_addr,
+                Some(transport.mode),
+                "file_not_found",
+                format!("file_hash={file_hash_hex}"),
+            ),
             Err(error) => dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport.mode),

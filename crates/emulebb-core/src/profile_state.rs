@@ -74,6 +74,7 @@ pub(crate) fn load_core_state(
         active_download_peer_endpoints: HashSet::new(),
         download_source_registry: crate::download_source_registry::DownloadSourceRegistry::default(
         ),
+        ed2k_dead_sources: crate::ed2k_dead_source_list::DeadSourceList::default(),
         ed2k_server_source_last_queried: HashMap::new(),
         ed2k_server_source_last_frame_at: None,
         ed2k_udp_source_batch_last_queried: HashMap::new(),

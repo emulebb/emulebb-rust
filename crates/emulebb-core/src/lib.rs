@@ -96,6 +96,7 @@ mod diag_sched;
 mod disk_guard;
 mod download_source_registry;
 mod ed2k_buddy_reask;
+mod ed2k_dead_source_list;
 mod ed2k_direct_download_types;
 mod ed2k_download_retry;
 mod ed2k_net_drivers;
@@ -3411,6 +3412,18 @@ impl EmulebbCore {
                     )
                     .await;
                 }
+                // FNF dead-listing (oracle ListenSocket.cpp:645-661 + UDPReaskFNF):
+                // a source that answered OP_FILEREQANSNOFIL (or an AICH-root
+                // mismatch treated like FNF) is blocked from re-admission for 45
+                // minutes and dropped from the registry. Rust maps the oracle
+                // swap-or-RemoveSource to a plain drop (A4AF intentionally parked).
+                if !outcome.file_not_found_sources.is_empty() {
+                    self.dead_list_file_not_found_sources(
+                        &transfer.hash,
+                        &outcome.file_not_found_sources,
+                    )
+                    .await;
+                }
                 accepted_incomplete_peers =
                     accepted_incomplete_peers.saturating_add(outcome.accepted_incomplete_peers);
                 if let Some(error) = outcome.last_error {
@@ -3610,6 +3623,17 @@ impl EmulebbCore {
         // (on the transfer runtime) owns the cap; the per-file source count
         // comes from the registry (live candidates only).
         for source in sources {
+            // Dead-source gate (oracle IsDeadSource admission checks,
+            // DownloadQueue.cpp:1420/:1530): an FNF-dead (source, file) pair
+            // must not be re-attempted while its 45-minute block runs. Not a
+            // deferral — the transfer must not wait on a dead source — and not
+            // a drop event (its removal was already surfaced when dead-listed).
+            if state
+                .ed2k_dead_sources
+                .is_dead_source(now, file_hash, source)
+            {
+                continue;
+            }
             let endpoint = source_endpoint_key(source);
             if state.active_download_peer_endpoints.contains(&endpoint) {
                 // Candidate already engaged this round: a dedup skip, NOT a source
@@ -3725,6 +3749,32 @@ impl EmulebbCore {
         state.download_cancels.remove(hash);
     }
 
+    /// Dead-list every FNF-answering source for `file_hash` for the oracle
+    /// 45-minute block and drop its registry candidate. Mirrors the oracle
+    /// OP_FILEREQANSNOFIL handler (`ListenSocket.cpp:645-661`:
+    /// `m_DeadSourceList.AddDeadSource` then swap-or-`RemoveSource`) and the
+    /// identical AICH-mismatch path (`DownloadClient.cpp:2971-3004`); rust's
+    /// swap-or-remove is a plain drop because A4AF is intentionally parked.
+    async fn dead_list_file_not_found_sources(
+        &self,
+        file_hash: &str,
+        sources: &[Ed2kFoundSource],
+    ) {
+        let mut state = self.state.lock().await;
+        let now = Instant::now();
+        for source in sources {
+            if state
+                .ed2k_dead_sources
+                .add_dead_source(now, file_hash, source)
+            {
+                crate::diag_sched::source_dead_listed(file_hash, source, "fnf");
+            }
+            state
+                .download_source_registry
+                .remove_candidate(source, file_hash);
+        }
+    }
+
     async fn register_download_source_candidates(
         &self,
         transfer: &Transfer,
@@ -3735,6 +3785,15 @@ impl EmulebbCore {
         let needed_parts = transfer.parts_total.saturating_sub(transfer.parts_obtained);
         let now = Instant::now();
         for source in sources {
+            // Admission gate (oracle DownloadQueue.cpp:1420/:1530 CheckAndAdd*
+            // paths): a dead-listed (source, file) pair is not re-admitted to
+            // the source registry while its 45-minute block runs.
+            if state
+                .ed2k_dead_sources
+                .is_dead_source(now, &transfer.hash, source)
+            {
+                continue;
+            }
             state.download_source_registry.add_candidate(
                 now,
                 DownloadSourceCandidate {
@@ -7505,6 +7564,10 @@ where
     // on each after the round (move to another wanted file the peer serves, else
     // drop). Kept across retry rounds.
     let mut no_needed_parts_sources: Vec<Ed2kFoundSource> = Vec::new();
+    // Sources that answered OP_FILEREQANSNOFIL (or AICH-mismatch-as-FNF); the
+    // driver dead-lists + drops each after the round (oracle
+    // ListenSocket.cpp:645-661). Kept across retry rounds.
+    let mut file_not_found_sources: Vec<Ed2kFoundSource> = Vec::new();
 
     loop {
         let mut accepted_incomplete_peers = 0u32;
@@ -7577,6 +7640,7 @@ where
                                 .map(|error| anyhow::anyhow!(error.to_string())),
                             detached_reask_endpoints: detached_reask_endpoints.clone(),
                             no_needed_parts_sources: no_needed_parts_sources.clone(),
+                            file_not_found_sources: file_not_found_sources.clone(),
                         });
                     }
                 }
@@ -7611,6 +7675,17 @@ where
                         peer_addr
                     );
                 }
+                Ok(Ed2kPeerDownloadOutcome::FileNotFound) => {
+                    // OP_FILEREQANSNOFIL (or AICH-mismatch-as-FNF): the driver
+                    // dead-lists the (source, file) pair for 45 minutes and drops
+                    // the source afterwards (oracle ListenSocket.cpp:645-661).
+                    file_not_found_sources.push(source.clone());
+                    tracing::info!(
+                        "ED2K direct download peer answered file-not-found file_hash={} peer={}",
+                        file_hash_hex,
+                        peer_addr
+                    );
+                }
                 Err(error) => {
                     retryable_error_seen |= is_retryable_direct_download_error(&error);
                     tracing::warn!(
@@ -7638,10 +7713,12 @@ where
                 .map(|error| anyhow::anyhow!(error.to_string())),
             detached_reask_endpoints: detached_reask_endpoints.clone(),
             no_needed_parts_sources: no_needed_parts_sources.clone(),
+            file_not_found_sources: file_not_found_sources.clone(),
         };
         if outcome.completed
             || outcome.accepted_incomplete_peers != 0
             || !outcome.no_needed_parts_sources.is_empty()
+            || !outcome.file_not_found_sources.is_empty()
         {
             return Ok(outcome);
         }
@@ -11332,6 +11409,87 @@ mod tests {
         assert!(a_again.is_empty());
         assert_eq!(a_again_deferred, 1);
         assert!(a_again_delay.is_some());
+    }
+
+    #[tokio::test]
+    async fn fnf_dead_listed_source_is_dropped_and_blocked_from_readmission() {
+        // DL-2 (oracle CPartFile::m_DeadSourceList, ListenSocket.cpp:645-661): a
+        // source that answered OP_FILEREQANSNOFIL is dead-listed for 45 minutes —
+        // its registry candidate is dropped, re-registration is refused
+        // (DownloadQueue.cpp:1420/:1530 IsDeadSource admission gates), and lease
+        // acquisition skips it WITHOUT deferring (the transfer must not wait on a
+        // dead source). The same peer's relationship with another file is
+        // untouched (the list is per-(file, source)).
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let dead_file = Ed2kHash::from_bytes([0x74; 16]).to_string();
+        let other_file = Ed2kHash::from_bytes([0x75; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x74; 16]),
+            Ipv4Addr::new(192, 0, 2, 32),
+            41011,
+        );
+        {
+            let mut state = core.state.lock().await;
+            for hash in [&dead_file, &other_file] {
+                state.download_source_registry.add_candidate(
+                    Instant::now(),
+                    DownloadSourceCandidate {
+                        file_hash: (*hash).clone(),
+                        file_priority: 5,
+                        needed_parts: 4,
+                        rare_parts: 0,
+                        source: source.clone(),
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        core.dead_list_file_not_found_sources(&dead_file, std::slice::from_ref(&source))
+            .await;
+        {
+            let now = Instant::now();
+            let state = core.state.lock().await;
+            assert_eq!(
+                state
+                    .download_source_registry
+                    .candidate_count_for_file(now, &dead_file),
+                0,
+                "the FNF source's candidate for the dead file must be dropped"
+            );
+            assert_eq!(
+                state
+                    .download_source_registry
+                    .candidate_count_for_file(now, &other_file),
+                1,
+                "the same peer's candidate for another file is untouched"
+            );
+        }
+
+        // Re-registration is refused while the 45-minute block runs.
+        let transfer = a4af_test_transfer(&dead_file, "downloading");
+        core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
+            .await;
+        {
+            let now = Instant::now();
+            let state = core.state.lock().await;
+            assert_eq!(
+                state
+                    .download_source_registry
+                    .candidate_count_for_file(now, &dead_file),
+                0,
+                "a dead-listed source must not be re-admitted to the registry"
+            );
+        }
+
+        // Lease acquisition skips the dead source without deferring: no retry
+        // wait is owed to a dead source.
+        let (engaged, deferred, retry_delay) = core
+            .acquire_direct_download_source_leases(&dead_file, std::slice::from_ref(&source))
+            .await;
+        assert!(engaged.is_empty());
+        assert_eq!(deferred, 0);
+        assert!(retry_delay.is_none());
     }
 
     #[tokio::test]

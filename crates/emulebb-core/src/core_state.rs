@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Category, Friend, Preferences, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot, Transfer,
-    download_source_registry::DownloadSourceRegistry,
+    download_source_registry::DownloadSourceRegistry, ed2k_dead_source_list::DeadSourceList,
 };
 
 #[derive(Debug)]
@@ -31,6 +31,10 @@ pub(crate) struct CoreState {
     pub(crate) next_download_cancel_id: u64,
     pub(crate) active_download_peer_endpoints: HashSet<(Ipv4Addr, u16)>,
     pub(crate) download_source_registry: DownloadSourceRegistry,
+    /// Per-(file, source) dead-source list: sources that answered FNF are
+    /// blocked from re-admission for 45 minutes (oracle
+    /// `CPartFile::m_DeadSourceList`, see `ed2k_dead_source_list`).
+    pub(crate) ed2k_dead_sources: DeadSourceList,
     pub(crate) ed2k_server_source_last_queried: HashMap<String, Instant>,
     pub(crate) ed2k_server_source_last_frame_at: Option<Instant>,
     pub(crate) ed2k_udp_source_batch_last_queried: HashMap<String, Instant>,
