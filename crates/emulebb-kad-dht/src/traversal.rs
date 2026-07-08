@@ -18,7 +18,7 @@ use emulebb_kad_proto::{
         KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
     },
     opcode,
-    packet::{ContactEntry, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq},
+    packet::{ContactEntry, FindBuddyReq, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq},
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -102,6 +102,10 @@ pub enum TraversalKind {
     Source { request: SearchSourceReq },
     /// Notes search — after traversal, send SearchNotesReq to close nodes.
     Notes { size: u64 },
+    /// FINDBUDDY walk — after traversal, send the provided FindBuddyReq to each
+    /// tolerance-passing responded contact (oracle `CSearch` type FINDBUDDY,
+    /// `Search.cpp:864-896`).
+    FindBuddy { request: FindBuddyReq },
 }
 
 /// Inputs for one full traversal run.
@@ -286,7 +290,9 @@ pub async fn run_traversal(
 fn req_count_for_kind(search_kind: &TraversalKind) -> u8 {
     match search_kind {
         TraversalKind::FindNode => KADEMLIA_FIND_NODE,
-        TraversalKind::Store => KADEMLIA_STORE,
+        // Oracle CSearch::GetRequestContactCount (Search.cpp:1653-1657) maps
+        // FINDBUDDY together with the STORE-type searches to KADEMLIA_STORE.
+        TraversalKind::Store | TraversalKind::FindBuddy { .. } => KADEMLIA_STORE,
         _ => KADEMLIA_FIND_VALUE,
     }
 }
@@ -869,6 +875,10 @@ fn search_phase_packet(kind: &TraversalKind, target: NodeId) -> KadPacket {
             target,
             size: *size,
         }),
+        // Oracle CSearch::StorePacket FINDBUDDY (Search.cpp:864-896): buddy
+        // target id + own client hash + own TCP port, sent to each
+        // tolerance-passing responded contact as the walk progresses.
+        TraversalKind::FindBuddy { request } => KadPacket::FindBuddyReq(request.clone()),
         TraversalKind::FindNode | TraversalKind::Store => unreachable!(),
     }
 }

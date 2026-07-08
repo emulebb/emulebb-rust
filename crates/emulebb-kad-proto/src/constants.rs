@@ -48,6 +48,16 @@ pub const STORE_STOP_GRACE_SECS: u64 = 20;
 ///
 /// Mirrors MFC `SEARCHSTORE*_TOTAL`; this is distinct from active store caps.
 pub const STORE_PUBLISH_TARGET_CONTACTS: usize = 10;
+/// FINDBUDDY search lifetime in seconds (MFC `SEARCHFINDBUDDY_LIFETIME`,
+/// `Defines.h:58`). Like the STORE searches, the manager stops the search 20
+/// seconds early so late replies can still land (`SearchManager.cpp:322-325`).
+pub const SEARCHFINDBUDDY_LIFETIME_SECS: u64 = 100;
+/// FINDBUDDY answer target (MFC `SEARCHFINDBUDDY_TOTAL`, `Defines.h:67`).
+///
+/// Each `KADEMLIA_FINDBUDDY_REQ` sent counts as one answer
+/// (`Search.cpp:892` `++m_uAnswers`); the manager stops the search once the
+/// target is reached (`SearchManager.cpp:324`).
+pub const SEARCHFINDBUDDY_TOTAL: usize = 10;
 pub const REPUBLISH_INTERVAL_SECS: u64 = 18_000;
 
 /// Contacts to request in Req for value lookups (Keyword/Source/Notes/File).

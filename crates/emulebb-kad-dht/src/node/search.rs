@@ -4,11 +4,23 @@ use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::RpcWorkClass;
-use emulebb_kad_proto::{Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq, constants::K};
+use emulebb_kad_proto::packet::FindBuddyReq;
+use emulebb_kad_proto::{
+    Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq,
+    constants::{K, SEARCHFINDBUDDY_LIFETIME_SECS, SEARCHFINDBUDDY_TOTAL, STORE_STOP_GRACE_SECS},
+};
 use emulebb_kad_routing::Contact;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// FINDBUDDY walk budget: the oracle lifetime (`SEARCHFINDBUDDY_LIFETIME` =
+/// 100 s) minus the shared 20 s stop grace the search manager applies before
+/// deletion (`SearchManager.cpp:322-325`). The trailing grace only drains late
+/// replies in MFC; our `FINDBUDDY_RES` handling lives in the unsolicited
+/// dispatch, so the walk itself ends at the stop mark.
+const FIND_BUDDY_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(SEARCHFINDBUDDY_LIFETIME_SECS - STORE_STOP_GRACE_SECS);
 
 impl DhtNode {
     /// Iterative node lookup. Returns up to K contacts closest to target.
@@ -29,18 +41,7 @@ impl DhtNode {
         let Ok(_permit) = self.try_acquire_search_permit(*target) else {
             return Ok(Vec::new());
         };
-        let initial = {
-            let rt = self.inner.routing_table.lock().await;
-            rt.get_closest(target, K)
-                .into_iter()
-                .map(|c| TraversalContact {
-                    id: c.id,
-                    addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
-                    tcp_port: c.tcp_port,
-                    version: c.kad_version,
-                })
-                .collect::<Vec<_>>()
-        };
+        let initial = self.closest_traversal_seed(target).await;
 
         let config = TraversalConfig {
             target: *target,
@@ -108,22 +109,58 @@ impl DhtNode {
         let Ok(_permit) = self.try_acquire_search_permit(*target) else {
             return NodeRefreshOutcome::default();
         };
-        let initial = {
-            let rt = self.inner.routing_table.lock().await;
-            rt.get_closest(target, K)
-                .into_iter()
-                .map(|c| TraversalContact {
-                    id: c.id,
-                    addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
-                    tcp_port: c.tcp_port,
-                    version: c.kad_version,
-                })
-                .collect::<Vec<_>>()
-        };
+        let initial = self.closest_traversal_seed(target).await;
         let mut config = NodeRefreshConfig::new(*target, work_class);
         config.ip_filter = self.ip_filter();
         config.res_contact_sink = Some(self.res_contact_sink());
         run_node_refresh_lookup(&self.inner.rpc, initial, config).await
+    }
+
+    /// FINDBUDDY buddy-acquisition walk (oracle `CSearchManager::FindBuddy` ->
+    /// `CSearch` type FINDBUDDY): a full convergence lookup whose every
+    /// `KADEMLIA2_REQ` requests the STORE contact count (`KADEMLIA_STORE` =
+    /// 0x04, `Search.cpp:1653-1657`), followed by the jump-start action walk
+    /// that sends the provided `KADEMLIA_FINDBUDDY_REQ` to each
+    /// SEARCHTOLERANCE-passing responded contact (`Search.cpp:536,864-896`)
+    /// up to `SEARCHFINDBUDDY_TOTAL` answers, all inside the oracle search
+    /// lifetime minus its stop grace. `FINDBUDDY_RES` replies are consumed by
+    /// the caller's unsolicited-packet dispatch, not collected here.
+    pub async fn find_buddy_search(&self, request: FindBuddyReq, work_class: RpcWorkClass) {
+        let target = request.buddy_id;
+        // Oracle CSearchManager::StartSearch drops a duplicate same-target
+        // search (AlreadySearchingFor); the permit also caps concurrency.
+        let Ok(_permit) = self.try_acquire_search_permit(target) else {
+            return;
+        };
+        let initial = self.closest_traversal_seed(&target).await;
+        let config = TraversalConfig {
+            target,
+            search_kind: TraversalKind::FindBuddy { request },
+            timeout: FIND_BUDDY_LOOKUP_TIMEOUT,
+            query_timeout: Duration::from_secs(10),
+            phase2_fanout: SEARCHFINDBUDDY_TOTAL,
+            cancel: CancellationToken::new(),
+            result_tx: None,
+            work_class,
+            ip_filter: self.ip_filter(),
+            res_contact_sink: Some(self.res_contact_sink()),
+        };
+        let _ = run_traversal(&self.inner.rpc, initial, config).await;
+    }
+
+    /// Routing-table contacts closest to `target`, mapped into the traversal
+    /// seed shape shared by every search walk.
+    async fn closest_traversal_seed(&self, target: &NodeId) -> Vec<TraversalContact> {
+        let rt = self.inner.routing_table.lock().await;
+        rt.get_closest(target, K)
+            .into_iter()
+            .map(|c| TraversalContact {
+                id: c.id,
+                addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+                tcp_port: c.tcp_port,
+                version: c.kad_version,
+            })
+            .collect::<Vec<_>>()
     }
 
     /// Search by keyword hash. Returns a Stream of results.
@@ -473,5 +510,18 @@ impl DhtNode {
                 .collect(),
             Err(_) => vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FIND_BUDDY_LOOKUP_TIMEOUT;
+
+    /// FINDBUDDY honors the oracle 100 s search lifetime with the shared 20 s
+    /// stop grace (`SEARCHFINDBUDDY_LIFETIME - SEC(20)`,
+    /// `SearchManager.cpp:322-325`): the walk budget is exactly 80 s.
+    #[test]
+    fn find_buddy_walk_budget_is_lifetime_minus_stop_grace() {
+        assert_eq!(FIND_BUDDY_LOOKUP_TIMEOUT.as_secs(), 80);
     }
 }

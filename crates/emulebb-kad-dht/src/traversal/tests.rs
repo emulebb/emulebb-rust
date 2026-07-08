@@ -1239,3 +1239,220 @@ fn reask_more_target_admits_eleven_contacts_only_from_that_contact() {
     );
     let _ = target;
 }
+
+// ── FINDBUDDY walk (oracle CSearch type FINDBUDDY) ──────────────────────────
+
+fn find_buddy_request(target: NodeId) -> FindBuddyReq {
+    FindBuddyReq {
+        buddy_id: target,
+        client_hash: Ed2kHash::from_bytes([0xC1; 16]),
+        tcp_port: 4662,
+    }
+}
+
+/// Oracle `CSearch::GetRequestContactCount` (Search.cpp:1653-1657) maps
+/// FINDBUDDY together with the STORE searches to KADEMLIA_STORE (0x04).
+#[test]
+fn find_buddy_req_count_is_the_store_contact_count() {
+    let kind = TraversalKind::FindBuddy {
+        request: find_buddy_request(NodeId::from_bytes([0x55; 16])),
+    };
+    assert_eq!(req_count_for_kind(&kind), KADEMLIA_STORE);
+    assert_eq!(KADEMLIA_STORE, 0x04);
+}
+
+/// Every KADEMLIA2_REQ of the buddy walk must carry the STORE contact count
+/// byte on the wire (previously the walk was a FindNode lookup asking 0x0B).
+#[tokio::test]
+async fn test_find_buddy_walk_req_carries_store_contact_count() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x55; 16]);
+    let contact = TraversalContact {
+        id: NodeId::from_bytes([0x12; 16]),
+        addr: "192.168.1.50:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+
+    let _ = run_traversal(
+        &rpc,
+        vec![contact.clone()],
+        TraversalConfig {
+            target,
+            search_kind: TraversalKind::FindBuddy {
+                request: find_buddy_request(target),
+            },
+            timeout: Duration::from_millis(100),
+            query_timeout: Duration::from_millis(40),
+            phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
+            cancel: CancellationToken::new(),
+            result_tx: None,
+            work_class: RpcWorkClass::Interactive,
+            ip_filter: None,
+            res_contact_sink: None,
+        },
+    )
+    .await;
+
+    let outgoing = transport.drain_outgoing();
+    assert!(!outgoing.is_empty(), "expected the walk to send a REQ");
+    assert_eq!(outgoing[0].0, contact.addr);
+    let packet = KadPacket::decode(&outgoing[0].1).unwrap();
+    let KadPacket::Req(req) = packet else {
+        panic!("expected KADEMLIA2_REQ");
+    };
+    assert_eq!(req.count, KADEMLIA_STORE);
+    assert_eq!(req.target, target);
+    assert_eq!(req.recipient_id, contact.id);
+}
+
+/// Oracle `CSearch::StorePacket` FINDBUDDY (Search.cpp:864-896): as the walk
+/// progresses, a KADEMLIA_FINDBUDDY_REQ with the verified payload (buddy
+/// target id + own client hash + own TCP port) goes to EACH responded contact
+/// that passes SEARCHTOLERANCE (Search.cpp:536); a too-distant responder is
+/// never asked.
+#[tokio::test]
+async fn test_find_buddy_action_walk_targets_each_tolerated_responder() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x55; 16]);
+    // LAN responder: tolerance-exempt (oracle IsLANIP).
+    let lan_contact = TraversalContact {
+        id: NodeId::from_bytes([0x11; 16]),
+        addr: "192.168.1.60:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    // Public responder within tolerance: same high-32 chunk as the target.
+    let mut close_id = [0xAA; 16];
+    close_id[..4].copy_from_slice(&[0x55; 4]);
+    let close_contact = TraversalContact {
+        id: NodeId::from_bytes(close_id),
+        addr: "8.8.8.10:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    // Public responder beyond tolerance: chunk-0 distance 0x55555555.
+    let far_contact = TraversalContact {
+        id: NodeId::ZERO,
+        addr: "8.8.4.4:4672".parse().unwrap(),
+        tcp_port: 0,
+        version: 9,
+    };
+    let request = find_buddy_request(target);
+    let responded = vec![
+        lan_contact.clone(),
+        close_contact.clone(),
+        far_contact.clone(),
+    ];
+
+    let _ = run_search_phase(
+        &rpc,
+        SearchPhaseConfig {
+            responded: &responded,
+            kind: TraversalKind::FindBuddy {
+                request: request.clone(),
+            },
+            target,
+            query_timeout: Duration::from_millis(30),
+            deadline: Instant::now() + Duration::from_millis(200),
+            phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
+            last_lookup_response_at: None,
+            jumpstart_idle_grace: Duration::ZERO,
+            jumpstart_tick: Duration::from_millis(5),
+            work_class: RpcWorkClass::Interactive,
+            cancel: &CancellationToken::new(),
+            result_tx: None,
+        },
+    )
+    .await;
+
+    let outgoing = transport.drain_outgoing();
+    let mut asked = Vec::new();
+    for (addr, bytes) in &outgoing {
+        let packet = KadPacket::decode(bytes).unwrap();
+        let KadPacket::FindBuddyReq(sent) = packet else {
+            panic!("expected KADEMLIA_FINDBUDDY_REQ");
+        };
+        assert_eq!(sent, request, "FINDBUDDY_REQ payload must be the request");
+        asked.push(*addr);
+    }
+    assert!(asked.contains(&lan_contact.addr), "LAN responder asked");
+    assert!(
+        asked.contains(&close_contact.addr),
+        "tolerated public responder asked"
+    );
+    assert!(
+        !asked.contains(&far_contact.addr),
+        "beyond-tolerance responder must be skipped"
+    );
+    assert_eq!(asked.len(), 2);
+}
+
+/// The action walk stops at the oracle answer target: each FINDBUDDY_REQ sent
+/// counts as one answer (Search.cpp:892) and the manager stops the search at
+/// SEARCHFINDBUDDY_TOTAL (SearchManager.cpp:324), so at most 10 responders are
+/// ever asked per search round.
+#[tokio::test]
+async fn test_find_buddy_action_walk_stops_at_the_oracle_answer_target() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::from_bytes([0x55; 16]);
+    let responded: Vec<TraversalContact> = (1u8..=12)
+        .map(|n| TraversalContact {
+            id: NodeId::from_bytes([0, 0, 0, 0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            addr: format!("192.168.1.{}:4672", n).parse().unwrap(),
+            tcp_port: 0,
+            version: 9,
+        })
+        .collect();
+
+    let _ = run_search_phase(
+        &rpc,
+        SearchPhaseConfig {
+            responded: &responded,
+            kind: TraversalKind::FindBuddy {
+                request: find_buddy_request(target),
+            },
+            target,
+            query_timeout: Duration::from_millis(30),
+            // Generous budget: OS timer granularity paces each jump-start emit
+            // well above the nominal 1 ms tick; only the send count matters.
+            deadline: Instant::now() + Duration::from_secs(2),
+            phase2_fanout: emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
+            last_lookup_response_at: None,
+            jumpstart_idle_grace: Duration::ZERO,
+            jumpstart_tick: Duration::from_millis(1),
+            work_class: RpcWorkClass::Interactive,
+            cancel: &CancellationToken::new(),
+            result_tx: None,
+        },
+    )
+    .await;
+
+    let outgoing = transport.drain_outgoing();
+    assert_eq!(
+        outgoing.len(),
+        emulebb_kad_proto::constants::SEARCHFINDBUDDY_TOTAL,
+        "the walk must ask exactly SEARCHFINDBUDDY_TOTAL responders"
+    );
+}
