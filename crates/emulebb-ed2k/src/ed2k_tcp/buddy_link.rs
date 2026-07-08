@@ -144,9 +144,15 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         transport.mode.as_str()
     );
 
-    // Send an initial ping right away so the buddy immediately treats us as live,
-    // then ping at the oracle cadence.
-    let mut ping_timer = tokio::time::interval(BUDDY_PING_INTERVAL);
+    // LOWID-G9a: the oracle's first buddy ping comes a full interval after the
+    // buddy client object is created (its ctor arms m_dwLastBuddyPingPongTime to
+    // now + MIN2MS(10), BaseClient.cpp:194 / UpDownClient.h:189), so
+    // SendBuddyPingPong() first becomes true ~10 min later. Arm the first tick a
+    // full interval out rather than firing at t=0.
+    let mut ping_timer = tokio::time::interval_at(
+        tokio::time::Instant::now() + BUDDY_PING_INTERVAL,
+        BUDDY_PING_INTERVAL,
+    );
     ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let result = drive_buddy_link(

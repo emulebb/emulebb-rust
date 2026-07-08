@@ -417,7 +417,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         buddy_hold = Some(InboundBuddyHold {
                             buddy_id,
                             relay_rx,
-                            last_buddy_pingpong_at: None,
+                            // LOWID-G9b: the oracle arms the ping/pong marker when
+                            // the buddy client object is created (ctor), so the
+                            // first pong is gated ~13 min out, not answered
+                            // immediately. Seed the watermark at hold creation.
+                            last_buddy_pingpong_at: Some(std::time::Instant::now()),
                         });
                     }
                 }
@@ -1074,10 +1078,14 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     result
 }
 
-/// Oracle `AllowIncomingBuddyPingPong()` cadence: an incoming `OP_BUDDYPING` is
-/// only answered with `OP_BUDDYPONG` at most once every three minutes
-/// (`MIN2MS(3)`, ListenSocket.cpp / UpDownClient.h).
-const BUDDY_PINGPONG_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+/// Oracle `AllowIncomingBuddyPingPong()` cadence (LOWID-G9b): after sending an
+/// `OP_BUDDYPONG` the oracle arms `m_dwLastBuddyPingPongTime` to `now + MIN2MS(10)`
+/// (`SetLastBuddyPingPongTime`, UpDownClient.h:189) and only allows the next pong
+/// once `now >= m_dwLastBuddyPingPongTime + MIN2MS(3)`
+/// (`AllowIncomingBuddyPingPong`, UpDownClient.h:188) — i.e. ~13 minutes after the
+/// last reply. Since the firewalled buddy pings every 10 minutes, this makes us
+/// pong every *other* ping (a flat 3-minute gate would pong every ping).
+const BUDDY_PINGPONG_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(13 * 60);
 
 /// Inbound Kad buddy hold state owned by a held listener session.
 struct InboundBuddyHold {
@@ -1085,7 +1093,8 @@ struct InboundBuddyHold {
     relay_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     /// When we last answered/observed a buddy ping/pong, gating the next allowed
     /// reply (oracle `SetLastBuddyPingPongTime` / `AllowIncomingBuddyPingPong`).
-    /// `None` means no reply has been sent yet, so the first ping is answered.
+    /// Seeded at hold creation (LOWID-G9b), mirroring the oracle arming the marker
+    /// in the buddy client ctor, so the first pong waits the full gate.
     last_buddy_pingpong_at: Option<std::time::Instant>,
 }
 
@@ -1273,25 +1282,29 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn buddy_pingpong_allows_first_ping_then_rate_limits() {
-        let now = Instant::now();
-        // No prior reply: the first ping is always answered.
-        assert!(allow_buddy_pingpong_at(None, now));
+    fn buddy_pingpong_gate_is_thirteen_minutes_and_pongs_every_other_ping() {
+        // LOWID-G9b: the pong gate is ~13 minutes (MIN2MS(10)+MIN2MS(3)), so with
+        // the firewalled buddy pinging every 10 minutes we pong every other ping.
+        assert_eq!(BUDDY_PINGPONG_MIN_INTERVAL, Duration::from_secs(13 * 60));
 
-        let last = now;
-        // Within the 3-minute window: suppressed (oracle AllowIncomingBuddyPingPong).
+        // Seeded at hold creation: the first ping (well before the gate) is NOT
+        // answered, mirroring the oracle arming the marker in the buddy ctor.
+        let created = Instant::now();
+        let ping_interval = Duration::from_secs(10 * 60);
+        // First ping ~10 min after creation: within the 13-min gate -> suppressed.
+        assert!(!allow_buddy_pingpong_at(Some(created), created + ping_interval));
+
+        // Simulate answering a pong at t (arms the marker to t), then the next
+        // ping 10 min later is suppressed and the one after (20 min) is answered.
+        let t = created + ping_interval + Duration::from_secs(30);
+        assert!(!allow_buddy_pingpong_at(Some(t), t + ping_interval));
+        assert!(allow_buddy_pingpong_at(Some(t), t + 2 * ping_interval));
+
+        // Boundary: exactly at the gate is allowed, just before is not.
         assert!(!allow_buddy_pingpong_at(
-            Some(last),
-            last + BUDDY_PINGPONG_MIN_INTERVAL - Duration::from_secs(1)
+            Some(t),
+            t + BUDDY_PINGPONG_MIN_INTERVAL - Duration::from_secs(1)
         ));
-        // Exactly at the boundary and beyond: allowed again.
-        assert!(allow_buddy_pingpong_at(
-            Some(last),
-            last + BUDDY_PINGPONG_MIN_INTERVAL
-        ));
-        assert!(allow_buddy_pingpong_at(
-            Some(last),
-            last + BUDDY_PINGPONG_MIN_INTERVAL + Duration::from_secs(1)
-        ));
+        assert!(allow_buddy_pingpong_at(Some(t), t + BUDDY_PINGPONG_MIN_INTERVAL));
     }
 }
