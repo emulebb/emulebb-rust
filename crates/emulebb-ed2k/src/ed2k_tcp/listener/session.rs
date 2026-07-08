@@ -26,7 +26,7 @@ use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
     decode_exact_file_hash_payload, decode_kad_callback_payload, decode_optional_file_hash_payload,
     encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_buddy_pong,
-    encode_file_req_ans_nofil, encode_port_test_answer, encode_public_ip_answer,
+    encode_port_test_answer, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
@@ -541,23 +541,41 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 let requested =
                     decode_exact_file_hash_payload(&packet.payload, "OP_STARTUPLOADREQ")?;
                 requested_file_hash = Some(requested);
-                let reply = if transfer_runtime.local_servable_entry(&requested).await?.is_some() {
+                if transfer_runtime.local_servable_entry(&requested).await?.is_some() {
                     let mut peer_identity = peer_upload_identity.clone();
                     peer_identity.firewall_context =
                         upload_firewall_context(server_state, kad_firewall).await;
-                    upload_queue
+                    // `None` where the oracle is silent (rejected admission /
+                    // waiting rank toward a plain-eDonkey peer).
+                    if let Some(reply) = upload_queue
                         .start_upload_reply(transfer_runtime, peer_identity, &requested)
                         .await
+                    {
+                        dump_ed2k_tcp_listener_send(
+                            peer_addr,
+                            transport.mode,
+                            "start_upload",
+                            &reply,
+                        );
+                        transport.write_all(&reply).await.with_context(|| {
+                            format!("failed to send OP_STARTUPLOADREQ response to {peer_addr}")
+                        })?;
+                    }
                 } else {
-                    // Phase C: an upload request for a file we do not serve is a failed
-                    // file-id request; a flood is a share-probe.
+                    // An OP_STARTUPLOADREQ for a file we do not serve gets NO
+                    // reply: the oracle only does CheckFailedFileIdReqs
+                    // bookkeeping (ListenSocket.cpp:706-707). Unlike the
+                    // file-request opcodes, no OP_FILEREQANSNOFIL is sent. The
+                    // failed request still counts toward the share-probe flood
+                    // ban, and the dump keeps the event visible locally.
                     failed_file_req_count += 1;
-                    encode_file_req_ans_nofil(&requested)
-                };
-                dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "start_upload", &reply);
-                transport.write_all(&reply).await.with_context(|| {
-                    format!("failed to send OP_STARTUPLOADREQ response to {peer_addr}")
-                })?;
+                    dump_ed2k_tcp_listener_meta(
+                        peer_addr,
+                        Some(transport.mode),
+                        "start_upload_unknown_file",
+                        format!("file_hash={requested} failed_file_req_count={failed_file_req_count}"),
+                    );
+                }
                 if failed_file_req_count >= crate::ed2k_transfer::diag_bad_peer::FAILED_FILE_REQ_FLOOD_THRESHOLD
                 {
                     let ban_ip = match peer_addr {

@@ -288,13 +288,17 @@ impl ListenerUploadQueue {
         }
     }
 
+    /// Answer one OP_STARTUPLOADREQ for a served file. Returns the packet to
+    /// put on the wire, or `None` where the oracle is silent: a rejected
+    /// admission (AddClientToQueue early returns, UploadQueue.cpp:1854,
+    /// 1905-1915, 1939-1941 — no packet).
     pub(in crate::ed2k_tcp) async fn start_upload_reply(
         &mut self,
         transfer_runtime: &Ed2kTransferRuntime,
         peer_identity: Ed2kUploadPeerIdentity,
         requested: &Ed2kHash,
-    ) -> Vec<u8> {
-        let status = if self.file_hash.as_ref() == Some(requested) {
+    ) -> Option<Vec<u8>> {
+        let mut status = if self.file_hash.as_ref() == Some(requested) {
             match self.session.as_ref() {
                 Some(upload_session_handle) => {
                     transfer_runtime
@@ -304,42 +308,75 @@ impl ListenerUploadQueue {
                 None => Ed2kUploadSessionStatus::Stale,
             }
         } else {
-            self.record_diag_peer(&peer_identity);
-            let (session_handle, status) = transfer_runtime
-                .begin_upload_session(peer_identity, requested)
-                .await;
-            // A rejected candidate was never enqueued, so do not retain a
-            // dangling session handle for it.
-            if status != Ed2kUploadSessionStatus::Rejected {
-                self.session = Some(session_handle);
-                self.file_hash = Some(*requested);
-                self.verified_reader = None;
-            }
-            status
+            self.admit_fresh(transfer_runtime, peer_identity.clone(), requested)
+                .await
         };
+        if status == Ed2kUploadSessionStatus::Stale {
+            // A re-ask from a peer the queue no longer tracks is a FRESH
+            // admission (oracle AddClientToQueue: an untracked client is
+            // enqueued anew and told its real rank via SendRankingInfo,
+            // UploadQueue.cpp:1986, or silently refused). Never synthesize a
+            // rank for a stale session.
+            self.session = None;
+            status = self
+                .admit_fresh(transfer_runtime, peer_identity, requested)
+                .await;
+        }
         match status {
             Ed2kUploadSessionStatus::Granted => {
                 self.mark_granted_sent();
-                encode_accept_upload_req()
+                Some(encode_accept_upload_req())
             }
             Ed2kUploadSessionStatus::Waiting { rank } => {
                 self.mark_waiting();
                 self.emit_queue_rank(rank);
-                encode_queue_ranking(rank)
+                Some(encode_queue_ranking(rank))
             }
             // Admission refused (master AddClientToQueue returned without
-            // queuing): signal a full queue so the peer backs off. eMule sends
-            // OP_QUEUEFULL on the UDP reask path; on this TCP path it simply
-            // does not admit, so report the maximum queue rank.
+            // queuing): the oracle sends NOTHING on this TCP path
+            // (UploadQueue.cpp:1854, 1905-1915, 1939-1941), so stay silent and
+            // only record the rejection locally.
             Ed2kUploadSessionStatus::Rejected => {
                 self.mark_waiting();
-                encode_queue_ranking(u16::MAX)
+                // Keyed on the REQUESTED file: a rejected candidate never
+                // updates `self.file_hash` (no session is retained for it).
+                if let Some(peer) = self.diag_peer.as_deref() {
+                    diag_sched::upload_admission_rejected(
+                        peer,
+                        self.diag_peer_hash,
+                        &requested.to_string(),
+                    );
+                }
+                None
             }
+            // begin_session never reports Stale; a raced poll stays silent
+            // like the oracle's untracked-client refusal.
             Ed2kUploadSessionStatus::Stale => {
                 self.mark_waiting();
-                encode_queue_ranking(1)
+                None
             }
         }
+    }
+
+    /// Run one fresh queue admission for this connection (oracle
+    /// `AddClientToQueue`). A rejected candidate was never enqueued, so no
+    /// dangling session handle is retained for it.
+    async fn admit_fresh(
+        &mut self,
+        transfer_runtime: &Ed2kTransferRuntime,
+        peer_identity: Ed2kUploadPeerIdentity,
+        requested: &Ed2kHash,
+    ) -> Ed2kUploadSessionStatus {
+        self.record_diag_peer(&peer_identity);
+        let (session_handle, status) = transfer_runtime
+            .begin_upload_session(peer_identity, requested)
+            .await;
+        if status != Ed2kUploadSessionStatus::Rejected {
+            self.session = Some(session_handle);
+            self.file_hash = Some(*requested);
+            self.verified_reader = None;
+        }
+        status
     }
 
     /// Attach a promoted-outbound slot grant (a waiter with no live connection
@@ -612,9 +649,27 @@ mod tests {
 
     use emulebb_kad_proto::Ed2kHash;
 
-    use super::ListenerUploadQueue;
-    use crate::ed2k_transfer::{ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime};
+    use super::{ListenerUploadQueue, encode_accept_upload_req, encode_queue_ranking};
+    use crate::ed2k_transfer::{
+        ED2K_EMBLOCK_SIZE, Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig,
+    };
     use crate::paths::unique_test_dir;
+
+    fn emule_identity(peer_addr: SocketAddr) -> Ed2kUploadPeerIdentity {
+        let mut identity = super::super::upload_peer_identity_from_socket(peer_addr);
+        identity.is_emule_client = true;
+        identity
+    }
+
+    async fn use_one_slot_queue(runtime: &Ed2kTransferRuntime) {
+        runtime
+            .configure_upload_queue(Ed2kUploadQueueConfig {
+                active_slots: 1,
+                waiting_capacity: 8,
+                ..Default::default()
+            })
+            .await;
+    }
 
     /// Oracle bRequeue=false (CheckForTimeOver, UploadQueue.cpp:2320-2321): a
     /// BANNED client's slot recycle must not get the OP_OUTOFPARTREQS courtesy
@@ -652,6 +707,87 @@ mod tests {
         // A different file is independent too.
         let other = Ed2kHash([9u8; 16]);
         assert_eq!(queue.note_block_request(&other, 0, 180_000), None);
+    }
+
+    /// UP-3: a re-ask on a STALE tracked session runs a FRESH admission — the
+    /// oracle treats a re-ask from a client it no longer tracks as a plain
+    /// `AddClientToQueue` and answers with the REAL state (SendRankingInfo,
+    /// UploadQueue.cpp:1986) — never the old synthesized rank-1
+    /// OP_QUEUERANKING.
+    #[tokio::test]
+    async fn stale_reask_runs_a_fresh_admission_with_the_real_reply() {
+        let root = unique_test_dir("ed2k-listener-stale-reask");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 21)), 4662);
+        let identity = emule_identity(peer_addr);
+        let file_hash = Ed2kHash::from_bytes([0x44; 16]);
+
+        let mut queue = ListenerUploadQueue::new();
+        let first = queue
+            .start_upload_reply(&runtime, identity.clone(), &file_hash)
+            .await;
+        assert_eq!(first, Some(encode_accept_upload_req()));
+
+        // Drop the runtime entry behind the listener's back: the next poll on
+        // the retained handle reports Stale.
+        let stale_handle = queue.session.clone().unwrap();
+        runtime.release_upload_session(&stale_handle).await;
+        assert!(runtime.upload_queue_snapshot().await.is_empty());
+
+        // The re-ask is a fresh admission; the queue is empty, so the peer is
+        // granted a REAL slot, not told a synthesized waiting rank.
+        let reask = queue
+            .start_upload_reply(&runtime, identity, &file_hash)
+            .await;
+        assert_eq!(reask, Some(encode_accept_upload_req()));
+        assert_eq!(runtime.upload_queue_snapshot().await.len(), 1);
+    }
+
+    /// UP-3: a refused admission sends NOTHING — the oracle AddClientToQueue
+    /// early-returns without a packet (per-IP cap, UploadQueue.cpp:1905-1915;
+    /// queue caps 1939-1941) — where rust previously synthesized
+    /// OP_QUEUERANKING(0xFFFF).
+    #[tokio::test]
+    async fn rejected_admission_sends_no_packet() {
+        let root = unique_test_dir("ed2k-listener-rejected-admission");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        use_one_slot_queue(&runtime).await;
+        let file_hash = Ed2kHash::from_bytes([0x55; 16]);
+        let shared_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+
+        // Occupy the single slot, then fill the per-IP waiter cap (3).
+        let mut queues = Vec::new();
+        for (index, port) in [4661u16, 4662, 4663, 4664].into_iter().enumerate() {
+            let mut queue = ListenerUploadQueue::new();
+            let reply = queue
+                .start_upload_reply(
+                    &runtime,
+                    emule_identity(SocketAddr::new(shared_ip, port)),
+                    &file_hash,
+                )
+                .await;
+            let expected = if index == 0 {
+                encode_accept_upload_req()
+            } else {
+                encode_queue_ranking(u16::try_from(index).unwrap())
+            };
+            assert_eq!(reply, Some(expected));
+            queues.push(queue);
+        }
+
+        // The 4th same-IP candidate is refused: silence on the wire, no
+        // retained session handle, and the queue is unchanged.
+        let mut rejected = ListenerUploadQueue::new();
+        let reply = rejected
+            .start_upload_reply(
+                &runtime,
+                emule_identity(SocketAddr::new(shared_ip, 4665)),
+                &file_hash,
+            )
+            .await;
+        assert_eq!(reply, None, "a rejected admission must stay silent");
+        assert!(rejected.session.is_none());
+        assert_eq!(runtime.upload_queue_snapshot().await.len(), 4);
     }
 
     /// FIX 5 invariant: the upload slot must be reclaimed on EVERY exit path.

@@ -398,3 +398,40 @@ async fn listener_upload_queue_preserves_waiter_rank_across_file_switch() {
     drop(trailing_stream);
     server.abort();
 }
+
+#[tokio::test]
+async fn listener_ignores_start_upload_for_an_unknown_file() {
+    let mut runtime = ListenerTestRuntime::new(
+        "ed2k-upload-listener-unknown-file",
+        listener_test_identity(0x53, 0x5556_5758, 41002, 41003),
+        [0x5B; 16],
+        0x99AA_BBCC,
+    )
+    .await;
+    let file = runtime
+        .seed_verified_upload_file("served.txt", vec![0x73; 4096])
+        .await;
+    let server = runtime.spawn_listener_loop();
+
+    let mut stream = connect_peer_and_exchange_hello(
+        runtime.peer_addr,
+        listener_test_identity(0x65, 0x4444_5555, 4661, 4665),
+    )
+    .await;
+
+    // OP_STARTUPLOADREQ for a file we do not serve: NOTHING comes back — the
+    // oracle only does CheckFailedFileIdReqs bookkeeping
+    // (ListenSocket.cpp:706-707). OP_FILEREQANSNOFIL is reserved for the
+    // file-request opcodes (OP_REQUESTFILENAME et al.).
+    let unknown_hash = Ed2kHash::from_bytes([0xEE; 16]);
+    request_upload_file(&mut stream, &unknown_hash).await;
+    assert_start_upload_silence(&mut stream, Duration::from_millis(1200)).await;
+
+    // The session survives the silent refusal: a follow-up request for the
+    // served file is granted normally.
+    request_upload_file(&mut stream, &file.file_hash).await;
+    wait_for_upload_accept_timeout(&mut stream).await;
+
+    drop(stream);
+    server.abort();
+}

@@ -482,6 +482,36 @@ pub(super) async fn assert_queue_rank_silence(stream: &mut TcpStream, window: Du
     );
 }
 
+/// Assert that NO upload-request reply (OP_FILEREQANSNOFIL, OP_ACCEPTUPLOADREQ
+/// or OP_QUEUERANKING) arrives within `window` and the connection stays open.
+/// The oracle answers an OP_STARTUPLOADREQ for an unknown file with silence
+/// (only CheckFailedFileIdReqs bookkeeping, ListenSocket.cpp:706-707).
+/// Unrelated packets (e.g. the secure-ident probe) may still flow.
+pub(super) async fn assert_start_upload_silence(stream: &mut TcpStream, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match tokio::time::timeout(remaining, try_read_packet(stream)).await {
+            // The window elapsed in silence.
+            Err(_elapsed) => return,
+            Ok(Err(err)) => panic!("connection dropped during the silence window: {err}"),
+            Ok(Ok(packet)) => {
+                let reply = (packet[0], packet[5]);
+                assert!(
+                    reply != (OP_EDONKEYPROT, OP_FILEREQANSNOFIL)
+                        && reply != (OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ)
+                        && reply != (OP_EMULEPROT, OP_QUEUERANKING),
+                    "unexpected OP_STARTUPLOADREQ reply opcode 0x{:02X}",
+                    packet[5]
+                );
+            }
+        }
+    }
+}
+
 pub(super) async fn wait_for_upload_accept(stream: &mut TcpStream) -> Vec<u8> {
     read_until_opcode(stream, OP_EDONKEYPROT, OP_ACCEPTUPLOADREQ).await
 }

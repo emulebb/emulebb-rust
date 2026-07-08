@@ -111,6 +111,18 @@ pub(crate) fn queue_rank(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &st
     emit(FAMILY, "queue_rank", "info", keys, body);
 }
 
+/// `upload_admission_rejected` (schema extension, rust-local): an upload-queue
+/// admission was refused and — matching the oracle's silent
+/// `CUploadQueue::AddClientToQueue` early returns (banned client
+/// UploadQueue.cpp:1854, same-IP caps 1905-1915, soft/hard queue cap
+/// 1939-1941) — NO packet was sent. Keeps the rejection visible locally for
+/// soak diffing where the wire is deliberately silent.
+pub(crate) fn upload_admission_rejected(peer: &str, peer_hash: Option<[u8; 16]>, file_hash: &str) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({ "outcome": "rejected", "packet": "none" });
+    emit(FAMILY, "upload_admission_rejected", "low", keys, body);
+}
+
 /// `upload_request_outcome` (schema extension): one OP_REQUESTPARTS admission and
 /// payload-serving result. This fills the parity gap between "request accepted"
 /// and "payload packet left the socket", without logging file names or payload.
