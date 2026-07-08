@@ -710,17 +710,28 @@ pub(super) async fn send_connected_server_startup(
     shared_catalog: &Ed2kSharedCatalog,
     bind_ip: Ipv4Addr,
     tcp_port: u16,
+    add_servers_from_server: bool,
 ) -> Result<()> {
     session.set_phase(
         ServerSessionPhase::Connected,
         "server session accepted after OP_IDCHANGE",
     );
     let _ = send_offer_files_advertisement(session, shared_catalog, bind_ip, tcp_port).await?;
-    send_server_list_request(session).await?;
+    send_server_list_request(session, add_servers_from_server).await?;
     Ok(())
 }
 
-async fn send_server_list_request(session: &mut ServerSession) -> Result<()> {
+async fn send_server_list_request(
+    session: &mut ServerSession,
+    add_servers_from_server: bool,
+) -> Result<()> {
+    // eMule ServerConnect.cpp:307-313 sends OP_GETSERVERLIST only when
+    // `thePrefs.GetAddServersFromServer()` is set. That preference defaults to
+    // false (Preferences.cpp:3207), so a stock-config client emits no such
+    // packet. Honor the same gate here.
+    if !add_servers_from_server {
+        return Ok(());
+    }
     if session.server_list_requested {
         return Ok(());
     }
@@ -790,6 +801,48 @@ mod tests {
             complete_parts: Vec::new(),
             publish: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn server_list_request_gated_on_add_servers_from_server() {
+        use std::time::Duration;
+
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server_stream, peer_addr) = listener.accept().await.unwrap();
+        let mut peer = peer_task.await.unwrap();
+        let mut session = super::ServerSession::from_stream_for_test(server_stream, peer_addr);
+
+        // Stock default (AddServersFromServer off): no OP_GETSERVERLIST is sent.
+        send_server_list_request(&mut session, false).await.unwrap();
+        assert!(!session.server_list_requested);
+        let mut probe = [0u8; 1];
+        let idle = tokio::time::timeout(Duration::from_millis(150), peer.read(&mut probe)).await;
+        assert!(
+            idle.is_err(),
+            "no packet must be sent when AddServersFromServer is off"
+        );
+
+        // Preference enabled: exactly one OP_GETSERVERLIST (empty payload).
+        send_server_list_request(&mut session, true).await.unwrap();
+        assert!(session.server_list_requested);
+        let mut header = [0u8; 6];
+        peer.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], super::super::OP_EDONKEYPROT);
+        // Length field covers the opcode byte only (empty body).
+        assert_eq!(u32::from_le_bytes(header[1..5].try_into().unwrap()), 1);
+        assert_eq!(header[5], OP_GETSERVERLIST);
+
+        // A second call is idempotent (already requested this session).
+        send_server_list_request(&mut session, true).await.unwrap();
+        let idle_again =
+            tokio::time::timeout(Duration::from_millis(150), peer.read(&mut probe)).await;
+        assert!(idle_again.is_err(), "server list must be requested at most once");
+        drop(peer);
     }
 
     #[test]

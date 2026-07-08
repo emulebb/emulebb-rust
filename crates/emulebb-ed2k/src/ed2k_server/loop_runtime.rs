@@ -52,6 +52,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         public_ip,
         reconnect_signal,
         server_list_events,
+        add_servers_from_server: config.add_servers_from_server,
     };
 
     let configured_servers = match configured_server_entries(&config) {

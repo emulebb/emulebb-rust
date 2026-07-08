@@ -249,11 +249,15 @@ async fn search_sources_on_server(
                     );
                 }
                 session.assigned_client_id = Some(id_change.client_id);
+                // Ephemeral source-query session: never solicit the server list
+                // (stock only issues OP_GETSERVERLIST from its single persistent
+                // ServerConnect, and only when AddServersFromServer is set).
                 send_connected_server_startup(
                     &mut session,
                     &active_catalog,
                     bind_ip,
                     hello_identity.tcp_port,
+                    false,
                 )
                 .await?;
                 session.set_phase(

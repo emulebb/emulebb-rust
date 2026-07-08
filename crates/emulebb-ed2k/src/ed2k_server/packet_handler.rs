@@ -95,6 +95,7 @@ pub(super) async fn handle_server_packet(
                 &context.shared_catalog,
                 context.bind_ip,
                 context.hello_identity.tcp_port,
+                context.add_servers_from_server,
             )
             .await?;
             if allow_probe_search {
@@ -166,7 +167,13 @@ pub(super) async fn handle_server_packet(
                 packet.payload.first().copied().unwrap_or_default(),
                 discovered.len()
             );
-            if !discovered.is_empty()
+            // eMule accepts servers from OP_SERVERLIST only when
+            // `GetAddServersFromServer()` is set (the same preference that gates
+            // the OP_GETSERVERLIST request). With the stock default (false) an
+            // unsolicited OP_SERVERLIST reply is decoded for logging but never
+            // merged into the local server list.
+            if context.add_servers_from_server
+                && !discovered.is_empty()
                 && let Some(sender) = context.server_list_events.as_ref()
             {
                 let _ = sender.send(Ed2kServerListEvent::DiscoveredServers(discovered));

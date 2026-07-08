@@ -96,11 +96,15 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                     );
                 }
                 session.assigned_client_id = Some(id_change.client_id);
+                // Ephemeral callback-request session: never solicit the server
+                // list (stock only issues OP_GETSERVERLIST from its persistent
+                // ServerConnect, gated on AddServersFromServer).
                 send_connected_server_startup(
                     &mut session,
                     &Arc::new(RwLock::new(shared_catalog.to_vec())),
                     bind_ip,
                     hello_identity.tcp_port,
+                    false,
                 )
                 .await?;
                 wait_for_offer_files_settle(&session).await;

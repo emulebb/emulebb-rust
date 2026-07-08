@@ -96,6 +96,14 @@ pub struct Ed2kConfig {
     /// Publish the real `emule-rust` mod identity in the eD2k hello instead of
     /// the default "eMule Community" (0.7-series) identity used to blend in.
     pub publish_emule_rust_identity: bool,
+    /// Whether to request the server's server list on connect (OP_GETSERVERLIST)
+    /// and merge unsolicited OP_SERVERLIST replies into the local server list.
+    /// Mirrors eMule `thePrefs.GetAddServersFromServer()` (`AddServersFromServer`
+    /// ini key), which DEFAULTS TO FALSE (Preferences.cpp:3207). Stock gates both
+    /// the OP_GETSERVERLIST send (ServerConnect.cpp:307-313) and acceptance of
+    /// discovered servers on this preference, so a default-config client sends no
+    /// such packet and adds no servers from the server.
+    pub add_servers_from_server: bool,
     /// Number of consecutive connect/ping failures after which a non-static
     /// server is dropped from the list (eMule `thePrefs.GetDeadServerRetries`,
     /// `DeadServerRetry` ini key). Master default is 1 (range 1..=10,
@@ -193,6 +201,10 @@ impl Default for Ed2kConfig {
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
+            // eMule AddServersFromServer default is FALSE (Preferences.cpp:3207):
+            // a stock client neither requests OP_GETSERVERLIST nor adds servers
+            // reported by the server.
+            add_servers_from_server: false,
             // eMule `CPreferences` DeadServerRetry default (NormalizeRetryCount
             // default 1, min 1, max MAX_SERVERFAILCOUNT=10).
             dead_server_retries: 1,

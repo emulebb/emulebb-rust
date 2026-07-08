@@ -76,6 +76,9 @@ pub(super) struct ServerSessionContext {
     /// servers (`OP_SERVERLIST`) and connect/ping outcomes (fail-count / dead
     /// server drop). `None` when the loop is run without a core store wired.
     pub(super) server_list_events: Option<Ed2kServerListEventSender>,
+    /// eMule `thePrefs.GetAddServersFromServer()` (default false): gates sending
+    /// OP_GETSERVERLIST on connect and accepting servers from OP_SERVERLIST.
+    pub(super) add_servers_from_server: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

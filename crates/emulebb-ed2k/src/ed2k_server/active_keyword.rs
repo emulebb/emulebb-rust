@@ -398,11 +398,15 @@ async fn search_keyword_on_server(
                 }
                 session.assigned_client_id = Some(id_change.client_id);
                 let active_catalog = Arc::new(RwLock::new(shared_catalog.to_vec()));
+                // Ephemeral keyword-query session: never solicit the server list
+                // (stock issues OP_GETSERVERLIST only from its persistent
+                // ServerConnect, gated on AddServersFromServer).
                 send_connected_server_startup(
                     &mut session,
                     &active_catalog,
                     bind_ip,
                     hello_identity.tcp_port,
+                    false,
                 )
                 .await?;
                 wait_for_offer_files_settle(&session).await;
