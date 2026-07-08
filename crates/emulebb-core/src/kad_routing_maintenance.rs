@@ -2,8 +2,9 @@
 //!
 //! The master keeps its routing tree healthy through two cadenced per-zone
 //! callbacks driven by the Kad event scheduler:
-//!   - `OnBigTimer` (~10 s/zone): a per-zone random-target `FindNode` lookup to
-//!     refill/refresh buckets (`RoutingZone.cpp:802-810,908-916`).
+//!   - `OnBigTimer` (~10 s/zone): a per-zone random-target NODE lookup (one
+//!     initial REQ, stop on first RES) to refill/refresh buckets
+//!     (`RoutingZone.cpp:802-810,908-916`, `Search.cpp:194,373-387`).
 //!   - `OnSmallTimer` (~1 min/leaf): seed expiry windows, drop dead+expired
 //!     contacts, and HELLO-probe the single lowest-quality expired contact per
 //!     leaf to re-verify liveness (`RoutingZone.cpp:852-906`).
@@ -83,10 +84,10 @@ pub(crate) async fn run_kad_routing_maintenance_loop(
     }
 }
 
-/// Kick off at most one random-target `FindNode` lookup per tick, into the
-/// next due refreshable leaf zone, to keep buckets populated (oracle
-/// `RandomLookup`). The master fires at most ONE zone's `OnBigTimer` per
-/// scheduler pass (`tNow >= m_tBigTimer` + `m_tBigTimer = tNow + SEC(10)`,
+/// Kick off at most one random-target NODE lookup per tick, into the next due
+/// refreshable leaf zone, to keep buckets populated (oracle `RandomLookup`).
+/// The master fires at most ONE zone's `OnBigTimer` per scheduler pass
+/// (`tNow >= m_tBigTimer` + `m_tBigTimer = tNow + SEC(10)`,
 /// Kademlia.cpp:289-294) and re-arms the fired zone one hour out
 /// (`m_tNextBigTimer = tNow + HR2S(1)`); the per-zone re-arm lives in the
 /// routing table, so ticks naturally rotate across due zones.
@@ -96,16 +97,20 @@ async fn run_bucket_refresh(dht: &DhtNode) {
     };
     let dht = dht.clone();
     tokio::spawn(async move {
-        // A bucket-refresh lookup is best-effort maintenance traffic; the
-        // discovered + answered contacts are folded into the routing table by
-        // the lookup itself (final closest-set) and by the AddUnfiltered RES
-        // sink (every answered contact).
-        if let Err(error) = dht
-            .lookup_nodes_with_class(&target, RpcWorkClass::Maintenance)
-            .await
-        {
-            tracing::debug!("kad routing refresh lookup failed target={target}: {error}");
-        }
+        // Oracle NODE search (CSearchManager::FindNode(uRandom, false),
+        // RoutingZone.cpp:915): ONE initial KADEMLIA2_REQ, jump-start retries
+        // only while silent, stop on the first RES (Search.cpp:194,373-387) —
+        // not a full convergence walk. The answered contacts are folded into
+        // the routing table by the AddUnfiltered RES sink.
+        let outcome = dht
+            .refresh_node_lookup(&target, RpcWorkClass::Maintenance)
+            .await;
+        tracing::debug!(
+            "kad routing refresh (NODE lookup) target={target} responded={} reqs_sent={} contacts_ingested={}",
+            outcome.responded,
+            outcome.reqs_sent,
+            outcome.contacts_ingested
+        );
     });
 }
 
