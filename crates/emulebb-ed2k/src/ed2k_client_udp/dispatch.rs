@@ -87,7 +87,9 @@ pub(crate) fn parse_inbound_reask_datagram(
             .map(InboundReaskMessage::Ack),
         OP_QUEUEFULL => Some(InboundReaskMessage::QueueFull),
         OP_FILENOTFOUND => Some(InboundReaskMessage::FileNotFound),
-        OP_REASKCALLBACKUDP => decode_reask_callback_udp(body, our_udp_version)
+        // The buddy relay forwards the post-buddy-id tail verbatim (oracle never
+        // parses it), so decode independently of our_udp_version.
+        OP_REASKCALLBACKUDP => decode_reask_callback_udp(body)
             .ok()
             .map(InboundReaskMessage::CallbackUdp),
         OP_DIRECTCALLBACKREQ => decode_direct_callback_req(body)

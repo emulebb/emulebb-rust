@@ -58,13 +58,22 @@ pub(crate) struct ReaskAck {
 
 /// Decoded `OP_REASKCALLBACKUDP` request (LowID buddy-relayed reask). Same as
 /// `OP_REASKFILEPING` with the source's buddy Kad id prepended.
+///
+/// The buddy relays this by stripping the 16-byte buddy-id and forwarding
+/// everything after it (`file_hash` + the version-gated reask tail) verbatim to
+/// the firewalled source it serves — the oracle never re-parses or re-encodes the
+/// tail (`ClientUDPSocket.cpp` `memcpy(response->pBuffer + 6, packet + 16, ...)`).
+/// So we keep the raw post-buddy-id bytes in `forwarded_tail` rather than
+/// round-tripping them through the version-gated codec (which would misparse or
+/// drop a legacy udp_version <= 3 sender's tail).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReaskCallbackUdp {
     /// The source's buddy Kad id (`GetBuddyID`), which relays the reask.
     pub buddy_id: Ed2kHash,
     pub file_hash: Ed2kHash,
-    pub part_status: Option<Vec<bool>>,
-    pub complete_source_count: Option<u16>,
+    /// The raw bytes after the 16-byte buddy-id (`file_hash` + version-gated
+    /// tail), forwarded verbatim by the buddy relay.
+    pub forwarded_tail: Vec<u8>,
 }
 
 /// Decoded `OP_DIRECTCALLBACKREQ` request (we are the firewalled LowID source the
@@ -267,36 +276,24 @@ pub(crate) fn encode_reask_callback_udp(
     body
 }
 
-/// Decodes an `OP_REASKCALLBACKUDP` body. `sender_udp_version` is the relaying
-/// downloader's advertised UDP version (gates the optional tails).
-pub(crate) fn decode_reask_callback_udp(
-    body: &[u8],
-    sender_udp_version: u8,
-) -> Result<ReaskCallbackUdp> {
+/// Decodes an `OP_REASKCALLBACKUDP` body for buddy relaying. The buddy forwards
+/// everything after the 16-byte buddy-id verbatim (oracle `ClientUDPSocket.cpp`
+/// forwards `packet + 16` without parsing the version-gated tail), so this only
+/// splits off the buddy-id and keeps the remaining bytes untouched rather than
+/// interpreting the partstatus / complete-source-count tail (which would misparse
+/// or drop a legacy udp_version <= 3 sender). We still require a full file hash so
+/// the relayed `OP_REASKCALLBACKTCP` carries a decodable hash.
+pub(crate) fn decode_reask_callback_udp(body: &[u8]) -> Result<ReaskCallbackUdp> {
     if body.len() < 32 {
         bail!("short OP_REASKCALLBACKUDP body ({})", body.len());
     }
     let buddy_id = Ed2kHash::from_bytes(body[..16].try_into()?);
     let file_hash = Ed2kHash::from_bytes(body[16..32].try_into()?);
-    let mut rest = &body[32..];
-    let mut part_status = None;
-    if sender_udp_version > 3 {
-        let (bitmap, tail) = decode_part_status(rest)?;
-        part_status = bitmap;
-        rest = tail;
-    }
-    let mut complete_source_count = None;
-    if sender_udp_version > 2 {
-        if rest.len() < 2 {
-            bail!("short OP_REASKCALLBACKUDP complete-source count");
-        }
-        complete_source_count = Some(u16::from_le_bytes([rest[0], rest[1]]));
-    }
+    let forwarded_tail = body[16..].to_vec();
     Ok(ReaskCallbackUdp {
         buddy_id,
         file_hash,
-        part_status,
-        complete_source_count,
+        forwarded_tail,
     })
 }
 
@@ -418,7 +415,7 @@ mod tests {
         assert!(decode_reask_file_ping(&[0u8; 4], 4).is_err());
         assert!(decode_reask_ack(&[], 2).is_err());
         assert!(decode_part_status(&[1]).is_err());
-        assert!(decode_reask_callback_udp(&[0u8; 20], 4).is_err()); // < 32 (two hashes)
+        assert!(decode_reask_callback_udp(&[0u8; 20]).is_err()); // < 32 (two hashes)
     }
 
     fn buddy() -> Ed2kHash {
@@ -435,21 +432,39 @@ mod tests {
         // buddy(16) + file(16) + partstatus(u16 count + 1 byte) + count(u16).
         assert_eq!(&body[..16], &buddy().0);
         assert_eq!(&body[16..32], &hash().0);
-        let decoded = decode_reask_callback_udp(&body, 4).unwrap();
+        let decoded = decode_reask_callback_udp(&body).unwrap();
         assert_eq!(decoded.buddy_id, buddy());
         assert_eq!(decoded.file_hash, hash());
-        assert_eq!(decoded.part_status.unwrap(), parts);
-        assert_eq!(decoded.complete_source_count, Some(5));
+        // The buddy relay forwards everything after the buddy-id verbatim.
+        assert_eq!(decoded.forwarded_tail, &body[16..]);
     }
 
     #[test]
     fn reask_callback_udp_low_version_is_two_hashes_only() {
         let body = encode_reask_callback_udp(&buddy(), &hash(), Some(&[true]), 9, 2);
         assert_eq!(body.len(), 32); // udp_version 2: no tail
-        let decoded = decode_reask_callback_udp(&body, 2).unwrap();
+        let decoded = decode_reask_callback_udp(&body).unwrap();
         assert_eq!(decoded.buddy_id, buddy());
         assert_eq!(decoded.file_hash, hash());
-        assert!(decoded.part_status.is_none());
-        assert!(decoded.complete_source_count.is_none());
+        // No tail after the two hashes: the forwarded tail is the file hash only.
+        assert_eq!(decoded.forwarded_tail, &hash().0);
+    }
+
+    #[test]
+    fn reask_callback_udp_forwards_arbitrary_tail_verbatim() {
+        // The relay forwards the post-buddy-id bytes untouched, even a tail whose
+        // shape does not match our udp_version's gating (oracle memcpy(packet+16)).
+        let mut body = Vec::new();
+        body.extend_from_slice(&buddy().0);
+        body.extend_from_slice(&hash().0);
+        // An opaque, deliberately non-conforming trailer.
+        let opaque = [0xDE, 0xAD, 0xBE, 0xEF, 0x01];
+        body.extend_from_slice(&opaque);
+        let decoded = decode_reask_callback_udp(&body).unwrap();
+        assert_eq!(decoded.buddy_id, buddy());
+        assert_eq!(decoded.file_hash, hash());
+        let mut expected_tail = hash().0.to_vec();
+        expected_tail.extend_from_slice(&opaque);
+        assert_eq!(decoded.forwarded_tail, expected_tail);
     }
 }

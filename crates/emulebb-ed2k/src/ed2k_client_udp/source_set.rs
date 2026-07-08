@@ -423,10 +423,21 @@ mod tests {
         assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
         assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
         assert!(!datagram.obfuscated);
-        let decoded = decode_reask_callback_udp(&datagram.payload, 4).unwrap();
+        let decoded = decode_reask_callback_udp(&datagram.payload).unwrap();
         assert_eq!(decoded.buddy_id.0, buddy_id);
         assert_eq!(decoded.file_hash, hash());
-        assert_eq!(decoded.complete_source_count, Some(3));
+        // The forwarded tail is everything after the buddy-id (file hash + the
+        // udp_version 4 partstatus/count tail), kept verbatim for relaying.
+        assert_eq!(decoded.forwarded_tail, &datagram.payload[16..]);
+        // The origination still emitted the complete-source count (3) at the tail end.
+        assert_eq!(
+            u16::from_le_bytes(
+                decoded.forwarded_tail[decoded.forwarded_tail.len() - 2..]
+                    .try_into()
+                    .unwrap()
+            ),
+            3
+        );
 
         // The pending gate is keyed on the SOURCE endpoint (the source answers), so
         // the source is no longer due after origination.

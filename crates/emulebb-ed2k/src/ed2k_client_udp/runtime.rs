@@ -305,7 +305,7 @@ pub async fn run_ed2k_udp_reask_loop(
                 let Some((data, from)) = maybe else { break };
                 handle_inbound_datagram(
                     &mut service, &dht, &transfer_runtime, &events, &ip_filter,
-                    &buddy_registry, user_hash, udp_version, public_ip.octets(), &data, from,
+                    &buddy_registry, user_hash, public_ip.octets(), &data, from,
                 )
                 .await;
             }
@@ -400,7 +400,6 @@ async fn handle_inbound_datagram(
     ip_filter: &IpFilter,
     buddy_registry: &BuddySocketRegistry,
     our_user_hash: [u8; 16],
-    our_udp_version: u8,
     our_public_ip: [u8; 4],
     data: &[u8],
     from: SocketAddr,
@@ -464,12 +463,10 @@ async fn handle_inbound_datagram(
             }
         }
         ReaskInboundOutcome::BuddyRelay { callback, from } => {
-            super::buddy_relay::relay_buddy_reask_callback(
-                buddy_registry,
-                &callback,
-                from,
-                our_udp_version,
-            );
+            // The relay forwards the post-buddy-id tail verbatim (oracle
+            // ClientUDPSocket.cpp memcpy(packet+16)), so our udp_version does not
+            // gate it.
+            super::buddy_relay::relay_buddy_reask_callback(buddy_registry, &callback, from);
         }
         ReaskInboundOutcome::DirectCallbackReq { req, from } => {
             // We have no TCP-connect / hello-identity / firewalled-verdict state

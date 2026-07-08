@@ -32,7 +32,7 @@ use tracing::trace;
 
 use emulebb_kad_proto::Ed2kHash as KadEd2kHash;
 
-use super::codec::{OP_REASKCALLBACKUDP, encode_reask_callback_udp};
+use super::codec::OP_REASKCALLBACKUDP;
 use super::outbound::{ClientUdpDatagram, build_reask_callback_udp_packet};
 use super::state::ReaskSource;
 use crate::buddy_socket::BuddySocketRegistry;
@@ -57,21 +57,13 @@ pub(crate) fn encode_reask_callback_tcp_relay(
     callback: &super::codec::ReaskCallbackUdp,
     requester_ip: Ipv4Addr,
     requester_port: u16,
-    sender_udp_version: u8,
 ) -> Vec<u8> {
-    // Reconstruct the inbound OP_REASKCALLBACKUDP body, then strip its leading
-    // 16-byte buddy-id (the oracle forwards `packet + 16` onward), leaving
-    // `[file_hash 16][udp-version tail]`. Re-encoding with the relaying
-    // downloader's udp_version reproduces the exact same tail bytes the oracle
-    // forwards verbatim.
-    let inbound_body = encode_reask_callback_udp(
-        &callback.buddy_id,
-        &callback.file_hash,
-        callback.part_status.as_deref(),
-        callback.complete_source_count.unwrap_or(0),
-        sender_udp_version,
-    );
-    let forwarded_tail = &inbound_body[16..]; // strip the buddy-id prefix
+    // The oracle strips the leading 16-byte buddy-id and forwards everything after
+    // it (`packet + 16` = `[file_hash 16][udp-version tail]`) verbatim, never
+    // re-parsing or re-encoding the version-gated tail. `forwarded_tail` is exactly
+    // those raw inbound bytes, so a legacy udp_version <= 3 sender's tail is passed
+    // through unaltered instead of being misparsed or dropped.
+    let forwarded_tail = callback.forwarded_tail.as_slice();
 
     let mut body = Vec::with_capacity(4 + 2 + forwarded_tail.len());
     // PokeUInt32(ip): the oracle passes the requester's IP as sockAddr.sin_addr.s_addr
@@ -144,13 +136,12 @@ pub(super) fn relay_buddy_reask_callback(
     buddy_registry: &BuddySocketRegistry,
     callback: &super::codec::ReaskCallbackUdp,
     from: SocketAddr,
-    our_udp_version: u8,
 ) {
     let SocketAddr::V4(v4) = from else {
         trace!("ed2k udp reask: dropping OP_REASKCALLBACKUDP from non-IPv4 requester {from}");
         return;
     };
-    let frame = encode_reask_callback_tcp_relay(callback, *v4.ip(), v4.port(), our_udp_version);
+    let frame = encode_reask_callback_tcp_relay(callback, *v4.ip(), v4.port());
     // The registry relays only when the buddy-id matches the held inbound buddy
     // socket (oracle GetBuddyID guard). NodeId and Ed2kHash share the 16-byte
     // wire layout, so the buddy-id field keys the registry directly.
@@ -222,12 +213,17 @@ mod tests {
         Ed2kHash::from_bytes([0xAB; 16])
     }
 
-    fn callback(part_status: Option<Vec<bool>>, count: Option<u16>) -> ReaskCallbackUdp {
+    /// Build a decoded inbound callback whose forwarded tail is `[file_hash]` plus
+    /// the given opaque trailer bytes. The buddy relay forwards this tail verbatim
+    /// (oracle `ClientUDPSocket.cpp` `memcpy(packet + 16)`), so `extra_tail` stands
+    /// in for whatever the relaying downloader appended (any udp-version shape).
+    fn callback(extra_tail: &[u8]) -> ReaskCallbackUdp {
+        let mut forwarded_tail = file().0.to_vec();
+        forwarded_tail.extend_from_slice(extra_tail);
         ReaskCallbackUdp {
             buddy_id: buddy(),
             file_hash: file(),
-            part_status,
-            complete_source_count: count,
+            forwarded_tail,
         }
     }
 
@@ -235,12 +231,7 @@ mod tests {
     fn relay_frame_strips_buddy_id_and_prepends_requester_endpoint() {
         let ip = Ipv4Addr::new(203, 0, 113, 7);
         let port = 4672u16;
-        let frame = encode_reask_callback_tcp_relay(
-            &callback(Some(vec![true, false, true]), Some(5)),
-            ip,
-            port,
-            4,
-        );
+        let frame = encode_reask_callback_tcp_relay(&callback(&[0x07, 0x00, 0x05, 0x00]), ip, port);
 
         // Header: [OP_EMULEPROT][len u32 LE][OP_REASKCALLBACKTCP].
         assert_eq!(frame[0], OP_EMULEPROT);
@@ -260,17 +251,33 @@ mod tests {
 
     #[test]
     fn relay_body_matches_oracle_layout_for_low_version() {
-        // udp_version 2: the inbound body is two hashes only (no tail), so the
+        // A legacy (udp_version 2) inbound body is two hashes only (no tail), so the
         // relayed body is [ip][port][file_hash] with nothing after the hash.
         let ip = Ipv4Addr::new(1, 2, 3, 4);
         let port = 0x1234u16;
-        let frame = encode_reask_callback_tcp_relay(&callback(None, None), ip, port, 2);
+        let frame = encode_reask_callback_tcp_relay(&callback(&[]), ip, port);
         let body = &frame[6..];
         let mut expected = Vec::new();
         expected.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]); // 1.2.3.4 network order
         expected.extend_from_slice(&[0x34, 0x12]); // port LE
         expected.extend_from_slice(&file().0);
         assert_eq!(body, expected.as_slice());
+    }
+
+    #[test]
+    fn relay_forwards_opaque_tail_verbatim() {
+        // The relay never re-parses the post-buddy-id tail: whatever bytes followed
+        // the file hash inbound (here a deliberately non-conforming, short trailer)
+        // must appear byte-identical after the relayed [ip][port][file_hash] prefix.
+        let ip = Ipv4Addr::new(203, 0, 113, 7);
+        let port = 4672u16;
+        let opaque = [0xDE, 0xAD, 0xBE];
+        let frame = encode_reask_callback_tcp_relay(&callback(&opaque), ip, port);
+        let body = &frame[6..];
+        assert_eq!(&body[..4], &ip.octets());
+        assert_eq!(&body[4..6], &port.to_le_bytes());
+        assert_eq!(&body[6..22], &file().0);
+        assert_eq!(&body[22..], &opaque, "opaque tail forwarded verbatim");
     }
 
     #[test]
@@ -286,12 +293,7 @@ mod tests {
 
         let requester: SocketAddr = "198.51.100.7:4672".parse().unwrap();
         // Matching buddy-id (== buddy()) -> relayed.
-        relay_buddy_reask_callback(
-            &registry,
-            &callback(Some(vec![true, false]), Some(2)),
-            requester,
-            4,
-        );
+        relay_buddy_reask_callback(&registry, &callback(&[0x03, 0x00]), requester);
         let frame = relay_rx
             .try_recv()
             .expect("a relayed OP_REASKCALLBACKTCP frame");
@@ -302,9 +304,9 @@ mod tests {
         assert_eq!(&body[6..22], &file().0);
 
         // Mismatching buddy-id -> nothing relayed.
-        let mut mismatch = callback(None, None);
+        let mut mismatch = callback(&[]);
         mismatch.buddy_id = Ed2kHash::from_bytes([0x99; 16]);
-        relay_buddy_reask_callback(&registry, &mismatch, requester, 4);
+        relay_buddy_reask_callback(&registry, &mismatch, requester);
         assert!(
             relay_rx.try_recv().is_err(),
             "mismatched buddy-id must not relay"
@@ -318,7 +320,7 @@ mod tests {
         let (tx, mut relay_rx) = mpsc::unbounded_channel();
         assert!(registry.attach_inbound(NodeId::from_bytes([0x11; 16]), tx));
         let v6: SocketAddr = "[2001:db8::1]:4672".parse().unwrap();
-        relay_buddy_reask_callback(&registry, &callback(None, None), v6, 4);
+        relay_buddy_reask_callback(&registry, &callback(&[]), v6);
         assert!(
             relay_rx.try_recv().is_err(),
             "non-IPv4 requester must be dropped"
@@ -332,8 +334,7 @@ mod tests {
         // [dest_ip u32][dest_port u16][file_hash 16][tail].
         let ip = Ipv4Addr::new(198, 51, 100, 9);
         let port = 5000u16;
-        let frame =
-            encode_reask_callback_tcp_relay(&callback(Some(vec![true]), Some(3)), ip, port, 4);
+        let frame = encode_reask_callback_tcp_relay(&callback(&[0x02, 0x00]), ip, port);
         let body = &frame[6..];
         // Manually mirror the source-side decode of the leading fixed fields
         // (dest IP is natural network order).

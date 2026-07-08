@@ -66,7 +66,7 @@ fn tick_originates_buddy_callback_udp_for_a_low_id_buddy_source() {
     assert_eq!(datagram.bytes[1], OP_REASKCALLBACKUDP);
     assert_eq!(datagram.opcode, OP_REASKCALLBACKUDP);
     assert!(!datagram.obfuscated);
-    let decoded = decode_reask_callback_udp(&datagram.payload, 4).unwrap();
+    let decoded = decode_reask_callback_udp(&datagram.payload).unwrap();
     assert_eq!(decoded.buddy_id.0, buddy_id);
     assert_eq!(decoded.file_hash, file_hash());
 }
