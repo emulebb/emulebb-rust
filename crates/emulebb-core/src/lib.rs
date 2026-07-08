@@ -152,7 +152,8 @@ use ed2k_sources::{
     Ed2kServerCallbackRoute, LearnedEd2kMetadata, OwnSourceIdentity,
     claim_ed2k_server_callback_request, collect_kad_ed2k_metadata, collect_kad_ed2k_sources,
     configured_server_attempts, direct_download_candidate_sources, drop_self_sources,
-    ed2k_server_callback_route, found_source_from_hint, global_udp_source_batch_server_attempts,
+    ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
+    global_udp_source_batch_server_attempts,
     global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
     kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
     merge_download_sources, new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
@@ -3222,6 +3223,14 @@ impl EmulebbCore {
             // direct callback (5) before server callback (6).
             self.send_ed2k_direct_callbacks(network, &transfer, &sources)
                 .await;
+            // Oracle CanDoCallback (emule.cpp:2952-2969): a server
+            // OP_CALLBACKREQUEST is only legal when WE are HighID on the ed2k
+            // server. A LowID node must NOT ask its own server to relay a
+            // callback to a same-server LowID source ("breaks the protocol and
+            // will get us banned"). Resolve our firewalled posture once per
+            // round; the per-source permit check (below) combines it with the
+            // same-server route.
+            let self_tcp_firewalled = self.ed2k_self_tcp_firewalled().await;
             let callback_only_sources = sources
                 .iter()
                 .filter(|source| {
@@ -3238,11 +3247,19 @@ impl EmulebbCore {
                 }
                 let callback_route =
                     ed2k_server_callback_route(source.source_server, connected_server_endpoint);
-                if matches!(callback_route, Ed2kServerCallbackRoute::Unavailable) {
+                // TryToConnect reaches CCS_SERVERCALLBACK only for a same-server
+                // source AND only after CanDoCallback passed (HighID). Suppress
+                // both the wrong-server route and the LowID-self case here.
+                if !ed2k_server_callback_permitted(
+                    self_tcp_firewalled,
+                    source.source_server,
+                    connected_server_endpoint,
+                ) {
                     tracing::debug!(
-                        "ED2K server callback unavailable file_hash={} client_id={} source_server={} connected_server={}",
+                        "ED2K server callback unavailable file_hash={} client_id={} self_firewalled={} source_server={} connected_server={}",
                         transfer.hash,
                         source.client_id,
+                        self_tcp_firewalled,
                         source
                             .source_server
                             .map_or_else(|| "-".to_string(), |endpoint| endpoint.to_string()),

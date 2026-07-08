@@ -365,6 +365,26 @@ pub(crate) fn ed2k_server_callback_route(
     }
 }
 
+/// Whether we may emit a server `OP_CALLBACKREQUEST` for a LowID source,
+/// mirroring `CanDoCallback` (emule.cpp:2952-2969) restricted to the
+/// server-callback branch that `TryToConnect` reaches (BaseClient.cpp:1507-1516,
+/// `CCS_SERVERCALLBACK`). That branch is only entered for a source registered on
+/// our currently connected server, and `CanDoCallback` forbids it entirely
+/// unless WE are HighID on the ed2k server (`ed2k && !eLow`). A firewalled
+/// (LowID) node asking its own server to relay a callback to a same-server LowID
+/// source "breaks the protocol and will get us banned", so we suppress it.
+pub(crate) fn ed2k_server_callback_permitted(
+    self_tcp_firewalled: bool,
+    source_server: Option<SocketAddr>,
+    connected_server: Option<SocketAddr>,
+) -> bool {
+    !self_tcp_firewalled
+        && matches!(
+            ed2k_server_callback_route(source_server, connected_server),
+            Ed2kServerCallbackRoute::BackgroundSession
+        )
+}
+
 pub(crate) fn should_query_kad_source_supplement(
     existing_source_count: usize,
     udp_source_cap: usize,

@@ -11,8 +11,8 @@ use emulebb_kad_proto::Ed2kHash;
 
 use super::{
     ED2K_SERVER_CALLBACK_COOLDOWN, claim_ed2k_server_callback_request, configured_server_attempts,
-    global_udp_source_batch_server_attempts, kad_source_result_to_ed2k_found_source,
-    merge_download_sources,
+    ed2k_server_callback_permitted, global_udp_source_batch_server_attempts,
+    kad_source_result_to_ed2k_found_source, merge_download_sources,
 };
 
 fn kad_source(udp_port: u16) -> SourceResult {
@@ -124,6 +124,38 @@ fn server_callback_claim_is_per_client_file_and_uses_twenty_minute_gate() {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now + ED2K_SERVER_CALLBACK_COOLDOWN
     ));
+}
+
+#[test]
+fn server_callback_requires_self_high_id_and_same_server() {
+    use std::net::SocketAddr;
+
+    let connected: SocketAddr = "203.0.113.5:4661".parse().unwrap();
+    let other: SocketAddr = "203.0.113.9:4661".parse().unwrap();
+
+    // HighID (not firewalled) + source registered on our connected server:
+    // CanDoCallback passes and TryToConnect reaches CCS_SERVERCALLBACK.
+    assert!(ed2k_server_callback_permitted(
+        false,
+        Some(connected),
+        Some(connected)
+    ));
+    // LowID self (firewalled): CanDoCallback forbids the same-server callback
+    // ("breaks the protocol and will get us banned") -> no OP_CALLBACKREQUEST.
+    assert!(!ed2k_server_callback_permitted(
+        true,
+        Some(connected),
+        Some(connected)
+    ));
+    // HighID but the source is on a different server: TryToConnect never enters
+    // the server-callback branch (IsLocalServer is false).
+    assert!(!ed2k_server_callback_permitted(
+        false,
+        Some(other),
+        Some(connected)
+    ));
+    // No connected server at all -> unavailable.
+    assert!(!ed2k_server_callback_permitted(false, Some(connected), None));
 }
 
 fn direct_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundSource {
