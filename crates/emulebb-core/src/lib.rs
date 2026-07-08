@@ -835,6 +835,13 @@ impl EmulebbCore {
         // Persistent Kad buddy-socket registry shared by inbound dispatch,
         // listener, outbound buddy link, and buddy-management loop.
         let buddy_registry = BuddySocketRegistry::new();
+        // Cancellation handle for the currently-spawned outbound buddy link task
+        // (LOWID-G8). The inbound dispatch (handle_kad_find_buddy_res) installs a
+        // fresh token when it spawns a link; the buddy-management loop cancels it
+        // when the buddy relationship is no longer warranted (HighID / Kad
+        // disconnect), so the link + its keepalive pings stop promptly.
+        let buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let nat = Arc::new(
             NatManagerBuilder::new(network.nat_config.clone())
@@ -1003,6 +1010,7 @@ impl EmulebbCore {
                     reachability: self.ed2k_reachability.clone(),
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
+                    buddy_link_cancel: Arc::clone(&buddy_link_cancel),
                     transfer_runtime: Arc::clone(&self.ed2k_transfers),
                     reask_handle: Arc::clone(&self.ed2k_reask_handle),
                     network: network.clone(),
@@ -1039,6 +1047,7 @@ impl EmulebbCore {
                     kad_firewall: Arc::clone(&kad_firewall),
                     kad_buddy: Arc::clone(&kad_buddy),
                     buddy_registry: buddy_registry.clone(),
+                    buddy_link_cancel: Arc::clone(&buddy_link_cancel),
                     network: network.clone(),
                 },
                 Arc::clone(&shutdown),
@@ -6570,6 +6579,10 @@ struct KadLocalStoreRuntime {
     reachability: ExternalReachability,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     buddy_registry: BuddySocketRegistry,
+    /// Cancellation handle for the spawned outbound buddy link (LOWID-G8), shared
+    /// with the buddy-management loop so it can tear the link down on a state
+    /// change.
+    buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     /// Lazily-read handle to the UDP reask loop, so a buddy link established here
     /// can answer buddy-relayed `OP_REASKCALLBACKTCP` over UDP (source side). Read
@@ -6604,6 +6617,8 @@ struct KadBuddyRuntime {
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     buddy_registry: BuddySocketRegistry,
+    /// Cancellation handle for the spawned outbound buddy link (LOWID-G8).
+    buddy_link_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
     network: Ed2kNetworkConfig,
 }
 
@@ -6660,6 +6675,15 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
                 if !need.needs_buddy() {
                     runtime.buddy_registry.evict_outbound();
                     set_hello_buddy_snapshot(None); // no outgoing buddy: stop advertising
+                    // LOWID-G8: tear down the persistent outbound buddy link (and
+                    // its OP_BUDDYPING keepalive) now that we no longer need a
+                    // buddy, instead of leaving it running until the socket dies
+                    // and holding the remote helper's single buddy slot (oracle
+                    // drops the buddy socket on HighID / Kad-disconnect,
+                    // ClientList.cpp:770-780).
+                    if let Some(cancel) = runtime.buddy_link_cancel.lock().unwrap().take() {
+                        cancel.cancel();
+                    }
                 }
             }
             // LOWID-G2: expire an incoming-buddy claim whose buddy never attached
@@ -7259,6 +7283,7 @@ async fn handle_kad_local_store_packet(
                 dht,
                 kad_buddy,
                 buddy_registry,
+                &runtime.buddy_link_cancel,
                 &runtime.reachability,
                 &runtime.transfer_runtime,
                 reask_handle,
@@ -7408,6 +7433,7 @@ async fn handle_kad_find_buddy_res(
     dht: &DhtNode,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,
     buddy_registry: &BuddySocketRegistry,
+    buddy_link_cancel: &Arc<std::sync::Mutex<Option<CancellationToken>>>,
     reachability: &ExternalReachability,
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     reask_handle: Option<ReaskSourceHandle>,
@@ -7462,6 +7488,13 @@ async fn handle_kad_find_buddy_res(
     let own_kad_id = dht.own_id().0;
     let transfer_runtime = Arc::clone(transfer_runtime);
     let lost = Arc::new(tokio::sync::Notify::new());
+    // LOWID-G8: install a fresh cancellation handle for this link so the
+    // buddy-management loop can tear it down (and stop its keepalive pings) when
+    // the buddy relationship is no longer warranted.
+    let cancel = CancellationToken::new();
+    // A newly-acquired buddy replaces any stale handle; the previous link (if any)
+    // has already exited or is being torn down.
+    *buddy_link_cancel.lock().unwrap() = Some(cancel.clone());
     tokio::spawn(async move {
         if let Err(error) = run_outbound_buddy_link(OutboundBuddyLinkOptions {
             bind_ip,
@@ -7475,13 +7508,16 @@ async fn handle_kad_find_buddy_res(
             reask_handle,
             timeout: KAD_BUDDY_LINK_TIMEOUT,
             lost,
+            cancel,
         })
         .await
         {
             tracing::debug!("outbound Kad buddy link to {buddy_addr} failed: {error:#}");
         }
-        // On any exit (connect failure or link drop), drop the acquired buddy so
-        // the next upkeep re-searches.
+        // On any exit (connect failure, link drop, or cancellation), drop the
+        // acquired buddy so the next upkeep re-searches. The stale cancellation
+        // handle in the shared cell is harmless: it is overwritten when a new
+        // buddy is acquired, and cancelling an already-finished token is a no-op.
         kad_buddy.lock().await.clear_outgoing_buddy();
         set_hello_buddy_snapshot(None);
         // kad_event buddy milestone `buddy_released` (uniform-diagnostics-v2 §3.3).

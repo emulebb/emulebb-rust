@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::buddy_socket::BuddySocketRegistry;
@@ -85,6 +86,13 @@ pub struct OutboundBuddyLinkOptions {
     /// Notified once the buddy link has dropped, so the buddy-management loop can
     /// re-search (oracle buddy-loss `SetFindBuddy`).
     pub lost: Arc<Notify>,
+    /// Cancellation handle held by the buddy-management loop: cancelled when the
+    /// buddy relationship is no longer warranted (we stopped being firewalled, or
+    /// Kad disconnected), which tears the link down and stops the keepalive pings
+    /// so we release the remote helper's single buddy slot promptly instead of
+    /// waiting for the socket to die (oracle drops the buddy socket on HighID /
+    /// Kad-disconnect, `ClientList.cpp:770-780`).
+    pub cancel: CancellationToken,
 }
 
 /// Hold a persistent TCP connection to our buddy: connect + hello, register in
@@ -104,12 +112,20 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         reask_handle,
         timeout,
         lost,
+        cancel,
     } = options;
 
     let buddy_ip = match buddy_addr.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => anyhow::bail!("IPv6 buddy connections are not supported: {buddy_addr}"),
     };
+
+    // If the relationship was already cancelled while the connect was queued,
+    // don't even open the socket.
+    if cancel.is_cancelled() {
+        lost.notify_one();
+        return Ok(());
+    }
 
     let mut transport = connect_and_hello_buddy(
         bind_ip,
@@ -142,6 +158,7 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
         own_kad_id,
         &transfer_runtime,
         reask_handle.as_ref(),
+        &cancel,
     )
     .await;
 
@@ -164,11 +181,16 @@ async fn drive_buddy_link(
     own_kad_id: [u8; 16],
     transfer_runtime: &Arc<Ed2kTransferRuntime>,
     reask_handle: Option<&ReaskSourceHandle>,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     loop {
         let read = tokio::time::timeout(BUDDY_READ_POLL, transport.read_packet());
         tokio::select! {
             biased;
+            // The buddy-management loop cancels this token when the relationship
+            // is no longer warranted (HighID / Kad-disconnect); stop the keepalive
+            // and drop the socket so the remote helper's buddy slot is freed.
+            () = cancel.cancelled() => return Ok(()),
             _ = ping_timer.tick() => {
                 let ping = super::codec::encode_buddy_ping();
                 transport
@@ -421,6 +443,98 @@ async fn connect_and_hello_buddy(
 #[cfg(test)]
 mod tests {
     use super::buddy_callback_check_matches;
+
+    use std::collections::VecDeque;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::sync::CancellationToken;
+
+    use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
+    use super::super::Ed2kHelloIdentity;
+    use super::drive_buddy_link;
+    use crate::ed2k_transfer::Ed2kTransferRuntime;
+
+    fn dummy_hello_identity() -> Ed2kHelloIdentity {
+        Ed2kHelloIdentity {
+            user_hash: [0xCD; 16],
+            client_id: 0,
+            tcp_port: 4662,
+            udp_port: 4672,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: 0,
+            direct_udp_callback: false,
+        }
+    }
+
+    /// LOWID-G8: cancelling the buddy link's token must stop the keepalive loop
+    /// (and thus the OP_BUDDYPINGs) instead of running until the socket dies, so
+    /// the remote helper's single buddy slot is freed promptly when we stop being
+    /// firewalled / Kad disconnects.
+    #[tokio::test]
+    async fn buddy_link_stops_and_stops_pinging_when_cancelled() {
+        // A fake buddy peer that accepts the connection and then stays silent, so
+        // the driver would otherwise idle on its ping/read timers indefinitely.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Hold the connection open (never send), and never observe an inbound
+            // OP_BUDDYPING (the first ping is a full interval away).
+            let mut buf = [0u8; 64];
+            let _ = tokio::time::timeout(Duration::from_secs(3), sock.read(&mut buf)).await;
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let mut transport = Ed2kTransport {
+            stream: client,
+            prefetched: VecDeque::new(),
+            receive_cipher: None,
+            send_cipher: None,
+            mode: Ed2kTransportMode::Plaintext,
+        };
+        // First tick a full interval out (LOWID-G9a), so no ping fires during the test.
+        let mut ping_timer = tokio::time::interval_at(
+            tokio::time::Instant::now() + super::BUDDY_PING_INTERVAL,
+            super::BUDDY_PING_INTERVAL,
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let transfer_runtime = Arc::new(Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap());
+        let cancel = CancellationToken::new();
+        let hello = dummy_hello_identity();
+
+        let driver = drive_buddy_link(
+            &mut transport,
+            &mut ping_timer,
+            Ipv4Addr::LOCALHOST,
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port()),
+            hello,
+            [0xAB; 16],
+            &transfer_runtime,
+            None,
+            &cancel,
+        );
+        tokio::pin!(driver);
+
+        let cancel_signal = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_signal.cancel();
+        });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), &mut driver).await;
+        assert!(
+            outcome.is_ok(),
+            "drive_buddy_link did not return promptly after cancellation"
+        );
+        assert!(outcome.unwrap().is_ok());
+        server.abort();
+    }
 
     #[test]
     fn callback_check_accepts_complement_of_our_kad_id() {
