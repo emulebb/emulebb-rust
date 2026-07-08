@@ -1274,6 +1274,17 @@ impl Ed2kUploadQueueState {
     /// UploadQueue.cpp:1070-1078: target-per-slot x the default slow-upload
     /// threshold factor 0.75, floored at 1 KiB/s).
     fn productive_upload_threshold_bytes_per_sec(&self) -> u64 {
+        // REG-7: with no configured upload budget the oracle returns a flat
+        // 3 KiB/s (`if (uTargetPerSlot == 0) return 3 * 1024;`,
+        // UploadQueue.cpp:1073-1074) -- NOT the 0.75-factored 2304 the general
+        // path would degenerate to. This arm is UNREACHABLE from the retention
+        // caller (it only fires under tracked underfill, which cannot occur at
+        // upload_limit 0, since `refresh_elastic_underfill` clears
+        // `underfill_since` there), but the constant is spelled to match the
+        // oracle. The nonzero path below is left exactly as before.
+        if self.config.upload_limit_bytes_per_sec == 0 {
+            return 3 * 1024;
+        }
         let base_slots = self.config.active_slots.max(1) as u64;
         let target_per_slot = (self.config.upload_limit_bytes_per_sec / base_slots).max(3 * 1024);
         (target_per_slot.saturating_mul(3) / 4).max(1024)
