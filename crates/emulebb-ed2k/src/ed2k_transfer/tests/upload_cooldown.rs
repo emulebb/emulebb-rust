@@ -200,6 +200,92 @@ fn failed_promotion_cools_the_peer_and_gates_inline_grant() {
     );
 }
 
+/// RUST-PAR-021 GAP2: an ACTIVE upload slot torn down young (<= 30 s) after
+/// serving little (<= 1 MB) while a replacement waiter was denied its turn is the
+/// "grabbed a slot then bailed" churn signal, so its IP is put on the churn
+/// cooldown; a same-IP re-request is then gated even with a free slot (oracle
+/// `ShouldCooldownShortFailedUploadSlot`, UploadQueueSeams.h:644-659, applied in
+/// RemoveFromUploadQueue).
+#[test]
+fn short_failed_disconnect_cools_the_ip() {
+    let mut state = Ed2kUploadQueueState::new(cooldown_config());
+    let t0 = Instant::now();
+    let churner = upload_peer(1, 1, 0x0A00_0001);
+    let (a, a_status) = begin(&mut state, churner.clone(), 1, t0);
+    assert_eq!(a_status, Ed2kUploadSessionStatus::Granted);
+
+    // A distinct-IP waiter is denied its turn by the churn: this is the
+    // replacement pressure the short-failed cooldown protects.
+    let (w, w_status) = begin(&mut state, upload_peer(2, 2, 0x0A00_0002), 2, t0);
+    assert!(is_waiting(w_status));
+
+    // Disconnect at +2 s having served nothing: short-failed -> cool the IP; the
+    // denied waiter takes the freed slot.
+    state.release_session(&a, t0 + Duration::from_secs(2));
+    assert_eq!(
+        state.poll_session(&w, t0 + Duration::from_secs(2), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    // Free the slot again (W is now the sole peer, so its own release is not
+    // cooled -- no replacement was denied).
+    state.release_session(&w, t0 + Duration::from_secs(3));
+
+    // The churner's same-IP re-request finds a free slot but is gated by its
+    // short-failed cooldown, proving the cooldown took hold.
+    let (a2, a2_status) = begin(&mut state, churner, 11, t0 + Duration::from_secs(3));
+    assert!(is_waiting(a2_status), "short-failed IP must be cooled");
+
+    // Past the 30 s churn cooldown (seeded at +2 s) the peer is promotable again.
+    assert_eq!(
+        state.poll_session(&a2, t0 + Duration::from_secs(33), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
+/// A productive session (> 1 MB served) ending young is NOT churn: no cooldown,
+/// so the same IP is immediately re-grantable -- and a legit sibling behind a
+/// shared NAT IP that uploads normally is never suppressed.
+#[test]
+fn productive_disconnect_does_not_cool_the_ip() {
+    let mut state = Ed2kUploadQueueState::new(cooldown_config());
+    let t0 = Instant::now();
+    let peer = upload_peer(1, 1, 0x0A00_0001);
+    let (a, a_status) = begin(&mut state, peer.clone(), 1, t0);
+    assert_eq!(a_status, Ed2kUploadSessionStatus::Granted);
+
+    // 2 MB served (> the 1 MB short-failed ceiling) before a young disconnect.
+    state.note_uploaded_bytes(&a, 2 * 1024 * 1024, t0 + Duration::from_secs(1));
+    state.release_session(&a, t0 + Duration::from_secs(2));
+
+    let (_a2, a2_status) = begin(&mut state, peer, 11, t0 + Duration::from_secs(3));
+    assert_eq!(
+        a2_status,
+        Ed2kUploadSessionStatus::Granted,
+        "a productive disconnect must not cool the IP"
+    );
+}
+
+/// A long-lived session (aged past 30 s) ending is NOT churn even with little
+/// served: no cooldown.
+#[test]
+fn long_low_served_disconnect_does_not_cool_the_ip() {
+    let mut state = Ed2kUploadQueueState::new(cooldown_config());
+    let t0 = Instant::now();
+    let peer = upload_peer(1, 1, 0x0A00_0001);
+    let (a, a_status) = begin(&mut state, peer.clone(), 1, t0);
+    assert_eq!(a_status, Ed2kUploadSessionStatus::Granted);
+
+    // Disconnect only after 31 s (> the 30 s short-failed age).
+    state.release_session(&a, t0 + Duration::from_secs(31));
+    let (_a2, a2_status) = begin(&mut state, peer, 11, t0 + Duration::from_secs(32));
+    assert_eq!(
+        a2_status,
+        Ed2kUploadSessionStatus::Granted,
+        "a long-lived disconnect must not cool the IP"
+    );
+}
+
 /// Direct unit coverage of the `UploadCooldownTracker` policy (tiers, strike
 /// thresholds, rolling window, probe eligibility), confirmed against
 /// `UploadQueueSeams.h`.

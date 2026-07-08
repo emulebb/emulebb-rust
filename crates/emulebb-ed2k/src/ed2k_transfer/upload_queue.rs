@@ -60,6 +60,20 @@ const UPLOAD_SLOT_OPEN_BURST_DATARATE_BYTES_PER_SEC: u64 = 102_400;
 /// UploadQueue.cpp:1052-1055; the `elastic_underfill` config).
 const SLOW_RECYCLE_UNDERFILL_WINDOW: Duration = Duration::from_secs(2);
 
+/// Short-failed upload-slot churn thresholds (oracle
+/// `ShouldCooldownShortFailedUploadSlot`, UploadQueueSeams.h:644-659 with
+/// `kShortFailedUploadCooldownMaxAgeMs` = 30000 and
+/// `kShortFailedUploadCooldownMaxPayloadBytes` = 1 MiB): an ACTIVE upload slot
+/// removed by a disconnect that was aged <= 30 s AND had served <= 1 MB is the
+/// "grabbed a slot then bailed" churn signal, and its IP is put on the churn
+/// retry cooldown. The 90 s `kRemoteCancelledUploadCooldownMaxAgeMs` age variant
+/// only extends the window for a distinct "remote client cancelled transfer"
+/// removal; rust's connection-per-op teardown surfaces every disconnect through
+/// the same path with no separate cancel signal, so we apply the base 30 s
+/// short-failed criteria only (a stricter subset -- it never over-cools).
+const SHORT_FAILED_UPLOAD_COOLDOWN_MAX_AGE: Duration = Duration::from_secs(30);
+const SHORT_FAILED_UPLOAD_COOLDOWN_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024;
+
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kUploadQueueConfig {
@@ -788,10 +802,52 @@ impl Ed2kUploadQueueState {
             return;
         }
         if session.phase == Ed2kUploadSessionPhase::Waiting {
-            // Waiter: keep the queue entry, drop only the connection binding.
+            // Waiter: keep the queue entry, drop only the connection binding. A
+            // waiter never held a slot, so there is no short-failed slot to cool.
             session.connected = false;
         } else {
+            // RUST-PAR-021 GAP2: an ACTIVE upload slot torn down by a disconnect
+            // that was young AND had served little payload is the "grabbed a slot
+            // then bailed" churn signal (oracle ShouldCooldownShortFailedUploadSlot
+            // in RemoveFromUploadQueue, UploadQueue.cpp:2170-2192,
+            // UploadQueueSeams.h:644-659). Seed the IP-scoped churn retry cooldown
+            // so the peer stops re-winning slot selection. U-GAP3 folded the
+            // short-failed cooldown onto the failed-promote-connect path only; this
+            // is the genuine inbound-disconnect churn path it left open. Scoped
+            // narrowly to the short-failed criteria (aged <= 30 s AND <= 1 MB
+            // served) exactly like the oracle, so a normal, long, or productive
+            // session ending never cools -- and a legit sibling behind a shared NAT
+            // IP that completes a normal session is not suppressed. `queued_at` is
+            // the slot-grant time for an active session (reset on promotion), the
+            // analog of the oracle's GetUpStartTimeDelay.
+            let short_failed = !handle.key.peer.friend_slot
+                && now.saturating_duration_since(session.queued_at)
+                    <= SHORT_FAILED_UPLOAD_COOLDOWN_MAX_AGE
+                && session.uploaded_bytes <= SHORT_FAILED_UPLOAD_COOLDOWN_MAX_PAYLOAD_BYTES;
             self.sessions.remove(&handle.key);
+            // NAT-sibling guard: the churn cooldown is IP-scoped, so seeding it
+            // while ANOTHER peer still shares the disconnecter's IP would suppress
+            // an innocent sibling behind the same NAT (the failure the round-20
+            // agent hit on the shared-loopback tests). Only cool when the
+            // disconnecter is the sole holder of its IP, so a shared-IP sibling is
+            // never collateral-suppressed.
+            let has_ip_sibling = self
+                .sessions
+                .keys()
+                .any(|other| other.peer.ip == handle.key.peer.ip);
+            // Replacement-pressure gate: the short-failed cooldown exists so a
+            // churner "cannot keep winning queue selection and consume replacement
+            // attempts" (oracle WHY, UploadQueue.cpp:2182-2187). With no waiter it
+            // denied no one -- and a lone peer that simply reconnects or resumes is
+            // not churn -- so cool only when a replacement waiter is actually
+            // present. This never over-cools relative to the oracle and keeps a
+            // lone disconnect/reconnect (and a stale-entry drop) from being gated.
+            let replacement_waiting = self.waiting_session_count() > 0;
+            if short_failed && !has_ip_sibling && replacement_waiting {
+                let budget = self.config.upload_limit_bytes_per_sec;
+                self.cooldown
+                    .set_churn_cooldown(handle.key.peer.ip, false, budget, now);
+            }
         }
         self.reap_expired_sessions(now);
         self.promote_waiters(now);
