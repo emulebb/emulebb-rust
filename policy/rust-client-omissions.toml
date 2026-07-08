@@ -69,6 +69,8 @@ stock_behavior = "Classic eMule's 'Safe connect' (safeServerConnect) gates how a
 rust_behavior = "The Rust client accepts, persists and echoes the safeServerConnect preference for REST-contract compatibility, but does not drive server-cycling behavior from it; server selection is explicit via the REST control plane."
 reason = "Safe-server-connect is an eMule GUI auto-connect tuning knob tied to the GUI server-cycling behavior, which the headless model does not implement (connect targets are chosen by the external controller)."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+review_disposition = "defer"
+review_disposition_note = "RUST-PAR-018 round-18 server-lane re-audit (2026-07-08): confirmed the preference is inert - rust connects to one server sequentially (loop_runtime.rs) with no TryAnotherConnectionRequest/ConnectToAnyServer cycling, so stock's up-to-2 simultaneous connect attempts are not driven. Rust's single-connect is strictly gentler. DEFER (permanent-leaning): explicit REST server selection replaces GUI auto-cycling; no wire benefit to implementing the cycling machinery for the headless model."
 
 [[omissions]]
 id = "pref-new-auto-up"
@@ -109,6 +111,8 @@ stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connect
 rust_behavior = "The Rust client does not send OP_SERVER_DESC_REQ and does not parse OP_SERVER_DESC_RES (opcodes 0xA2/0xA3 are unhandled). Server description/name for the CONNECTED server is still captured from the TCP ident/tag path; the rest of the server list keeps the name/description it was imported/configured with and is surfaced over the REST server routes."
 reason = "Cosmetic-only for a headless client: the description poll refreshes human-facing server name/description/version strings for the non-connected server list, which the REST controller neither drives nor needs (server selection is explicit over /api/v1, and server metadata comes from server.met import + the connected-server ident). Implementing a client-initiated cosmetic UDP poll adds outbound server traffic with no functional benefit, against the be-gentle posture."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the poll is client-initiated and optional, so omitting it only means non-connected server entries are not refreshed with wire-sourced descriptions. No server or peer behavior depends on the client sending it."
+review_disposition = "defer"
+review_disposition_note = "RUST-PAR-018 round-18 server-lane re-audit (2026-07-08): confirmed omitted (opcodes 0xA2/0xA3 unhandled, no OP_SERVER_DESC_REQ emitter). DEFER - cosmetic metadata refresh for non-connected servers with no functional or wire dependency; not worth implementing for a headless client under the be-gentle posture. Revisit only if a discovered-server metadata requirement appears."
 
 [[omissions]]
 id = "kad-flood-lan-exemption"
@@ -117,6 +121,8 @@ stock_behavior = "eMule's inbound Kad packet flood tracker exempts LAN/loopback 
 rust_behavior = "The Rust inbound flood tracker exempts all LAN/loopback source IPs unconditionally (`flood_exempt = is_lan_ip(from.ip())`, receive_loop.rs), regardless of LAN-mode, so a flooding LAN peer is never throttled or banned by the flood tracker."
 reason = "Deliberate be-gentle simplification: a public VPN'd node (the release posture) essentially never receives Kad traffic from LAN peers, and unconditionally trusting LAN sources avoids a LAN-mode state dependency in the hot receive path. Strictly gentler than stock (it only ever exempts more, never bans more)."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the exemption only relaxes local flood defense against LAN sources, which are absent on a public node. Non-LAN (public) sources are throttled/banned exactly as stock."
+review_disposition = "permanent-drop"
+review_disposition_note = "RUST-PAR-018 round-18 LowID-lane re-audit (2026-07-08): confirmed. Implementing the oracle's LAN-mode-only conditional (PacketTracking.cpp:199) would require introducing a LAN-mode concept solely to REDUCE leniency toward LAN sources that do not exist in the VPN'd public deployment. No wire effect on public peers; strictly gentler local defense. PERMANENT DROP - added to excluded_surface_ids in rust-client.toml."
 
 [[omissions]]
 id = "upload-slow-cooldown-suppression"
@@ -149,3 +155,5 @@ stock_behavior = "eMule's server.met persists per-server obfuscation metadata (S
 rust_behavior = "The Rust client carries server obfuscation ports/flags only for statically CONFIGURED servers (from the operator config's Ed2kServerEntry). The REST/state server model (ServerInfo, at /api/v1 contract parity) intentionally has no obfuscation fields, the server.met parser does not extract obfuscation tags, and the OP_SERVERLIST decode carries only (ip, port) — so a non-config discovered/imported server has no obfuscation metadata to persist. The servers table's obfuscation_tcp_port / udp_flags columns are reserved/forward-looking."
 reason = "Deliberate scoping: obfuscation is delivered where it matters (the operator's configured servers, which keep it from config on every restart), while the headless server pipeline (REST ServerInfo -> SQLite) stays at /api/v1 contract parity without obfuscation fields. Threading obfuscation through the REST/state model would either regress the documented server schema or persist empty values, since no non-config path currently supplies obfuscation metadata."
 compatibility = "Does not affect eD2K or Kad wire compatibility for the supported path: configured servers connect with obfuscation exactly as intended. Only a non-config discovered/imported obfuscation-required server is unsupported (it would need config entry), which is the operator-driven server model already in use."
+review_disposition = "defer"
+review_disposition_note = "RUST-PAR-018 round-18 server-lane re-audit (2026-07-08): confirmed. The OP_GLOBSERVSTATRES handler does harvest live udp_flags but does not persist obfuscation ports; configured servers supply obfuscation where it matters. DEFER as an accepted scoping divergence; revisit only if a discovered-server obfuscation path becomes a requirement."

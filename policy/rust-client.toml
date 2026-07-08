@@ -15,7 +15,7 @@ macos = "compile/test-viable target; runtime deferred pending a macOS CI runner"
 
 [protocol]
 address_family = "ipv4-only"
-compatibility = "stock eMule parity by default; SX1 is the only pre-approved permanent drop"
+compatibility = "stock eMule parity by default; SX1 and the Kad LAN-mode flood exemption are the pre-approved permanent drops"
 omission_registry = "policy/rust-client-omissions.toml"
 
 [review_reporting]
@@ -25,6 +25,10 @@ omission_registry = "policy/rust-client-omissions.toml"
 intentional_omissions_are_not_gaps = false
 excluded_surface_ids = [
     "sx1-live-source-exchange",
+    # RUST-PAR-018 round-18 disposition (2026-07-08): the oracle's LAN-mode-only
+    # Kad flood exemption would only reduce leniency toward LAN sources absent on
+    # a public VPN'd node; permanent drop. See the entry's review_disposition.
+    "kad-flood-lan-exemption",
 ]
 
 # Windows long-path (>260 char) support is SCOPED to operator-facing content
