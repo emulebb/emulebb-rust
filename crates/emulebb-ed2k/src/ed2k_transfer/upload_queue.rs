@@ -463,6 +463,16 @@ impl Ed2kUploadQueueState {
         file_size: u64,
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
+        // Banned-peer admission gate (master `AddClientToQueue`, UploadQueue.cpp:1854
+        // `if (client->IsBanned()) return;`): a banned client is refused BEFORE any
+        // queue entry is created or ranking reply is emitted -- the master returns
+        // silently ahead of the duplicate/re-ask loop. Rejected keeps the listener
+        // silent and retains no session. This is the earlier admission gate; the
+        // round-17 banned-recycle path (d83c02b) separately suppresses
+        // OP_OUTOFPARTREQS for a banned peer already holding a slot.
+        if key.peer.banned {
+            return Ed2kUploadSessionStatus::Rejected;
+        }
         let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
         let score_modifiers =
             UploadScoreModifiers::from_peer(&key.peer, low_id, all_time_upload_ratio_permille);

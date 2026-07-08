@@ -835,6 +835,30 @@ mod tests {
         assert_eq!(runtime.upload_queue_snapshot().await.len(), 4);
     }
 
+    /// REG-1: a BANNED peer's STARTUPLOADREQ is refused at admission (master
+    /// `AddClientToQueue` `if (client->IsBanned()) return;`, UploadQueue.cpp:1854):
+    /// no reply packet reaches the wire and no queue entry is created.
+    #[tokio::test]
+    async fn banned_peer_start_upload_req_gets_no_reply_and_no_queue_entry() {
+        let root = unique_test_dir("ed2k-listener-banned-admission");
+        let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+        let file_hash = Ed2kHash::from_bytes([0x77; 16]);
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 50)), 4662);
+        let mut identity = emule_identity(peer_addr);
+        identity.banned = true;
+
+        let mut queue = ListenerUploadQueue::new();
+        let reply = queue
+            .start_upload_reply(&runtime, identity, &file_hash)
+            .await;
+        assert_eq!(reply, None, "a banned peer's admission must stay silent");
+        assert!(queue.session.is_none(), "no session is retained for a banned peer");
+        assert!(
+            runtime.upload_queue_snapshot().await.is_empty(),
+            "a banned peer must not create a queue entry"
+        );
+    }
+
     /// UP-3: OP_QUEUERANKING is gated on the eMule extended protocol — the
     /// oracle's SendRankingInfo early-returns for a plain-eDonkey peer
     /// (`!ExtProtocolAvailable()`, UploadClient.cpp:962-963) and never sends

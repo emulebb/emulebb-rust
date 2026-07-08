@@ -100,9 +100,34 @@ async fn gpl_evildoer_score_is_zeroed() {
     flagged_waiter_ranks_below_plain("gpl", gpl_peer(2, 0x02, 0x0A00_0002)).await;
 }
 
+/// REG-1: unlike a bad-guy / GPL waiter (admitted with a zeroed score), a BANNED
+/// peer is refused at admission (master `AddClientToQueue`
+/// `if (client->IsBanned()) return;`, UploadQueue.cpp:1854) BEFORE any queue
+/// entry or ranking — the banned score-zeroing modifier (GetScoreBreakdown) stays
+/// only as the defensive fallback for a session banned after admission. So a
+/// banned peer never sits in the queue to be ranked at all.
 #[tokio::test]
-async fn banned_score_is_zeroed() {
-    flagged_waiter_ranks_below_plain("banned", banned_peer(2, 0x02, 0x0A00_0002)).await;
+async fn banned_peer_is_refused_at_admission() {
+    let root = unique_test_dir("ed2k-upload-queue-banned-admission");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+    let file_hash = Ed2kHash::from_bytes([0x5A; 16]);
+    let now = Instant::now();
+
+    // Occupy the single slot with a clean peer.
+    let (_active, active_status) = runtime
+        .begin_upload_session_at(upload_peer(1, 0x01, 0x0A00_0001), &file_hash, now)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+
+    // The banned candidate would otherwise join the waiting queue: it is refused.
+    let (_banned_handle, banned_status) = runtime
+        .begin_upload_session_at(banned_peer(2, 0x02, 0x0A00_0002), &file_hash, now)
+        .await;
+    assert_eq!(banned_status, Ed2kUploadSessionStatus::Rejected);
+
+    // No queue entry was created for the banned peer (only the slot holder remains).
+    assert_eq!(runtime.upload_queue_snapshot().await.len(), 1);
 }
 
 #[tokio::test]

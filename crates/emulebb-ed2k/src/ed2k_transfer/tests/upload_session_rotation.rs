@@ -198,31 +198,26 @@ fn rotated_session_requeues_at_tail_with_fresh_wait_start() {
     assert_eq!(requeued.uploaded_bytes, 0);
 }
 
+/// REG-1: a BANNED client is refused at admission (master `AddClientToQueue`
+/// `if (client->IsBanned()) return;`, UploadQueue.cpp:1854) — it never occupies
+/// or is queued for a slot, so it can never reach the session-cap recycle at all.
+/// The round-17 recycle-drop (bRequeue=false, UploadQueue.cpp:2320-2321) remains
+/// in `reap_expired_sessions` as the defensive later gate for a session banned
+/// after admission.
 #[test]
-fn banned_peer_cap_recycle_is_dropped_not_requeued() {
+fn banned_peer_is_refused_at_admission_before_any_slot() {
     let mut state = Ed2kUploadQueueState::new(rotation_config());
     let t0 = Instant::now();
     let mut banned_peer = upload_peer(1, 0x61, 0x0A00_0001);
     banned_peer.banned = true;
     let handle = Ed2kUploadSessionHandle::new(banned_peer, FILE_HASH.to_string(), 1);
     let status = state.begin_session(handle.key().clone(), 1, t0, 7, 1_000, 1_000, 1_000);
-    assert_eq!(status, Ed2kUploadSessionStatus::Granted);
-    state.note_uploaded_bytes(&handle, 950, t0 + Duration::from_secs(1));
-    let (waiter, waiter_status) = begin(&mut state, 2, 0x62, 2, 1_000, t0 + Duration::from_secs(2));
-    assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    assert_eq!(status, Ed2kUploadSessionStatus::Rejected);
 
-    // A BANNED client's recycle is dropped without a requeue (oracle
-    // bRequeue=false, UploadQueue.cpp:2320-2321): Stale, not Waiting. The
-    // listener consequently sends no OP_OUTOFPARTREQS (requeue guard,
-    // UploadQueue.cpp:883-884).
-    assert_eq!(
-        state.poll_session(&handle, t0 + Duration::from_secs(3), false),
-        Ed2kUploadSessionStatus::Stale
-    );
-    assert_eq!(
-        state.poll_session(&waiter, t0 + Duration::from_secs(3), false),
-        Ed2kUploadSessionStatus::Granted
-    );
+    // The banned peer created no queue entry, so the free slot goes straight to
+    // the next (clean) waiter at admission.
+    let (_waiter, waiter_status) = begin(&mut state, 2, 0x62, 2, 1_000, t0 + Duration::from_secs(2));
+    assert_eq!(waiter_status, Ed2kUploadSessionStatus::Granted);
 }
 
 #[test]
