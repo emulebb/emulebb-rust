@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt, fs,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -5636,7 +5636,11 @@ async fn publish_kad_due_shared_files(
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
-    let shared_files = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
+    let KadPublishCandidateSets {
+        source_scan: shared_files,
+        keyword_files,
+        keyword_index,
+    } = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     let available_search_permits = runtime.dht.available_search_permits();
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -5884,11 +5888,19 @@ async fn publish_kad_due_shared_files(
         let now = Instant::now();
         let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
         schedule.retain_keywords(&entry.file_hash, keyword_terms.iter().map(String::as_str));
-        let due_keyword = keyword_terms.iter().find(|keyword| {
-            schedule.keyword_due(&entry.file_hash, keyword, now)
-                && !attempted_keywords_this_cycle.contains(keyword.as_str())
-        });
-        let due_keyword = due_keyword.cloned();
+        // Only completed files trigger keyword publishes (oracle `!IsPartFile()`
+        // gate); an in-progress partfile in the source scan never emits keywords.
+        let due_keyword = if keyword_index.contains_key(&entry.file_hash) {
+            keyword_terms
+                .iter()
+                .find(|keyword| {
+                    schedule.keyword_due(&entry.file_hash, keyword, now)
+                        && !attempted_keywords_this_cycle.contains(keyword.as_str())
+                })
+                .cloned()
+        } else {
+            None
+        };
         let keyword_due = due_keyword.is_some();
         let source_due = source_publish_reachability.is_some()
             && schedule.source_due(&entry.file_hash, now, source_publish_buddy_ip);
@@ -5993,11 +6005,18 @@ async fn publish_kad_due_shared_files(
             } else {
                 let keyword_hash = keyword_target(keyword);
                 let keyword = keyword.to_string();
+                // The keyword batch is drawn from the completed-only keyword set,
+                // starting at the triggering file's position within it and
+                // wrapping (matching the >150-file cap rotation).
+                let keyword_start = keyword_index
+                    .get(&entry.file_hash)
+                    .copied()
+                    .unwrap_or(0);
                 let keyword_entries = kad_keyword_publish_entries_for_keyword(
-                    &shared_files,
+                    &keyword_files,
                     &keyword,
                     KAD_KEYWORD_PUBLISH_FILE_LIMIT,
-                    (start + offset) % item_count,
+                    keyword_start,
                 );
                 if keyword_entries.is_empty() {
                     keyword_skipped_by_budget += 1;
@@ -6476,30 +6495,91 @@ fn record_kad_publish_failure(
     });
 }
 
+/// Candidate file sets for one Kad publish cycle, split by lane to match the
+/// oracle. The SOURCE and KEYWORD lanes advertise different file populations:
+/// the source lane advertises any servable file (including in-progress
+/// partfiles), the keyword lane only completed files.
+struct KadPublishCandidateSets {
+    /// SOURCE-lane scan list: our own files (not compatibility hints) that are
+    /// servable right now — a fully verified file OR an in-progress partfile
+    /// holding ≥1 complete ED2K part. Ordered by the SOURCE last-publish clock
+    /// (the scan is driven by the source lane). Mirrors the oracle SOURCE loop
+    /// iterating all of `m_Files_map` with no `IsPartFile()` filter
+    /// (SharedFileList.cpp:3371-3388); `PublishSrc()` is inherited unchanged by
+    /// `CPartFile` (KnownFile.cpp:1818).
+    source_scan: Vec<MetadataTransferPublishEntry>,
+    /// KEYWORD-lane candidate list: completed files only, mirroring the oracle
+    /// keyword loop's `!IsPartFile()` gate (SharedFileList.cpp:3313) — "only
+    /// publish complete files as someone else should have the full file."
+    keyword_files: Vec<MetadataTransferPublishEntry>,
+    /// Position of each keyword-eligible (completed) file within `keyword_files`,
+    /// so a scanned file can be tested for keyword eligibility and its keyword
+    /// batch can start at the triggering file and wrap.
+    keyword_index: HashMap<String, usize>,
+}
+
+/// Whether a shared-catalog entry may be published as a Kad SOURCE: one of our
+/// own files (not a compatibility hint) that is servable right now. A fully
+/// verified file or an in-progress partfile with ≥1 complete ED2K part
+/// qualifies; a partfile with no complete part yet has nothing to serve and is
+/// excluded. Mirrors the oracle SOURCE loop admitting partfiles (no
+/// `IsPartFile()` filter, SharedFileList.cpp:3371-3388).
+fn kad_source_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
+    !entry.compatibility_hint && entry.is_servable()
+}
+
+/// Whether a shared-catalog entry may be published under a Kad KEYWORD: a
+/// completed file only (oracle `!IsPartFile()`, SharedFileList.cpp:3313), never
+/// an in-progress partfile.
+fn kad_keyword_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
+    !entry.compatibility_hint && entry.verified_complete
+}
+
 async fn kad_publishable_shared_files(
     runtime: &Ed2kTransferRuntime,
     schedule: &kad_publish_schedule::KadPublishSchedule,
-) -> Result<Vec<MetadataTransferPublishEntry>> {
+) -> Result<KadPublishCandidateSets> {
     let shared_catalog = runtime.shared_catalog();
-    let entries = shared_catalog
-        .read()
-        .await
-        .iter()
-        .filter(|entry| entry.verified_complete && !entry.compatibility_hint)
-        .map(kad_publish_entry_from_shared_entry)
-        .collect::<Vec<_>>();
+    let (source_entries, keyword_entries) = {
+        let guard = shared_catalog.read().await;
+        let source_entries = guard
+            .iter()
+            .filter(|entry| kad_source_publish_eligible(entry))
+            .map(kad_publish_entry_from_shared_entry)
+            .collect::<Vec<_>>();
+        let keyword_entries = guard
+            .iter()
+            .filter(|entry| kad_keyword_publish_eligible(entry))
+            .map(kad_publish_entry_from_shared_entry)
+            .collect::<Vec<_>>();
+        (source_entries, keyword_entries)
+    };
     // The Kad publish scan is driven by the SOURCE lane (every file, 5h
-    // interval), so the shared scan order uses the source last-publish clock —
+    // interval), so the source scan order uses the source last-publish clock —
     // the oracle source selection ranks due files by `GetLastPublishTimeKadSrc()`
     // (SharedFileList.cpp:3377). The NOTES lane selects its own best candidate by
     // the notes clock separately (see `select_best_notes_publish_candidate`).
     let now_instant = Instant::now();
     let now_unix_ms = Utc::now().timestamp_millis();
-    Ok(kad_publishable_shared_file_entries(
-        entries,
-        now_unix_ms,
-        |file_hash| schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms),
-    ))
+    let source_scan =
+        kad_publishable_shared_file_entries(source_entries, now_unix_ms, |file_hash| {
+            schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
+        });
+    // KEYWORD lane keeps its own ordering, mirroring the source clock for now.
+    let keyword_files =
+        kad_publishable_shared_file_entries(keyword_entries, now_unix_ms, |file_hash| {
+            schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
+        });
+    let keyword_index = keyword_files
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.file_hash.clone(), index))
+        .collect();
+    Ok(KadPublishCandidateSets {
+        source_scan,
+        keyword_files,
+        keyword_index,
+    })
 }
 
 fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTransferPublishEntry {
@@ -9588,6 +9668,53 @@ mod tests {
         assert_eq!(publish.all_time_upload_accepts, 4);
         assert_eq!(publish.comment, "synthetic note");
         assert_eq!(publish.rating, 5);
+    }
+
+    #[test]
+    fn kad_source_publish_admits_servable_partfiles_but_keyword_stays_complete_only() {
+        let base = |hash: u8, verified_complete: bool, complete_parts: Vec<bool>| Ed2kSharedEntry {
+            file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
+            canonical_name: "ubuntu-python-sample.iso".to_string(),
+            file_size: 4096,
+            verified_complete,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            all_time_uploaded_bytes: 0,
+            complete_parts,
+            publish: Default::default(),
+        };
+
+        // Completed file: eligible for both lanes.
+        let complete = base(0x01, true, Vec::new());
+        assert!(kad_source_publish_eligible(&complete));
+        assert!(kad_keyword_publish_eligible(&complete));
+
+        // In-progress partfile with ≥1 complete ED2K part: SOURCE-eligible (we
+        // can serve that part) but NOT keyword-eligible (oracle `!IsPartFile()`).
+        let servable_partfile = base(0x02, false, vec![true, false]);
+        assert!(servable_partfile.is_servable());
+        assert!(kad_source_publish_eligible(&servable_partfile));
+        assert!(!kad_keyword_publish_eligible(&servable_partfile));
+
+        // Partfile with no complete part yet: nothing to serve, so in neither.
+        let empty_partfile = base(0x03, false, vec![false, false]);
+        assert!(!empty_partfile.is_servable());
+        assert!(!kad_source_publish_eligible(&empty_partfile));
+        assert!(!kad_keyword_publish_eligible(&empty_partfile));
+
+        // Compatibility hint (a file we do not hold): never published either way.
+        let hint = Ed2kSharedEntry {
+            compatibility_hint: true,
+            ..base(0x04, true, Vec::new())
+        };
+        assert!(!kad_source_publish_eligible(&hint));
+        assert!(!kad_keyword_publish_eligible(&hint));
     }
 
     #[test]
