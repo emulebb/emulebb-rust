@@ -460,6 +460,23 @@ impl Ed2kTransferRuntime {
         self.lock_corruption_blackbox().remove(file_hash);
     }
 
+    /// Test-only: total bytes currently attributed to `ip` in the file's
+    /// blackbox, across all parts and statuses. Lets tests assert that dropped
+    /// stale payload is never attributed as received data.
+    #[cfg(test)]
+    pub(crate) fn cbb_recorded_bytes_for_test(&self, file_hash: &str, ip: Ipv4Addr) -> u64 {
+        let map = self.lock_corruption_blackbox();
+        map.get(file_hash).map_or(0, |blackbox| {
+            blackbox
+                .records
+                .iter()
+                .flatten()
+                .filter(|record| record.ip == ip)
+                .map(|record| record.end - record.start + 1)
+                .sum()
+        })
+    }
+
     fn lock_corruption_blackbox(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, CorruptionBlackBox>> {

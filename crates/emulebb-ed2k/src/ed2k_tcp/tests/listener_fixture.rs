@@ -584,6 +584,7 @@ pub(super) async fn read_upload_bytes(
                     compressed_received: 0,
                     uncompressed_written: 0,
                     inflater: Decompress::new(true),
+                    zstream_error: false,
                 });
                 let (bytes, finished) =
                     inflate_compressed_part_fragment(pending_stream, fragment).unwrap();
@@ -650,6 +651,7 @@ pub(super) async fn read_transport_upload_bytes(
                     compressed_received: 0,
                     uncompressed_written: 0,
                     inflater: Decompress::new(true),
+                    zstream_error: false,
                 });
                 let (bytes, finished) =
                     inflate_compressed_part_fragment(pending_stream, fragment).unwrap();

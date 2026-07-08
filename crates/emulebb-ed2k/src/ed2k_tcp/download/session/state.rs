@@ -2,6 +2,7 @@ use tokio::time::Instant;
 
 use super::super::super::{ED2K_SOURCE_EXCHANGE2_VERSION, Ed2kPeerSecureIdentState};
 use super::super::ActiveDownloadPiece;
+use super::super::stale_guard::StaleBlockPacketGuard;
 
 pub(super) struct DownloadSessionState {
     pub(super) peer_secure_ident: Ed2kPeerSecureIdentState,
@@ -62,6 +63,11 @@ pub(super) struct DownloadSessionState {
     /// so a part is not re-requested while a request is outstanding (master
     /// `CAICHRecoveryHashSet::IsClientRequestPending`).
     pub(super) aich_requests_inflight: Vec<u16>,
+    /// Rolling 32-in-15s stale block-packet cancel guard (oracle
+    /// `ShouldAbortAfterStaleBlockPacket`, DownloadClient.cpp:2690-2712): stale
+    /// / duplicate block payload is dropped and counted here instead of ending
+    /// the session; only a sustained burst cancels the transfer.
+    pub(super) stale_block_guard: StaleBlockPacketGuard,
 }
 
 impl DownloadSessionState {
@@ -113,6 +119,7 @@ impl DownloadSessionState {
             peer_part_bitmap: None,
             pending_aich_recovery_parts: Vec::new(),
             aich_requests_inflight: Vec::new(),
+            stale_block_guard: StaleBlockPacketGuard::default(),
         }
     }
 

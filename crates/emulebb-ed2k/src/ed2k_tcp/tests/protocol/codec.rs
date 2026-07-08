@@ -777,6 +777,7 @@ fn compressed_part_fragments_inflate_across_multiple_packets() {
         compressed_received: 0,
         uncompressed_written: 0,
         inflater: flate2::Decompress::new(true),
+        zstream_error: false,
     };
 
     let (first_bytes, first_finished) =
@@ -810,6 +811,7 @@ fn compressed_part_fragment_rejects_decompression_bomb() {
         compressed_received: 0,
         uncompressed_written: 0,
         inflater: flate2::Decompress::new(true),
+        zstream_error: false,
     };
 
     let err = super::inflate_compressed_part_fragment(&mut pending, &compressed)

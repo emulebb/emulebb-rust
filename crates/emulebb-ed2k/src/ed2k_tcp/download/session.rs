@@ -1132,6 +1132,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                 | (OP_EMULEPROT, OP_COMPRESSEDPART)
                 | (OP_EMULEPROT, OP_COMPRESSEDPART_I64) => {
                     if let Some(outcome) = handle_download_part_packet(DownloadPartPacket {
+                            transport: &mut *transport,
                             transfer_runtime,
                             file_hash: &file_hash,
                             file_hash_hex,
@@ -1140,7 +1141,6 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             manifest: &mut manifest,
                             session_state: &mut session_state,
                             peer_addr,
-                            transport_mode: transport.mode,
                             packet: &packet,
                         })
                         .await?

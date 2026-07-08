@@ -22,6 +22,12 @@ pub(in crate::ed2k_tcp) struct PendingCompressedPart {
     pub(in crate::ed2k_tcp) compressed_received: usize,
     pub(in crate::ed2k_tcp) uncompressed_written: u64,
     pub(in crate::ed2k_tcp) inflater: Decompress,
+    /// The stream hit a zlib/framing error and cannot be recovered; all further
+    /// payload for this block is ignored WITHOUT killing the connection, because
+    /// the peer's next 180 K stream can be valid again (oracle
+    /// `Pending_Block_Struct::fZStreamError`, DownloadClient.cpp:1394-1411 sets
+    /// it, :1300-1308 ignores subsequent payload for the flagged block).
+    pub(in crate::ed2k_tcp) zstream_error: bool,
 }
 
 pub(in crate::ed2k_tcp) struct ReadyDownloadBlocks<'a> {

@@ -146,6 +146,7 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
                             compressed_received: 0,
                             uncompressed_written: 0,
                             inflater: Decompress::new(true),
+                            zstream_error: false,
                         });
                     let (bytes, finished) =
                         super::inflate_compressed_part_fragment(pending_stream, fragment).unwrap();

@@ -422,6 +422,100 @@ pub(crate) fn download_idle_timeout(peer: &str, peer_hash: Option<[u8; 16]>, fil
     emit("bad_peer", "download_idle_timeout", "medium", keys, body);
 }
 
+/// `download_stale_block_packet_dropped` (rust-only observe event): a received
+/// block payload matched no pending block request, or duplicated
+/// already-received payload, and was DROPPED without ending the session
+/// (oracle DownloadClient.cpp:1531-1553 drops such packets too, but only logs
+/// them as `#ifdef`'d download-slot diagnostics — `packet-dropped-no-pending-
+/// block` / `packet-zero-write` — not as a bad_peer event, so this event is
+/// rust-extra in a bad_peer diff). `staleCount` is the guard's in-window
+/// counter after this drop.
+pub(crate) fn download_stale_block_packet_dropped(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    duplicate: bool,
+    stale_count: u32,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "drop_packet",
+        "reason": if duplicate {
+            "Duplicate block payload dropped"
+        } else {
+            "Stale block packet dropped"
+        },
+        "staleCount": stale_count,
+    });
+    emit(
+        "bad_peer",
+        "download_stale_block_packet_dropped",
+        "low",
+        keys,
+        body,
+    );
+}
+
+/// The oracle reason string for both stale-packet aborts
+/// (`ShouldAbortAfterStaleBlockPacket`, DownloadClient.cpp:2705-2710), kept
+/// byte-identical so soak diffing lines up.
+fn stale_block_abort_reason(stale_packets: u32, window_ms: u64) -> String {
+    format!(
+        "Sustained stale block packets. {stale_packets} packets in {window_ms} ms did not make useful download progress."
+    )
+}
+
+/// `download_stale_block_packet_abort`: the 32-in-15s stale block-packet guard
+/// tripped on payload matching NO pending block request, so the transfer is
+/// cancelled (OP_CANCELTRANSFER) and the source requeued. Mirrors MFC
+/// `download_stale_block_packet_abort` (DownloadClient.cpp:1541-1553, severity
+/// medium, `action:"cancel_transfer"`).
+pub(crate) fn download_stale_block_packet_abort(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    stale_packets: u32,
+    window_ms: u64,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cancel_transfer",
+        "reason": stale_block_abort_reason(stale_packets, window_ms),
+    });
+    emit(
+        "bad_peer",
+        "download_stale_block_packet_abort",
+        "medium",
+        keys,
+        body,
+    );
+}
+
+/// `download_stale_duplicate_block_abort`: the same guard tripped on DUPLICATE
+/// payload for a pending block (already-received bytes re-sent without useful
+/// progress). Mirrors MFC `download_stale_duplicate_block_abort`
+/// (DownloadClient.cpp:1495-1526, severity medium, `action:"cancel_transfer"`).
+pub(crate) fn download_stale_duplicate_block_abort(
+    peer: &str,
+    peer_hash: Option<[u8; 16]>,
+    file_hash: &str,
+    stale_packets: u32,
+    window_ms: u64,
+) {
+    let keys = upload_keys(peer, peer_hash, file_hash);
+    let body = json!({
+        "action": "cancel_transfer",
+        "reason": stale_block_abort_reason(stale_packets, window_ms),
+    });
+    emit(
+        "bad_peer",
+        "download_stale_duplicate_block_abort",
+        "medium",
+        keys,
+        body,
+    );
+}
+
 /// `download_out_of_part_reqs`: a download source reported No Needed Parts for our
 /// file (it sent `OP_OUTOFPARTREQS`). Mirrors MFC `CUpDownClient` -> bad_peer
 /// `download_out_of_part_reqs` (severity `low`, `action:"state_on_queue"`). rust's

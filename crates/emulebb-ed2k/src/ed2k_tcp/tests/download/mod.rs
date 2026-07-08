@@ -12,6 +12,7 @@ mod range_out_of_order_complete;
 mod range_out_of_order_compressed;
 mod range_out_of_order_incomplete;
 mod resume_reconnect;
+mod stale_packets;
 mod startup_metadata;
 mod startup_secure_ident;
 mod window_policy;

@@ -3,6 +3,7 @@
 pub(in crate::ed2k_tcp) mod aich_request;
 pub(in crate::ed2k_tcp) mod blocks;
 pub(in crate::ed2k_tcp) mod session;
+pub(in crate::ed2k_tcp) mod stale_guard;
 pub(in crate::ed2k_tcp) mod startup;
 pub(in crate::ed2k_tcp) mod window;
 
