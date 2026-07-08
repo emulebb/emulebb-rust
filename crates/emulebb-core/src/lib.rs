@@ -3402,11 +3402,20 @@ impl EmulebbCore {
                 // A4AF-lite NNP swap (eMuleBB CUpDownClient::SwapToAnotherFile):
                 // a source that has No Needed Parts for THIS file but serves
                 // another wanted file in the registry is moved to that file
-                // (its transfer is re-driven so leg-1 selection reuses the peer)
-                // instead of being dropped. Sources with no other wanted file
-                // fall through and stay dropped (the lease was just released).
+                // (its transfer is re-driven so leg-1 selection reuses the peer).
+                // Every NNP source is then HELD on THIS file for the doubled
+                // 58-minute reask cycle (oracle DS_NONEEDEDPARTS: the source
+                // stays in the srclist, DownloadClient.cpp:848-852, and is
+                // re-asked after FILEREASKTIME*2, DownloadClient.cpp:2425-2431)
+                // instead of being dropped — the swap moves the peer's activity,
+                // the hold keeps the NNP relation to this file re-askable.
                 if !outcome.no_needed_parts_sources.is_empty() {
                     self.swap_no_needed_parts_sources(
+                        &transfer.hash,
+                        &outcome.no_needed_parts_sources,
+                    )
+                    .await;
+                    self.hold_no_needed_parts_sources(
                         &transfer.hash,
                         &outcome.no_needed_parts_sources,
                     )
@@ -3691,12 +3700,13 @@ impl EmulebbCore {
         {
             let source_count = state.download_source_registry.candidate_count();
             let valid_source_count = state.download_source_registry.leased_peer_count();
+            let nnp_source_count = state.download_source_registry.nnp_source_count(now);
             let a4af_file_count = state.download_source_registry.a4af_file_count();
             let transferring_source_count = state.active_download_peer_endpoints.len();
             crate::diag_sched::source_count(
                 source_count,
                 valid_source_count,
-                0,
+                nnp_source_count,
                 a4af_file_count,
                 transferring_source_count,
             );
@@ -3842,7 +3852,8 @@ impl EmulebbCore {
     /// transfer, re-drive that transfer's download attempt so the registry-driven
     /// source selection (leg 1) re-engages this peer on the swap-target file
     /// instead of dropping it. Sources whose only registered file was the current
-    /// one (no swap target) are left dropped, exactly as before. Returns the
+    /// one (no swap target) fall through to the NNP hold
+    /// ([`Self::hold_no_needed_parts_sources`]) instead of a drop. Returns the
     /// number of sources actually swapped (target queued).
     async fn swap_no_needed_parts_sources(
         &self,
@@ -3897,6 +3908,61 @@ impl EmulebbCore {
             self.queue_ed2k_download_attempt(target);
         }
         swapped
+    }
+
+    /// Hold every No-Needed-Parts source for the doubled reask cycle instead of
+    /// dropping it (RUST-PAR-017 DL-3). Oracle: an NNP source goes to
+    /// `DS_NONEEDEDPARTS` but STAYS in the file's source list with
+    /// `SetLastAskedTime` stamped (DownloadClient.cpp:848-852) and is re-asked
+    /// after `FILEREASKTIME * 2` = 58 minutes because it may have acquired
+    /// needed parts since (DownloadClient.cpp:2425-2431 + PartFile.cpp:3064-3068
+    /// — which also resets to `DS_ONQUEUE` at reask time, mirrored by the
+    /// expired-hold prune in [`DownloadSourceRegistry::lease_best_for_file`]).
+    /// Retention mirrors the oracle NNP purge (PartFile.cpp:3056-3062): once the
+    /// file already holds `maxSources * 4/5` live sources, at most one NNP
+    /// source per 40-second window is dropped instead of held. A source that
+    /// also sits on the UDP reask loop (a Kad buddy-registered source keeps its
+    /// loop entry across a TCP session) is flagged there too, so the loop's own
+    /// cadence doubles. Returns the number of sources held.
+    async fn hold_no_needed_parts_sources(
+        &self,
+        file_hash: &str,
+        sources: &[Ed2kFoundSource],
+    ) -> usize {
+        let reask_handle = self.ed2k_reask_handle.lock().unwrap().clone();
+        let mut state = self.state.lock().await;
+        let now = Instant::now();
+        let mut held = 0usize;
+        for source in sources {
+            let live_count = state
+                .download_source_registry
+                .candidate_count_for_file(now, file_hash);
+            if self.ed2k_transfers.should_purge_nnp_source(live_count)
+                && state.download_source_registry.try_nnp_purge(now, file_hash)
+            {
+                // Oracle NNP retention purge (PartFile.cpp:3056-3062): under
+                // source-cap pressure the NNP source is removed to make room
+                // for a potentially better one (RemoveSource; emits
+                // source_dropped like every genuine registry removal).
+                state
+                    .download_source_registry
+                    .remove_candidate(source, file_hash);
+                continue;
+            }
+            if state
+                .download_source_registry
+                .mark_no_needed_parts(now, source, file_hash)
+            {
+                held += 1;
+                crate::diag_sched::source_nnp_held(file_hash, source);
+                // Double the UDP reask cadence too when the source has a loop
+                // entry (keyed by its client-UDP endpoint; unknown = no-op).
+                if let (Some(handle), Some(udp_port)) = (&reask_handle, source.source_udp_port) {
+                    handle.mark_no_needed_parts((source.ip, udp_port));
+                }
+            }
+        }
+        held
     }
 
     /// Spawn a background download attempt for `transfer`. Synchronous (returns
@@ -7588,8 +7654,9 @@ where
     // are kept (not released) so the next cycle does not re-TCP them.
     let mut detached_reask_endpoints: Vec<(Ipv4Addr, u16)> = Vec::new();
     // Sources that reported No Needed Parts; the driver runs the A4AF-lite swap
-    // on each after the round (move to another wanted file the peer serves, else
-    // drop). Kept across retry rounds.
+    // on each after the round (move to another wanted file the peer serves) and
+    // then NNP-holds each on this file for the doubled 58-minute reask cycle
+    // (oracle DS_NONEEDEDPARTS). Kept across retry rounds.
     let mut no_needed_parts_sources: Vec<Ed2kFoundSource> = Vec::new();
     // Sources that answered OP_FILEREQANSNOFIL (or AICH-mismatch-as-FNF); the
     // driver dead-lists + drops each after the round (oracle
@@ -7693,8 +7760,10 @@ where
                 }
                 Ok(Ed2kPeerDownloadOutcome::NoNeededParts) => {
                     // No Needed Parts for this file (eMuleBB DS_NONEEDEDPARTS). The
-                    // driver runs the A4AF-lite SwapToAnotherFile afterwards: this
-                    // source is moved to another wanted file it serves, if any.
+                    // driver runs the A4AF-lite SwapToAnotherFile afterwards (this
+                    // source is moved to another wanted file it serves, if any) and
+                    // then NNP-holds the source on this file for the doubled
+                    // 58-minute reask cycle instead of dropping it.
                     no_needed_parts_sources.push(source.clone());
                     tracing::info!(
                         "ED2K direct download peer reported no needed parts file_hash={} peer={}",
@@ -11723,6 +11792,156 @@ mod tests {
         assert_eq!(
             swapped, 0,
             "completed other file is not a valid swap target"
+        );
+    }
+
+    #[tokio::test]
+    async fn nnp_source_is_held_for_the_doubled_reask_cycle_not_dropped_or_dead_listed() {
+        // RUST-PAR-017 DL-3: an NNP source stays in the download source registry
+        // in an NNP-held state (oracle DS_NONEEDEDPARTS keeps the source in the
+        // srclist, DownloadClient.cpp:848-852) — it is neither dropped nor
+        // dead-listed (NNP is not FNF), and its next re-ask is deferred by the
+        // 58-minute hold rather than the 20-minute endpoint cooldown.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let file = Ed2kHash::from_bytes([0x78; 16]).to_string();
+        let source = direct_test_source(
+            Ed2kHash::from_bytes([0x78; 16]),
+            Ipv4Addr::new(192, 0, 2, 35),
+            41014,
+        );
+        let now = Instant::now();
+        {
+            let mut state = core.state.lock().await;
+            state.download_source_registry.add_candidate(
+                now,
+                DownloadSourceCandidate {
+                    file_hash: file.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 1,
+                    source: source.clone(),
+                    last_seen: now,
+                },
+            );
+        }
+
+        let held = core
+            .hold_no_needed_parts_sources(&file, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(held, 1, "the NNP source must be held");
+
+        let mut state = core.state.lock().await;
+        assert_eq!(
+            state
+                .download_source_registry
+                .candidate_count_for_file(now, &file),
+            1,
+            "the held source stays a candidate (kept, not dropped)"
+        );
+        assert!(
+            !state.ed2k_dead_sources.is_dead_source(now, &file, &source),
+            "an NNP source is never dead-listed (that is the FNF path)"
+        );
+        assert_eq!(state.download_source_registry.nnp_source_count(now), 1);
+        // The hold (not the attempt cooldown) gates the redial: even with a zero
+        // cooldown the lease defers for the full doubled reask interval.
+        assert!(
+            state
+                .download_source_registry
+                .lease_best_for_file(
+                    now + Duration::from_secs(25 * 60),
+                    Duration::ZERO,
+                    &source,
+                    &file
+                )
+                .is_none(),
+            "NNP-held source must not be redialed before the 58-minute hold"
+        );
+        assert!(
+            state
+                .download_source_registry
+                .lease_best_for_file(
+                    now + crate::download_source_registry::NNP_REASK_HOLD
+                        + Duration::from_secs(1),
+                    Duration::ZERO,
+                    &source,
+                    &file
+                )
+                .is_some(),
+            "the held source is re-asked after FILEREASKTIME * 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn nnp_hold_purges_one_source_per_window_under_source_cap_pressure() {
+        // Oracle retention bound (PartFile.cpp:3056-3062): once the file holds
+        // >= maxSources * 4/5 sources, an NNP source is dropped instead of held
+        // — but at most one per 40-second purge window; the rest stay held.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        core.ed2k_transfers.apply_download_coordinator_config(
+            emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig {
+                // Threshold = 5 * 4/5 = 4 live sources.
+                max_sources_per_file: 5,
+                ..emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig::default()
+            },
+        );
+        let file = Ed2kHash::from_bytes([0x79; 16]).to_string();
+        let now = Instant::now();
+        let sources: Vec<Ed2kFoundSource> = (0..5u8)
+            .map(|index| {
+                direct_test_source(
+                    Ed2kHash::from_bytes([0x79; 16]),
+                    Ipv4Addr::new(192, 0, 2, 40 + index),
+                    41020 + u16::from(index),
+                )
+            })
+            .collect();
+        {
+            let mut state = core.state.lock().await;
+            for source in &sources {
+                state.download_source_registry.add_candidate(
+                    now,
+                    DownloadSourceCandidate {
+                        file_hash: file.clone(),
+                        file_priority: 5,
+                        needed_parts: 4,
+                        rare_parts: 1,
+                        source: source.clone(),
+                        last_seen: now,
+                    },
+                );
+            }
+        }
+
+        // Two NNP verdicts in one round: the first is purged (5 >= 4 with the
+        // purge window open), the second is held (the 40-second window is spent).
+        let held = core
+            .hold_no_needed_parts_sources(&file, &sources[0..2])
+            .await;
+        assert_eq!(held, 1, "only one NNP source is purged per 40s window");
+
+        let mut state = core.state.lock().await;
+        assert_eq!(
+            state
+                .download_source_registry
+                .candidate_count_for_file(Instant::now(), &file),
+            4,
+            "exactly one NNP source was dropped under cap pressure"
+        );
+        assert_eq!(
+            state
+                .download_source_registry
+                .nnp_source_count(Instant::now()),
+            1,
+            "the non-purged NNP source is held"
+        );
+        // The purged source is gone entirely; the held one keeps its candidate.
+        assert!(
+            state
+                .download_source_registry
+                .lease_best_for_file(Instant::now(), Duration::ZERO, &sources[0], &file)
+                .is_none(),
+            "the purged source has no candidate left to lease"
         );
     }
 

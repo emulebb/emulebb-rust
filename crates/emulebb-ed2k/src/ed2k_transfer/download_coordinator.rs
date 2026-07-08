@@ -122,6 +122,15 @@ impl Ed2kDownloadCoordinatorConfig {
         }
         ((self.max_sources_per_file * 3) / 4).min(MAX_SOURCES_FILE_UDP)
     }
+
+    /// No-Needed-Parts retention purge threshold (master `CPartFile::Process`
+    /// `DS_NONEEDEDPARTS` purge, PartFile.cpp:3056-3062): an NNP source is only
+    /// dropped — instead of held for the doubled reask cycle — once the file
+    /// already holds `GetMaxSources() * 4 / 5` sources. 0 means never purge
+    /// (the per-file cap is disabled).
+    pub fn nnp_purge_threshold(&self) -> usize {
+        self.max_sources_per_file * 4 / 5
+    }
 }
 
 /// Shared cross-transfer download coordinator (one per runtime, behind a
@@ -262,6 +271,16 @@ impl Ed2kDownloadCoordinator {
         udp == 0 || current_source_count < udp
     }
 
+    /// Whether a No-Needed-Parts source of a file currently holding
+    /// `current_source_count` sources should be purged rather than held for the
+    /// doubled reask cycle (master `CPartFile::Process` NNP purge,
+    /// PartFile.cpp:3059: `GetSourceCount() >= GetMaxSources() * 4 / 5`). Never
+    /// purges when the per-file cap is disabled (threshold 0).
+    pub fn should_purge_nnp_source(&self, current_source_count: usize) -> bool {
+        let threshold = self.config.nnp_purge_threshold();
+        threshold != 0 && current_source_count >= threshold
+    }
+
     /// Round-robin the next file due for a global UDP source reask, enforcing the
     /// minimum global inter-reask interval (master `CDownloadQueue::Process`
     /// `m_udcounter` rotation + `SendNextUDPPacket` cadence).
@@ -343,6 +362,19 @@ mod tests {
         let coordinator = Ed2kDownloadCoordinator::new(config);
         assert!(coordinator.can_engage_source(10_000));
         assert!(coordinator.can_reask_via_udp(10_000));
+        // NNP purge is also cap-driven: never purge with the cap disabled.
+        assert!(!coordinator.should_purge_nnp_source(10_000));
+    }
+
+    #[test]
+    fn nnp_purge_threshold_matches_the_oracle_formula() {
+        // Oracle PartFile.cpp:3059: GetSourceCount() >= GetMaxSources() * 4/5.
+        let config = Ed2kDownloadCoordinatorConfig::default();
+        assert_eq!(config.nnp_purge_threshold(), 480); // 600 * 4/5
+        let coordinator = Ed2kDownloadCoordinator::new(config);
+        assert!(!coordinator.should_purge_nnp_source(479));
+        assert!(coordinator.should_purge_nnp_source(480));
+        assert!(coordinator.should_purge_nnp_source(481));
     }
 
     #[test]

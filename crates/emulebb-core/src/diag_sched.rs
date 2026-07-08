@@ -203,6 +203,23 @@ pub(crate) fn source_dead_listed(file_hash_hex: &str, source: &Ed2kFoundSource, 
     );
 }
 
+/// `source_nnp_held` (source family, §3.5 shape): a source answered with a file
+/// status offering no part we still need (oracle `DS_NONEEDEDPARTS`,
+/// DownloadClient.cpp:848-852) and is HELD for the doubled reask cycle
+/// (`FILEREASKTIME * 2`, DownloadClient.cpp:2425-2431) instead of dropped: it
+/// stays in the download source registry and is re-asked after `holdSecs` in
+/// case it acquired needed parts since. Distinct from `source_dead_listed`
+/// (FNF): an NNP source is kept and re-asked, never dead-listed.
+pub(crate) fn source_nnp_held(file_hash_hex: &str, source: &Ed2kFoundSource) {
+    let mut keys = Map::new();
+    insert_source_keys(&mut keys, source, file_hash_hex);
+    let body = json!({
+        "outcome": "nnp_held",
+        "holdSecs": crate::download_source_registry::NNP_REASK_HOLD.as_secs(),
+    });
+    emit(FAMILY, "source_nnp_held", "info", Value::Object(keys), body);
+}
+
 /// `source_swapped` (schema §3.5): an A4AF / NoNeededParts move of a source to a
 /// different wanted file (`swapReason:"nnp"`).
 pub(crate) fn source_swapped(
@@ -277,9 +294,10 @@ pub(crate) fn keyword_search_queue(
 /// `source_count` (schema §3.5): periodic download-source picture snapshot, for
 /// parity with MFC `DiagEventLogDownloadSourceCount`. Field mapping to rust's
 /// source registry: `sourceCount` = total live candidates; `validSourceCount` =
-/// leased (actively engaged) sources; `nnpSourceCount` is 0 (rust does not keep a
-/// NoNeededParts aggregate on the registry); `a4afFileCount` = A4AF-lite candidate
-/// count (source-based). Keys are empty, matching MFC.
+/// leased (actively engaged) sources; `nnpSourceCount` = (source, file) pairs
+/// under an active No-Needed-Parts hold (the MFC `DS_NONEEDEDPARTS` aggregate);
+/// `a4afFileCount` = A4AF-lite candidate count (source-based). Keys are empty,
+/// matching MFC.
 pub(crate) fn source_count(
     source_count: usize,
     valid_source_count: usize,

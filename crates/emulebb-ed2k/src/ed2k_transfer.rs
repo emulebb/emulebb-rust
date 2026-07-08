@@ -540,6 +540,17 @@ impl Ed2kTransferRuntime {
             .can_reask_via_udp(current_source_count)
     }
 
+    /// Whether a No-Needed-Parts source of a file already holding
+    /// `current_source_count` sources should be purged instead of held for the
+    /// doubled reask cycle (eMule `CPartFile::Process` `DS_NONEEDEDPARTS` purge,
+    /// PartFile.cpp:3059: `GetSourceCount() >= GetMaxSources() * 4 / 5`).
+    pub fn should_purge_nnp_source(&self, current_source_count: usize) -> bool {
+        self.download_coordinator
+            .lock()
+            .expect("download coordinator mutex poisoned")
+            .should_purge_nnp_source(current_source_count)
+    }
+
     /// Round-robin the next file index due for a global UDP source reask,
     /// enforcing the minimum global inter-reask interval (eMule
     /// `CDownloadQueue::Process` `m_udcounter` rotation + `SendNextUDPPacket`).

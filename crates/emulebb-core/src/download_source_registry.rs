@@ -18,6 +18,20 @@ use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
 /// and stopped engaging new live sources (and the `peers` map grew unbounded).
 const CANDIDATE_LIVENESS_TTL: Duration = Duration::from_secs(60 * 60);
 
+/// No-Needed-Parts reask hold: a source whose file status showed no part we
+/// still need is HELD (kept registered but not re-dialed) for the doubled
+/// reask interval — `FILEREASKTIME * 2` = 58 minutes (oracle
+/// `CUpDownClient::GetTimeUntilReask`, DownloadClient.cpp:2425-2431) — before
+/// the next TCP re-ask rechecks whether the peer has acquired needed parts
+/// since (oracle `CPartFile::Process` `DS_NONEEDEDPARTS` branch,
+/// PartFile.cpp:3064-3068).
+pub(crate) const NNP_REASK_HOLD: Duration = Duration::from_secs(2 * 29 * 60);
+
+/// Throttle between No-Needed-Parts retention purges for one file (oracle
+/// `m_lastpurgetime + SEC2MS(40)`, PartFile.cpp:3056): even under source-cap
+/// pressure at most one NNP source is dropped per 40-second window.
+const NNP_PURGE_INTERVAL: Duration = Duration::from_secs(40);
+
 /// File-scoped source candidate retained by the peer-centric download registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadSourceCandidate {
@@ -46,6 +60,17 @@ pub(crate) struct DownloadSourceRegistry {
     /// one peer with 20-minute gaps and dead-locking the A4AF NNP swap (the
     /// swapped-to file deferred against the stamp the swapped-from file left).
     last_attempted_endpoints: HashMap<((Ipv4Addr, u16), String), Instant>,
+    /// Per-(endpoint, file) No-Needed-Parts hold stamps (oracle
+    /// `DS_NONEEDEDPARTS` + `SetLastAskedTime`, DownloadClient.cpp:848-852):
+    /// while a stamp is younger than [`NNP_REASK_HOLD`] the source is not
+    /// leased (re-dialed) for that file. Expired stamps are pruned in
+    /// [`Self::lease_best_for_file`], which mirrors the oracle reset to
+    /// `DS_ONQUEUE` at reask time (PartFile.cpp:3067-3068): the re-ask session
+    /// re-marks the pair only if the peer is still NNP.
+    nnp_holds: HashMap<((Ipv4Addr, u16), String), Instant>,
+    /// Per-file stamp of the last NNP retention purge (oracle per-file
+    /// `m_lastpurgetime`, PartFile.cpp:3056-3057).
+    last_nnp_purge: HashMap<String, Instant>,
 }
 
 impl DownloadSourceRegistry {
@@ -71,6 +96,7 @@ impl DownloadSourceRegistry {
     /// seen). Leases are untouched: a leased (engaged/detached) source is being
     /// actively worked and its lease is released through its own lifecycle.
     pub(crate) fn prune_stale_candidates(&mut self, now: Instant) {
+        let mut removed: Vec<((Ipv4Addr, u16), String)> = Vec::new();
         self.peers.retain(|_, candidates| {
             candidates.retain(|candidate| {
                 if is_stale(candidate, now) {
@@ -79,6 +105,10 @@ impl DownloadSourceRegistry {
                     // of the MFC oracle source_dropped (source removed from a part
                     // file's srclist) — the only place it should fire.
                     crate::diag_sched::source_dropped(&candidate.file_hash, &candidate.source);
+                    removed.push((
+                        (candidate.source.ip, candidate.source.tcp_port),
+                        candidate.file_hash.clone(),
+                    ));
                     false
                 } else {
                     true
@@ -86,6 +116,10 @@ impl DownloadSourceRegistry {
             });
             !candidates.is_empty()
         });
+        // A pruned candidate's NNP hold goes with it (nothing left to hold).
+        for key in removed {
+            self.nnp_holds.remove(&key);
+        }
     }
 
     #[cfg(test)]
@@ -165,6 +199,21 @@ impl DownloadSourceRegistry {
         {
             return None;
         }
+        // NNP hold gate (oracle DS_NONEEDEDPARTS + doubled GetTimeUntilReask):
+        // a No-Needed-Parts source is not re-dialed for this file until its
+        // 58-minute hold elapses. Expired holds are pruned here — the oracle
+        // analogue of the reset to DS_ONQUEUE at reask time
+        // (PartFile.cpp:3067-3068); the re-ask session re-marks the pair only
+        // when the peer is still NNP, so a peer that acquired needed parts in
+        // the meantime resumes the normal cadence.
+        self.nnp_holds
+            .retain(|_, held_at| now.saturating_duration_since(*held_at) < NNP_REASK_HOLD);
+        if self
+            .nnp_holds
+            .contains_key(&(endpoint, file_hash.to_string()))
+        {
+            return None;
+        }
         let candidates = self.peers.get(&peer_key)?;
         let candidate = candidates.iter().max_by_key(candidate_score)?;
         if candidate.file_hash != file_hash || !self.leased_peers.insert(peer_key) {
@@ -175,6 +224,10 @@ impl DownloadSourceRegistry {
         Some(candidate.clone())
     }
 
+    /// How long until `(source, file_hash)` may be re-dialed: the remainder of
+    /// the anti-churn attempt cooldown and/or of an active No-Needed-Parts hold,
+    /// whichever ends later (an NNP-held source waits the full doubled reask
+    /// interval, not the 20-minute redial floor). `None` when neither applies.
     pub(crate) fn endpoint_retry_delay(
         &self,
         now: Instant,
@@ -182,10 +235,88 @@ impl DownloadSourceRegistry {
         source: &Ed2kFoundSource,
         file_hash: &str,
     ) -> Option<Duration> {
-        let last = *self
+        let cooldown_remaining = self
             .last_attempted_endpoints
+            .get(&((source.ip, source.tcp_port), file_hash.to_string()))
+            .and_then(|last| retry_cooldown.checked_sub(now.saturating_duration_since(*last)));
+        let nnp_remaining = self.nnp_hold_remaining(now, source, file_hash);
+        match (cooldown_remaining, nnp_remaining) {
+            (Some(cooldown), Some(nnp)) => Some(cooldown.max(nnp)),
+            (cooldown, nnp) => cooldown.or(nnp),
+        }
+    }
+
+    /// Hold a No-Needed-Parts source for the doubled reask cycle instead of
+    /// dropping it (oracle: the source stays in the file's srclist in
+    /// `DS_NONEEDEDPARTS` with `SetLastAskedTime` stamped,
+    /// DownloadClient.cpp:848-852, and is re-asked after `FILEREASKTIME * 2`
+    /// because it may have acquired needed parts since,
+    /// DownloadClient.cpp:2425-2431). Also refreshes the candidate's liveness so
+    /// the held source survives its own hold window rather than aging out of
+    /// [`CANDIDATE_LIVENESS_TTL`] before the re-ask. Returns whether the peer
+    /// had a candidate for `file_hash` (no candidate -> nothing to hold).
+    pub(crate) fn mark_no_needed_parts(
+        &mut self,
+        now: Instant,
+        source: &Ed2kFoundSource,
+        file_hash: &str,
+    ) -> bool {
+        let peer_key = DownloadPeerKey::from_source(source);
+        let Some(candidate) = self
+            .peers
+            .get_mut(&peer_key)
+            .and_then(|candidates| {
+                candidates
+                    .iter_mut()
+                    .find(|candidate| candidate.file_hash == file_hash)
+            })
+        else {
+            return false;
+        };
+        candidate.last_seen = now;
+        self.nnp_holds
+            .insert(((source.ip, source.tcp_port), file_hash.to_string()), now);
+        true
+    }
+
+    /// Remaining time of an active No-Needed-Parts hold on `(source, file_hash)`,
+    /// or `None` when the pair is not held (never marked, or the hold elapsed).
+    pub(crate) fn nnp_hold_remaining(
+        &self,
+        now: Instant,
+        source: &Ed2kFoundSource,
+        file_hash: &str,
+    ) -> Option<Duration> {
+        let held_at = *self
+            .nnp_holds
             .get(&((source.ip, source.tcp_port), file_hash.to_string()))?;
-        retry_cooldown.checked_sub(now.saturating_duration_since(last))
+        NNP_REASK_HOLD
+            .checked_sub(now.saturating_duration_since(held_at))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    /// Number of (source, file) pairs currently under an active No-Needed-Parts
+    /// hold — the rust analogue of the MFC `DS_NONEEDEDPARTS` aggregate
+    /// (`GetSrcStatisticsValue(DS_NONEEDEDPARTS)`) reported by `source_count`.
+    pub(crate) fn nnp_source_count(&self, now: Instant) -> usize {
+        self.nnp_holds
+            .values()
+            .filter(|held_at| now.saturating_duration_since(**held_at) < NNP_REASK_HOLD)
+            .count()
+    }
+
+    /// Whether an NNP retention purge may run for `file_hash` now (oracle
+    /// per-file `m_lastpurgetime + SEC2MS(40)` throttle, PartFile.cpp:3056-3057:
+    /// at most one NNP source is purged per 40-second window even under
+    /// source-cap pressure). Stamps the window when it grants.
+    pub(crate) fn try_nnp_purge(&mut self, now: Instant, file_hash: &str) -> bool {
+        match self.last_nnp_purge.get(file_hash) {
+            Some(last) if now.saturating_duration_since(*last) < NNP_PURGE_INTERVAL => false,
+            _ => {
+                self.last_nnp_purge.insert(file_hash.to_string(), now);
+                true
+            }
+        }
     }
 
     /// A4AF-lite NNP swap target (master `CUpDownClient::SwapToAnotherFile`):
@@ -262,6 +393,10 @@ impl DownloadSourceRegistry {
         if candidates.is_empty() {
             self.peers.remove(&peer_key);
         }
+        if removed {
+            self.nnp_holds
+                .remove(&((source.ip, source.tcp_port), file_hash.to_string()));
+        }
         removed
     }
 
@@ -305,6 +440,9 @@ impl DownloadSourceRegistry {
             });
             !candidates.is_empty()
         });
+        // The cleared file's NNP holds and purge stamp go with its candidates.
+        self.nnp_holds.retain(|(_, file), _| file != file_hash);
+        self.last_nnp_purge.remove(file_hash);
         // Release the lease of every peer that no longer has any candidate (it was
         // engaged only for the file just cleared). A peer still present in `peers`
         // serves another file and keeps its lease.
@@ -382,7 +520,9 @@ mod tests {
     use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
     use emulebb_kad_proto::Ed2kHash;
 
-    use super::{CANDIDATE_LIVENESS_TTL, DownloadSourceCandidate, DownloadSourceRegistry};
+    use super::{
+        CANDIDATE_LIVENESS_TTL, DownloadSourceCandidate, DownloadSourceRegistry, NNP_REASK_HOLD,
+    };
 
     #[test]
     fn registry_derives_a4af_candidates_from_peer_fanout() {
@@ -731,6 +871,135 @@ mod tests {
                 .is_some(),
             "file A keeps its own anti-churn window against the same endpoint"
         );
+    }
+
+    #[test]
+    fn nnp_hold_defers_the_lease_for_the_doubled_reask_interval() {
+        // RUST-PAR-017 DL-3: a No-Needed-Parts source is HELD, not dropped —
+        // it stays a candidate but is not re-dialed for FILEREASKTIME * 2
+        // (58 min, oracle GetTimeUntilReask DownloadClient.cpp:2425-2431),
+        // instead of being redialed on the 20-minute attempt cooldown.
+        let source = source_with_endpoint(0x10, 41300);
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cooldown = Duration::from_secs(20 * 60);
+        registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+
+        assert!(registry.mark_no_needed_parts(now, &source, file));
+        assert_eq!(registry.nnp_source_count(now), 1);
+        // The candidate is retained (held, not dropped).
+        assert_eq!(registry.candidate_count_for_file(now, file), 1);
+
+        // Past the 20-minute cooldown but inside the NNP hold: still deferred,
+        // and the reported retry delay is the hold remainder (not the cooldown).
+        let at_25_min = now + Duration::from_secs(25 * 60);
+        assert!(
+            registry
+                .lease_best_for_file(at_25_min, cooldown, &source, file)
+                .is_none(),
+            "an NNP-held source must not be redialed at the 20-minute cooldown"
+        );
+        assert_eq!(
+            registry.endpoint_retry_delay(at_25_min, cooldown, &source, file),
+            Some(NNP_REASK_HOLD - Duration::from_secs(25 * 60)),
+        );
+
+        // After the doubled interval the hold expires and the re-ask leases.
+        let after_hold = now + NNP_REASK_HOLD + Duration::from_secs(1);
+        assert!(
+            registry
+                .lease_best_for_file(after_hold, cooldown, &source, file)
+                .is_some(),
+            "the NNP source is re-asked once the 58-minute hold elapses"
+        );
+        // The expired hold was pruned at lease time (oracle reset to
+        // DS_ONQUEUE at reask time); the flag stays clear unless re-marked.
+        assert_eq!(registry.nnp_source_count(after_hold), 0);
+    }
+
+    #[test]
+    fn peer_acquiring_needed_parts_clears_the_nnp_flag_and_resumes_normal_cadence() {
+        // After the hold elapses the re-ask session runs; when the peer now HAS
+        // needed parts the pair is simply not re-marked, so only the normal
+        // attempt cooldown gates the next dial (not another 58-minute hold).
+        let source = source_with_endpoint(0x11, 41301);
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cooldown = Duration::from_secs(20 * 60);
+        registry.add_candidate(now, candidate(file, 5, 1, source.clone()));
+        registry.mark_no_needed_parts(now, &source, file);
+
+        // Hold elapsed -> re-ask leases (this is "the next reask/session").
+        let reask_at = now + NNP_REASK_HOLD + Duration::from_secs(1);
+        assert!(
+            registry
+                .lease_best_for_file(reask_at, cooldown, &source, file)
+                .is_some()
+        );
+        registry.release_peer(&source);
+
+        // The session found needed parts -> no re-mark. The next dial is gated
+        // by the plain cooldown remainder only, not a fresh NNP hold.
+        let later = reask_at + Duration::from_secs(60);
+        assert_eq!(registry.nnp_source_count(later), 0);
+        assert_eq!(
+            registry.endpoint_retry_delay(later, cooldown, &source, file),
+            Some(cooldown - Duration::from_secs(60)),
+        );
+        assert!(
+            registry
+                .lease_best_for_file(
+                    reask_at + cooldown + Duration::from_secs(1),
+                    cooldown,
+                    &source,
+                    file
+                )
+                .is_some(),
+            "normal 20-minute cadence resumes once the NNP flag is gone"
+        );
+    }
+
+    #[test]
+    fn nnp_hold_refreshes_liveness_and_is_cleaned_up_with_its_candidate() {
+        let source = source_with_endpoint(0x12, 41302);
+        let mut registry = DownloadSourceRegistry::default();
+        let t0 = Instant::now();
+        let file = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        registry.add_candidate(t0, candidate(file, 5, 1, source.clone()));
+
+        // Marking NNP at t0+50min refreshes liveness: at t0+70min (past the TTL
+        // from t0, inside it from the mark) the held candidate must survive the
+        // prune — the oracle keeps NNP sources in the srclist across the hold.
+        let marked_at = t0 + Duration::from_secs(50 * 60);
+        registry.mark_no_needed_parts(marked_at, &source, file);
+        let pruned_at = t0 + Duration::from_secs(70 * 60);
+        registry.prune_stale_candidates(pruned_at);
+        assert_eq!(
+            registry.candidate_count_for_file(pruned_at, file),
+            1,
+            "an NNP-held candidate must not age out mid-hold"
+        );
+
+        // A genuine removal takes the hold with it.
+        assert!(registry.remove_candidate(&source, file));
+        assert_eq!(registry.nnp_source_count(marked_at), 0);
+    }
+
+    #[test]
+    fn nnp_purge_throttle_grants_once_per_40_second_window_per_file() {
+        // Oracle PartFile.cpp:3056-3057: even under source-cap pressure at most
+        // one NNP source is purged per 40-second window per file.
+        let mut registry = DownloadSourceRegistry::default();
+        let now = Instant::now();
+        let file_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let file_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(registry.try_nnp_purge(now, file_a));
+        assert!(!registry.try_nnp_purge(now + Duration::from_secs(39), file_a));
+        // The window is per file: another file purges independently.
+        assert!(registry.try_nnp_purge(now, file_b));
+        assert!(registry.try_nnp_purge(now + Duration::from_secs(40), file_a));
     }
 
     fn source_with_endpoint(last_octet: u8, tcp_port: u16) -> Ed2kFoundSource {
