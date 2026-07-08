@@ -166,8 +166,8 @@ use ed2k_sources::{
     significant_keyword_words,
 };
 use kad_buddy::{
-    BuddyNeedInput, FindBuddyReqRefusal, IncomingBuddy, KadBuddyState, OutgoingBuddy,
-    buddy_search_target, find_buddy_res_matches,
+    BuddyNeedInput, FindBuddyReqRefusal, INCOMING_BUDDY_ATTACH_TIMEOUT_SECS, IncomingBuddy,
+    KadBuddyState, OutgoingBuddy, buddy_search_target, find_buddy_res_matches,
 };
 use kad_callback_initiator::{
     KAD_CALLBACK_INITIATOR_COOLDOWN, build_kad_callback_req, is_direct_kad_callback_candidate,
@@ -6661,6 +6661,21 @@ async fn run_kad_buddy_loop(runtime: KadBuddyRuntime, shutdown: Arc<AtomicBool>)
                     runtime.buddy_registry.evict_outbound();
                     set_hello_buddy_snapshot(None); // no outgoing buddy: stop advertising
                 }
+            }
+            // LOWID-G2: expire an incoming-buddy claim whose buddy never attached
+            // a TCP session (or whose held session ended and never returned), so a
+            // later FINDBUDDY_REQ is answerable again. While a buddy session is
+            // attached (registry holds an inbound socket) the claim is kept.
+            let buddy_attached = runtime.buddy_registry.has_inbound();
+            if state.reconcile_incoming_buddy(
+                buddy_attached,
+                now,
+                chrono::Duration::seconds(INCOMING_BUDDY_ATTACH_TIMEOUT_SECS),
+            ) {
+                tracing::debug!(
+                    "released a stale incoming Kad buddy claim (no attached buddy session)"
+                );
+                runtime.buddy_registry.clear_inbound();
             }
             if !state.should_search(need, now) {
                 continue;

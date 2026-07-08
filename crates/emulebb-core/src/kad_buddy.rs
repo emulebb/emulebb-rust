@@ -30,6 +30,19 @@ use emulebb_kad_proto::{Ed2kHash, NodeId};
 /// oracle `MIN2S(20)` cadence on `m_tNextFindBuddy`.
 pub const FIND_BUDDY_RETRY_SECS: i64 = 1_200;
 
+/// Bounded window we keep an accepted incoming-buddy claim while no buddy TCP
+/// session is attached, before releasing the slot so a later `FINDBUDDY_REQ` can
+/// be answered again (LOWID-G2).
+///
+/// The oracle's served buddy is a normal `CUpDownClient` (`KS_INCOMING_BUDDY`),
+/// cleared on the next `CClientList::Process` once its buddy socket is gone
+/// (`ClientList.cpp:736-748`); there is no dedicated incoming-buddy timer, so we
+/// bound the unconnected/abandoned claim by the Kad-wide staleness delay
+/// `KADEMLIADISCONNECTDELAY` (`MIN2S(20)`, `Opcodes.h`). That is comfortably
+/// longer than any buddy connect attempt, so a genuine buddy always attaches
+/// first, yet short enough that an abandoned slot is reusable within one window.
+pub const INCOMING_BUDDY_ATTACH_TIMEOUT_SECS: i64 = 20 * 60;
+
 /// Whether the local node currently believes it is TCP-firewalled (LowID) *and*
 /// has a verified-firewalled UDP status, the exact condition under which the
 /// oracle starts looking for a buddy (`ClientList.cpp` upkeep:
@@ -127,6 +140,11 @@ pub struct KadBuddyState {
     outgoing: Option<OutgoingBuddy>,
     /// Timestamp of our last buddy search attempt (rate-limiting the search).
     last_search_at: Option<DateTime<Utc>>,
+    /// Liveness watermark for the [`Self::incoming`] claim: the last time we
+    /// either registered it or observed its buddy TCP session attached. Drives
+    /// the LOWID-G2 expiry of a claim whose buddy never connects, or whose held
+    /// session ended and never returned.
+    incoming_attach_watermark: Option<DateTime<Utc>>,
 }
 
 /// Why an inbound `FINDBUDDY_REQ` was refused (so the caller knows to stay
@@ -186,9 +204,44 @@ impl KadBuddyState {
         // If we became firewalled we can no longer relay for an incoming buddy.
         if need.tcp_firewalled && self.has_incoming_buddy() {
             self.incoming = None;
+            self.incoming_attach_watermark = None;
             changed = true;
         }
         changed
+    }
+
+    /// Reconcile the incoming-buddy claim against whether a buddy TCP session is
+    /// currently attached (LOWID-G2).
+    ///
+    /// While a session is attached the liveness watermark is refreshed and the
+    /// claim is kept. With no session attached, the claim is released once the
+    /// watermark is older than `timeout`, so a buddy that never TCP-connects — or
+    /// whose held session ended without re-attaching — no longer blocks later
+    /// `FINDBUDDY_REQ`s (the oracle clears the served buddy on the next `Process`
+    /// once its socket is gone, `ClientList.cpp:736-748`). Returns `true` when the
+    /// claim was released so the caller can also drop the registry expectation.
+    pub fn reconcile_incoming_buddy(
+        &mut self,
+        attached: bool,
+        now: DateTime<Utc>,
+        timeout: ChronoDuration,
+    ) -> bool {
+        if self.incoming.is_none() {
+            return false;
+        }
+        if attached {
+            self.incoming_attach_watermark = Some(now);
+            return false;
+        }
+        let stale = match self.incoming_attach_watermark {
+            Some(watermark) => now - watermark >= timeout,
+            None => true,
+        };
+        if stale {
+            self.incoming = None;
+            self.incoming_attach_watermark = None;
+        }
+        stale
     }
 
     /// Decide whether to accept an inbound `FINDBUDDY_REQ` and become this
@@ -213,6 +266,9 @@ impl KadBuddyState {
         if self.incoming.is_some() {
             return Err(FindBuddyReqRefusal::AlreadyHaveBuddy);
         }
+        // Start the LOWID-G2 liveness watermark at registration; it is refreshed
+        // once a buddy TCP session attaches (`reconcile_incoming_buddy`).
+        self.incoming_attach_watermark = Some(buddy.registered_at);
         self.incoming = Some(buddy);
         Ok(())
     }
@@ -230,6 +286,7 @@ impl KadBuddyState {
     pub fn release_incoming_buddy(&mut self, buddy: &IncomingBuddy) {
         if self.incoming.as_ref() == Some(buddy) {
             self.incoming = None;
+            self.incoming_attach_watermark = None;
         }
     }
 
@@ -397,6 +454,70 @@ mod tests {
                 .accept_incoming_buddy(false, incoming(NodeId::from_bytes([0x33; 16])))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn incoming_claim_expires_when_no_session_attaches() {
+        // LOWID-G2 (a): a buddy that never TCP-connects must not hold the slot
+        // forever; after the attach window the claim is released and re-answerable.
+        let timeout = ChronoDuration::seconds(INCOMING_BUDDY_ATTACH_TIMEOUT_SECS);
+        let t0 = Utc::now();
+        let mut buddy = incoming(NodeId::from_bytes([0x22; 16]));
+        buddy.registered_at = t0;
+        let mut state = KadBuddyState::new();
+        state.accept_incoming_buddy(false, buddy).unwrap();
+
+        // Not yet stale: still held.
+        assert!(!state.reconcile_incoming_buddy(false, t0 + timeout - ChronoDuration::seconds(1), timeout));
+        assert!(state.has_incoming_buddy());
+
+        // At the window: released.
+        assert!(state.reconcile_incoming_buddy(false, t0 + timeout, timeout));
+        assert!(!state.has_incoming_buddy());
+
+        // A later request can be accepted again.
+        assert!(
+            state
+                .accept_incoming_buddy(false, incoming(NodeId::from_bytes([0x33; 16])))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn incoming_claim_kept_while_attached_then_released_after_session_end() {
+        // LOWID-G2 (b): while a buddy TCP session is attached the claim is kept
+        // indefinitely; once the held session ends and never returns, the claim is
+        // released within one window (measured from the last attached observation).
+        let timeout = ChronoDuration::seconds(INCOMING_BUDDY_ATTACH_TIMEOUT_SECS);
+        let t0 = Utc::now();
+        let mut buddy = incoming(NodeId::from_bytes([0x22; 16]));
+        buddy.registered_at = t0;
+        let mut state = KadBuddyState::new();
+        state.accept_incoming_buddy(false, buddy).unwrap();
+
+        // Attached far past the original registration: refreshed, never expired.
+        let attached_at = t0 + timeout + ChronoDuration::hours(1);
+        assert!(!state.reconcile_incoming_buddy(true, attached_at, timeout));
+        assert!(state.has_incoming_buddy());
+
+        // Session still alive shortly after: not expired even though registration
+        // is now ancient (watermark tracks the last attached observation).
+        assert!(!state.reconcile_incoming_buddy(false, attached_at + ChronoDuration::seconds(30), timeout));
+        assert!(state.has_incoming_buddy());
+
+        // Session gone for a full window without re-attaching: released.
+        assert!(state.reconcile_incoming_buddy(false, attached_at + timeout, timeout));
+        assert!(!state.has_incoming_buddy());
+    }
+
+    #[test]
+    fn reconcile_incoming_buddy_is_noop_without_a_claim() {
+        let mut state = KadBuddyState::new();
+        assert!(!state.reconcile_incoming_buddy(
+            false,
+            Utc::now(),
+            ChronoDuration::seconds(INCOMING_BUDDY_ATTACH_TIMEOUT_SECS)
+        ));
     }
 
     #[test]
