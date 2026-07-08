@@ -1,14 +1,18 @@
 use std::{
     io,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use tracing::{debug, info};
 
 use emulebb_kad_dht::DhtNode;
 
+use crate::ed2k_transfer::Ed2kTransferRuntime;
+
+use super::codec::KadCallbackRequest;
 use super::dump::{
     dump_ed2k_tcp_helper_meta, dump_ed2k_tcp_helper_recv, dump_ed2k_tcp_helper_send,
 };
@@ -388,6 +392,93 @@ pub async fn request_udp_firewall_check(
     Ok(())
 }
 
+/// Validate a received Kad `OP_CALLBACK` `uCheck` against our own Kad id.
+///
+/// The oracle (`ListenSocket.cpp:1609-1612`) reads `uCheck`, XORs it with the
+/// all-ones `CUInt128`, and only proceeds when the result equals its own Kad id.
+/// XOR with all-ones is the bitwise complement, so this is equivalent to
+/// `!uCheck[i] == own_kad_id[i]` for every byte.
+#[must_use]
+pub(crate) fn kad_callback_check_matches(buddy_check: [u8; 16], own_kad_id: [u8; 16]) -> bool {
+    buddy_check
+        .iter()
+        .zip(own_kad_id.iter())
+        .all(|(check, own)| !check == *own)
+}
+
+/// Whether a received `OP_CALLBACK` is authorized to induce a connect-out,
+/// mirroring the oracle `ListenSocket.cpp:1596-1633` guard: (1) `uCheck XOR
+/// all-ones == our own Kad id`, and (2) the referenced file is one we share or
+/// are downloading. The oracle applies this same guard on any inbound client
+/// socket (the buddy relay leg is a normal `CClientReqSocket`), so both the
+/// inbound listener session and the outbound buddy link route through here to
+/// avoid drifting.
+///
+/// The oracle also requires `CKademlia::IsRunning()`; a rust `OP_CALLBACK`
+/// handler only runs with the Kad `DhtNode` live, so that half is structurally
+/// satisfied by the caller and not re-checked here.
+pub(crate) async fn kad_callback_is_authorized(
+    own_kad_id: [u8; 16],
+    transfer_runtime: &Ed2kTransferRuntime,
+    callback: &KadCallbackRequest,
+) -> bool {
+    kad_callback_check_matches(callback.buddy_check, own_kad_id)
+        && transfer_runtime.owns_file(&callback.file_hash).await
+}
+
+/// Validate a received Kad `OP_CALLBACK` and, when authorized, connect out to
+/// the requester so the firewalled requester can reach us (oracle
+/// `ListenSocket.cpp:1596-1633` -> `TryToConnectOrDelete`). Returns whether the
+/// callback was accepted (a spawned connect-out started); an unauthorized or
+/// obviously invalid endpoint is dropped silently, exactly like the oracle.
+///
+/// Shared by the inbound listener session and the outbound buddy link so the two
+/// acceptance surfaces cannot diverge.
+pub(crate) async fn complete_authorized_kad_callback(
+    bind_ip: Ipv4Addr,
+    own_kad_id: [u8; 16],
+    transfer_runtime: &Arc<Ed2kTransferRuntime>,
+    hello_identity: Ed2kHelloIdentity,
+    callback: &KadCallbackRequest,
+    source: &str,
+) -> bool {
+    if !kad_callback_is_authorized(own_kad_id, transfer_runtime, callback).await {
+        debug!(
+            "dropping {source} OP_CALLBACK file_hash={} requester={}:{}: failed uCheck / \
+             unshared-file guard",
+            callback.file_hash, callback.peer_ip, callback.peer_tcp_port
+        );
+        return false;
+    }
+    // Skip obviously invalid endpoints (oracle constructs a client only for a
+    // real (ip, tcp) pair).
+    if callback.peer_tcp_port == 0 || callback.peer_ip.is_unspecified() {
+        return false;
+    }
+    let requester = SocketAddr::new(IpAddr::V4(callback.peer_ip), callback.peer_tcp_port);
+    tokio::spawn(async move {
+        match connect_callback_peer(
+            bind_ip,
+            requester,
+            hello_identity,
+            None,
+            None,
+            super::ED2K_CONNECTION_IDLE_TIMEOUT,
+        )
+        .await
+        {
+            Ok(mode) => info!(
+                "Kad firewalled-callback connect-out to {requester} completed transport={}",
+                mode.as_str()
+            ),
+            Err(error) => {
+                debug!("Kad firewalled-callback connect-out to {requester} failed: {error:#}")
+            }
+        }
+    });
+    true
+}
+
 /// Mirror the oracle's active peer callback path by opening an outgoing eD2k
 /// client connection and immediately sending `OP_HELLO`.
 pub async fn connect_callback_peer(
@@ -525,4 +616,78 @@ pub(crate) fn is_connection_shutdown_error(error: &anyhow::Error) -> bool {
             )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use emulebb_kad_proto::Ed2kHash;
+
+    use super::super::codec::KadCallbackRequest;
+    use super::{kad_callback_check_matches, kad_callback_is_authorized};
+    use crate::ed2k_transfer::{Ed2kTransferRuntime, new_transfer_job};
+
+    fn callback(buddy_check: [u8; 16], file_hash: Ed2kHash) -> KadCallbackRequest {
+        KadCallbackRequest {
+            buddy_check,
+            file_hash,
+            peer_ip: Ipv4Addr::new(203, 0, 113, 7),
+            peer_tcp_port: 4662,
+            trailing_len: 0,
+        }
+    }
+
+    #[test]
+    fn check_matches_only_the_complement_of_our_kad_id() {
+        let own = [0xABu8; 16];
+        // The requester places `own XOR allones` (= complement) into uCheck.
+        assert!(kad_callback_check_matches(own.map(|b| !b), own));
+        // Echoing our id verbatim (not the complement) must be rejected.
+        assert!(!kad_callback_check_matches(own, own));
+        assert!(!kad_callback_check_matches([0u8; 16], own));
+        // A single flipped byte breaks the match.
+        let mut almost = own.map(|b| !b);
+        almost[7] ^= 0x01;
+        assert!(!kad_callback_check_matches(almost, own));
+    }
+
+    /// LOWID-G3: an unguarded OP_CALLBACK (wrong uCheck, or a file we neither
+    /// share nor download) must NOT be authorized, so the listener session and
+    /// buddy link never connect out for it.
+    #[tokio::test]
+    async fn unauthorized_callback_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap();
+        let own = [0xABu8; 16];
+
+        // Wrong uCheck (echoes our id verbatim) is rejected even for a file we own.
+        let owned = Ed2kHash::from_bytes([0x11; 16]);
+        runtime
+            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .await
+            .unwrap();
+        assert!(!kad_callback_is_authorized(own, &runtime, &callback(own, owned)).await);
+
+        // Correct uCheck but an unshared/undownloaded file is rejected.
+        let unknown = Ed2kHash::from_bytes([0x22; 16]);
+        assert!(
+            !kad_callback_is_authorized(own, &runtime, &callback(own.map(|b| !b), unknown)).await
+        );
+    }
+
+    /// LOWID-G3: a valid OP_CALLBACK (uCheck == complement of our Kad id AND a
+    /// file we own) is authorized, so the connect-out proceeds.
+    #[tokio::test]
+    async fn authorized_callback_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Ed2kTransferRuntime::load_or_create(tmp.path()).unwrap();
+        let own = [0xABu8; 16];
+        let owned = Ed2kHash::from_bytes([0x33; 16]);
+        runtime
+            .ensure_job(&new_transfer_job(owned, "owned".into(), 1))
+            .await
+            .unwrap();
+        assert!(kad_callback_is_authorized(own, &runtime, &callback(own.map(|b| !b), owned)).await);
+    }
 }
