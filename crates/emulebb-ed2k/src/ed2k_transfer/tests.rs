@@ -40,6 +40,7 @@ mod upload_queue_support;
 mod upload_session_rotation;
 mod upload_slot_pacing;
 mod upload_slot_recycle_window;
+mod upload_unlimited_recycle;
 
 fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
     assert!(!pattern.is_empty());

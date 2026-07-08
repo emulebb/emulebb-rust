@@ -94,10 +94,16 @@ fn time_cap_rotates_only_when_a_replacement_waits() {
     let t0 = Instant::now();
     let (active, status) = begin(&mut state, 1, 0x31, 1, 0, t0);
     assert_eq!(status, Ed2kUploadSessionStatus::Granted);
+    // Keep the holder PRODUCTIVE so this fixture isolates the wall-clock time cap:
+    // under unlimited upload (upload_limit == 0) a 0-byte idle holder is now caught
+    // first by the slot-scarcity no-request recycle (RUST-PAR-021 Upload-GAP6), so a
+    // sustained payload (well above the 1 KiB/s slow-recycle bar across the whole
+    // 7200 s window) is what leaves ONLY the time cap able to rotate this slot.
+    state.note_uploaded_bytes(&active, 32 * 1024 * 1024, t0);
     let (waiter, waiter_status) = begin(&mut state, 2, 0x32, 2, 0, t0 + Duration::from_secs(5));
     assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
 
-    // Within the 7200 s session window the slot holds even with a waiter.
+    // Within the 7200 s session window the productive slot holds even with a waiter.
     assert_eq!(
         state.poll_session(&active, t0 + Duration::from_secs(7_199), false),
         Ed2kUploadSessionStatus::Granted

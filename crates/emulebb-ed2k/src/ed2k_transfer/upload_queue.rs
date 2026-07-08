@@ -1430,10 +1430,24 @@ impl Ed2kUploadQueueState {
         // (oracle HasSustainedBroadbandUnderfill, UploadQueue.cpp:1047-1050 via
         // ShouldTrackSlowUploadSlots, :1114), NOT the 10 s elastic-open window: a
         // slow/idle uploader is recycled + sent OP_OUTOFPARTREQS ~8 s sooner.
-        if self.waiting_session_count() == 0
-            || self.config.upload_limit_bytes_per_sec == 0
-            || !self.sustained_recycle_underfill_ready(now)
-        {
+        //
+        // RUST-PAR-021 Upload-GAP6: the recycle signal is SLOT scarcity, not
+        // merely a spare byte budget. The oracle always derives from a finite
+        // GetConfiguredUploadBudgetBytesPerSec = GetMaxUpload()*1024
+        // (UploadQueue.cpp:981-986, which explicitly notes "no ... unlimited
+        // upload mode left in slot control"), so ShouldRecycleIdleUploadSlot's
+        // HasSustainedBroadbandUnderfill gate is effectively always satisfied
+        // under sparse public demand and the decision falls to the waiter/slot
+        // scarcity of HasNoRequestUploadReplacementPressure (:1570). This fork DOES
+        // have an unlimited mode (upload_limit == 0); there the byte-budget
+        // underfill can never be computed, so `recycle_underfill_signal_ready`
+        // treats infinite bandwidth as PERMANENTLY underfilled -- the faithful
+        // reading of the oracle's underfill line when the budget is unbounded --
+        // and the anti-abuse keys purely on slot occupancy (an active slot-holder,
+        // guaranteed by the phase above) plus waiter presence (the count guard
+        // below). This restores the no-request/slow recycle + strike/cooldown/ban
+        // path under unlimited upload without touching the bandwidth-limited case.
+        if self.waiting_session_count() == 0 || !self.recycle_underfill_signal_ready(now) {
             return None;
         }
         if session.uploaded_bytes == 0 {
@@ -1898,6 +1912,28 @@ impl Ed2kUploadQueueState {
             && self.underfill_since.is_some_and(|underfill_since| {
                 now.saturating_duration_since(underfill_since) >= SLOW_RECYCLE_UNDERFILL_WINDOW
             })
+    }
+
+    /// Whether the slow/idle active-slot RECYCLE signal is ready (RUST-PAR-021
+    /// Upload-GAP6). Under a configured upload budget this is exactly the oracle's
+    /// 2 s sustained bandwidth underfill (`sustained_recycle_underfill_ready`,
+    /// `HasSustainedBroadbandUnderfill`, UploadQueue.cpp:1047-1050) -- the
+    /// bandwidth-limited case is unchanged. Under this fork's unlimited upload
+    /// mode (`upload_limit == 0`, which the oracle never has: it always derives
+    /// from a finite `GetConfiguredUploadBudgetBytesPerSec`, UploadQueue.cpp:981-986)
+    /// the spare byte budget cannot be computed, so infinite bandwidth is treated
+    /// as permanently underfilled. The real scarcity is then the finite slot count
+    /// (`GetSoftMaxUploadSlots`): an idle/no-request holder occupying a slot a
+    /// waiter wants is always replacement-pressured. The caller has already
+    /// established the active (slot-holding) phase and the non-empty waiting queue,
+    /// so returning `true` here confines the unlimited-mode recycle to precisely
+    /// the slot-scarcity case (a waiter denied a slot by an idle holder), matching
+    /// the oracle's waiter-driven `HasNoRequestUploadReplacementPressure` (:1570).
+    fn recycle_underfill_signal_ready(&self, now: Instant) -> bool {
+        if self.config.upload_limit_bytes_per_sec == 0 {
+            return true;
+        }
+        self.sustained_recycle_underfill_ready(now)
     }
 
     fn refresh_elastic_underfill(&mut self, now: Instant) {
