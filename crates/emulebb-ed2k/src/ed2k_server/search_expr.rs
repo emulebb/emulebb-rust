@@ -29,6 +29,12 @@ const FT_COMPLETE_SOURCES: u8 = 0x30;
 const ED2K_SEARCH_OP_GREATER_EQUAL: u8 = 3;
 const ED2K_SEARCH_OP_LESS_EQUAL: u8 = 4;
 
+/// Maximum number of boolean AND/OR/NOT operators the emitted search tree may
+/// carry. eMule refuses an over-complex expression (`iOpAnd + iOpOr + iOpNot >
+/// 10` -> IDS_SEARCH_TOOCOMPLEX, SearchResultsWnd.cpp:1134-1135) rather than
+/// sending it, so a Lugdunum server never sees an oversized tree.
+const MAX_SEARCH_OPERATORS: usize = 10;
+
 /// Server-side search criteria folded into the eD2k query tree (eMule
 /// `GetSearchPacket`). Mirrors the constraint set eMule sends so the server
 /// filters results instead of the client post-filtering a keyword-only reply.
@@ -83,10 +89,23 @@ pub(super) fn encode_search_request_with_criteria(
     term: &str,
     criteria: &SearchCriteria,
 ) -> Result<Vec<u8>> {
-    let keyword = encode_keyword_payload(term)?;
+    let keyword_expression = parse_search_expression(term)?;
+    let keyword = encode_keyword_payload(keyword_expression.as_ref())?;
 
-    // Build the constraint node blobs in the oracle's order.
+    // Build the constraint node blobs in the oracle's emitted-leaf order. eMule
+    // prepends each attribute with InsertAt(0, ...) (AddAndAttr,
+    // SearchResultsWnd.cpp:1317-1329) in the call order extension, avail,
+    // maxSize, minSize, fileType, complete (:1397-1413), which reverses to the
+    // leaf order below. Our fold_and_chain then produces the identical
+    // right-folded AND(c0, AND(c1, ... cn)) prefix tree the oracle emits.
     let mut constraints: Vec<Vec<u8>> = Vec::new();
+    if let Some(complete) = criteria.min_complete_sources {
+        constraints.push(encode_numeric_meta_node(
+            FT_COMPLETE_SOURCES,
+            ED2K_SEARCH_OP_GREATER_EQUAL,
+            u64::from(complete),
+        ));
+    }
     if let Some(file_type) = criteria.file_type.as_deref().and_then(wire_file_type) {
         constraints.push(encode_string_meta_node(FT_FILETYPE, &file_type)?);
     }
@@ -111,13 +130,6 @@ pub(super) fn encode_search_request_with_criteria(
             u64::from(avail),
         ));
     }
-    if let Some(complete) = criteria.min_complete_sources {
-        constraints.push(encode_numeric_meta_node(
-            FT_COMPLETE_SOURCES,
-            ED2K_SEARCH_OP_GREATER_EQUAL,
-            u64::from(complete),
-        ));
-    }
     if let Some(extension) = criteria.extension.as_deref() {
         let ext = extension.trim().trim_start_matches('.');
         if !ext.is_empty() {
@@ -125,12 +137,27 @@ pub(super) fn encode_search_request_with_criteria(
         }
     }
 
+    // eMule refuses an over-complex tree instead of sending it
+    // (SearchResultsWnd.cpp:1134-1135). Count the boolean operators the final
+    // tree carries: the keyword operators plus, when constraints are appended
+    // under a top-level AND, one AND per constraint (n-1 chain ANDs + the join).
+    let keyword_operators = keyword_expression
+        .as_ref()
+        .map_or(0, count_search_operators);
+    let constraints_present = !keyword.is_empty() && !criteria.is_empty() && !constraints.is_empty();
+    let total_operators = keyword_operators + if constraints_present { constraints.len() } else { 0 };
+    if total_operators > MAX_SEARCH_OPERATORS {
+        anyhow::bail!(
+            "ED2K search expression too complex: {total_operators} boolean operators exceed the {MAX_SEARCH_OPERATORS}-operator limit"
+        );
+    }
+
     if keyword.is_empty() {
         // No keyword (criteria-only search is not how eMule drives this); fall
         // back to the keyword payload alone (possibly empty) for safety.
         return Ok(keyword);
     }
-    if criteria.is_empty() || constraints.is_empty() {
+    if !constraints_present {
         return Ok(keyword);
     }
 
@@ -141,16 +168,29 @@ pub(super) fn encode_search_request_with_criteria(
     Ok(payload)
 }
 
+/// Count the boolean AND/OR/NOT operator nodes in a parsed search expression,
+/// matching eMule's `ParsedSearchExpression` tally (SearchResultsWnd.cpp:1098-1115).
+fn count_search_operators(expression: &SearchExprNode) -> usize {
+    match expression {
+        SearchExprNode::Term(_) => 0,
+        SearchExprNode::And(left, right)
+        | SearchExprNode::Or(left, right)
+        | SearchExprNode::Not(left, right) => {
+            1 + count_search_operators(left) + count_search_operators(right)
+        }
+    }
+}
+
 /// Encode just the keyword expression bytes (no constraints).
-fn encode_keyword_payload(term: &str) -> Result<Vec<u8>> {
-    let Some(expression) = parse_search_expression(term)? else {
+fn encode_keyword_payload(expression: Option<&SearchExprNode>) -> Result<Vec<u8>> {
+    let Some(expression) = expression else {
         return Ok(Vec::new());
     };
     let mut payload = Vec::new();
-    if let Some(joined_terms) = flatten_and_terms(&expression) {
+    if let Some(joined_terms) = flatten_and_terms(expression) {
         encode_search_string_param(&mut payload, &joined_terms.join(" "))?;
     } else {
-        encode_search_expression(&mut payload, &expression)?;
+        encode_search_expression(&mut payload, expression)?;
     }
     Ok(payload)
 }
@@ -467,6 +507,50 @@ mod criteria_tests {
         want.extend_from_slice(&2000u32.to_le_bytes());
         want.extend_from_slice(&[ED2K_SEARCH_OP_LESS_EQUAL, 1, 0, FT_FILESIZE]);
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn multi_constraint_fold_uses_oracle_reversed_leaf_order() {
+        // Both complete-sources and file-type set. eMule's AddAndAttr prepends
+        // attributes, so file-type (added after complete) ends up AFTER complete
+        // in the emitted leaf order: AND(keyword, AND(complete, fileType)).
+        let criteria = SearchCriteria {
+            file_type: Some("Video".to_string()),
+            min_complete_sources: Some(5),
+            ..SearchCriteria::default()
+        };
+        let got = encode_search_request_with_criteria("iso", &criteria).unwrap();
+
+        let mut want = vec![0u8, 0x00];
+        want.extend_from_slice(&kw("iso"));
+        want.extend_from_slice(&[0, 0x00]); // inner AND joining the two constraints
+        // complete-sources numeric FIRST: 03 <u32 5> <GE=3> <01 00> <FT_COMPLETE_SOURCES=0x30>
+        want.push(3);
+        want.extend_from_slice(&5u32.to_le_bytes());
+        want.extend_from_slice(&[ED2K_SEARCH_OP_GREATER_EQUAL, 1, 0, FT_COMPLETE_SOURCES]);
+        // file-type string SECOND: 02 <len> "Video" <01 00> <FT_FILETYPE=0x03>
+        want.extend_from_slice(&[2, 5, 0]);
+        want.extend_from_slice(b"Video");
+        want.extend_from_slice(&[1, 0, FT_FILETYPE]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn over_complex_expression_is_refused() {
+        // eMule errors IDS_SEARCH_TOOCOMPLEX above 10 boolean operators
+        // (SearchResultsWnd.cpp:1134). 12 OR-terms => 11 OR operators > 10.
+        let too_complex = (0..12)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        assert!(encode_search_request(&too_complex).is_err());
+
+        // 11 OR-terms => 10 operators == the limit, still accepted.
+        let at_limit = (0..11)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        assert!(encode_search_request(&at_limit).is_ok());
     }
 
     #[test]
