@@ -15,34 +15,16 @@ macos = "compile/test-viable target; runtime deferred pending a macOS CI runner"
 
 [protocol]
 address_family = "ipv4-only"
-compatibility = "stock-compatible implemented surface"
+compatibility = "stock eMule parity by default; SX1 is the only pre-approved permanent drop"
 omission_registry = "policy/rust-client-omissions.toml"
 
 [review_reporting]
-# Intentional omissions are already product decisions, not open parity gaps.
-# Reviews must not report these surfaces again unless the implementation starts
-# advertising or partially implementing one of them.
-intentional_omissions_are_not_gaps = true
+# Non-SX1 entries in the omission registry are known divergence records under
+# re-audit, not permanent product exclusions. Reviewers must report them until
+# a fresh disposition says "fix", "defer", or "permanent drop".
+intentional_omissions_are_not_gaps = false
 excluded_surface_ids = [
     "sx1-live-source-exchange",
-    "conn-rate-rolling-five-second-window",
-    "conn-rate-spike-modifier",
-    "upload-throttle-focus-slot-distribution",
-    "server-udp-description-poll",
-    "kad-flood-lan-exemption",
-    "upload-slow-cooldown-suppression",
-    "upload-duplicate-queued-intra-packet",
-    "ed2k-partial-file-preview",
-    "server-obfuscation-metadata-non-config",
-    "ipv6-ed2k-kad",
-    "legacy-html-webserver",
-    "peer-chat-messaging",
-    "ed2k-preview",
-    "time-based-scheduler",
-    "pref-safe-server-connect",
-    "pref-new-auto-up",
-    "pref-new-auto-down",
-    "pref-download-auto-broadband-io",
 ]
 
 # Windows long-path (>260 char) support is SCOPED to operator-facing content
@@ -207,6 +189,7 @@ allowed_ipv6_mentions = [
     "crates/emulebb-core/src/lib.rs",
     "crates/emulebb-core/src/kad_buddy.rs",
     "crates/emulebb-core/src/kad_hello.rs",
+    "crates/emulebb-core/tests/kad_swarm_support/node.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/transport.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/buddy_link.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",

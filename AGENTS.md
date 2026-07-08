@@ -9,7 +9,10 @@
 Everything below is this repo's local deltas only:
 
 - This repo owns the Rust headless eMuleBB client. Keep the public controller
-  surface aligned with the canonical eMuleBB `/api/v1` REST contract.
+  surface aligned with the Rust-forward `/api/v1` contract in
+  `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\api`;
+  do not treat the frozen emulebb-mfc contract as a forward compatibility
+  constraint.
 - BUILD OUTPUT: every `cargo build`/`test`/`run` (debug AND release, orchestrated
   or ad-hoc) MUST set
   `CARGO_TARGET_DIR=%EMULEBB_WORKSPACE_OUTPUT_ROOT%\builds\rust\target`.
