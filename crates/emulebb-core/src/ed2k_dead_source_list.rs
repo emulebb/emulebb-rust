@@ -41,23 +41,32 @@ pub(crate) const DEAD_SOURCE_BLOCK: Duration = Duration::from_secs(45 * 60);
 const DEAD_SOURCE_CLEANUP: Duration = Duration::from_secs(60 * 60);
 
 /// Identity of a dead source, mirroring oracle `CDeadSource`
-/// (`DeadSourceList.cpp:47-64`): a HighID client is identified by its public
-/// endpoint (oracle id==IP + port); a LowID client with a known server by the
-/// server-scoped (server, client id, port) triple; a LowID client without
-/// server context only by its user hash. A source with none of those has no
-/// valid key and is never dead-listed (oracle `HasValidKey`,
-/// `DeadSourceList.cpp:131-140`).
+/// (`DeadSourceList.cpp:47-80`): a HighID client is identified by its public
+/// endpoint (oracle `m_dwID`==IP + `m_nPort`); a LowID client with a known
+/// server by the server-scoped (server, client id) pair keyed on `m_dwServerIP`
+/// plus `m_dwID`, NOT the reported port (`operator==` matches LowID on
+/// `m_dwID`/`m_dwServerIP`, so a re-reported port change still resolves to the
+/// same source); a LowID client without server context only by its user hash,
+/// and then ONLY when it is reachable via a buddy or direct UDP callback
+/// (`DeadSourceList.cpp:56-57`, `HasValidBuddyID() || SupportsDirectUDPCallback()`,
+/// otherwise `md4clr` yields no valid key). A source with none of those has no
+/// valid key and is never dead-listed (oracle `HasValidKey`, `DeadSourceList.cpp:93-96`).
+///
+/// Residual divergence: the oracle `operator==` also accepts a `m_nKadPort`
+/// alternative when the reported TCP port differs (`DeadSourceList.cpp:76`). That
+/// is an OR-match between two ports, which this hash-keyed identity cannot express
+/// (a single key cannot match on either of two ports), so the Kad-port fallback is
+/// not mirrored here; the (server, client-id) LowID key and endpoint HighID key
+/// carry the common cases.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DeadSourceKey {
     /// HighID / directly-addressable peer: public endpoint.
     Endpoint { ip: Ipv4Addr, tcp_port: u16 },
-    /// LowID peer behind a known eD2K server: server-scoped client id.
-    ServerScoped {
-        server: SocketAddr,
-        client_id: u32,
-        tcp_port: u16,
-    },
-    /// LowID peer without server context: eD2K user hash.
+    /// LowID peer behind a known eD2K server: server-scoped client id (oracle
+    /// `m_dwServerIP` + `m_dwID`, port-independent).
+    ServerScoped { server: SocketAddr, client_id: u32 },
+    /// LowID peer without server context: eD2K user hash (only for a
+    /// buddy/direct-callback-capable source, per the oracle capability gate).
     UserHash([u8; 16]),
 }
 
@@ -73,10 +82,19 @@ impl DeadSourceKey {
             return Some(Self::ServerScoped {
                 server,
                 client_id: source.client_id,
-                tcp_port: source.tcp_port,
             });
         }
-        source.user_hash.map(Self::UserHash)
+        // LowID Kad source without a server: the oracle keys on the user hash
+        // ONLY when the peer is reachable via a buddy relay or a direct UDP
+        // callback (`HasValidBuddyID() || SupportsDirectUDPCallback()`,
+        // DeadSourceList.cpp:56-57); otherwise it clears the hash and the source
+        // has no valid key. A found source carries the buddy id (Kad types 3/5)
+        // and its own eD2k UDP port for those callback-capable shapes, which is
+        // the available proxy for the oracle capability gate.
+        if source.buddy_id.is_some() || source.source_udp_port.is_some() {
+            return source.user_hash.map(Self::UserHash);
+        }
+        None
     }
 }
 
@@ -236,15 +254,65 @@ mod tests {
         assert!(list.add_dead_source(now, FILE_A, &server_scoped));
         assert!(list.is_dead_source(now, FILE_A, &server_scoped));
 
+        // A LowID Kad source (no server) is keyed on its user hash only when it
+        // is buddy/direct-callback-capable (oracle DeadSourceList.cpp:56-57).
         let mut hashed = high_id_source(7, 4662);
         hashed.low_id = true;
         hashed.user_hash = Some([0x77; 16]);
+        hashed.buddy_id = Some([0xB0; 16]);
         assert!(list.add_dead_source(now, FILE_A, &hashed));
         assert!(list.is_dead_source(now, FILE_A, &hashed));
         // A different user hash is a different identity.
         let mut other_hash = hashed.clone();
         other_hash.user_hash = Some([0x78; 16]);
         assert!(!list.is_dead_source(now, FILE_A, &other_hash));
+    }
+
+    /// REG-5(b): a LowID server-scoped source is keyed on (server, client-id),
+    /// NOT the reported TCP port (oracle `operator==` matches LowID on
+    /// `m_dwID`/`m_dwServerIP`, DeadSourceList.cpp:73-78). A port change on a
+    /// later re-report of the same server-scoped source still resolves to the
+    /// dead-listed identity.
+    #[test]
+    fn low_id_server_scoped_source_matches_after_a_port_change() {
+        let mut list = DeadSourceList::default();
+        let now = Instant::now();
+        let server: SocketAddr = "203.0.113.2:4661".parse().unwrap();
+
+        let mut source = high_id_source(8, 4662);
+        source.low_id = true;
+        source.client_id = 4242;
+        source.source_server = Some(server);
+        assert!(list.add_dead_source(now, FILE_A, &source));
+
+        // The server re-reports the same LowID (server, client-id) on a fresh
+        // TCP port: still the same dead source.
+        let mut reported = source.clone();
+        reported.tcp_port = 5000;
+        assert!(list.is_dead_source(now, FILE_A, &reported));
+    }
+
+    /// REG-5(c): a LowID Kad source (no server) with NO buddy/direct-callback
+    /// capability has no valid key and is never dead-listed (oracle clears the
+    /// hash in that branch, DeadSourceList.cpp:58-59); the same source becomes
+    /// dead-listable once it advertises a callback path.
+    #[test]
+    fn low_id_kad_source_hash_key_is_gated_on_callback_capability() {
+        let mut list = DeadSourceList::default();
+        let now = Instant::now();
+
+        // No server, a user hash, but no buddy id and no own UDP port: no key.
+        let mut incapable = high_id_source(9, 4662);
+        incapable.low_id = true;
+        incapable.user_hash = Some([0x99; 16]);
+        assert!(!list.add_dead_source(now, FILE_A, &incapable));
+        assert!(!list.is_dead_source(now, FILE_A, &incapable));
+
+        // The same source, now reachable via its own eD2k UDP port, is keyed.
+        let mut capable = incapable.clone();
+        capable.source_udp_port = Some(9000);
+        assert!(list.add_dead_source(now, FILE_A, &capable));
+        assert!(list.is_dead_source(now, FILE_A, &capable));
     }
 
     #[test]
