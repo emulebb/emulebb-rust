@@ -136,15 +136,25 @@ fn deep_rank_keeps_source_and_releases_no_lease() {
 }
 
 #[test]
-fn dropped_source_releases_its_lease() {
+fn dropped_source_is_dead_listed_then_releases_its_lease() {
+    // UDP FNF (oracle UDPReaskFNF, DownloadClient.cpp:1774-1795): the source is
+    // dead-listed BEFORE its lease is released, so the 45-minute block gates
+    // re-acquisition the moment the endpoint becomes free again.
     let endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4672);
-    let events = routed_reply_events(
-        ReaskAction::DropSource,
-        Ed2kHash::from_bytes([0x55; 16]),
-        endpoint,
-    );
-    assert_eq!(events.len(), 1);
+    let hash = Ed2kHash::from_bytes([0x55; 16]);
+    let events = routed_reply_events(ReaskAction::DropSource, hash, endpoint);
+    assert_eq!(events.len(), 2);
     match &events[0] {
+        ReaskEvent::SourceDead {
+            file_hash,
+            endpoint: dead,
+        } => {
+            assert_eq!(*file_hash, hash);
+            assert_eq!(*dead, endpoint);
+        }
+        other => panic!("expected SourceDead, got {other:?}"),
+    }
+    match &events[1] {
         ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(*released, endpoint),
         other => panic!("expected SourceReleased, got {other:?}"),
     }

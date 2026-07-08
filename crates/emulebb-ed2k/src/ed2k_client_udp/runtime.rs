@@ -166,6 +166,16 @@ pub enum ReaskEvent {
     /// frees the lease and a later cycle (or the following `SourceReady`) reconnects
     /// it over TCP. Must precede the `SourceReady` for the same source.
     SourceReleased { endpoint: (Ipv4Addr, u16) },
+    /// A detached source UDP-answered `OP_FILENOTFOUND` for `file_hash` (oracle
+    /// `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`): besides the
+    /// `SourceReleased` that follows, core dead-lists the (source, file) pair for
+    /// the oracle 45-minute block, exactly like the TCP `OP_FILEREQANSNOFIL` path.
+    /// `endpoint` is the peer's UDP endpoint (the only key the loop holds); core
+    /// resolves the full source identity from its registry by (ip, file).
+    SourceDead {
+        file_hash: Ed2kHash,
+        endpoint: (Ipv4Addr, u16),
+    },
     /// A queued source for `file_hash` reported a queue rank at/under the re-engage
     /// threshold: a slot is imminent, so core reconnects over TCP now. The loop has
     /// already removed the source + released its lease via a preceding `SourceReleased`.
@@ -317,8 +327,17 @@ fn routed_reply_events(
             ReaskEvent::SourceReleased { endpoint },
             ReaskEvent::SourceReady { file_hash },
         ],
-        // Uploader no longer has the file: the source is dropped, free its lease.
-        ReaskAction::DropSource => vec![ReaskEvent::SourceReleased { endpoint }],
+        // Uploader no longer has the file (OP_FILENOTFOUND): dead-list it first
+        // (oracle UDPReaskFNF AddDeadSource, DownloadClient.cpp:1781), then free
+        // its lease. Order matters: the dead-list gate must be in place before
+        // the released source becomes re-acquirable.
+        ReaskAction::DropSource => vec![
+            ReaskEvent::SourceDead {
+                file_hash,
+                endpoint,
+            },
+            ReaskEvent::SourceReleased { endpoint },
+        ],
         // Still queued / transient: keep the source on UDP reask, lease unchanged.
         _ => Vec::new(),
     }

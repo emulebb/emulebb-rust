@@ -3775,6 +3775,33 @@ impl EmulebbCore {
         }
     }
 
+    /// Dead-list a source that UDP-answered `OP_FILENOTFOUND` on the reask loop
+    /// (oracle `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`:
+    /// `AddDeadSource` + swap-or-`RemoveSource`), unifying the UDP FNF drop with
+    /// the TCP FNF dead list. The reask loop only knows the peer's UDP endpoint,
+    /// so the full oracle identity is recovered from the registry by (ip, file);
+    /// an already-forgotten or ambiguous source is left un-listed (it is already
+    /// out of the reask loop, and without identity there is nothing to gate).
+    async fn dead_list_udp_fnf_source(&self, file_hash: &str, peer_ip: Ipv4Addr) {
+        let mut state = self.state.lock().await;
+        let now = Instant::now();
+        let Some(source) = state
+            .download_source_registry
+            .sole_candidate_source_by_ip(peer_ip, file_hash)
+        else {
+            return;
+        };
+        if state
+            .ed2k_dead_sources
+            .add_dead_source(now, file_hash, &source)
+        {
+            crate::diag_sched::source_dead_listed(file_hash, &source, "udp_fnf");
+        }
+        state
+            .download_source_registry
+            .remove_candidate(&source, file_hash);
+    }
+
     async fn register_download_source_candidates(
         &self,
         transfer: &Transfer,
@@ -11490,6 +11517,94 @@ mod tests {
         assert!(engaged.is_empty());
         assert_eq!(deferred, 0);
         assert!(retry_delay.is_none());
+    }
+
+    #[tokio::test]
+    async fn udp_fnf_dead_lists_the_sole_registered_source_by_ip() {
+        // UDP reask FNF (oracle UDPReaskFNF): the loop only knows the peer's UDP
+        // endpoint, so core recovers the full identity from the registry by
+        // (ip, file), dead-lists it, and drops the candidate — after which the
+        // admission gate refuses re-registration. With TWO distinct peers at the
+        // same IP serving the file the resolution is ambiguous and nothing is
+        // dead-listed (better than blocking the wrong client behind a NAT).
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let file = Ed2kHash::from_bytes([0x76; 16]).to_string();
+        let peer_ip = Ipv4Addr::new(192, 0, 2, 33);
+        let source = direct_test_source(Ed2kHash::from_bytes([0x76; 16]), peer_ip, 41012);
+        {
+            let mut state = core.state.lock().await;
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: file.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 0,
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+
+        core.dead_list_udp_fnf_source(&file, peer_ip).await;
+        {
+            let now = Instant::now();
+            let state = core.state.lock().await;
+            assert_eq!(
+                state
+                    .download_source_registry
+                    .candidate_count_for_file(now, &file),
+                0,
+                "the UDP-FNF source's candidate must be dropped"
+            );
+        }
+        let transfer = a4af_test_transfer(&file, "downloading");
+        core.register_download_source_candidates(&transfer, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(
+            core.state
+                .lock()
+                .await
+                .download_source_registry
+                .candidate_count_for_file(Instant::now(), &file),
+            0,
+            "a UDP-FNF dead-listed source must not be re-admitted"
+        );
+
+        // Ambiguity guard: two distinct peers at one IP -> no dead-listing.
+        let ambiguous_file = Ed2kHash::from_bytes([0x77; 16]).to_string();
+        let ambiguous_ip = Ipv4Addr::new(192, 0, 2, 34);
+        {
+            let mut state = core.state.lock().await;
+            for tcp_port in [41013u16, 41014] {
+                state.download_source_registry.add_candidate(
+                    Instant::now(),
+                    DownloadSourceCandidate {
+                        file_hash: ambiguous_file.clone(),
+                        file_priority: 5,
+                        needed_parts: 4,
+                        rare_parts: 0,
+                        source: direct_test_source(
+                            Ed2kHash::from_bytes([0x77; 16]),
+                            ambiguous_ip,
+                            tcp_port,
+                        ),
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+        }
+        core.dead_list_udp_fnf_source(&ambiguous_file, ambiguous_ip)
+            .await;
+        assert_eq!(
+            core.state
+                .lock()
+                .await
+                .download_source_registry
+                .candidate_count_for_file(Instant::now(), &ambiguous_file),
+            2,
+            "an ambiguous IP match must not dead-list either candidate"
+        );
     }
 
     #[tokio::test]

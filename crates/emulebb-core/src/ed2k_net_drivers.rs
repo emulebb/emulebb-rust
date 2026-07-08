@@ -277,6 +277,19 @@ async fn handle_reask_event(
             )
             .await;
         }
+        ReaskEvent::SourceDead {
+            file_hash,
+            endpoint,
+        } => {
+            // A detached source UDP-answered OP_FILENOTFOUND (oracle
+            // UDPReaskFNF): dead-list the (source, file) pair for the 45-minute
+            // block BEFORE the SourceReleased that follows frees its lease, so
+            // the released endpoint is not immediately re-acquirable. The loop
+            // only knows the peer's UDP endpoint; core resolves the full source
+            // identity from the registry by (ip, file).
+            core.dead_list_udp_fnf_source(&file_hash.to_string(), endpoint.0)
+                .await;
+        }
         ReaskEvent::SourceReleased { endpoint } => {
             // The reask loop dropped a detached source: free the lease it kept
             // (active_download_peer_endpoints + the registry) so the next
