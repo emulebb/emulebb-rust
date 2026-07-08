@@ -16,6 +16,12 @@ fn peer_v4() -> (Ipv4Addr, u16) {
     (Ipv4Addr::new(198, 51, 100, 7), 4672)
 }
 
+/// The peer's TCP endpoint — core's lease key, distinct from the UDP routing
+/// endpoint so tests catch a release addressed to the wrong keyspace.
+fn peer_lease_v4() -> (Ipv4Addr, u16) {
+    (Ipv4Addr::new(198, 51, 100, 7), 4662)
+}
+
 fn service() -> ReaskService {
     let public_ip = ExternalReachability::new();
     public_ip.set(Ipv4Addr::new(203, 0, 113, 9));
@@ -23,7 +29,9 @@ fn service() -> ReaskService {
 }
 
 fn register(svc: &mut ReaskService, now: Instant) {
-    let src = ReaskSource::new(peer_v4(), file_hash(), 4, now).with_obfuscation(PEER_HASH, true);
+    let src = ReaskSource::new(peer_v4(), file_hash(), 4, now)
+        .with_lease_endpoint(peer_lease_v4())
+        .with_obfuscation(PEER_HASH, true);
     svc.register_source(file_hash(), src);
 }
 
@@ -92,6 +100,7 @@ fn tick_emits_due_ping_then_routes_the_ack() {
         ReaskInboundOutcome::RoutedReply {
             file_hash: file_hash(),
             endpoint: peer_v4(),
+            lease_endpoint: peer_lease_v4(),
             action: ReaskAction::UpdatedRank(12),
         }
     );
@@ -195,6 +204,7 @@ fn file_not_found_drops_source_and_clears_routing() {
         ReaskInboundOutcome::RoutedReply {
             file_hash: file_hash(),
             endpoint: peer_v4(),
+            lease_endpoint: peer_lease_v4(),
             action: ReaskAction::DropSource,
         }
     );

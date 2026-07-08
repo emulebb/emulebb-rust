@@ -90,6 +90,12 @@ pub type ReaskCommandReceiver = mpsc::Receiver<ReaskCommand>;
 pub struct ReaskDetachArgs {
     pub file_hash: Ed2kHash,
     pub endpoint: (Ipv4Addr, u16),
+    /// The source's eD2k **TCP** port. Core's lease bookkeeping
+    /// (`active_download_peer_endpoints` + the download source registry) is keyed
+    /// by `(ip, tcp_port)` while `endpoint` is the UDP routing key, so the loop
+    /// must address `SourceReleased` events by `(endpoint.ip, tcp_port)` or the
+    /// release never matches and the lease leaks (RUST-PAR-017 DL-11).
+    pub tcp_port: u16,
     pub udp_version: u8,
     /// Delay before the first detached UDP reask is due.
     ///
@@ -179,6 +185,10 @@ pub enum ReaskEvent {
     /// registry. The loop raises this whenever it drops a detached source, so core
     /// frees the lease and a later cycle (or the following `SourceReady`) reconnects
     /// it over TCP. Must precede the `SourceReady` for the same source.
+    ///
+    /// `endpoint` is the source's **TCP** endpoint (`ReaskDetachArgs::tcp_port`) —
+    /// the key core leased it under — NOT the UDP endpoint the loop routes on;
+    /// core matches it directly against its TCP-keyed lease sets.
     SourceReleased { endpoint: (Ipv4Addr, u16) },
     /// A detached source UDP-answered `OP_FILENOTFOUND` for `file_hash` (oracle
     /// `CUpDownClient::UDPReaskFNF`, `DownloadClient.cpp:1774-1795`): besides the
@@ -334,23 +344,32 @@ fn routed_reply_events(
     action: ReaskAction,
     file_hash: Ed2kHash,
     endpoint: (Ipv4Addr, u16),
+    lease_endpoint: (Ipv4Addr, u16),
 ) -> Vec<ReaskEvent> {
     match action {
         // Slot imminent: release the lease, then ask core to reconnect over TCP.
+        // The release carries the TCP lease key, not the UDP routing endpoint
+        // (core's lease sets are TCP-keyed; RUST-PAR-017 DL-11).
         ReaskAction::UpdatedRank(rank) if rank <= REENGAGE_RANK_THRESHOLD => vec![
-            ReaskEvent::SourceReleased { endpoint },
+            ReaskEvent::SourceReleased {
+                endpoint: lease_endpoint,
+            },
             ReaskEvent::SourceReady { file_hash },
         ],
         // Uploader no longer has the file (OP_FILENOTFOUND): dead-list it first
         // (oracle UDPReaskFNF AddDeadSource, DownloadClient.cpp:1781), then free
         // its lease. Order matters: the dead-list gate must be in place before
-        // the released source becomes re-acquirable.
+        // the released source becomes re-acquirable. SourceDead keeps the UDP
+        // endpoint (core's FNF resolver keys on the IP only); the release again
+        // carries the TCP lease key.
         ReaskAction::DropSource => vec![
             ReaskEvent::SourceDead {
                 file_hash,
                 endpoint,
             },
-            ReaskEvent::SourceReleased { endpoint },
+            ReaskEvent::SourceReleased {
+                endpoint: lease_endpoint,
+            },
         ],
         // Still queued / transient: keep the source on UDP reask, lease unchanged.
         _ => Vec::new(),
@@ -411,6 +430,7 @@ async fn handle_inbound_datagram(
         ReaskInboundOutcome::RoutedReply {
             file_hash,
             endpoint,
+            lease_endpoint,
             action,
         } => {
             trace!("ed2k udp reask: routed reply from {from}: {action:?} (file {file_hash})");
@@ -419,7 +439,7 @@ async fn handle_inbound_datagram(
                 service.remove_source(endpoint.0, endpoint.1);
             }
             // Emit loop->core events (lease release ordered before any re-engage).
-            for event in routed_reply_events(action, file_hash, endpoint) {
+            for event in routed_reply_events(action, file_hash, endpoint, lease_endpoint) {
                 if let ReaskEvent::SourceReady { file_hash } = &event {
                     trace!("ed2k udp reask: re-engage SourceReady for {file_hash}");
                 }
@@ -490,6 +510,7 @@ fn apply_reask_command(
             let ReaskDetachArgs {
                 file_hash,
                 endpoint,
+                tcp_port,
                 udp_version,
                 initial_reask_delay,
                 user_hash,
@@ -499,7 +520,8 @@ fn apply_reask_command(
                 buddy_id,
             } = args;
             let now = Instant::now();
-            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, now);
+            let mut source = ReaskSource::new(endpoint, file_hash, udp_version, now)
+                .with_lease_endpoint((endpoint.0, tcp_port));
             source.next_reask = now + initial_reask_delay;
             if let Some(hash) = user_hash {
                 source = source.with_obfuscation(hash, should_crypt);
@@ -513,9 +535,13 @@ fn apply_reask_command(
         }
         ReaskCommand::Remove { endpoint } => {
             // Only release the lease if this endpoint was a detached source we held;
-            // a Remove for an unknown endpoint must not free a lease core never gave us.
-            if service.remove_source(endpoint.0, endpoint.1) {
-                let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+            // a Remove for an unknown endpoint must not free a lease core never gave
+            // us. The release carries the source's TCP lease key, not the UDP
+            // routing endpoint (core's lease sets are TCP-keyed).
+            if let Some(lease_endpoint) = service.remove_source(endpoint.0, endpoint.1) {
+                let _ = events.send(ReaskEvent::SourceReleased {
+                    endpoint: lease_endpoint,
+                });
             }
         }
         ReaskCommand::MarkNoNeededParts { endpoint } => {
@@ -640,8 +666,10 @@ async fn drive_reask_tick(
             && let SocketAddr::V4(v4) = addr
         {
             let endpoint = (*v4.ip(), v4.port());
-            if service.remove_source(endpoint.0, endpoint.1) {
-                let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+            if let Some(lease_endpoint) = service.remove_source(endpoint.0, endpoint.1) {
+                let _ = events.send(ReaskEvent::SourceReleased {
+                    endpoint: lease_endpoint,
+                });
             }
         }
     }

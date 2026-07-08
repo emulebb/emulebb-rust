@@ -12,13 +12,18 @@ fn register_command_adds_a_source_and_remove_drops_it() {
     let mut svc = service();
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0xAB; 16]);
+    // Distinct UDP routing port (4672) vs TCP lease port (4662): core's lease
+    // sets are keyed by (ip, tcp_port), so a SourceReleased carrying the UDP
+    // endpoint would never match and the lease would leak (RUST-PAR-017 DL-11).
     let endpoint = (Ipv4Addr::new(198, 51, 100, 7), 4672);
+    let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 7), 4662);
     apply_reask_command(
         &mut svc,
         &events,
         ReaskCommand::Register(ReaskDetachArgs {
             file_hash,
             endpoint,
+            tcp_port: lease_endpoint.1,
             udp_version: 4,
             initial_reask_delay: Duration::ZERO,
             user_hash: Some([0x55; 16]),
@@ -36,7 +41,10 @@ fn register_command_adds_a_source_and_remove_drops_it() {
     assert_eq!(svc.source_count(), 0);
     assert!(svc.registered_file_hashes().is_empty());
     match rx.try_recv().expect("a SourceReleased event") {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, endpoint),
+        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
+            released, lease_endpoint,
+            "the release must carry the TCP lease key, not the UDP routing endpoint"
+        ),
         other => panic!("expected SourceReleased, got {other:?}"),
     }
 }
@@ -53,6 +61,7 @@ fn register_command_respects_initial_reask_delay() {
         ReaskCommand::Register(ReaskDetachArgs {
             file_hash,
             endpoint,
+            tcp_port: 4662,
             udp_version: 4,
             initial_reask_delay: crate::ed2k_client_udp::FILE_REASK_TIME,
             user_hash: None,
@@ -106,14 +115,19 @@ fn remove_command_for_unknown_endpoint_releases_no_lease() {
 fn reengage_releases_lease_before_signalling_source_ready() {
     let file_hash = Ed2kHash::from_bytes([0x33; 16]);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4672);
+    let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 9), 4662);
     let events = routed_reply_events(
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD),
         file_hash,
         endpoint,
+        lease_endpoint,
     );
     assert_eq!(events.len(), 2);
     match &events[0] {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(*released, endpoint),
+        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
+            *released, lease_endpoint,
+            "the release must carry the TCP lease key, not the UDP routing endpoint"
+        ),
         other => panic!("expected SourceReleased first, got {other:?}"),
     }
     match &events[1] {
@@ -128,6 +142,7 @@ fn deep_rank_keeps_source_and_releases_no_lease() {
         ReaskAction::UpdatedRank(REENGAGE_RANK_THRESHOLD + 1),
         Ed2kHash::from_bytes([0x44; 16]),
         (Ipv4Addr::new(198, 51, 100, 10), 4672),
+        (Ipv4Addr::new(198, 51, 100, 10), 4662),
     );
     assert!(
         events.is_empty(),
@@ -139,10 +154,13 @@ fn deep_rank_keeps_source_and_releases_no_lease() {
 fn dropped_source_is_dead_listed_then_releases_its_lease() {
     // UDP FNF (oracle UDPReaskFNF, DownloadClient.cpp:1774-1795): the source is
     // dead-listed BEFORE its lease is released, so the 45-minute block gates
-    // re-acquisition the moment the endpoint becomes free again.
+    // re-acquisition the moment the endpoint becomes free again. SourceDead
+    // carries the UDP endpoint (core resolves by IP); SourceReleased carries
+    // the TCP lease key core's sets match against (RUST-PAR-017 DL-11).
     let endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4672);
+    let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 11), 4662);
     let hash = Ed2kHash::from_bytes([0x55; 16]);
-    let events = routed_reply_events(ReaskAction::DropSource, hash, endpoint);
+    let events = routed_reply_events(ReaskAction::DropSource, hash, endpoint, lease_endpoint);
     assert_eq!(events.len(), 2);
     match &events[0] {
         ReaskEvent::SourceDead {
@@ -155,7 +173,10 @@ fn dropped_source_is_dead_listed_then_releases_its_lease() {
         other => panic!("expected SourceDead, got {other:?}"),
     }
     match &events[1] {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(*released, endpoint),
+        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(
+            *released, lease_endpoint,
+            "the release must carry the TCP lease key, not the UDP routing endpoint"
+        ),
         other => panic!("expected SourceReleased, got {other:?}"),
     }
 }
@@ -166,12 +187,14 @@ fn retry_tcp_timeout_releases_held_lease() {
     let (events, mut rx) = reask_event_channel();
     let file_hash = Ed2kHash::from_bytes([0x66; 16]);
     let endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4672);
+    let lease_endpoint = (Ipv4Addr::new(198, 51, 100, 12), 4662);
     apply_reask_command(
         &mut svc,
         &events,
         ReaskCommand::Register(ReaskDetachArgs {
             file_hash,
             endpoint,
+            tcp_port: lease_endpoint.1,
             udp_version: 4,
             initial_reask_delay: Duration::ZERO,
             user_hash: None,
@@ -181,13 +204,19 @@ fn retry_tcp_timeout_releases_held_lease() {
             buddy_id: None,
         }),
     );
-    assert!(svc.remove_source(endpoint.0, endpoint.1));
-    let _ = events.send(ReaskEvent::SourceReleased { endpoint });
+    // remove_source hands back the TCP lease key the release event must carry.
+    assert_eq!(
+        svc.remove_source(endpoint.0, endpoint.1),
+        Some(lease_endpoint)
+    );
+    let _ = events.send(ReaskEvent::SourceReleased {
+        endpoint: lease_endpoint,
+    });
     match rx.try_recv().expect("a SourceReleased event") {
-        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, endpoint),
+        ReaskEvent::SourceReleased { endpoint: released } => assert_eq!(released, lease_endpoint),
         other => panic!("expected SourceReleased, got {other:?}"),
     }
-    assert!(!svc.remove_source(endpoint.0, endpoint.1));
+    assert_eq!(svc.remove_source(endpoint.0, endpoint.1), None);
 }
 
 #[tokio::test]
@@ -258,6 +287,7 @@ fn detach_handle_register_is_received_as_a_command() {
     assert!(handle.register_kad_buddy_source(ReaskDetachArgs {
         file_hash,
         endpoint: (Ipv4Addr::new(10, 0, 0, 1), 5000),
+        tcp_port: 4662,
         udp_version: 4,
         initial_reask_delay: Duration::ZERO,
         user_hash: None,
@@ -269,6 +299,7 @@ fn detach_handle_register_is_received_as_a_command() {
     match rx.try_recv().expect("a queued command") {
         ReaskCommand::Register(args) => {
             assert_eq!(args.endpoint, (Ipv4Addr::new(10, 0, 0, 1), 5000));
+            assert_eq!(args.tcp_port, 4662);
             assert!(args.low_id);
             assert_eq!(
                 args.buddy_endpoint,

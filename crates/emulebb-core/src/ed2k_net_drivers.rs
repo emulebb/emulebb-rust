@@ -296,7 +296,9 @@ async fn handle_reask_event(
             // download cycle — or the SourceReady that follows — can re-acquire
             // and reconnect this endpoint over TCP. Without this the endpoint
             // stays leased forever and acquire_direct_download_source_leases
-            // defers it, leaking the lease and killing re-engage.
+            // defers it, leaking the lease and killing re-engage. `endpoint` is
+            // the source's TCP endpoint (the loop carries core's lease key,
+            // RUST-PAR-017 DL-11), so it matches these TCP-keyed sets directly.
             core.release_direct_download_source_leases(&[endpoint])
                 .await;
         }

@@ -24,6 +24,13 @@ const UDP_FAILURE_RATIO: f64 = 0.3;
 #[derive(Debug, Clone)]
 pub(crate) struct ReaskSource {
     pub endpoint: (Ipv4Addr, u16),
+    /// The peer's eD2k **TCP** endpoint — the key core leased this source under
+    /// (`active_download_peer_endpoints` + the download source registry are keyed
+    /// by `(ip, tcp_port)`, never by the UDP `endpoint` the loop routes on).
+    /// Every `SourceReleased` for this source must carry THIS endpoint or core's
+    /// release is a no-op and the lease leaks (RUST-PAR-017 DL-11). Defaults to
+    /// `endpoint` until [`Self::with_lease_endpoint`] sets the real TCP key.
+    pub lease_endpoint: (Ipv4Addr, u16),
     pub file_hash: Ed2kHash,
     pub udp_version: u8,
     /// Our last known queue rank on this source (0 == queue full / unknown).
@@ -68,6 +75,7 @@ impl ReaskSource {
     ) -> Self {
         Self {
             endpoint,
+            lease_endpoint: endpoint,
             file_hash,
             udp_version,
             last_rank: None,
@@ -84,6 +92,14 @@ impl ReaskSource {
             buddy_endpoint: None,
             buddy_id: None,
         }
+    }
+
+    /// Set the peer's eD2k TCP endpoint — the key core's lease bookkeeping uses
+    /// (`source_endpoint_key` = `(ip, tcp_port)`) — so release events emitted for
+    /// this source address the lease core actually holds.
+    pub(crate) fn with_lease_endpoint(mut self, lease_endpoint: (Ipv4Addr, u16)) -> Self {
+        self.lease_endpoint = lease_endpoint;
+        self
     }
 
     /// Attach the peer's obfuscation key material (learned from the download

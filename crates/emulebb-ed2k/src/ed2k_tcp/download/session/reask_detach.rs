@@ -84,6 +84,10 @@ fn try_detach_queued_source_for_reask(
     handle.detach(crate::ed2k_client_udp::ReaskDetachArgs {
         file_hash,
         endpoint: (*v4.ip(), session_state.peer_udp_port),
+        // The connected session's remote TCP port — the key core leased this
+        // source under (source_endpoint_key), carried so the loop's release
+        // events address the lease core actually holds.
+        tcp_port: v4.port(),
         udp_version: effective_udp_version,
         // WHY: MFC stamps SetLastAskedTime() when the TCP file request is sent,
         // so a queued source is not immediately reasked over UDP after the TCP
@@ -135,6 +139,9 @@ mod tests {
             ReaskCommand::Register(args) => {
                 assert_eq!(args.file_hash, file_hash);
                 assert_eq!(args.endpoint, (Ipv4Addr::new(192, 0, 2, 10), 4672));
+                // The TCP lease key port (core's source_endpoint_key), distinct
+                // from the UDP routing port above (RUST-PAR-017 DL-11).
+                assert_eq!(args.tcp_port, 4662);
                 assert_eq!(args.udp_version, 4);
                 assert_eq!(args.user_hash, Some([0x42; 16]));
                 assert!(args.should_crypt);

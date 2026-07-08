@@ -187,10 +187,13 @@ impl ReaskSourceSet {
         true
     }
 
-    /// Explicitly drop a source (e.g. the transfer no longer needs it).
-    pub(crate) fn remove(&mut self, ip: Ipv4Addr, udp_port: u16) {
-        self.sources.remove(&(ip, udp_port));
+    /// Explicitly drop a source (e.g. the transfer no longer needs it). Returns
+    /// the removed source so the caller can address its release event to the
+    /// lease key core holds ([`ReaskSource::lease_endpoint`]).
+    pub(crate) fn remove(&mut self, ip: Ipv4Addr, udp_port: u16) -> Option<ReaskSource> {
+        let removed = self.sources.remove(&(ip, udp_port));
         self.pending.take_reply(ip, udp_port);
+        removed
     }
 
     pub(crate) fn get(&self, ip: Ipv4Addr, udp_port: u16) -> Option<&ReaskSource> {

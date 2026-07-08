@@ -32,6 +32,10 @@ pub(crate) enum ReaskInboundOutcome {
     RoutedReply {
         file_hash: Ed2kHash,
         endpoint: (Ipv4Addr, u16),
+        /// The source's TCP endpoint — the key core leased it under
+        /// ([`ReaskSource::lease_endpoint`]); any `SourceReleased` the caller
+        /// emits for this reply must carry this, not the UDP `endpoint`.
+        lease_endpoint: (Ipv4Addr, u16),
         action: ReaskAction,
     },
     /// An inbound `OP_REASKFILEPING` from a peer queued on us — the caller answers
@@ -158,17 +162,25 @@ impl ReaskService {
     }
 
     /// Drop a source (e.g. the transfer completed or no longer needs it).
-    /// Returns `true` if a source was actually present and removed, so the caller
-    /// can release the held UDP lease only for endpoints the loop really owned.
-    pub(crate) fn remove_source(&mut self, ip: Ipv4Addr, udp_port: u16) -> bool {
-        if let Some(file_hash) = self.endpoint_index.remove(&(ip, udp_port)) {
-            if let Some(set) = self.per_file.get_mut(&file_hash) {
-                set.remove(ip, udp_port);
-            }
-            true
-        } else {
-            false
-        }
+    /// Returns the source's lease endpoint (its TCP endpoint, the key core
+    /// leased it under) when a source was actually present and removed, so the
+    /// caller releases exactly the lease the loop really owned — and addresses
+    /// it by the key core's bookkeeping uses, not the UDP routing endpoint
+    /// (RUST-PAR-017 DL-11). `None` for an unknown endpoint.
+    pub(crate) fn remove_source(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+    ) -> Option<(Ipv4Addr, u16)> {
+        let file_hash = self.endpoint_index.remove(&(ip, udp_port))?;
+        let removed = self
+            .per_file
+            .get_mut(&file_hash)
+            .and_then(|set| set.remove(ip, udp_port));
+        // Degenerate index/set mismatch: fall back to the UDP endpoint rather
+        // than dropping the release on the floor (the maps are kept in sync, so
+        // this should be unreachable).
+        Some(removed.map_or((ip, udp_port), |source| source.lease_endpoint))
     }
 
     /// Flag a registered source as No Needed Parts, routed by endpoint (a TCP
@@ -239,6 +251,11 @@ impl ReaskService {
         let Some(set) = self.per_file.get_mut(&file_hash) else {
             return ReaskInboundOutcome::Ignored;
         };
+        // Capture the lease key BEFORE applying the reply: `DropSource` removes
+        // the source from the set, taking its TCP lease endpoint with it.
+        let lease_endpoint = set
+            .get(ip, port)
+            .map_or((ip, port), |source| source.lease_endpoint);
         match set.apply_reply(ip, port, reply, now) {
             Some(action) => {
                 if matches!(action, ReaskAction::DropSource) {
@@ -247,6 +264,7 @@ impl ReaskService {
                 ReaskInboundOutcome::RoutedReply {
                     file_hash,
                     endpoint: (ip, port),
+                    lease_endpoint,
                     action,
                 }
             }

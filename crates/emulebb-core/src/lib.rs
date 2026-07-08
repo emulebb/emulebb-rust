@@ -11250,6 +11250,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_release_is_tcp_keyed_so_a_udp_endpoint_never_matches() {
+        // RUST-PAR-017 DL-11: core's lease sets (active_download_peer_endpoints +
+        // the registry leased peers) are keyed by (ip, tcp_port), while the UDP
+        // reask loop routes sources by (ip, udp_port). A SourceReleased carrying
+        // the UDP endpoint therefore releases NOTHING — the lease leaks and the
+        // source can never be re-engaged. This pins the constraint that forced
+        // the loop to carry the TCP lease key in its release events.
+        let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+        let file_hash = Ed2kHash::from_bytes([0x5b; 16]).to_string();
+        let ip = Ipv4Addr::new(192, 0, 2, 60);
+        let tcp_port = 4662u16;
+        let udp_port = 4672u16;
+        let source = direct_test_source(Ed2kHash::from_bytes([0x5b; 16]), ip, tcp_port);
+        {
+            let mut state = core.state.lock().await;
+            state.download_source_registry.add_candidate(
+                Instant::now(),
+                DownloadSourceCandidate {
+                    file_hash: file_hash.clone(),
+                    file_priority: 5,
+                    needed_parts: 4,
+                    rare_parts: 0,
+                    source: source.clone(),
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+        let (engaged, _, _) = core
+            .acquire_direct_download_source_leases(&file_hash, std::slice::from_ref(&source))
+            .await;
+        assert_eq!(engaged, vec![source.clone()]);
+
+        // Releasing by the peer's UDP endpoint (what the reask loop routes on)
+        // must not free the TCP-keyed lease — the endpoints live in different
+        // keyspaces, so this is a no-op by construction.
+        core.release_direct_download_source_leases(&[(ip, udp_port)])
+            .await;
+        {
+            let state = core.state.lock().await;
+            assert_eq!(
+                state.active_download_peer_endpoints.len(),
+                1,
+                "a UDP endpoint must not match the TCP-keyed active set"
+            );
+            assert_eq!(
+                state.download_source_registry.leased_peer_count(),
+                1,
+                "a UDP endpoint must not match the TCP-keyed registry lease"
+            );
+        }
+
+        // Releasing by the TCP lease key (what SourceReleased now carries) frees it.
+        core.release_direct_download_source_leases(&[source_endpoint_key(&source)])
+            .await;
+        {
+            let state = core.state.lock().await;
+            assert!(state.active_download_peer_endpoints.is_empty());
+            assert_eq!(state.download_source_registry.leased_peer_count(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn run_attempt_stops_immediately_when_pre_cancelled() {
         // The requery loop checks the per-hash cancel token at the top of each
         // round (and the function checks it before any work). A pre-cancelled token

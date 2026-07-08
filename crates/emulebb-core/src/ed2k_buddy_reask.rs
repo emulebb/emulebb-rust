@@ -62,6 +62,10 @@ pub(crate) fn detach_kad_buddy_sources_for_reask(
         let registered = reask_handle.register_kad_buddy_source(ReaskDetachArgs {
             file_hash,
             endpoint,
+            // Core's lease key port (source_endpoint_key). A buddy source holds
+            // no direct-download lease, but its release events must still be
+            // addressed consistently by the TCP key.
+            tcp_port: source.tcp_port,
             udp_version: ED2K_DEFAULT_UDP_VERSION,
             // Kad buddy sources have no direct TCP file request to timestamp, so
             // the first buddy-relayed UDP reask is due immediately.
@@ -155,6 +159,7 @@ mod tests {
                 assert_eq!(args.file_hash, file_hash);
                 assert!(args.low_id);
                 assert_eq!(args.endpoint, (Ipv4Addr::new(192, 0, 2, 77), 4672));
+                assert_eq!(args.tcp_port, 4662);
                 assert_eq!(args.buddy_id, Some([0x5a; 16]));
                 assert_eq!(
                     args.buddy_endpoint,
