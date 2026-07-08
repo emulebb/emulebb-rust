@@ -34,6 +34,15 @@ const PUBLISH_NOTES_LOOKUP_TIMEOUT: Duration =
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum file entries per `KADEMLIA2_PUBLISH_KEY_REQ` packet.
+///
+/// Oracle `CSearch::StorePacket` STOREKEYWORD (Search.cpp:769-807) packs at
+/// most 50 files per packet (`iPacketCount < 50`) and loops, re-emitting the
+/// target + count header for every chunk, so a >50-entry keyword store leaves
+/// as a back-to-back packet train to the same contact (up to 3 packets for the
+/// 150-file per-contact cap).
+const KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET: usize = 50;
+
 /// Summarizes the outcome of a Kad publish fanout over the closest contacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PublishAttemptStats {
@@ -144,6 +153,80 @@ async fn execute_publish_fanout_for_contacts(
     results
 }
 
+/// Keyword fanout: every contact receives its whole ≤50-entry packet train.
+///
+/// The requests for one contact are spawned in chunk order before moving to
+/// the next contact, so the wire keeps the oracle's back-to-back chunk train
+/// (Search.cpp:769-807 sends all chunks within one `StorePacket` call without
+/// waiting for responses in between). Results are regrouped per contact; a
+/// chunk whose task failed to join is dropped from that contact's result list.
+async fn execute_keyword_publish_fanout(
+    rpc: &RpcManager,
+    contacts: &[TraversalContact],
+    work_class: RpcWorkClass,
+    mut build_packets: impl FnMut(&TraversalContact) -> Vec<KadPacket>,
+) -> Vec<(
+    PublishAttempt,
+    Vec<Result<KadPacket, emulebb_kad_net::NetError>>,
+)> {
+    let mut join_set = JoinSet::new();
+    let mut chunk_counts = Vec::with_capacity(contacts.len());
+
+    for (contact_index, contact) in contacts.iter().enumerate() {
+        let packets = build_packets(contact);
+        chunk_counts.push(packets.len());
+        for (chunk_index, packet) in packets.into_iter().enumerate() {
+            let rpc = rpc.clone();
+            let addr = contact.addr;
+            join_set.spawn(async move {
+                let result = rpc
+                    .request_with_class(
+                        addr,
+                        &packet,
+                        opcode::PUBLISH_RES,
+                        PUBLISH_RESPONSE_TIMEOUT,
+                        work_class,
+                    )
+                    .await;
+                (contact_index, chunk_index, result)
+            });
+        }
+    }
+
+    let mut per_contact: Vec<Vec<Option<Result<KadPacket, emulebb_kad_net::NetError>>>> =
+        chunk_counts
+            .iter()
+            .map(|count| std::iter::repeat_with(|| None).take(*count).collect())
+            .collect();
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok((contact_index, chunk_index, result)) => {
+                per_contact[contact_index][chunk_index] = Some(result);
+            }
+            Err(error) => {
+                tracing::warn!("publish request task failed to join: {error}");
+            }
+        }
+    }
+
+    let total = contacts.len() as u32;
+    contacts
+        .iter()
+        .zip(per_contact)
+        .enumerate()
+        .map(|(index, (contact, chunk_results))| {
+            (
+                PublishAttempt {
+                    rank: index as u32 + 1,
+                    total,
+                    contact: contact.clone(),
+                },
+                chunk_results.into_iter().flatten().collect(),
+            )
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn resolve_publish_contacts(
     rpc: &RpcManager,
@@ -250,10 +333,19 @@ fn record_publish_failure(
     if matches!(error, emulebb_kad_net::NetError::Timeout { .. }) {
         stats.timed_out_contacts += 1;
     }
+    log_publish_failure(family, failure_label, &attempt, &error);
+}
+
+fn log_publish_failure(
+    family: &str,
+    failure_label: &str,
+    attempt: &PublishAttempt,
+    error: &emulebb_kad_net::NetError,
+) {
     tracing::debug!(
         "kad publish contact family={} step={} rank={}/{} contact_addr={} contact_id={} error={}",
         family,
-        publish_failure_step(&error),
+        publish_failure_step(error),
         attempt.rank,
         attempt.total,
         attempt.contact.addr,
@@ -266,6 +358,67 @@ fn record_publish_failure(
         attempt.contact.addr,
         error
     );
+}
+
+/// Number of `KADEMLIA2_PUBLISH_KEY_REQ` packets one keyword store emits per
+/// contact (oracle chunk loop, Search.cpp:769-776).
+fn keyword_publish_chunk_count(entry_count: usize) -> u32 {
+    entry_count
+        .div_ceil(KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET)
+        .max(1) as u32
+}
+
+/// Fold per-chunk publish results into contact-oriented keyword stats.
+///
+/// The oracle counts every `KADEMLIA2_PUBLISH_RES` individually
+/// (SearchManager.cpp:422-445 `ProcessPublishResult`: `++m_uAnswers` per RES
+/// and `UpdateNodeLoad` per load-carrying RES), then normalizes the raw answer
+/// count by the packets-per-contact chunk count when reporting answers
+/// (Search.cpp:1570-1576 `GetAnswers`). Mirror both sides: the load average
+/// keeps one sample per RES, while `acked_contacts` floor-divides the raw acks
+/// by the chunk count so a multi-packet train still moves the
+/// answers-toward-total by at most one per contact.
+fn record_keyword_publish_results(
+    stats: &mut PublishAttemptStats,
+    chunk_count: u32,
+    results: Vec<(
+        PublishAttempt,
+        Vec<Result<KadPacket, emulebb_kad_net::NetError>>,
+    )>,
+) {
+    let mut raw_acks = 0u32;
+    for (attempt, chunk_results) in results {
+        let chunk_total = chunk_results.len() as u32;
+        let mut chunk_timeouts = 0u32;
+        for result in chunk_results {
+            match result {
+                Ok(KadPacket::PublishRes(response)) => {
+                    raw_acks += 1;
+                    stats.total_load += u32::from(response.load);
+                    stats.load_responses += 1;
+                    log_publish_response_ack("keyword", &attempt, response.target, response.load);
+                }
+                // Keyword publish keeps counting unexpected response opcodes as
+                // acks (same policy as the non-chunked path).
+                Ok(other) => {
+                    raw_acks += 1;
+                    log_publish_opcode_ack("keyword", &attempt, other.opcode());
+                }
+                Err(error) => {
+                    if matches!(error, emulebb_kad_net::NetError::Timeout { .. }) {
+                        chunk_timeouts += 1;
+                    }
+                    log_publish_failure("keyword", "publish_keyword", &attempt, &error);
+                }
+            }
+        }
+        // `timed_out_contacts` stays contact-oriented: only a contact whose
+        // whole chunk train expired counts as timed out.
+        if chunk_total > 0 && chunk_timeouts == chunk_total {
+            stats.timed_out_contacts += 1;
+        }
+    }
+    stats.acked_contacts = raw_acks / chunk_count.max(1);
 }
 
 fn log_publish_response_ack(
@@ -396,9 +549,10 @@ pub async fn publish_keyword(
         res_contact_sink,
     )
     .await?;
+    let chunk_count = keyword_publish_chunk_count(entries.len());
     for (index, contact) in publish_contacts.iter().enumerate() {
         tracing::debug!(
-            "kad publish contact family=keyword step=send rank={}/{} contact_addr={} contact_id={} contact_version={} target={} entry_count={} first_file_hash={}",
+            "kad publish contact family=keyword step=send rank={}/{} contact_addr={} contact_id={} contact_version={} target={} entry_count={} packet_count={} first_file_hash={}",
             index + 1,
             stats.attempted_contacts,
             contact.addr,
@@ -406,17 +560,35 @@ pub async fn publish_keyword(
             contact.version,
             target,
             entries.len(),
+            chunk_count,
             entries[0].file_hash,
         );
     }
-    let results =
-        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
-            build_keyword_publish_packet(target, &entries, contact.version)
-        })
-        .await;
-    record_publish_results(&mut stats, "keyword", "publish_keyword", true, results);
+    let results = execute_keyword_publish_fanout(rpc, &publish_contacts, work_class, |contact| {
+        build_keyword_publish_packets(target, &entries, contact.version)
+    })
+    .await;
+    record_keyword_publish_results(&mut stats, chunk_count, results);
 
     Ok(stats)
+}
+
+/// Build the oracle-style keyword publish packet train for one target contact.
+///
+/// Oracle `CSearch::StorePacket` STOREKEYWORD (Search.cpp:769-807) flushes a
+/// `KADEMLIA2_PUBLISH_KEY_REQ` every 50 files and starts the next packet with a
+/// fresh target + count header, so up to 3 packets cover the 150-file
+/// per-contact cap. Each chunk re-runs the per-entry tag build, so the AICH
+/// v9+ gating stays per contact and per entry.
+fn build_keyword_publish_packets(
+    target: NodeId,
+    entries: &[KeywordPublishEntry],
+    contact_version: u8,
+) -> Vec<KadPacket> {
+    entries
+        .chunks(KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET)
+        .map(|chunk| build_keyword_publish_packet(target, chunk, contact_version))
+        .collect()
 }
 
 /// Build the oracle-style keyword publish body for a specific target contact.

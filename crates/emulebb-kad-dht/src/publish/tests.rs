@@ -1,7 +1,9 @@
 use super::{
-    KeywordPublishEntry, PUBLISH_KEYWORD_LOOKUP_TIMEOUT, PUBLISH_NOTES_LOOKUP_TIMEOUT,
-    PUBLISH_SOURCE_LOOKUP_TIMEOUT, build_keyword_publish_packet, build_source_publish_packet,
-    publish_target_is_within_tolerance, select_publish_contacts,
+    KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET, KeywordPublishEntry, PUBLISH_KEYWORD_LOOKUP_TIMEOUT,
+    PUBLISH_NOTES_LOOKUP_TIMEOUT, PUBLISH_SOURCE_LOOKUP_TIMEOUT, PublishAttempt,
+    PublishAttemptStats, build_keyword_publish_packet, build_keyword_publish_packets,
+    build_source_publish_packet, keyword_publish_chunk_count, publish_target_is_within_tolerance,
+    record_keyword_publish_results, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
 use emulebb_kad_proto::{
@@ -10,6 +12,7 @@ use emulebb_kad_proto::{
         STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS,
         STORE_STOP_GRACE_SECS,
     },
+    packet::{PublishKeyReq, PublishRes},
     tag_name,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -259,4 +262,243 @@ fn build_keyword_publish_packet_preserves_multi_file_entries() {
             .iter()
             .any(|tag| tag.value == TagValue::SmallBlob(vec![5; 20]))
     );
+}
+
+fn keyword_entry(seed: u8) -> KeywordPublishEntry {
+    KeywordPublishEntry {
+        file_hash: Ed2kHash::from_bytes([seed; 16]),
+        tags: vec![Tag::filename("ubuntu.iso")],
+        aich_hash: Some([seed; 20]),
+    }
+}
+
+fn keyword_entries(count: usize) -> Vec<KeywordPublishEntry> {
+    (0..count)
+        .map(|index| keyword_entry((index % 251) as u8))
+        .collect()
+}
+
+fn unpack_key_req(packet: &KadPacket) -> &PublishKeyReq {
+    let KadPacket::PublishKeyReq(request) = packet else {
+        panic!("expected publish key packet");
+    };
+    request
+}
+
+/// Oracle Search.cpp:766-776: chunk divisor mirrors `(files + 49) / 50`.
+#[test]
+fn keyword_publish_chunk_count_matches_oracle_divisor() {
+    assert_eq!(KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET, 50);
+    assert_eq!(keyword_publish_chunk_count(0), 1);
+    assert_eq!(keyword_publish_chunk_count(1), 1);
+    assert_eq!(keyword_publish_chunk_count(50), 1);
+    assert_eq!(keyword_publish_chunk_count(51), 2);
+    assert_eq!(keyword_publish_chunk_count(100), 2);
+    assert_eq!(keyword_publish_chunk_count(101), 3);
+    assert_eq!(keyword_publish_chunk_count(150), 3);
+}
+
+#[test]
+fn build_keyword_publish_packets_keeps_fifty_entries_in_one_packet() {
+    let target = NodeId::from_bytes([1; 16]);
+    let packets = build_keyword_publish_packets(target, &keyword_entries(50), 9);
+
+    assert_eq!(packets.len(), 1);
+    let request = unpack_key_req(&packets[0]);
+    assert_eq!(request.target, target);
+    assert_eq!(request.entries.len(), 50);
+}
+
+#[test]
+fn build_keyword_publish_packets_splits_fifty_one_entries_into_two_packets() {
+    let target = NodeId::from_bytes([1; 16]);
+    let entries = keyword_entries(51);
+    let packets = build_keyword_publish_packets(target, &entries, 9);
+
+    assert_eq!(packets.len(), 2);
+    let first = unpack_key_req(&packets[0]);
+    let second = unpack_key_req(&packets[1]);
+    // Every chunk re-emits the target + count header (oracle Search.cpp:774-791).
+    assert_eq!(first.target, target);
+    assert_eq!(second.target, target);
+    assert_eq!(first.entries.len(), 50);
+    assert_eq!(second.entries.len(), 1);
+    // Entry order is preserved across the chunk boundary.
+    assert_eq!(first.entries[0].hash, entries[0].file_hash);
+    assert_eq!(first.entries[49].hash, entries[49].file_hash);
+    assert_eq!(second.entries[0].hash, entries[50].file_hash);
+}
+
+#[test]
+fn build_keyword_publish_packets_splits_cap_into_three_full_packets() {
+    let target = NodeId::from_bytes([1; 16]);
+    let entries = keyword_entries(150);
+    let packets = build_keyword_publish_packets(target, &entries, 9);
+
+    assert_eq!(packets.len(), 3);
+    for (chunk_index, packet) in packets.iter().enumerate() {
+        let request = unpack_key_req(packet);
+        assert_eq!(request.target, target);
+        assert_eq!(request.entries.len(), 50);
+        assert_eq!(
+            request.entries[0].hash,
+            entries[chunk_index * 50].file_hash
+        );
+        assert_eq!(
+            request.entries[49].hash,
+            entries[chunk_index * 50 + 49].file_hash
+        );
+    }
+}
+
+#[test]
+fn build_keyword_publish_packets_applies_aich_gating_per_chunk() {
+    let target = NodeId::from_bytes([1; 16]);
+    let entries = keyword_entries(51);
+
+    for packet in build_keyword_publish_packets(target, &entries, 8) {
+        for entry in &unpack_key_req(&packet).entries {
+            assert!(
+                !entry
+                    .tags
+                    .iter()
+                    .any(|tag| tag.name == TagName::Short(tag_name::KADAICHHASHPUB))
+            );
+        }
+    }
+    for packet in build_keyword_publish_packets(target, &entries, 9) {
+        for entry in &unpack_key_req(&packet).entries {
+            assert!(
+                entry
+                    .tags
+                    .iter()
+                    .any(|tag| tag.name == TagName::Short(tag_name::KADAICHHASHPUB))
+            );
+        }
+    }
+}
+
+fn chunk_attempt(rank: u32, total: u32) -> PublishAttempt {
+    PublishAttempt {
+        rank,
+        total,
+        contact: close_publish_contact(rank as u8, rank as u8 + 1),
+    }
+}
+
+fn publish_res(load: u8) -> KadPacket {
+    KadPacket::PublishRes(PublishRes {
+        target: NodeId::from_bytes([9; 16]),
+        load,
+        options: None,
+    })
+}
+
+fn timeout_error(secs: u64) -> emulebb_kad_net::NetError {
+    emulebb_kad_net::NetError::Timeout {
+        addr: "127.0.0.9:4672".parse().unwrap(),
+        secs,
+    }
+}
+
+/// SearchManager.cpp:422-445 + Search.cpp:1570-1576: every RES counts one load
+/// sample, but the answer count is normalized by the packets-per-contact chunk
+/// count so a 3-packet train from one contact yields one effective answer.
+#[test]
+fn record_keyword_publish_results_normalizes_acks_by_chunk_count() {
+    let mut stats = PublishAttemptStats {
+        attempted_contacts: 2,
+        ..PublishAttemptStats::default()
+    };
+
+    let results = vec![
+        (
+            chunk_attempt(1, 2),
+            vec![Ok(publish_res(10)), Ok(publish_res(20)), Ok(publish_res(30))],
+        ),
+        (
+            chunk_attempt(2, 2),
+            vec![Ok(publish_res(40)), Ok(publish_res(50)), Ok(publish_res(60))],
+        ),
+    ];
+    record_keyword_publish_results(&mut stats, 3, results);
+
+    // 6 raw RES / 3 chunks per contact = 2 effective contact answers.
+    assert_eq!(stats.acked_contacts, 2);
+    // Load stays per-RES (oracle UpdateNodeLoad runs once per RES).
+    assert_eq!(stats.load_responses, 6);
+    assert_eq!(stats.total_load, 210);
+    assert_eq!(stats.node_load(), 35);
+    assert_eq!(stats.timed_out_contacts, 0);
+}
+
+#[test]
+fn record_keyword_publish_results_floors_partial_chunk_answers() {
+    let mut stats = PublishAttemptStats {
+        attempted_contacts: 1,
+        ..PublishAttemptStats::default()
+    };
+
+    let results = vec![(
+        chunk_attempt(1, 1),
+        vec![
+            Ok(publish_res(10)),
+            Err(timeout_error(5)),
+            Err(timeout_error(5)),
+        ],
+    )];
+    record_keyword_publish_results(&mut stats, 3, results);
+
+    // 1 raw RES / 3 chunks floors to 0 (oracle GetAnswers integer division);
+    // the contact answered one chunk, so it is not counted as timed out.
+    assert_eq!(stats.acked_contacts, 0);
+    assert_eq!(stats.load_responses, 1);
+    assert_eq!(stats.timed_out_contacts, 0);
+}
+
+#[test]
+fn record_keyword_publish_results_counts_contact_timeout_only_when_whole_train_expires() {
+    let mut stats = PublishAttemptStats {
+        attempted_contacts: 2,
+        ..PublishAttemptStats::default()
+    };
+
+    let results = vec![
+        (
+            chunk_attempt(1, 2),
+            vec![
+                Err(timeout_error(5)),
+                Err(timeout_error(5)),
+                Err(timeout_error(5)),
+            ],
+        ),
+        (
+            chunk_attempt(2, 2),
+            vec![Ok(publish_res(4)), Ok(publish_res(6)), Ok(publish_res(8))],
+        ),
+    ];
+    record_keyword_publish_results(&mut stats, 3, results);
+
+    assert_eq!(stats.timed_out_contacts, 1);
+    assert_eq!(stats.acked_contacts, 1);
+    assert_eq!(stats.failed_contacts(), 1);
+}
+
+#[test]
+fn record_keyword_publish_results_single_packet_matches_unchunked_counting() {
+    let mut stats = PublishAttemptStats {
+        attempted_contacts: 2,
+        ..PublishAttemptStats::default()
+    };
+
+    let results = vec![
+        (chunk_attempt(1, 2), vec![Ok(publish_res(12))]),
+        (chunk_attempt(2, 2), vec![Err(timeout_error(5))]),
+    ];
+    record_keyword_publish_results(&mut stats, 1, results);
+
+    assert_eq!(stats.acked_contacts, 1);
+    assert_eq!(stats.load_responses, 1);
+    assert_eq!(stats.total_load, 12);
+    assert_eq!(stats.timed_out_contacts, 1);
 }
