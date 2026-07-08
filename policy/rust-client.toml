@@ -29,6 +29,16 @@ excluded_surface_ids = [
     # Kad flood exemption would only reduce leniency toward LAN sources absent on
     # a public VPN'd node; permanent drop. See the entry's review_disposition.
     "kad-flood-lan-exemption",
+    # RUST-PAR-019 round-19 permanent-drop dispositions (2026-07-08): headless /
+    # IPv4-only / GUI-only surfaces with no wire fingerprint. See each entry's
+    # review_disposition_note in rust-client-omissions.toml.
+    "ipv6-ed2k-kad",
+    "legacy-html-webserver",
+    "pref-new-auto-up",
+    "pref-new-auto-down",
+    "pref-download-auto-broadband-io",
+    "time-based-scheduler",
+    "ed2k-partial-file-preview",
 ]
 
 # Windows long-path (>260 char) support is SCOPED to operator-facing content
