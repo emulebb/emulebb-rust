@@ -124,6 +124,11 @@ pub struct MetadataTransferPiece {
     /// part's present blocks are simply the contiguous prefix up to
     /// `bytes_written` (legacy / contiguous fast path).
     pub block_bitmap: Option<String>,
+    /// Whether the part previously failed its MD4 flush check and is pending
+    /// MD4-only ICH salvage: the stale on-disk bytes are retained so the part
+    /// can re-verify early during re-download (the rust analog of eMule's
+    /// persisted `FT_CORRUPTEDPARTS` corrupted-parts list).
+    pub ich_corrupted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

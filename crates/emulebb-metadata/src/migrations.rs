@@ -43,6 +43,10 @@
 //!   shared-source paths whose ingest failed.
 //! - v12 -> v13: per-file upload demand counters on `known_files`, used by the
 //!   shared-file publish rank across restarts.
+//! - v13 -> v14: `transfer_pieces.ich_corrupted INTEGER NOT NULL DEFAULT 0` —
+//!   whether the part previously failed its MD4 flush check and is pending
+//!   MD4-only ICH salvage (the rust analog of eMule's persisted
+//!   `FT_CORRUPTEDPARTS` corrupted-parts list, PartFile.cpp:1445-1462).
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -239,6 +243,14 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
                 "INTEGER NOT NULL DEFAULT 0",
             )
         }
+        // v13 -> v14: parts pending MD4-only ICH salvage after a failed flush
+        // check (eMule's persisted FT_CORRUPTEDPARTS corrupted-parts list).
+        14 => add_column_if_missing(
+            tx,
+            "transfer_pieces",
+            "ich_corrupted",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         other => bail!("no metadata migration defined for schema version v{other}"),
     }
 }
@@ -396,6 +408,7 @@ mod tests {
         assert_eq!(stored_version(&conn).unwrap(), Some(SCHEMA_VERSION));
         for (table, column) in [
             ("transfer_pieces", "block_bitmap"),
+            ("transfer_pieces", "ich_corrupted"),
             ("known_files", "all_time_uploaded_bytes"),
             ("peers", "secure_ident_pubkey"),
             ("peers", "secure_ident_pubkey_len"),
