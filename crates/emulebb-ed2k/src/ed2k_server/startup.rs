@@ -30,7 +30,8 @@ use super::{
     OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST,
     OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ,
     OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry,
-    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER,
+    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES, SERVER_TCP_FLAG_TCPOBFUSCATION,
+    SERVER_TCP_FLAG_TYPETAGINTEGER,
     SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
     SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
     SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE,
@@ -121,14 +122,25 @@ fn encode_offer_files_payload_at_cursor(
 ) -> EncodedOfferFilesPayload {
     let (advertised_client_id, advertised_client_port) =
         advertised_client_endpoint_for_offer_file(client_id, bind_ip, tcp_port, server_flags);
+    // eMule offers a >4GB file only to a server advertising LARGEFILES TCP
+    // support (SharedFileList.cpp:2649); otherwise the file is excluded from the
+    // candidate set (and thus from pagination) entirely.
+    let server_supports_large_files =
+        server_flags.unwrap_or_default() & SERVER_TCP_FLAG_LARGEFILES != 0;
     let offered_files = match already_published {
         Some(already_published) => offered_files_catalog_at_cursor_skipping_published(
             shared_catalog,
             cursor,
             already_published,
             max_offer_files,
+            server_supports_large_files,
         ),
-        None => offered_files_catalog_at_cursor(shared_catalog, cursor, max_offer_files),
+        None => offered_files_catalog_at_cursor(
+            shared_catalog,
+            cursor,
+            max_offer_files,
+            server_supports_large_files,
+        ),
     };
     let mut payload = Vec::with_capacity(80 * offered_files.entries.len());
     payload.extend_from_slice(
@@ -351,6 +363,7 @@ fn offered_files_catalog_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,
     max_offer_files: usize,
+    server_supports_large_files: bool,
 ) -> OfferedFilesCatalog {
     // max_offer_files is the per-server offer cap (server soft limit, clamped to
     // <= MAX_OFFER_FILES_PER_ADVERTISEMENT); guard against a 0 so a misconfigured
@@ -360,7 +373,7 @@ fn offered_files_catalog_at_cursor(
     // ZERO files, so do NOT fabricate a placeholder offer — a stock client sharing
     // nothing sends a 0-file OP_OFFERFILES, and a synthetic sample would be a
     // non-stock tell.
-    let all_offered_files = ranked_offer_files(shared_catalog);
+    let all_offered_files = ranked_offer_files(shared_catalog, server_supports_large_files);
     let total_entries = all_offered_files.len();
     if total_entries <= max_offer_files {
         return OfferedFilesCatalog {
@@ -387,11 +400,17 @@ fn offered_files_catalog_at_cursor_skipping_published(
     cursor: usize,
     already_published: &HashSet<[u8; 16]>,
     max_offer_files: usize,
+    server_supports_large_files: bool,
 ) -> OfferedFilesCatalog {
     let max_offer_files = max_offer_files.clamp(1, MAX_OFFER_FILES_PER_ADVERTISEMENT);
-    let all_offered_files = ranked_offer_files(shared_catalog);
+    let all_offered_files = ranked_offer_files(shared_catalog, server_supports_large_files);
     if all_offered_files.is_empty() {
-        return offered_files_catalog_at_cursor(shared_catalog, cursor, max_offer_files);
+        return offered_files_catalog_at_cursor(
+            shared_catalog,
+            cursor,
+            max_offer_files,
+            server_supports_large_files,
+        );
     }
 
     let total_entries = all_offered_files.len();
@@ -407,7 +426,12 @@ fn offered_files_catalog_at_cursor_skipping_published(
         scanned += 1;
     }
     if entries.is_empty() && already_published.len() >= total_entries {
-        return offered_files_catalog_at_cursor(shared_catalog, 0, max_offer_files);
+        return offered_files_catalog_at_cursor(
+            shared_catalog,
+            0,
+            max_offer_files,
+            server_supports_large_files,
+        );
     }
     OfferedFilesCatalog {
         entries,
@@ -418,7 +442,10 @@ fn offered_files_catalog_at_cursor_skipping_published(
 
 pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    offered_files_catalog_at_cursor(shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT)
+    // Change-detection hash over the full ranked share (server-independent): a
+    // catalog edit must trigger a republish regardless of the connected server's
+    // large-file support, so hash the unfiltered candidate set.
+    offered_files_catalog_at_cursor(shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true)
         .entries
         .hash(&mut hasher);
     hasher.finish()
@@ -460,12 +487,24 @@ fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<([u8; 16], String, 
     ))
 }
 
-fn ranked_offer_files(shared_catalog: &[Ed2kSharedEntry]) -> Vec<([u8; 16], String, u64, u8)> {
+fn ranked_offer_files(
+    shared_catalog: &[Ed2kSharedEntry],
+    server_supports_large_files: bool,
+) -> Vec<([u8; 16], String, u64, u8)> {
     let now_unix_ms = unix_time_ms();
     let mut ranked = shared_catalog
         .iter()
         .enumerate()
         .filter_map(|(sequence, entry)| {
+            // Stock SharedFileList.cpp:2649 excludes a large file (>4GB, high
+            // dword != 0) from the offer candidate set entirely when the server
+            // lacks large-file TCP support (`!IsLargeFile() ||
+            // pCurServer->SupportsLargeFilesTCP()`). Never advertise a >4GB file
+            // to a non-LARGEFILES server (the forced FT_FILESIZE=0 fallback is a
+            // stock ASSERT(0) path we avoid by simply not offering the file).
+            if !server_supports_large_files && entry.file_size > u64::from(u32::MAX) {
+                return None;
+            }
             let offered = popular_hash_offer_file(entry)?;
             let rank = shared_publish_rank(SharedPublishRankInput {
                 file_hash: &entry.file_hash,
@@ -938,20 +977,20 @@ mod tests {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
         // A soft limit below 200 caps the batch at the soft limit and advances
         // the cursor by that amount (so the next batch continues the rotation).
-        let limited = offered_files_catalog_at_cursor(&shared_catalog, 0, 50);
+        let limited = offered_files_catalog_at_cursor(&shared_catalog, 0, 50, true);
         assert_eq!(limited.entries.len(), 50);
         assert_eq!(limited.total_entries, 450);
         assert_eq!(limited.next_cursor, 50);
         // The catalog clamps an out-of-range cap to [1, MAX]; 0 cannot zero the
         // batch and a huge cap cannot exceed MAX_OFFER_FILES_PER_ADVERTISEMENT.
         assert_eq!(
-            offered_files_catalog_at_cursor(&shared_catalog, 0, 0)
+            offered_files_catalog_at_cursor(&shared_catalog, 0, 0, true)
                 .entries
                 .len(),
             1
         );
         assert_eq!(
-            offered_files_catalog_at_cursor(&shared_catalog, 0, 10_000)
+            offered_files_catalog_at_cursor(&shared_catalog, 0, 10_000, true)
                 .entries
                 .len(),
             MAX_OFFER_FILES_PER_ADVERTISEMENT
@@ -959,10 +998,54 @@ mod tests {
     }
 
     #[test]
+    fn large_file_offered_only_to_largefiles_server() {
+        let mut small = shared_entry(1);
+        small.file_size = 1_000;
+        let mut large = shared_entry(2);
+        // > 4 GiB: high dword is non-zero, so eMule treats it as a large file.
+        large.file_size = u64::from(u32::MAX) + 4_096;
+        let catalog = vec![small.clone(), large.clone()];
+        let small_hash = popular_hash_offer_file(&small).unwrap().0;
+
+        // Non-LARGEFILES server: the >4GB file is excluded from the candidate
+        // set entirely (SharedFileList.cpp:2649), so only the small file remains.
+        let without = ranked_offer_files(&catalog, false);
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].0, small_hash);
+
+        // LARGEFILES server: both files are offered.
+        let with = ranked_offer_files(&catalog, true);
+        assert_eq!(with.len(), 2);
+
+        // Wire path: server_flags without LARGEFILES advertises one file; with
+        // the LARGEFILES bit set it advertises both.
+        let no_largefiles = encode_offer_files_payload(
+            &catalog,
+            Some(u32::from_le_bytes([192, 168, 1, 5])),
+            Ipv4Addr::new(192, 168, 1, 5),
+            4662,
+            None,
+        );
+        assert_eq!(u32::from_le_bytes(no_largefiles[0..4].try_into().unwrap()), 1);
+        let with_largefiles = encode_offer_files_payload(
+            &catalog,
+            Some(u32::from_le_bytes([192, 168, 1, 5])),
+            Ipv4Addr::new(192, 168, 1, 5),
+            4662,
+            Some(SERVER_TCP_FLAG_LARGEFILES),
+        );
+        assert_eq!(
+            u32::from_le_bytes(with_largefiles[0..4].try_into().unwrap()),
+            2
+        );
+    }
+
+    #[test]
     fn empty_share_advertises_zero_files_without_a_placeholder() {
         // Stock parity: an empty share sends a 0-file OP_OFFERFILES, not a
         // fabricated sample entry.
-        let catalog = offered_files_catalog_at_cursor(&[], 0, MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        let catalog =
+            offered_files_catalog_at_cursor(&[], 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true);
         assert_eq!(catalog.entries.len(), 0);
         assert_eq!(catalog.total_entries, 0);
         let payload = encode_offer_files_payload(&[], Some(0), Ipv4Addr::LOCALHOST, 4662, None);
@@ -973,19 +1056,25 @@ mod tests {
     #[test]
     fn offered_files_catalog_rotates_large_libraries() {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
-        let ranked = ranked_offer_files(&shared_catalog);
+        let ranked = ranked_offer_files(&shared_catalog, true);
 
-        let first =
-            offered_files_catalog_at_cursor(&shared_catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        let first = offered_files_catalog_at_cursor(
+            &shared_catalog,
+            0,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
+        );
         let second = offered_files_catalog_at_cursor(
             &shared_catalog,
             first.next_cursor,
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
         );
         let third = offered_files_catalog_at_cursor(
             &shared_catalog,
             second.next_cursor,
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
         );
 
         assert_eq!(first.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -1018,8 +1107,12 @@ mod tests {
     fn offered_files_catalog_small_libraries_do_not_rotate() {
         let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
 
-        let offered =
-            offered_files_catalog_at_cursor(&shared_catalog, 2, MAX_OFFER_FILES_PER_ADVERTISEMENT);
+        let offered = offered_files_catalog_at_cursor(
+            &shared_catalog,
+            2,
+            MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
+        );
 
         assert_eq!(offered.entries.len(), 3);
         assert_eq!(offered.next_cursor, 0);
@@ -1029,7 +1122,7 @@ mod tests {
     #[test]
     fn offered_files_catalog_prioritizes_unpublished_hashes() {
         let shared_catalog = (0..450).map(shared_entry).collect::<Vec<_>>();
-        let ranked = ranked_offer_files(&shared_catalog);
+        let ranked = ranked_offer_files(&shared_catalog, true);
         let mut already_published = HashSet::new();
         for entry in ranked.iter().take(200) {
             already_published.insert(entry.0);
@@ -1040,6 +1133,7 @@ mod tests {
             0,
             &already_published,
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
         );
 
         assert_eq!(offered.entries.len(), MAX_OFFER_FILES_PER_ADVERTISEMENT);
@@ -1060,6 +1154,7 @@ mod tests {
             0,
             &already_published,
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
         );
 
         assert_eq!(offered.entries.len(), 1);
@@ -1073,7 +1168,7 @@ mod tests {
     #[test]
     fn offered_files_catalog_restarts_ranked_cycle_when_every_hash_was_published() {
         let shared_catalog = (0..3).map(shared_entry).collect::<Vec<_>>();
-        let ranked = ranked_offer_files(&shared_catalog);
+        let ranked = ranked_offer_files(&shared_catalog, true);
         let already_published = shared_catalog
             .iter()
             .map(|entry| popular_hash_offer_file(entry).unwrap().0)
@@ -1084,6 +1179,7 @@ mod tests {
             0,
             &already_published,
             MAX_OFFER_FILES_PER_ADVERTISEMENT,
+            true,
         );
 
         assert_eq!(offered.entries, ranked);
