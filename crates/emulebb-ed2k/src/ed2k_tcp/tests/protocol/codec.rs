@@ -718,6 +718,58 @@ fn legacy_source_answer_rejects_v4_shape_from_v3_peer() {
     assert_eq!(decoded_sources, vec![source]);
 }
 
+/// Build `count` SX2 v4 sources (each carries a user hash so it survives the
+/// version>=2 filter) with slowly varying, highly compressible bytes.
+fn sx2_test_sources(count: u16) -> Vec<SourceExchangePeer> {
+    (0..count)
+        .map(|index| SourceExchangePeer {
+            ip: [45, 82, 80, (index % 250 + 1) as u8],
+            tcp_port: 4662,
+            server_ip: u32::from_le_bytes([203, 0, 113, 7]),
+            server_port: 4242,
+            user_hash: Some([0x5A; 16]),
+            connect_options: 0,
+        })
+        .collect()
+}
+
+#[test]
+fn source_answer_sx2_packs_when_payload_exceeds_354_bytes() {
+    // RUST-PAR-019 R19-4: eMule packs OP_ANSWERSOURCES2 once the payload exceeds
+    // 354 bytes (KnownFile.cpp:1330 / PartFile.cpp:4723), flipping OP_EMULEPROT
+    // (0xC5) -> OP_PACKEDPROT (0xD4) when the packed form is smaller.
+    let file_hash = Ed2kHash([0x61; 16]);
+    // 13 v4 sources -> payload = 1 + 16 + 2 + 13*29 = 396 bytes (> 354), and the
+    // near-identical entries compress well below raw.
+    let sources = sx2_test_sources(13);
+    let packet =
+        encode_answer_sources2(&file_hash, ED2K_SOURCE_EXCHANGE2_VERSION, &sources).unwrap();
+
+    assert_eq!(packet[0], OP_PACKEDPROT, "SX2 answer > 354 bytes must pack");
+    assert_eq!(packet[5], OP_ANSWERSOURCES2);
+    // The packed payload inflates back to the raw SX2 body (version, hash, count).
+    let (protocol, inflated) = decode_peer_payload(packet[0], packet[6..].to_vec()).unwrap();
+    assert_eq!(protocol, OP_EMULEPROT);
+    assert_eq!(inflated[0], ED2K_SOURCE_EXCHANGE2_VERSION);
+    assert_eq!(&inflated[1..17], &file_hash.0);
+    assert_eq!(u16::from_le_bytes([inflated[17], inflated[18]]), 13);
+}
+
+#[test]
+fn source_answer_sx2_stays_uncompressed_at_or_below_354_bytes() {
+    // A small SX2 answer (payload <= 354) is sent raw as OP_EMULEPROT (0xC5).
+    let file_hash = Ed2kHash([0x62; 16]);
+    // 5 v4 sources -> payload = 1 + 16 + 2 + 5*29 = 164 bytes (<= 354).
+    let sources = sx2_test_sources(5);
+    let packet =
+        encode_answer_sources2(&file_hash, ED2K_SOURCE_EXCHANGE2_VERSION, &sources).unwrap();
+
+    assert_eq!(packet[0], OP_EMULEPROT, "small SX2 answer must stay 0xC5");
+    assert_eq!(packet[5], OP_ANSWERSOURCES2);
+    assert_eq!(packet[6], ED2K_SOURCE_EXCHANGE2_VERSION);
+    assert_eq!(&packet[7..23], &file_hash.0);
+}
+
 #[test]
 fn request_filename_answer_uses_stock_u16_string_length_prefix() {
     let file_hash = Ed2kHash([0x55; 16]);

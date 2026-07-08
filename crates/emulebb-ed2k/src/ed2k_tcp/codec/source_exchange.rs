@@ -5,7 +5,11 @@ use super::super::{
     ED2K_SOURCE_EXCHANGE2_VERSION, OP_ANSWERSOURCES, OP_ANSWERSOURCES2, OP_EMULEPROT,
     OP_REQUESTSOURCES, OP_REQUESTSOURCES2,
 };
-use super::{decode_file_hash_payload, encode_packet};
+use super::{decode_file_hash_payload, encode_packed_packet, encode_packet};
+
+/// eMule packs the OP_ANSWERSOURCES2 answer once its payload exceeds this size
+/// (KnownFile.cpp:1330 / PartFile.cpp:4723: `if (result->size > 354)`).
+const SOURCE_EXCHANGE_PACK_THRESHOLD: usize = 354;
 
 pub(in crate::ed2k_tcp) fn encode_request_sources2_subpayload() -> [u8; 3] {
     let mut payload = [0u8; 3];
@@ -49,12 +53,23 @@ pub(in crate::ed2k_tcp) fn encode_answer_sources2(
     file_hash: &Ed2kHash,
     version: u8,
     sources: &[SourceExchangePeer],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(19 + sources.len() * 29);
     payload.push(version);
     payload.extend_from_slice(&file_hash.0);
     encode_source_exchange_entries(&mut payload, version, sources);
-    encode_packet(OP_EMULEPROT, OP_ANSWERSOURCES2, &payload)
+    let raw = encode_packet(OP_EMULEPROT, OP_ANSWERSOURCES2, &payload);
+    // eMule packs the OP_ANSWERSOURCES2 answer when its payload exceeds 354 bytes,
+    // keeping the packed form only when it is strictly smaller than raw
+    // (KnownFile.cpp:1330 / PartFile.cpp:4723 -> Packet::PackPacket, Packets.cpp:259).
+    // The pack flips the protocol byte OP_EMULEPROT (0xC5) -> OP_PACKEDPROT (0xD4).
+    if payload.len() > SOURCE_EXCHANGE_PACK_THRESHOLD {
+        let packed = encode_packed_packet(OP_ANSWERSOURCES2, &payload)?;
+        if packed.len() < raw.len() {
+            return Ok(packed);
+        }
+    }
+    Ok(raw)
 }
 
 pub(in crate::ed2k_tcp) fn source_exchange_entry_count(

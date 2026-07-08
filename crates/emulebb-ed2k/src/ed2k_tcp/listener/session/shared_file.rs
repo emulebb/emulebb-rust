@@ -82,7 +82,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
                 if source_exchange_entry_count(used_version, &sources) == 0 {
                     continue;
                 }
-                let reply = encode_answer_sources2(&requested, used_version, &sources);
+                let reply = encode_answer_sources2(&requested, used_version, &sources)?;
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
                 transport.write_all(&reply).await.with_context(|| {
                     format!("failed to send source exchange reply to {peer_addr}")
@@ -370,7 +370,7 @@ pub(in crate::ed2k_tcp) async fn handle_source_request(
         if source_exchange_entry_count(used_version, &sources) == 0 {
             return Ok(Some(requested));
         }
-        let reply = encode_answer_sources2(&requested, used_version, &sources);
+        let reply = encode_answer_sources2(&requested, used_version, &sources)?;
         dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
         transport
             .write_all(&reply)
@@ -408,7 +408,7 @@ async fn answer_source_request_subpacket<'a>(
     if source_exchange_entry_count(used_version, &sources) == 0 {
         return Ok(remaining);
     }
-    let reply = encode_answer_sources2(requested, used_version, &sources);
+    let reply = encode_answer_sources2(requested, used_version, &sources)?;
     dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "answer_sources", &reply);
     transport
         .write_all(&reply)

@@ -37,7 +37,8 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
                 user_hash: Some([0x77; 16]),
                 connect_options: 0,
             }],
-        );
+        )
+        .unwrap();
         stream.write_all(&source_exchange_answer).await.unwrap();
         let (requested_hash, ranges) =
             accept_upload_and_read_parts_request(&mut stream, false).await;

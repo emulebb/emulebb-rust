@@ -106,7 +106,9 @@ pub(super) fn encode_packet(protocol: u8, opcode: u8, payload: &[u8]) -> Vec<u8>
     bytes
 }
 
-#[cfg(test)]
+/// Frame an eD2k peer packet with a zlib-packed payload, flipping the protocol
+/// byte to OP_PACKEDPROT (0xD4). Mirrors eMule `Packet::PackPacket` compression
+/// (Packets.cpp:258); the keep-if-smaller decision is left to the caller.
 pub(super) fn encode_packed_packet(opcode: u8, payload: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write as _;
 
