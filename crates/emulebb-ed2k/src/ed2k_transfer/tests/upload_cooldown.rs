@@ -286,6 +286,36 @@ fn long_low_served_disconnect_does_not_cool_the_ip() {
     );
 }
 
+/// RUST-PAR-021 GAP3: when every waiter is cooled with a hard (non-probeable)
+/// cooldown and none is admissible, an idle no-request slot is RETAINED with no
+/// strike, matching the oracle's HasNoRequestUploadReplacementPressure retain
+/// (UploadQueue.cpp:1570-1584) -- rust must not strike (and escalate toward a
+/// ban) a slot it has no candidate to replace.
+#[test]
+fn idle_no_request_slot_is_retained_when_all_waiters_are_hard_cooled() {
+    let mut state = Ed2kUploadQueueState::new(cooldown_config());
+    let t0 = Instant::now();
+
+    let (a, a_status) = begin(&mut state, upload_peer(1, 1, 0x0A00_0001), 1, t0);
+    assert_eq!(a_status, Ed2kUploadSessionStatus::Granted);
+
+    // The only waiter carries a churn cooldown: a hard, non-probeable gate, so it
+    // is neither an admissible nor a probeable replacement.
+    let peer_b = upload_peer(2, 2, 0x0A00_0002);
+    state.note_failed_promotion(&peer_b, t0);
+    let (_b, b_status) = begin(&mut state, peer_b, 2, t0);
+    assert!(is_waiting(b_status));
+
+    // +3 s: past the grant-idle timer and the 2 s underfill window, A has served
+    // nothing -- but the sole waiter cannot replace it, so A is retained, NOT
+    // recycled/struck.
+    assert_eq!(
+        state.poll_session(&a, t0 + Duration::from_secs(3), false),
+        Ed2kUploadSessionStatus::Granted,
+        "an unreplaceable idle no-request slot must be retained, not struck"
+    );
+}
+
 /// Direct unit coverage of the `UploadCooldownTracker` policy (tiers, strike
 /// thresholds, rolling window, probe eligibility), confirmed against
 /// `UploadQueueSeams.h`.

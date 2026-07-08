@@ -1406,6 +1406,18 @@ impl Ed2kUploadQueueState {
             return None;
         }
         if session.uploaded_bytes == 0 {
+            // RUST-PAR-021 GAP3: strike + recycle a no-request idle slot only when
+            // a genuine replacement exists (oracle
+            // HasNoRequestUploadReplacementPressure, UploadQueue.cpp:1570 /
+            // UploadQueueSeams.h:162). When every waiter is cooled with a hard
+            // (churn/slow) cooldown and none is probeable, the oracle RETAINS the
+            // idle holder with NO strike (:1571-1584) rather than recycling it
+            // toward a repeat-offender ban. The outer `waiting_session_count() == 0`
+            // guard alone is coarser: it strikes even when no waiter can take the
+            // freed slot.
+            if !self.has_no_request_replacement_pressure(now) {
+                return None;
+            }
             return (now.saturating_duration_since(session.queued_at)
                 > self.config.granted_timeout)
                 .then(|| self.recycle_diagnostics(session, now, "noRequestUnderfill"));
@@ -1416,6 +1428,27 @@ impl Ed2kUploadQueueState {
         }
         (upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec())
             .then(|| self.recycle_diagnostics(session, now, "slowUnderfill"))
+    }
+
+    /// Whether a drained no-request slot has a concrete replacement to recycle
+    /// toward (oracle `HasNoRequestUploadReplacementPressure`, UploadQueue.cpp:1570
+    /// / UploadQueueSeams.h:162): a non-cooled ADMISSIBLE waiter, OR a cooldown-
+    /// PROBE candidate (a waiter under an active probeable no-request cooldown).
+    /// When every waiter carries only a hard churn/slow cooldown (never probeable)
+    /// and none is admissible -- or the queue is empty -- there is no replacement
+    /// pressure and the caller retains the idle holder unstricken. The probe
+    /// existence is checked with `open_base_slot_underfill = true` because a
+    /// no-request recycle frees exactly the slot the probe would fill, so the
+    /// candidate's existence must not be gated on the slot the recycle is about to
+    /// open.
+    fn has_no_request_replacement_pressure(&self, now: Instant) -> bool {
+        if self.waiting_session_count() == 0 {
+            return false;
+        }
+        self.ranked_waiting_keys(now).into_iter().any(|key| {
+            !self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now)
+                || self.cooldown.can_probe(key.peer.ip, now, true)
+        })
     }
 
     /// Session rotation caps (oracle `CheckForTimeOver`, UploadQueue.cpp:2407-2467):
