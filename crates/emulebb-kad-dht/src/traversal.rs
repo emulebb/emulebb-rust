@@ -3,6 +3,12 @@
 //! The traversal owns the oracle-shaped `REQ` / `RES` phase, the jump-start
 //! timing for search phase 2, and the candidate-state bookkeeping that decides
 //! which contacts are still eligible to query.
+//!
+//! The lightweight NODE-type bucket-refresh lookup (1 initial `REQ`, stop on
+//! first `RES`) lives in [`refresh`]; the convergence walk here stays for
+//! value/store/bootstrap lookups.
+
+pub mod refresh;
 
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::{

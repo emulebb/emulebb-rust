@@ -1063,6 +1063,72 @@ async fn test_run_search_phase_emits_even_when_idle_grace_exceeds_remaining_budg
     );
 }
 
+/// RUST-PAR-017 KAD-G1 guard: the NODE-lite refresh lookup must NOT change the
+/// full traversal used by value lookups — a keyword walk still fans out
+/// `ALPHA` initial `KADEMLIA2_REQ`s with the value contact-count byte (2).
+#[tokio::test]
+async fn test_value_lookup_phase_still_fans_out_alpha_initial_reqs() {
+    let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+    let rpc = RpcManager::new(
+        Arc::clone(&transport),
+        ObfuscationLayer::new(NodeId::ZERO, 0, false),
+        RpcConfig::default(),
+    );
+    let _handle = rpc.start();
+
+    let target = NodeId::ZERO;
+    let initial: Vec<TraversalContact> = (1u8..=4)
+        .map(|n| TraversalContact {
+            id: NodeId::from_bytes([n; 16]),
+            addr: format!("192.168.1.{n}:4672").parse().unwrap(),
+            tcp_port: 0,
+            version: 9,
+        })
+        .collect();
+
+    let _ = run_traversal(
+        &rpc,
+        initial,
+        TraversalConfig {
+            target,
+            search_kind: TraversalKind::Keyword {
+                request: SearchKeyReq {
+                    target,
+                    start_position: 0,
+                    restrictive_payload: Vec::new(),
+                },
+            },
+            timeout: Duration::from_millis(150),
+            query_timeout: Duration::from_millis(150),
+            phase2_fanout: 1,
+            cancel: CancellationToken::new(),
+            result_tx: None,
+            work_class: RpcWorkClass::Interactive,
+            ip_filter: None,
+            res_contact_sink: None,
+        },
+    )
+    .await;
+
+    let reqs: Vec<_> = transport
+        .drain_outgoing()
+        .into_iter()
+        .filter_map(|(addr, bytes)| match KadPacket::decode(&bytes) {
+            Ok(KadPacket::Req(req)) => Some((addr, req)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        reqs.len() >= ALPHA,
+        "value lookups keep the ALPHA fan-out, sent {} REQs",
+        reqs.len()
+    );
+    assert!(
+        reqs.iter().all(|(_, req)| req.count == KADEMLIA_FIND_VALUE),
+        "value lookups keep the FIND_VALUE contact-count byte"
+    );
+}
+
 fn reask_candidate(last_octet: u8, state: CandidateState) -> TraversalCandidate {
     let id = NodeId::from_bytes([last_octet; 16]);
     TraversalCandidate {

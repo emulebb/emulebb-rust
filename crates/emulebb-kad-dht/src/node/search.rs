@@ -1,5 +1,6 @@
 use super::{DhtNode, contact_helpers::addr_from_contact};
 use crate::error::DhtError;
+use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_refresh_lookup};
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::RpcWorkClass;
@@ -88,6 +89,41 @@ impl DhtNode {
         }
 
         Ok(result.closest)
+    }
+
+    /// Bucket-refresh NODE lookup (oracle `CSearchManager::FindNode(target,
+    /// false)` -> `CSearch` type NODE): one initial `KADEMLIA2_REQ` to the
+    /// closest known contact, jump-start retries while silent, stop on the
+    /// first `RES` (Search.cpp:194,373-387). Answered contacts reach the
+    /// routing table through the RES-contact sink (oracle `AddUnfiltered`);
+    /// there is no convergence walk. Only for the hourly zone refresh —
+    /// value/store/bootstrap lookups keep [`Self::lookup_nodes_with_class`].
+    pub async fn refresh_node_lookup(
+        &self,
+        target: &NodeId,
+        work_class: RpcWorkClass,
+    ) -> NodeRefreshOutcome {
+        // Oracle CSearchManager::StartSearch drops a duplicate same-target
+        // search (AlreadySearchingFor); the permit also caps concurrency.
+        let Ok(_permit) = self.try_acquire_search_permit(*target) else {
+            return NodeRefreshOutcome::default();
+        };
+        let initial = {
+            let rt = self.inner.routing_table.lock().await;
+            rt.get_closest(target, K)
+                .into_iter()
+                .map(|c| TraversalContact {
+                    id: c.id,
+                    addr: SocketAddr::new(IpAddr::V4(c.ip), c.udp_port),
+                    tcp_port: c.tcp_port,
+                    version: c.kad_version,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut config = NodeRefreshConfig::new(*target, work_class);
+        config.ip_filter = self.ip_filter();
+        config.res_contact_sink = Some(self.res_contact_sink());
+        run_node_refresh_lookup(&self.inner.rpc, initial, config).await
     }
 
     /// Search by keyword hash. Returns a Stream of results.
