@@ -139,6 +139,13 @@ pub(crate) struct Ed2kUploadPeerIdentity {
     /// `0` when not Kad-reachable. A Kad-reachable peer is exempt from the
     /// firewalled-LowID callback admission guard. Excluded from identity eq/hash.
     pub kad_port: u16,
+    /// Whether the peer advertised MISCOPTIONS2 bit 12 (eMule
+    /// `SupportsDirectUDPCallback()`): a firewalled peer whose UDP is open+verified,
+    /// reachable via `OP_DIRECTCALLBACKREQ`. Lets the upload-promote driver hand a
+    /// slot to a LowID waiter by asking it to TCP-connect back (master
+    /// `TryToConnect` CCS_DIRECTCALLBACK, BaseClient.cpp:1478). Excluded from
+    /// identity eq/hash.
+    pub supports_direct_udp_callback: bool,
     /// Our-side firewalled-LowID callback admission context, set per-connection by
     /// the listener from the live server/Kad firewall state (master
     /// `AddClientToQueue` opening guard). Transient; excluded from identity
@@ -1528,6 +1535,7 @@ pub(super) fn test_support_peer() -> Ed2kUploadPeerIdentity {
         emule_version: 0,
         is_emule_client: false,
         kad_port: 0,
+        supports_direct_udp_callback: false,
         firewall_context: Ed2kUploadFirewallContext::default(),
         client_software: None,
     }

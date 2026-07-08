@@ -1118,6 +1118,7 @@ fn upload_peer_identity_from_socket(peer_addr: SocketAddr) -> Ed2kUploadPeerIden
         emule_version: 0,
         is_emule_client: false,
         kad_port: 0,
+        supports_direct_udp_callback: false,
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),
         client_software: None,
     }
@@ -1156,6 +1157,9 @@ fn upload_peer_identity_from_hello(
         // Peer Kad port (high 16 of CT_EMULE_UDPPORTS): a Kad-reachable peer is
         // exempt from the firewalled-LowID callback admission guard.
         kad_port: remote_hello.kad_port,
+        // MISCOPTIONS2 bit 12: lets the promote driver reach a firewalled LowID
+        // waiter with OP_DIRECTCALLBACKREQ instead of dropping the grant.
+        supports_direct_udp_callback: profile.supports_direct_udp_callback,
         // Set per-request by the OP_STARTUPLOADREQ / OP_REQUESTPARTS handlers from
         // the live server/Kad firewall state; defaults to non-firewalled here.
         firewall_context: crate::ed2k_transfer::Ed2kUploadFirewallContext::default(),

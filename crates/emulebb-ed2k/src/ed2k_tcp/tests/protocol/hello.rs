@@ -176,6 +176,31 @@ fn hello_decode_preserves_multipacket_capabilities() {
 }
 
 #[test]
+fn hello_learns_direct_udp_callback_capability_from_bit_12() {
+    // A peer that advertises MISCOPTIONS2 bit 12 (eMule m_fDirectUDPCallback,
+    // BaseClient.cpp:559) is learned as direct-callback-capable; a peer that
+    // leaves it clear is not. The advertised bit is round-tripped through the
+    // hello encoder so this covers both the emule_misc_options2 bit position and
+    // the decoder.
+    for advertised in [false, true] {
+        let packet = encode_hello_answer(Ed2kHelloIdentity {
+            user_hash: [0x44; 16],
+            client_id: 0x0000_1234,
+            tcp_port: 41001,
+            udp_port: 41000,
+            server_ip: 0,
+            server_port: 0,
+            connect_options: emule_connect_options(true),
+            direct_udp_callback: advertised,
+        });
+
+        let profile = decode_hello_profile(&packet[6..]).unwrap();
+
+        assert_eq!(profile.supports_direct_udp_callback, advertised);
+    }
+}
+
+#[test]
 fn hello_answer_decode_keeps_user_hash_leading_type_byte() {
     let packet = encode_hello_answer(Ed2kHelloIdentity {
         user_hash: [0x10; 16],

@@ -400,6 +400,12 @@ pub(super) struct DecodedHelloProfile {
     pub(super) supports_source_exchange: bool,
     pub(super) supports_source_exchange2: bool,
     pub(super) supports_file_identifiers: bool,
+    /// Peer advertises MISCOPTIONS2 bit 12 (eMule `m_fDirectUDPCallback`,
+    /// BaseClient.cpp:559): it is firewalled but its UDP is open+verified, so a
+    /// downloader/uploader may poke it with `OP_DIRECTCALLBACKREQ` to have it
+    /// TCP-connect back instead of relying on a server/buddy callback. Consumed
+    /// by the LowID upload-promote direct-callback path.
+    pub(super) supports_direct_udp_callback: bool,
     pub(super) connect_options: u8,
     pub(super) gpl_evildoer: bool,
     pub(super) misc_options1: MiscOptions1,
@@ -503,6 +509,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
     let mut supports_source_exchange = false;
     let mut supports_source_exchange2 = false;
     let mut supports_file_identifiers = false;
+    let mut supports_direct_udp_callback = false;
     let mut connect_options = 0;
     let mut gpl_evildoer = false;
     let mut misc_options1 = MiscOptions1::default();
@@ -526,6 +533,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
             && let Some(misc_options2) = decode_hello_tag_u32(&tag)
         {
             supports_file_identifiers = ((misc_options2 >> 13) & 1) != 0;
+            supports_direct_udp_callback = ((misc_options2 >> 12) & 1) != 0;
             supports_source_exchange2 = ((misc_options2 >> 10) & 1) != 0;
             connect_options = decode_misc_options2_connect_options(misc_options2);
             supports_ext_multipacket = ((misc_options2 >> 5) & 1) != 0;
@@ -563,6 +571,7 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         supports_source_exchange,
         supports_source_exchange2,
         supports_file_identifiers,
+        supports_direct_udp_callback,
         connect_options,
         gpl_evildoer,
         misc_options1,

@@ -44,6 +44,7 @@ pub(super) fn upload_peer(octet: u8, user_marker: u8, client_id: u32) -> Ed2kUpl
         emule_version: 0x99,
         is_emule_client: true,
         kad_port: 0,
+        supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
     }
@@ -68,6 +69,7 @@ pub(super) fn same_ip_upload_peer(port_marker: u8) -> Ed2kUploadPeerIdentity {
         emule_version: 0x99,
         is_emule_client: true,
         kad_port: 0,
+        supports_direct_udp_callback: false,
         firewall_context: Default::default(),
         client_software: None,
     }
