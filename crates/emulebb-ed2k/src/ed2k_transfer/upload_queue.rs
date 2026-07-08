@@ -558,10 +558,28 @@ impl Ed2kUploadQueueState {
         // same cooldown (or re-promoted via the cooldown probe) until it expires.
         let slot_free = self.active_session_count() < self.effective_active_slot_limit(now);
         let cooled = self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now);
-        let phase = if slot_free && !cooled {
+        // RUST-PAR-021 GAP1 (corrects the round-20 U-GAP1 residual): the inline
+        // grant to a just-connecting peer must respect BOTH the 1/sec slot-open
+        // pace AND the ranked waiting queue, exactly like the oracle's paced+ranked
+        // `ForceNewClient` -> `AddUpNextClient` in `Process`
+        // (UploadQueue.cpp:811-823,960-979), which opens ONE slot per tick for the
+        // BEST waiting client (`FindBestClientInQueue`). The fork never inline-grants
+        // a just-connected client ahead of the queue and never opens faster than the
+        // pace. So a free slot is granted inline only when the pace allows a new open
+        // now (`slot_open_paced`) AND no higher-ranked admissible waiter is already
+        // queued (`best_admissible_waiting_key` is empty). Otherwise this peer is
+        // admitted to the waiting queue at its ranked position and the paced
+        // `promote_waiters` picks the best candidate -- so a pace-deferred slot can
+        // never be opened early by an arrival, and a low-ranked newcomer can never
+        // jump a higher-ranked paced waiter.
+        let inline_grant = slot_free
+            && !cooled
+            && self.slot_open_paced(now)
+            && self.best_admissible_waiting_key(now).is_none();
+        let phase = if inline_grant {
             Ed2kUploadSessionPhase::Granted
         } else {
-            // No grant: this peer joins the waiting queue, so apply the master
+            // No inline grant: this peer joins the waiting queue, so apply the master
             // AddClientToQueue admission gates. First the firewalled-LowID
             // callback guard (opening check), then the per-IP cap + soft/hard
             // combined-score limit.
@@ -600,6 +618,15 @@ impl Ed2kUploadQueueState {
             self.last_slot_open = Some(now);
         }
         self.trim_waiting_queue(now);
+        // A newcomer admitted to the waiting queue may have left a free slot that
+        // the BEST existing waiter should take now, not this arrival (oracle
+        // Process promotes via the paced+ranked path, never inline for the
+        // newcomer). Run the paced promote so a free slot goes to the best
+        // candidate -- which is this peer only when it genuinely outranks every
+        // queued waiter (RUST-PAR-021 GAP1).
+        if phase == Ed2kUploadSessionPhase::Waiting {
+            self.promote_waiters(now);
+        }
         self.status_for_key(&key, now)
     }
 
