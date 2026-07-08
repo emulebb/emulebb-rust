@@ -2026,7 +2026,14 @@ impl EmulebbCore {
                 }
             }
         }
-        self.queue_ed2k_shared_catalog_publish();
+        // A metadata PATCH mutates only priority/comment/rating -- none of which
+        // are in the eD2k offer set or per-file offer content -- so it changes
+        // neither the share status nor the completion state and must not spin up a
+        // redundant re-offer session (Publish-G3). Comment/rating already have
+        // their own Kad-notes trigger above.
+        if shared_file_change_requires_ed2k_reoffer(false, false) {
+            self.queue_ed2k_shared_catalog_publish();
+        }
         Ok(self.share(hash).await)
     }
 
@@ -5551,6 +5558,23 @@ fn shared_file_notes_changed(
 ) -> bool {
     comment_rating
         .is_some_and(|(comment, rating)| comment != current_comment || rating != current_rating)
+}
+
+/// Whether a shared-file mutation changed a field that alters the eD2k
+/// OP_OFFERFILES set or per-file offer content, and therefore warrants re-running
+/// the rate-limited shared-catalog offer session. Only the SET of offered files
+/// (a share/unshare) or a file's completion state is offer content; a file's
+/// name/size/hash are fixed and cannot be edited. A metadata PATCH touches only
+/// priority and comment/rating, none of which are offer content: priority merely
+/// reorders a future full offer (oracle `CKnownFile::SetUpPriority` emits no
+/// re-offer, KnownFile.cpp:1395-1402) and comment/rating are Kad-notes content
+/// with their own trigger (Publish-G1), so such a PATCH passes both flags `false`
+/// and must not queue a redundant no-op offer session (Publish-G3).
+fn shared_file_change_requires_ed2k_reoffer(
+    share_status_changed: bool,
+    completion_changed: bool,
+) -> bool {
+    share_status_changed || completion_changed
 }
 
 /// Drain the pending NOTES-reset queue into the loop-local schedule, resetting
@@ -9942,6 +9966,17 @@ mod tests {
     }
 
     #[test]
+    fn only_offer_relevant_changes_queue_the_ed2k_reoffer() {
+        // Publish-G3: a metadata PATCH (priority/comment/rating) changes neither
+        // the offered SET nor a file's offer content, so it passes both flags
+        // `false` and must NOT queue the rate-limited shared-catalog re-offer.
+        assert!(!shared_file_change_requires_ed2k_reoffer(false, false));
+        // A genuinely offer-relevant change (share/unshare, or completion) does.
+        assert!(shared_file_change_requires_ed2k_reoffer(true, false));
+        assert!(shared_file_change_requires_ed2k_reoffer(false, true));
+    }
+
+    #[test]
     fn draining_notes_dirty_queue_resets_the_notes_clock() {
         // The edit path enqueues the file hash; the publish loop drains it and
         // resets the in-memory notes clock so the file is notes-due next tick.
@@ -11322,7 +11357,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_shared_file_queues_ed2k_republish() {
+    async fn update_shared_file_does_not_queue_redundant_ed2k_reoffer() {
+        // Publish-G3: a metadata PATCH mutates only priority/comment/rating, none
+        // of which are in the eD2k OP_OFFERFILES set/content, so it must apply the
+        // metadata without spinning up a redundant shared-catalog re-offer (oracle
+        // `CKnownFile::SetUpPriority` emits no re-offer, KnownFile.cpp:1395-1402).
         let runtime_dir = unique_runtime_dir("emulebb-core-update-shared-republish");
         let transfer_root = runtime_dir.join("transfers");
         let shared_path = runtime_dir.join("shared-metadata.bin");
@@ -11352,12 +11391,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // The metadata is still applied over REST.
         assert_eq!(updated.priority, "high");
         assert_eq!(updated.comment, "synthetic note");
         assert_eq!(updated.rating, 4);
+        // ...but no eD2k re-offer session was queued (net-nil delta before G3).
         assert_eq!(
             core.ed2k_publish_diagnostics().queued_count,
-            queued_before.saturating_add(1)
+            queued_before
         );
     }
 
