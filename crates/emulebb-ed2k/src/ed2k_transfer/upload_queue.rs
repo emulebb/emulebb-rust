@@ -33,6 +33,21 @@ const DEFAULT_SESSION_TRANSFER_PERCENT: u32 = 90;
 /// (`PreferenceValidationSeams::kDefaultSessionTimeLimitSeconds`).
 const DEFAULT_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 
+/// Minimum concurrent upload slots that always open immediately, regardless of
+/// the slot-open pacing gate (oracle `MIN_UP_CLIENTS_ALLOWED`, Opcodes.h:107):
+/// `ForceNewClient` returns true below this count before it reaches the 1/sec
+/// gate (UploadQueue.cpp:969-970), so the base slots fill without pacing.
+const MIN_UP_CLIENTS_ALLOWED: usize = 2;
+/// Minimum interval between opening successive upload slots while the aggregate
+/// upload datarate is below the busy-pipe threshold (oracle `m_nLastStartUpload
+/// + SEC2MS(1)` gate, UploadQueue.cpp:972): at most one new slot per second.
+const UPLOAD_SLOT_OPEN_MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// Aggregate upload datarate (bytes/sec) at/above which the 1/sec slot-open
+/// pacing gate is bypassed and new slots may burst open (oracle `datarate <
+/// 102400` short-circuit, UploadQueue.cpp:972): once the pipe is already busy the
+/// fork stops throttling slot opens.
+const UPLOAD_SLOT_OPEN_BURST_DATARATE_BYTES_PER_SEC: u64 = 102_400;
+
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ed2kUploadQueueConfig {
@@ -379,6 +394,10 @@ pub(super) struct Ed2kUploadQueueState {
     pending_promotions: Vec<Ed2kUploadSessionKey>,
     next_waiting_sequence: u64,
     underfill_since: Option<Instant>,
+    /// Wall-clock instant of the most recent slot open (grant or promotion): the
+    /// analog of the oracle `m_nLastStartUpload` stamped on every AddUpNextClient
+    /// (UploadQueue.cpp:370). Drives the 1/sec slot-open pacing gate.
+    last_slot_open: Option<Instant>,
     throttle_next_send_at: Option<Instant>,
 }
 
@@ -391,6 +410,7 @@ impl Ed2kUploadQueueState {
             pending_promotions: Vec::new(),
             next_waiting_sequence: 1,
             underfill_since: None,
+            last_slot_open: None,
             throttle_next_send_at: None,
         }
     }
@@ -537,6 +557,12 @@ impl Ed2kUploadQueueState {
                 served_ranges: VecDeque::new(),
             },
         );
+        // Stamp the slot-open pacing clock on the inline grant, mirroring the
+        // oracle stamping `m_nLastStartUpload` on every slot open
+        // (UploadQueue.cpp:370): a fresh grant paces the next slot open.
+        if phase == Ed2kUploadSessionPhase::Granted {
+            self.last_slot_open = Some(now);
+        }
         self.trim_waiting_queue(now);
         self.status_for_key(&key, now)
     }
@@ -1329,6 +1355,13 @@ impl Ed2kUploadQueueState {
     fn promote_waiters(&mut self, now: Instant) {
         self.refresh_elastic_underfill(now);
         while self.active_session_count() < self.effective_active_slot_limit(now) {
+            // Slot-open pacing: below the busy-pipe datarate the fork opens at most
+            // one new slot per second (oracle Process opens ONE client per tick via
+            // ForceNewClient, UploadQueue.cpp:821-823/972). Defer the remaining free
+            // slots to a later tick instead of bursting the whole backlog at once.
+            if !self.slot_open_paced(now) {
+                break;
+            }
             let Some(next_key) = self.best_waiting_key(now) else {
                 break;
             };
@@ -1352,6 +1385,31 @@ impl Ed2kUploadQueueState {
                 // grant like the master's failed TryToConnect path.
                 self.pending_promotions.push(next_key);
             }
+            // Stamp the slot-open pacing clock (oracle m_nLastStartUpload,
+            // UploadQueue.cpp:370): stamped for the connect-out grant too, so the
+            // disconnected-waiter promotions stagger 1/sec just like inline grants.
+            self.last_slot_open = Some(now);
+        }
+    }
+
+    /// One-slot-per-second slot-open pacing (oracle `ForceNewClient` gate,
+    /// UploadQueue.cpp:969-972). Returns whether a NEW upload slot may open now:
+    /// - always while below `MIN_UP_CLIENTS_ALLOWED` base slots (the fork fills the
+    ///   minimum immediately, before the 1/sec gate);
+    /// - always once the aggregate upload datarate is at/above the busy-pipe
+    ///   threshold (the fork bypasses the 1/sec cap and lets slots burst);
+    /// - otherwise only once at least one second has elapsed since the last grant
+    ///   (`m_nLastStartUpload + SEC2MS(1)`).
+    fn slot_open_paced(&self, now: Instant) -> bool {
+        if self.active_session_count() < MIN_UP_CLIENTS_ALLOWED {
+            return true;
+        }
+        if self.upload_rate_bytes_per_sec(now) >= UPLOAD_SLOT_OPEN_BURST_DATARATE_BYTES_PER_SEC {
+            return true;
+        }
+        match self.last_slot_open {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= UPLOAD_SLOT_OPEN_MIN_INTERVAL,
         }
     }
 
