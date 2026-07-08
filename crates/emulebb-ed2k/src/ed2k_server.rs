@@ -88,7 +88,7 @@ use search_expr::{encode_search_request, encode_search_request_with_criteria};
 use server_entry::ConfiguredServerEntry;
 use server_entry::{
     ResolvedServerEntry, configured_server_entries, resolve_callback_server_entry,
-    resolve_server_entry,
+    resolve_server_entry, retain_live_servers,
 };
 use server_events::decode_server_list;
 pub use server_events::{

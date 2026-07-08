@@ -1474,6 +1474,24 @@ impl EmulebbCore {
         }
     }
 
+    /// Endpoints whose consecutive-failure count is at or over the dead-server
+    /// retry threshold, so a UDP source/keyword walk can skip them exactly like
+    /// eMule (`GetFailedCount() >= GetDeadServerRetries()`, DownloadQueue.cpp:1798
+    /// / ServerList.cpp:265). Non-static servers are dropped from the list on
+    /// reaching the threshold, so in practice this surfaces static servers that
+    /// keep accumulating failures. Endpoints that do not parse as `ip:port` are
+    /// skipped (the walk matches configured entries by resolved address:port).
+    async fn ed2k_dead_server_endpoints(&self, dead_server_retries: u32) -> Vec<SocketAddr> {
+        let threshold = dead_server_retries.max(1);
+        let state = self.state.lock().await;
+        state
+            .server_fail_counts
+            .iter()
+            .filter(|(_, count)| **count >= threshold)
+            .filter_map(|(endpoint, _)| endpoint.parse::<SocketAddr>().ok())
+            .collect()
+    }
+
     pub async fn create_search(&self, request: SearchCreate) -> Result<Search> {
         let now = Utc::now();
         // Local index results are cheap, so include them immediately.
@@ -3050,10 +3068,13 @@ impl EmulebbCore {
             ),
         }
         if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
+            let dead_server_endpoints =
+                self.ed2k_dead_server_endpoints(config.dead_server_retries).await;
             match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &config,
                 excluded_endpoint: connected_server_endpoint,
+                dead_server_endpoints: &dead_server_endpoints,
                 max_attempts: configured_server_attempts(&config),
                 query: &request.query,
                 timeout,
@@ -4290,6 +4311,8 @@ impl EmulebbCore {
                 )
             };
             if !claimed_batch.targets.is_empty() {
+                let dead_server_endpoints =
+                    self.ed2k_dead_server_endpoints(config.dead_server_retries).await;
                 match search_source_udp_server_batches(Ed2kUdpSourceBatchSearchOptions {
                     bind_ip: network.bind_ip,
                     config: &config,
@@ -4298,6 +4321,7 @@ impl EmulebbCore {
                         has_background_search,
                         preferred_endpoint,
                     ),
+                    dead_server_endpoints: &dead_server_endpoints,
                     max_attempts: global_udp_source_batch_server_attempts(&config),
                     targets: &claimed_batch.targets,
                     timeout: Duration::from_secs(config.connect_timeout_secs.max(15)),

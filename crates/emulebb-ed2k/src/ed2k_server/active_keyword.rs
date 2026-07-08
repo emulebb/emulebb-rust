@@ -18,8 +18,8 @@ use super::{
     ServerSession, ServerSessionPhase, bind_server_udp_socket, configured_server_entries,
     decode_search_result_page, decode_udp_search_result_pages, encode_login_request, encode_packet,
     encode_search_request, login_identity_for_server_transport, read_server_udp_packet,
-    resolve_server_entry, send_connected_server_startup, send_udp_keyword_search,
-    should_use_server_obfuscation, wait_for_offer_files_settle,
+    resolve_server_entry, retain_live_servers, send_connected_server_startup,
+    send_udp_keyword_search, should_use_server_obfuscation, wait_for_offer_files_settle,
 };
 
 /// Inputs for a one-shot ED2K keyword search across configured servers.
@@ -39,6 +39,9 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub bind_ip: Ipv4Addr,
     pub config: &'a Ed2kConfig,
     pub excluded_endpoint: Option<SocketAddr>,
+    /// Servers at/over the dead-server retry threshold, skipped like eMule's UDP
+    /// keyword/stat walk (`GetFailedCount() >= GetDeadServerRetries()`).
+    pub dead_server_endpoints: &'a [SocketAddr],
     pub max_attempts: usize,
     pub query: &'a str,
     pub timeout: Duration,
@@ -59,12 +62,16 @@ pub async fn search_keyword_udp_servers(
         bind_ip,
         config,
         excluded_endpoint,
+        dead_server_endpoints,
         max_attempts,
         query,
         timeout,
         cancel,
     } = options;
     let mut configured_servers = configured_server_entries(config)?;
+    // eMule skips servers at/over the dead-server retry threshold in the UDP
+    // keyword/stat walk (ServerList.cpp:265); drop them before the walk.
+    retain_live_servers(&mut configured_servers, dead_server_endpoints);
     if let Some(excluded_endpoint) = excluded_endpoint {
         configured_servers.retain(|entry| {
             entry.host != excluded_endpoint.ip().to_string()

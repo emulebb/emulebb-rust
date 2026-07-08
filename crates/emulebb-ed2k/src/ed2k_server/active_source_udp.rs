@@ -16,7 +16,8 @@ use super::{
     Ed2kFoundSource, OP_GLOBFOUNDSOURCES, annotate_found_sources_server, bind_server_udp_socket,
     configured_server_entries, decode_udp_found_source_sets, merge_found_sources,
     read_server_udp_packet, read_server_udp_packet_from_any, resolve_server_entry,
-    send_udp_source_search, send_udp_source_search_batch, validate_found_sources,
+    retain_live_servers, send_udp_source_search, send_udp_source_search_batch,
+    validate_found_sources,
 };
 
 /// Inputs for an ED2K server UDP source search.
@@ -29,6 +30,9 @@ pub struct Ed2kUdpSourceSearchOptions<'a> {
     pub preferred_endpoint: Option<SocketAddr>,
     /// Server endpoint to skip, usually because another source-search path is already using it.
     pub excluded_endpoint: Option<SocketAddr>,
+    /// Servers at/over the dead-server retry threshold, skipped like eMule's UDP
+    /// source walk (`GetFailedCount() >= GetDeadServerRetries()`).
+    pub dead_server_endpoints: &'a [SocketAddr],
     /// Maximum number of configured servers to try.
     pub max_attempts: usize,
     /// Target ED2K file hash.
@@ -58,6 +62,9 @@ pub struct Ed2kUdpSourceBatchSearchOptions<'a> {
     pub preferred_endpoint: Option<SocketAddr>,
     /// Server endpoint to skip, usually because another source-search path is already using it.
     pub excluded_endpoint: Option<SocketAddr>,
+    /// Servers at/over the dead-server retry threshold, skipped like eMule's UDP
+    /// source walk (`GetFailedCount() >= GetDeadServerRetries()`).
+    pub dead_server_endpoints: &'a [SocketAddr],
     /// Maximum number of configured servers to try.
     pub max_attempts: usize,
     /// Target ED2K files.
@@ -83,6 +90,7 @@ pub async fn search_source_udp_servers(
         config,
         preferred_endpoint,
         excluded_endpoint,
+        dead_server_endpoints,
         max_attempts,
         file_hash,
         file_size,
@@ -90,6 +98,9 @@ pub async fn search_source_udp_servers(
         cancel,
     } = options;
     let mut configured_servers = configured_server_entries(config)?;
+    // eMule skips servers at/over the dead-server retry threshold in the UDP
+    // source walk (DownloadQueue.cpp:1798); drop them before the walk.
+    retain_live_servers(&mut configured_servers, dead_server_endpoints);
     if configured_servers.is_empty() {
         anyhow::bail!("ED2K UDP source search requires at least one configured server");
     }
@@ -335,6 +346,7 @@ pub async fn search_source_udp_server_batches(
         config,
         preferred_endpoint,
         excluded_endpoint,
+        dead_server_endpoints,
         max_attempts,
         targets,
         timeout,
@@ -344,6 +356,9 @@ pub async fn search_source_udp_server_batches(
         return Ok(HashMap::new());
     }
     let mut configured_servers = configured_server_entries(config)?;
+    // eMule skips servers at/over the dead-server retry threshold in the UDP
+    // source walk (DownloadQueue.cpp:1798); drop them before the walk.
+    retain_live_servers(&mut configured_servers, dead_server_endpoints);
     if configured_servers.is_empty() {
         anyhow::bail!("ED2K UDP source batch search requires at least one configured server");
     }

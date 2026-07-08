@@ -158,6 +158,26 @@ pub(super) fn configured_server_entries(config: &Ed2kConfig) -> Result<Vec<Confi
     Ok(ordered)
 }
 
+/// Drop configured servers whose endpoint is at or over the dead-server retry
+/// threshold before a UDP source/keyword walk, mirroring eMule's skip of
+/// `GetFailedCount() >= GetDeadServerRetries()` servers in the UDP source walk
+/// (DownloadQueue.cpp:1798) and stat ping (ServerList.cpp:265). `dead_endpoints`
+/// is the over-threshold set the core's fail-count store already tracks; the
+/// match uses the same host/port comparison as the excluded-endpoint filter.
+pub(super) fn retain_live_servers(
+    servers: &mut Vec<ConfiguredServerEntry>,
+    dead_endpoints: &[SocketAddr],
+) {
+    if dead_endpoints.is_empty() {
+        return;
+    }
+    servers.retain(|entry| {
+        !dead_endpoints
+            .iter()
+            .any(|dead| entry.port == dead.port() && entry.host == dead.ip().to_string())
+    });
+}
+
 pub(super) async fn resolve_server_entry(
     entry: &ConfiguredServerEntry,
 ) -> Result<ResolvedServerEntry> {
@@ -233,6 +253,33 @@ mod tests {
         assert_eq!(entries[0].base_endpoint_text(), "203.0.113.20:4661");
         assert_eq!(entries[0].display_name(), "configured-with-metadata");
         assert_eq!(entries[1].base_endpoint_text(), "203.0.113.10:4661");
+    }
+
+    #[test]
+    fn retain_live_servers_skips_dead_server_endpoints() {
+        let config = Ed2kConfig {
+            server_entries: vec![
+                metadata_entry("203.0.113.10", 4661, "alive"),
+                metadata_entry("203.0.113.20", 4661, "dead"),
+                metadata_entry("203.0.113.30", 5000, "alive-other-port"),
+            ],
+            ..Ed2kConfig::default()
+        };
+        let mut entries = configured_server_entries(&config).unwrap();
+
+        // Empty dead set is a no-op.
+        retain_live_servers(&mut entries, &[]);
+        assert_eq!(entries.len(), 3);
+
+        // The over-threshold server (and only it) is dropped; a same-IP entry on
+        // a different port is kept (endpoint, not host, must match).
+        let dead = vec!["203.0.113.20:4661".parse::<SocketAddr>().unwrap()];
+        retain_live_servers(&mut entries, &dead);
+        let remaining: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.base_endpoint_text())
+            .collect();
+        assert_eq!(remaining, ["203.0.113.10:4661", "203.0.113.30:5000"]);
     }
 
     #[test]
