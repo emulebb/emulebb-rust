@@ -29,10 +29,12 @@ const FT_COMPLETE_SOURCES: u8 = 0x30;
 const ED2K_SEARCH_OP_GREATER_EQUAL: u8 = 3;
 const ED2K_SEARCH_OP_LESS_EQUAL: u8 = 4;
 
-/// Maximum number of boolean AND/OR/NOT operators the emitted search tree may
-/// carry. eMule refuses an over-complex expression (`iOpAnd + iOpOr + iOpNot >
+/// Maximum number of boolean AND/OR/NOT operators the parsed KEYWORD expression
+/// may carry. eMule refuses an over-complex expression (`iOpAnd + iOpOr + iOpNot >
 /// 10` -> IDS_SEARCH_TOOCOMPLEX, SearchResultsWnd.cpp:1134-1135) rather than
-/// sending it, so a Lugdunum server never sees an oversized tree.
+/// sending it, so a Lugdunum server never sees an oversized tree. The cap counts
+/// only the user's typed keyword boolean operators; the metatag constraints are
+/// appended afterwards and do NOT count (see the counting note below).
 const MAX_SEARCH_OPERATORS: usize = 10;
 
 /// Server-side search criteria folded into the eD2k query tree (eMule
@@ -137,18 +139,25 @@ pub(super) fn encode_search_request_with_criteria(
         }
     }
 
-    // eMule refuses an over-complex tree instead of sending it
-    // (SearchResultsWnd.cpp:1134-1135). Count the boolean operators the final
-    // tree carries: the keyword operators plus, when constraints are appended
-    // under a top-level AND, one AND per constraint (n-1 chain ANDs + the join).
+    // eMule refuses an over-complex KEYWORD expression instead of sending it.
+    // ParsedSearchExpression (SearchResultsWnd.cpp:1098-1135) tallies only the
+    // boolean AND/OR/NOT operators of the parsed keyword expression (iOpAnd +
+    // iOpOr + iOpNot) and errors IDS_SEARCH_TOOCOMPLEX above 10. That check runs
+    // DURING PARSE, before CreateSearchExpressionTree appends the metatag
+    // constraints (type/min/max/avail/complete/ext/...): the ":1119-1133"
+    // comment enumerates the ~12 later attributes as an ADDITIONAL budget on top
+    // of the 10, so the constraints do NOT count toward this refusal. We count
+    // the pre-flatten keyword operator tree to match the oracle's basis (an
+    // implicit AND between N adjacent keyword terms = N-1 operators) -- the
+    // user's typed boolean complexity, independent of whether a flat AND-chain
+    // is later folded into a single joined wire string.
     let keyword_operators = keyword_expression
         .as_ref()
         .map_or(0, count_search_operators);
     let constraints_present = !keyword.is_empty() && !criteria.is_empty() && !constraints.is_empty();
-    let total_operators = keyword_operators + if constraints_present { constraints.len() } else { 0 };
-    if total_operators > MAX_SEARCH_OPERATORS {
+    if keyword_operators > MAX_SEARCH_OPERATORS {
         anyhow::bail!(
-            "ED2K search expression too complex: {total_operators} boolean operators exceed the {MAX_SEARCH_OPERATORS}-operator limit"
+            "ED2K search expression too complex: {keyword_operators} keyword boolean operators exceed the {MAX_SEARCH_OPERATORS}-operator limit"
         );
     }
 
@@ -551,6 +560,48 @@ mod criteria_tests {
             .collect::<Vec<_>>()
             .join(" OR ");
         assert!(encode_search_request(&at_limit).is_ok());
+
+        // Implicit-AND keyword terms count too: 12 words => 11 implicit ANDs > 10.
+        let too_many_words = (0..12).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        assert!(encode_search_request(&too_many_words).is_err());
+    }
+
+    #[test]
+    fn metatag_constraints_do_not_count_toward_complexity_cap() {
+        // Regression for RUST-PAR-019: round-18 counted constraints toward the
+        // 10-operator cap, but the oracle checks iOpAnd+iOpOr+iOpNot DURING PARSE
+        // before the metatag constraints are appended (SearchResultsWnd.cpp
+        // :1098-1135). An 8-word keyword (7 implicit-AND operators) plus 4
+        // constraints must ENCODE, not error: 7 <= 10 keyword operators.
+        let eight_words = (0..8).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let criteria = SearchCriteria {
+            file_type: Some("Video".to_string()),
+            min_size: Some(1000),
+            max_size: Some(2_000_000),
+            min_availability: Some(5),
+            ..SearchCriteria::default()
+        };
+        let encoded = encode_search_request_with_criteria(&eight_words, &criteria)
+            .expect("8 keyword operators + 4 constraints must encode (constraints do not count)");
+        assert!(!encoded.is_empty());
+
+        // Even at the keyword cap (11 words => 10 implicit ANDs) with a full set
+        // of constraints the query still encodes: constraints are excluded.
+        let eleven_words = (0..11).map(|i| format!("k{i}")).collect::<Vec<_>>().join(" ");
+        let full = SearchCriteria {
+            file_type: Some("Pro".to_string()),
+            extension: Some("iso".to_string()),
+            min_size: Some(1),
+            max_size: Some(9_000_000),
+            min_availability: Some(2),
+            min_complete_sources: Some(1),
+        };
+        assert!(encode_search_request_with_criteria(&eleven_words, &full).is_ok());
+
+        // But a genuinely over-complex KEYWORD expression still refuses even with
+        // no constraints (12 words => 11 implicit ANDs > 10).
+        let twelve_words = (0..12).map(|i| format!("k{i}")).collect::<Vec<_>>().join(" ");
+        assert!(encode_search_request_with_criteria(&twelve_words, &full).is_err());
     }
 
     #[test]
