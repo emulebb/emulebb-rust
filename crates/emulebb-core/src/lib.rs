@@ -87,6 +87,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod callback_tracker;
 mod categories;
 mod category_runtime;
 mod core_state;
@@ -1139,6 +1140,9 @@ impl EmulebbCore {
                     ed2k_listener: Arc::clone(&ed2k_listener),
                     server_state: Arc::clone(&server_state),
                     kad_firewall: Arc::clone(&kad_firewall),
+                    direct_callback_limiter: Arc::new(
+                        crate::callback_tracker::DirectCallbackRateLimiter::new(),
+                    ),
                 },
                 Arc::clone(&shutdown),
             )));

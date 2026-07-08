@@ -54,6 +54,9 @@ pub(crate) struct ReaskReengageContext {
     pub server_state: Arc<RwLock<Ed2kServerState>>,
     /// The Kad TCP firewall verdict (pure-Kad LowID detection).
     pub kad_firewall: Arc<Mutex<KadFirewallState>>,
+    /// Per-IP direct-callback rate limiter (oracle `AllowCalbackRequest` /
+    /// `AddTrackCallbackRequests`): at most one request per IP per 180s.
+    pub direct_callback_limiter: Arc<crate::callback_tracker::DirectCallbackRateLimiter>,
 }
 
 /// Fetches a URL body for server.met / nodes.dat import. A browser User-Agent
@@ -343,6 +346,17 @@ async fn handle_direct_callback_req(
         );
         return;
     }
+    // Per-IP rate limit (oracle AllowCalbackRequest, ClientUDPSocket.cpp:431):
+    // suppress repeat/spam requests — at most one per source IP per 180s —
+    // before doing any work, exactly like the oracle checks it ahead of the
+    // firewalled gate.
+    if !ctx.direct_callback_limiter.allow(requester_ip) {
+        tracing::debug!(
+            "ignoring OP_DIRECTCALLBACKREQ from {requester_ip}:{tcp_port}: too many requests from \
+             this IP within 180s"
+        );
+        return;
+    }
     // Only act when we are still the firewalled (LowID) side we advertised: a
     // non-firewalled node never advertised direct UDP callback, so a request to
     // it is stale/spurious (oracle gates on IsFirewalled()).
@@ -355,6 +369,9 @@ async fn handle_direct_callback_req(
         );
         return;
     }
+    // Accepted: track this IP so subsequent requests within 180s are suppressed
+    // (oracle AddTrackCallbackRequests, only on an accepted request).
+    ctx.direct_callback_limiter.track(requester_ip);
     let peer_addr = SocketAddr::new(IpAddr::V4(requester_ip), tcp_port);
     let bind_ip = ctx.bind_ip;
     let hello_identity = ctx.hello_identity;
