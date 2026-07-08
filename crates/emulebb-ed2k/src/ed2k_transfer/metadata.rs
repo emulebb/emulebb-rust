@@ -357,12 +357,17 @@ impl Ed2kTransferRuntime {
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         if priority.is_some() {
-            self.upload_queue.lock().await.update_file_priority(
+            let mut queue = self.upload_queue.lock().await;
+            // Resolve an auto file's dynamic tier from its live queue depth
+            // (oracle GetQueuedCount, KnownFile.cpp:1382-1387) so a REST priority
+            // change re-scores the file against its current demand.
+            let queued_count = queue.upload_client_count_for_file(&manifest.file_hash);
+            queue.update_file_priority(
                 &manifest.file_hash,
                 upload_priority_score(
                     &manifest.upload_priority,
                     manifest.auto_upload_priority,
-                    0,
+                    queued_count,
                 ),
             );
         }

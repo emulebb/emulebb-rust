@@ -105,9 +105,17 @@ impl Ed2kTransferRuntime {
             }
         }
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
-        let file_priority_score = self.file_priority_score(file_hash, 0);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
         let file_size = self.shared_file_size(file_hash);
+        // Resolve an auto-upload-priority file's dynamic tier from its live queue
+        // depth (oracle GetQueuedCount, KnownFile.cpp:1382-1387). Read the count
+        // in a short lock, released before the blocking manifest read.
+        let queued_count = self
+            .upload_queue
+            .lock()
+            .await
+            .upload_client_count_for_file(&file_hash.to_string());
+        let file_priority_score = self.file_priority_score(file_hash, queued_count);
         let status = self.upload_queue.lock().await.begin_session(
             handle.key().clone(),
             connection_id,

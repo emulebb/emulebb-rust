@@ -1807,6 +1807,20 @@ impl Ed2kUploadQueueState {
             .count()
     }
 
+    /// The number of clients associated with a shared file's upload set, the
+    /// oracle's `CKnownFile::GetQueuedCount()` = `m_ClientUploadList.GetCount()`
+    /// (KnownFile.h:77). Every peer that has requested this file is on that list
+    /// (`SetUploadFileID` -> `AddUploadingClient`, UploadClient.cpp:583-585),
+    /// whether waiting for a slot or actively uploading, so we count all sessions
+    /// for the hash regardless of phase. Feeds the auto-upload-priority dynamic
+    /// tier (`UpdateAutoUpPriority`, KnownFile.cpp:1377-1392).
+    pub(super) fn upload_client_count_for_file(&self, file_hash: &str) -> u64 {
+        self.sessions
+            .keys()
+            .filter(|key| key.file_hash == file_hash)
+            .count() as u64
+    }
+
     fn active_granted_session_count(&self) -> usize {
         self.sessions
             .values()
@@ -1998,5 +2012,59 @@ mod tests {
         let config = Ed2kUploadQueueConfig::default();
         assert_eq!(config.session_transfer_percent, 90);
         assert_eq!(config.session_time_limit.as_secs(), 7_200);
+    }
+
+    #[test]
+    fn upload_priority_score_resolves_auto_like_publish_ranker() {
+        // Explicit tiers = CUpDownClient::GetFilePrioAsNumber (UploadClient.cpp
+        // :401-425): VERYLOW->2, LOW->6, NORMAL->7, HIGH->9, VERYHIGH->18.
+        assert_eq!(upload_priority_score("verylow", false, 0), 2);
+        assert_eq!(upload_priority_score("low", false, 0), 6);
+        assert_eq!(upload_priority_score("normal", false, 0), 7);
+        assert_eq!(upload_priority_score("high", false, 0), 9);
+        assert_eq!(upload_priority_score("veryhigh", false, 0), 18);
+        assert_eq!(upload_priority_score("release", false, 0), 18);
+        // Auto empty/short queue -> HIGH (9), matching the publish ranker's HIGH
+        // resolution, NOT the NORMAL (7) it used to collapse to.
+        assert_eq!(upload_priority_score("normal", true, 0), 9);
+        assert_eq!(upload_priority_score("auto", false, 1), 9);
+        // GetQueuedCount() > 1 -> NORMAL (7); > 20 -> LOW (6).
+        assert_eq!(upload_priority_score("normal", true, 2), 7);
+        assert_eq!(upload_priority_score("normal", true, 21), 6);
+    }
+
+    #[test]
+    fn upload_client_count_for_file_counts_sessions_per_hash() {
+        let mut queue = Ed2kUploadQueueState::new(Ed2kUploadQueueConfig::default());
+        let now = Instant::now();
+        let mut peer_a = test_support_peer();
+        peer_a.client_id = Some(0x0102_0304);
+        peer_a.user_hash = Some([1; 16]);
+        let mut peer_b = test_support_peer();
+        peer_b.client_id = Some(0x0102_0305);
+        peer_b.user_hash = Some([2; 16]);
+        peer_b.tcp_port = 4663;
+        let hash_x = "aa".repeat(16);
+        let hash_y = "bb".repeat(16);
+        queue.begin_session(
+            Ed2kUploadSessionKey { peer: peer_a, file_hash: hash_x.clone() },
+            1,
+            now,
+            7,
+            1_000,
+            5_000,
+            1_000,
+        );
+        queue.begin_session(
+            Ed2kUploadSessionKey { peer: peer_b, file_hash: hash_x.clone() },
+            2,
+            now,
+            7,
+            1_000,
+            5_000,
+            1_000,
+        );
+        assert_eq!(queue.upload_client_count_for_file(&hash_x), 2);
+        assert_eq!(queue.upload_client_count_for_file(&hash_y), 0);
     }
 }
