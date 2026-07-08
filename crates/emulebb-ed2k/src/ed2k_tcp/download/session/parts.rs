@@ -88,7 +88,7 @@ pub(super) async fn handle_download_part_packet(
                     "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len}"
                 ),
             );
-            let has_pending_blocks = !pending_part_requests.is_empty();
+            let has_pending_blocks = has_sent_block_requests(pending_part_requests);
             return drop_stale_block_packet(StaleBlockPacketDrop {
                 transport,
                 session_state,
@@ -112,7 +112,7 @@ pub(super) async fn handle_download_part_packet(
                     "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len} pending={pending_part_requests:?}",
                 ),
             );
-            let has_pending_blocks = !pending_part_requests.is_empty();
+            let has_pending_blocks = has_sent_block_requests(pending_part_requests);
             return drop_stale_block_packet(StaleBlockPacketDrop {
                 transport,
                 session_state,
@@ -297,7 +297,7 @@ pub(super) async fn handle_download_part_packet(
                 "unexpected_part_without_queued_request",
                 format!("file_hash={file_hash_hex} start={start} end={end}"),
             );
-            let has_pending_blocks = !pending_part_requests.is_empty();
+            let has_pending_blocks = has_sent_block_requests(pending_part_requests);
             return drop_stale_block_packet(StaleBlockPacketDrop {
                 transport,
                 session_state,
@@ -324,7 +324,7 @@ pub(super) async fn handle_download_part_packet(
                         "file_hash={file_hash_hex} start={start} end={end} payload_len={payload_len}"
                     ),
                 );
-                let has_pending_blocks = !pending_part_requests.is_empty();
+                let has_pending_blocks = has_sent_block_requests(pending_part_requests);
                 return drop_stale_block_packet(StaleBlockPacketDrop {
                     transport,
                     session_state,
@@ -376,7 +376,7 @@ pub(super) async fn handle_download_part_packet(
                         "file_hash={file_hash_hex} start={start} end={end} received_end={received_end}"
                     ),
                 );
-                let has_pending_blocks = !pending_part_requests.is_empty();
+                let has_pending_blocks = has_sent_block_requests(pending_part_requests);
                 return drop_stale_block_packet(StaleBlockPacketDrop {
                     transport,
                     session_state,
@@ -398,7 +398,7 @@ pub(super) async fn handle_download_part_packet(
                     "file_hash={file_hash_hex} start={start} end={end} pending={pending_part_requests:?}",
                 ),
             );
-            let has_pending_blocks = !pending_part_requests.is_empty();
+            let has_pending_blocks = has_sent_block_requests(pending_part_requests);
             return drop_stale_block_packet(StaleBlockPacketDrop {
                 transport,
                 session_state,
@@ -422,6 +422,18 @@ pub(super) async fn handle_download_part_packet(
     }
 
     Ok(None)
+}
+
+/// REG-6: whether we have actually SENT block requests to this peer (mirrors the
+/// oracle's `m_PendingBlocks_list.IsEmpty()` gate, DownloadClient.cpp:2692, where
+/// the list holds requests already put on the wire). A `PendingPartRequest` is
+/// pushed when a block is planned but only marked `queued` once its
+/// OP_REQUESTPARTS has been written (window.rs). Arming the stale guard on merely
+/// planned-but-unsent requests would let a peer that streams payload without our
+/// having asked trip the 32-in-15s cancel, where the oracle would only drop the
+/// packets.
+fn has_sent_block_requests(pending_part_requests: &[PendingPartRequest]) -> bool {
+    pending_part_requests.iter().any(|request| request.queued)
 }
 
 struct StaleBlockPacketDrop<'a> {
@@ -535,4 +547,33 @@ async fn flush_download_blocks(blocks: FlushDownloadBlocks<'_>) -> Result<()> {
         aich_recovery_parts: &mut session_state.pending_aich_recovery_parts,
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PendingPartRequest, has_sent_block_requests};
+
+    /// REG-6: the stale guard arms on SENT block requests only (oracle
+    /// `m_PendingBlocks_list`, DownloadClient.cpp:2692), not on planned-but-unsent
+    /// ones — a `PendingPartRequest` is `queued` only after its OP_REQUESTPARTS is
+    /// on the wire. Payload arriving before we sent any request must not arm the
+    /// 32-in-15s cancel; payload after a request was sent does.
+    #[test]
+    fn stale_guard_arms_only_on_sent_block_requests() {
+        // Planned but not yet sent (queued == false): guard stays disarmed, so
+        // stray payload is merely dropped, never counted toward the cancel.
+        let planned = PendingPartRequest::new(0, 0, 100);
+        assert!(!has_sent_block_requests(std::slice::from_ref(&planned)));
+
+        // Once OP_REQUESTPARTS is written the request is `queued`: guard arms.
+        let mut sent = PendingPartRequest::new(1, 100, 200);
+        sent.queued = true;
+        assert!(has_sent_block_requests(std::slice::from_ref(&sent)));
+
+        // A mix arms as soon as any request is on the wire.
+        assert!(has_sent_block_requests(&[planned, sent]));
+
+        // No requests at all: disarmed.
+        assert!(!has_sent_block_requests(&[]));
+    }
 }
