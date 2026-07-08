@@ -207,6 +207,18 @@ impl KadPublishSchedule {
         }
     }
 
+    /// Reset the file's NOTES publish clock so `notes_due` becomes true on the
+    /// next tick. The analog of the oracle `SetLastPublishTimeKadNotes(0)` called
+    /// from `CKnownFile::SetFileComment`/`SetFileRating` (KnownFile.cpp:1340,1360)
+    /// when a comment/rating actually changes, so the edited note republishes
+    /// promptly instead of waiting up to the 24h interval. Only the notes clock
+    /// is touched; source/keyword timers are unaffected.
+    pub(crate) fn reset_notes(&mut self, file_hash: &str) {
+        if let Some(state) = self.files.get_mut(file_hash) {
+            state.last_notes = None;
+        }
+    }
+
     /// Record that the file's notes were (re)published at `now`.
     pub(crate) fn mark_notes_published(&mut self, file_hash: &str, now: Instant) {
         self.files
@@ -478,6 +490,27 @@ mod tests {
         // reset the notes timer.
         sched.mark_keyword_published(HASH, KEYWORD, almost);
         assert!(!sched.notes_due(HASH, almost));
+    }
+
+    #[test]
+    fn reset_notes_makes_notes_due_again() {
+        // A comment/rating edit resets the notes clock (SetLastPublishTimeKadNotes(0)),
+        // so a just-published note becomes due again without waiting 24h. Only the
+        // notes clock is affected -- the source clock is left intact.
+        let mut sched = KadPublishSchedule::new();
+        let t0 = Instant::now();
+        sched.mark_notes_published(HASH, t0);
+        sched.mark_source_published(HASH, t0, None);
+        assert!(!sched.notes_due(HASH, t0));
+
+        sched.reset_notes(HASH);
+        assert!(sched.notes_due(HASH, t0));
+        // Source timer untouched by a notes reset.
+        assert!(!sched.source_due(HASH, t0, None));
+
+        // Resetting an unknown file is a harmless no-op (stays due-by-default).
+        sched.reset_notes("unknownhash");
+        assert!(sched.notes_due("unknownhash", t0));
     }
 
     #[test]

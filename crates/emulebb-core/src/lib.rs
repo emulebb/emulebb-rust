@@ -401,6 +401,11 @@ pub struct EmulebbCore {
     shared_catalog_publish_dirty: Arc<AtomicBool>,
     shared_catalog_publish_worker: Arc<AtomicBool>,
     shared_catalog_publish_last: Arc<Mutex<Option<Instant>>>,
+    /// Files whose Kad NOTES clock must be reset on the next publish tick because
+    /// their comment/rating was just edited (oracle `SetLastPublishTimeKadNotes(0)`).
+    /// Drained by the loop-local `KadPublishSchedule`; `std::sync::Mutex` since it
+    /// is only ever held for a brief insert/drain, never across an `.await`.
+    kad_notes_dirty: Arc<std::sync::Mutex<HashSet<String>>>,
     ed2k_publish_diagnostics: ed2k_publish_diagnostics::SharedEd2kPublishDiagnostics,
     kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
     /// Connection-aware queue for network searches (`search_queue.rs` state
@@ -516,6 +521,7 @@ impl EmulebbCore {
             shared_catalog_publish_dirty: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_worker: Arc::new(AtomicBool::new(false)),
             shared_catalog_publish_last: Arc::new(Mutex::new(None)),
+            kad_notes_dirty: Arc::new(std::sync::Mutex::new(HashSet::new())),
             ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             search_queue: Arc::new(std::sync::Mutex::new(SearchQueue::new())),
@@ -978,6 +984,7 @@ impl EmulebbCore {
                     kad_firewall: Arc::clone(&kad_firewall),
                     kad_buddy: Arc::clone(&kad_buddy),
                     network: network.clone(),
+                    kad_notes_dirty: Arc::clone(&self.kad_notes_dirty),
                 },
                 Arc::clone(&shutdown),
             )));
@@ -1962,7 +1969,7 @@ impl EmulebbCore {
         hash: &str,
         request: SharedFileUpdate,
     ) -> Result<Option<LocalShare>> {
-        let Some(_share) = self.share(hash).await else {
+        let Some(share) = self.share(hash).await else {
             return Ok(None);
         };
         let priority = request
@@ -1975,6 +1982,17 @@ impl EmulebbCore {
         if priority.is_none() && comment_rating.is_none() {
             anyhow::bail!("shared-file PATCH requires priority, comment, or rating");
         }
+        // A comment/rating change resets the Kad NOTES clock (oracle
+        // `SetLastPublishTimeKadNotes(0)`, KnownFile.cpp:1340,1360) so the edited
+        // note republishes promptly; a priority-only PATCH does NOT. Detect an
+        // actual change against the current values, not merely a present field.
+        let notes_changed = shared_file_notes_changed(
+            &share.comment,
+            share.rating,
+            comment_rating
+                .as_ref()
+                .map(|(comment, rating)| (comment.as_str(), *rating)),
+        );
         self.ed2k_transfers
             .update_shared_file_metadata(
                 hash,
@@ -1986,6 +2004,28 @@ impl EmulebbCore {
                     .map(|(comment, rating)| (comment.as_str(), *rating)),
             )
             .await?;
+        if notes_changed {
+            // Clear the persisted notes row first so a restart before the loop
+            // drains the queue cannot re-hydrate the stale 24h clock, then flag
+            // the live loop-local schedule.
+            if let Err(error) = self
+                .metadata_store
+                .delete_kad_outbound_publish(&share.hash, MetadataKadOutboundPublishKind::Notes)
+            {
+                tracing::warn!(
+                    file_hash = %share.hash,
+                    "failed to clear persisted Kad notes publish row after edit: {error:#}"
+                );
+            }
+            match self.kad_notes_dirty.lock() {
+                Ok(mut dirty) => {
+                    dirty.insert(share.hash.clone());
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().insert(share.hash.clone());
+                }
+            }
+        }
         self.queue_ed2k_shared_catalog_publish();
         Ok(self.share(hash).await)
     }
@@ -5259,6 +5299,9 @@ struct KadPublishLoopRuntime {
     kad_firewall: Arc<Mutex<KadFirewallState>>,
     kad_buddy: Arc<Mutex<KadBuddyState>>,
     network: Ed2kNetworkConfig,
+    /// Shared queue of files whose NOTES clock must be reset (comment/rating
+    /// edited); drained each tick into the loop-local schedule.
+    kad_notes_dirty: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 /// Re-scan cadence for the shared-file publish loop. The master `Publish()` runs
@@ -5452,6 +5495,13 @@ async fn run_kad_shared_file_publish_loop(
             continue;
         }
 
+        // G1: republish edited notes promptly. A comment/rating PATCH enqueues
+        // the file hash here; reset its in-memory NOTES clock so `notes_due`
+        // becomes true this tick (analog of `SetLastPublishTimeKadNotes(0)`,
+        // KnownFile.cpp:1340,1360). The persisted notes row is cleared at edit
+        // time, so a restart cannot restore the stale clock either.
+        drain_kad_notes_dirty(&runtime.kad_notes_dirty, &mut schedule);
+
         if let Err(error) = publish_kad_due_shared_files(
             &runtime,
             &mut schedule,
@@ -5487,6 +5537,36 @@ async fn run_kad_shared_file_publish_loop(
         diagnostics.phase = "stopped".to_string();
         diagnostics.running = false;
     });
+}
+
+/// Whether a shared-file PATCH changed the Kad notes-relevant fields
+/// (comment/rating) versus the current values. A priority-only PATCH passes
+/// `comment_rating = None` and is never a notes change — the oracle resets the
+/// notes clock only from `SetFileComment`/`SetFileRating` (KnownFile.cpp:1337-
+/// 1355,1357-1375), each gated on the value actually differing.
+fn shared_file_notes_changed(
+    current_comment: &str,
+    current_rating: u8,
+    comment_rating: Option<(&str, u8)>,
+) -> bool {
+    comment_rating
+        .is_some_and(|(comment, rating)| comment != current_comment || rating != current_rating)
+}
+
+/// Drain the pending NOTES-reset queue into the loop-local schedule, resetting
+/// each file's notes clock so an edited comment/rating republishes this tick
+/// (oracle `SetLastPublishTimeKadNotes(0)`).
+fn drain_kad_notes_dirty(
+    kad_notes_dirty: &Arc<std::sync::Mutex<HashSet<String>>>,
+    schedule: &mut kad_publish_schedule::KadPublishSchedule,
+) {
+    let dirty: Vec<String> = match kad_notes_dirty.lock() {
+        Ok(mut guard) => guard.drain().collect(),
+        Err(poisoned) => poisoned.into_inner().drain().collect(),
+    };
+    for file_hash in dirty {
+        schedule.reset_notes(&file_hash);
+    }
 }
 
 fn hydrate_kad_outbound_publish_schedule(
@@ -9715,6 +9795,38 @@ mod tests {
         };
         assert!(!kad_source_publish_eligible(&hint));
         assert!(!kad_keyword_publish_eligible(&hint));
+    }
+
+    #[test]
+    fn comment_edit_marks_notes_dirty_but_priority_only_edit_does_not() {
+        // A comment change edits the notes-relevant fields -> notes clock resets.
+        assert!(shared_file_notes_changed("old", 3, Some(("new", 3))));
+        // A rating change is also a notes change.
+        assert!(shared_file_notes_changed("same", 3, Some(("same", 5))));
+        // Re-submitting identical comment/rating is NOT a change.
+        assert!(!shared_file_notes_changed("same", 3, Some(("same", 3))));
+        // A priority-only PATCH carries no comment/rating and must not reset notes.
+        assert!(!shared_file_notes_changed("same", 3, None));
+    }
+
+    #[test]
+    fn draining_notes_dirty_queue_resets_the_notes_clock() {
+        // The edit path enqueues the file hash; the publish loop drains it and
+        // resets the in-memory notes clock so the file is notes-due next tick.
+        let hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
+        let mut schedule = kad_publish_schedule::KadPublishSchedule::new();
+        let now = Instant::now();
+        schedule.mark_notes_published(&hash, now);
+        assert!(!schedule.notes_due(&hash, now));
+
+        let dirty: Arc<std::sync::Mutex<HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        dirty.lock().unwrap().insert(hash.clone());
+
+        drain_kad_notes_dirty(&dirty, &mut schedule);
+
+        assert!(schedule.notes_due(&hash, now));
+        assert!(dirty.lock().unwrap().is_empty());
     }
 
     #[test]

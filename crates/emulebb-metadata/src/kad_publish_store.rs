@@ -124,6 +124,26 @@ impl super::MetadataStore {
         Ok(())
     }
 
+    /// Clear the persisted outbound-publish rows of one kind for a file, so a
+    /// restart cannot restore a stale (re)publish clock. Used when a user edit
+    /// invalidates a prior publish (e.g. a comment/rating change resets the Kad
+    /// notes clock, oracle `SetLastPublishTimeKadNotes(0)`).
+    pub fn delete_kad_outbound_publish(
+        &self,
+        file_hash: &str,
+        publish_kind: MetadataKadOutboundPublishKind,
+    ) -> Result<()> {
+        let file_hash = decode_fixed_hex(file_hash, 16, "Kad outbound file hash")?;
+        self.connection()?.execute(
+            r#"
+            DELETE FROM kad_outbound_publish_schedule
+            WHERE file_hash = ?1 AND publish_kind = ?2
+            "#,
+            params![file_hash, publish_kind.as_str()],
+        )?;
+        Ok(())
+    }
+
     pub fn load_kad_outbound_publish_schedule(&self) -> Result<MetadataKadOutboundPublishSchedule> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
