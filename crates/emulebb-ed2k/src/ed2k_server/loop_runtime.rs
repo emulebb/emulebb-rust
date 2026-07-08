@@ -43,7 +43,9 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         shared_catalog,
         state: Arc::clone(&state),
         kad_firewall,
-        keepalive_interval: Duration::from_secs(config.keepalive_secs.max(1)),
+        // eMule ServerKeepAliveTimeout: 0 disables the idle keepalive entirely
+        // (ServerConnect.cpp:672-674). When enabled it is a minutes-scale value.
+        keepalive_interval: config.keepalive_interval(),
         // Server connect budget (eMule CONSERVTIMEOUT = SEC2MS(25), Opcodes.h:109).
         connect_timeout: Duration::from_secs(config.server_connect_timeout_secs.max(1)),
         rotation_interval: (config.session_rotation_secs > 0)

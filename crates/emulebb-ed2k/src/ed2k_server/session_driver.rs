@@ -22,6 +22,11 @@ use super::{
     should_use_server_obfuscation, start_background_server_search, validate_found_sources,
 };
 
+/// Wakeup cadence used to drive the periodic UDP server-status ping when the
+/// TCP keepalive is disabled (`keepalive_interval == None`). It sends no TCP
+/// traffic; it only keeps the status-ping schedule alive.
+const KEEPALIVE_DISABLED_STATUS_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerSessionExit {
     ContinueOrder,
@@ -519,8 +524,15 @@ pub(super) async fn run_one_server_session(
                     }
                 }
             }
-            _ = tokio::time::sleep(context.keepalive_interval) => {
-                if session.last_tx.elapsed() >= context.keepalive_interval {
+            _ = tokio::time::sleep(context.keepalive_interval.unwrap_or(KEEPALIVE_DISABLED_STATUS_TICK)) => {
+                // eMule KeepConnectionAlive (ServerConnect.cpp:672-674) only
+                // "pings" the server when the keepalive timeout is enabled AND
+                // the TCP link has been idle for at least that interval. With the
+                // keepalive disabled (interval None) we still wake on a fixed
+                // cadence so the UDP status ping below keeps its own schedule.
+                if let Some(interval) = context.keepalive_interval
+                    && session.last_tx.elapsed() >= interval
+                {
                     // Keepalive traffic must not advance the large-library
                     // offer cursor. Full OP_OFFERFILES refreshes are driven by
                     // startup and the core's rate-limited shared-catalog

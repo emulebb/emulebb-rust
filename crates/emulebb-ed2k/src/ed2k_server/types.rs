@@ -61,7 +61,10 @@ pub(super) struct ServerSessionContext {
     pub(super) shared_catalog: Ed2kSharedCatalog,
     pub(super) state: Arc<RwLock<Ed2kServerState>>,
     pub(super) kad_firewall: Arc<Mutex<KadFirewallState>>,
-    pub(super) keepalive_interval: Duration,
+    /// Idle TCP keepalive interval (empty OP_OFFERFILES ping). `None` disables
+    /// the keepalive entirely, mirroring eMule's `ServerKeepAliveTimeout == 0`
+    /// (ServerConnect.cpp:672-674). When enabled it is a minutes-scale value.
+    pub(super) keepalive_interval: Option<Duration>,
     pub(super) connect_timeout: Duration,
     pub(super) rotation_interval: Option<Duration>,
     pub(super) shutdown: Arc<AtomicBool>,

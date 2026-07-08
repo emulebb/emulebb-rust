@@ -41,7 +41,12 @@ pub struct Ed2kConfig {
     /// Whether the background ED2K server session should reconnect after the
     /// initial configured-server pass. Mirrors eMule's `Reconnect` preference.
     pub reconnect_enabled: bool,
-    /// Idle interval before the client refreshes the ED2K server session.
+    /// Idle interval before the client refreshes the ED2K server session with an
+    /// empty OP_OFFERFILES keepalive (eMule `ServerKeepAliveTimeout`,
+    /// ServerConnect.cpp:672-674). 0 disables the keepalive. Stock defaults this
+    /// to 0/disabled and, when enabled, uses a minutes-scale value (cap 1440 min,
+    /// Preferences.cpp:80); we default to a conservative 20 minutes to hold the
+    /// soak session open without the sub-minute non-stock fingerprint.
     pub keepalive_secs: u64,
     /// Maximum lifetime of one ED2K server session before rotating endpoints.
     pub session_rotation_secs: u64,
@@ -153,6 +158,16 @@ pub struct Ed2kServerEntry {
 }
 
 impl Ed2kConfig {
+    /// Idle TCP keepalive interval, or `None` when disabled. Mirrors eMule's
+    /// `ServerKeepAliveTimeout` gate (`if (dwServerKeepAliveTimeout && ...)`,
+    /// ServerConnect.cpp:673): a zero value disables the empty-OP_OFFERFILES
+    /// keepalive entirely; a non-zero value is honored verbatim (no sub-minute
+    /// floor is imposed).
+    #[must_use]
+    pub fn keepalive_interval(&self) -> Option<std::time::Duration> {
+        (self.keepalive_secs > 0).then(|| std::time::Duration::from_secs(self.keepalive_secs))
+    }
+
     /// Per-file UDP source cap (oracle `GetMaxSourcePerFileUDP` =
     /// `min(maxSources * 3 / 4, MAX_SOURCES_FILE_UDP)`, default 100): global
     /// UDP server walks and Kad source searches keep supplementing a file
@@ -184,7 +199,11 @@ impl Default for Ed2kConfig {
             callback_timeout_secs: 45,
             reconnect_interval_secs: 30,
             reconnect_enabled: true,
-            keepalive_secs: 60,
+            // eMule ServerKeepAliveTimeout is 0/disabled by default and, when
+            // enabled, minutes-scale (cap 1440 min). 60s was a sub-minute
+            // non-stock fingerprint; 20 minutes matches the stock posture while
+            // still holding the operator-server soak session open.
+            keepalive_secs: 20 * 60,
             session_rotation_secs: 0,
             // eMule GetRecommendedMaxConnections default ceiling (500) /
             // GetDefaultMaxConperFive (50) / GetDefaultMaxSourcesPerFile (600).
@@ -263,6 +282,44 @@ mod tests {
         assert_eq!(config.upload_queue.session_time_limit_secs, 7_200);
         // eMule DeadServerRetry default is 1.
         assert_eq!(config.dead_server_retries, 1);
+        // Stock AddServersFromServer defaults to false (Preferences.cpp:3207).
+        assert!(!config.add_servers_from_server);
+    }
+
+    #[test]
+    fn default_keepalive_matches_stock_minutes_scale_posture() {
+        let config = Ed2kConfig::default();
+        // eMule ServerKeepAliveTimeout is minutes-scale (cap 1440 min); the old
+        // 60s default was a sub-minute non-stock fingerprint. We hold the soak
+        // session with a conservative 20-minute keepalive.
+        assert_eq!(config.keepalive_secs, 20 * 60);
+        assert!(
+            config.keepalive_secs >= 60 && config.keepalive_secs % 60 == 0,
+            "keepalive must be a whole-minutes value, not sub-minute"
+        );
+        assert!(config.keepalive_secs <= 1440 * 60, "within stock 1440-min cap");
+        assert_eq!(
+            config.keepalive_interval(),
+            Some(std::time::Duration::from_secs(20 * 60))
+        );
+    }
+
+    #[test]
+    fn zero_keepalive_disables_and_nonzero_is_honored_verbatim() {
+        // eMule ServerConnect.cpp:673 guards the ping on a non-zero timeout: 0
+        // disables the keepalive entirely (no empty-OP_OFFERFILES ping).
+        let mut config = Ed2kConfig {
+            keepalive_secs: 0,
+            ..Ed2kConfig::default()
+        };
+        assert_eq!(config.keepalive_interval(), None);
+        // A non-zero value is honored verbatim, with no sub-minute floor forced
+        // (the driver only sends when the link has been idle for this interval).
+        config.keepalive_secs = 45;
+        assert_eq!(
+            config.keepalive_interval(),
+            Some(std::time::Duration::from_secs(45))
+        );
     }
 
     #[test]
