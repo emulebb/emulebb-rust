@@ -36,6 +36,7 @@ mod upload_queue_firewalled_callback;
 mod upload_queue_priority;
 mod upload_queue_score_modifiers;
 mod upload_queue_support;
+mod upload_session_rotation;
 
 fn write_repeating_pattern_file(path: &Path, size: usize, pattern: &[u8]) {
     assert!(!pattern.is_empty());

@@ -25,6 +25,13 @@ pub(super) const LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE: i128 = 1_000;
 pub(crate) const DEFAULT_SOFT_QUEUE_SIZE: u32 = 10_000;
 /// eMule `MAX_PURGEQUEUETIME` (`Opcodes.h`) for stale waiting upload clients.
 const DEFAULT_WAITING_TIMEOUT_SECS: u64 = 60 * 60;
+/// Oracle default per-session transfer cap: 90% of the requested file
+/// (`PreferenceValidationSeams::kDefaultSessionTransferPercent`, percent-of-file
+/// session-transfer mode).
+const DEFAULT_SESSION_TRANSFER_PERCENT: u32 = 90;
+/// Oracle default per-session slot time cap: 7200 s
+/// (`PreferenceValidationSeams::kDefaultSessionTimeLimitSeconds`).
+const DEFAULT_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +59,15 @@ pub(crate) struct Ed2kUploadQueueConfig {
     pub granted_timeout: Duration,
     /// Maximum idle time while a peer already has an active upload slot.
     pub upload_timeout: Duration,
+    /// Per-session transferred-bytes cap as a percent of the requested file's
+    /// size (oracle session-transfer limit, percent-of-file mode,
+    /// `ResolveSessionTransferLimitBytes`, UploadQueue.cpp:137-149). A capped
+    /// session rotates back to the waiting queue (`CheckForTimeOver`,
+    /// UploadQueue.cpp:2407-2438). 0 disables the byte cap.
+    pub session_transfer_percent: u32,
+    /// Per-session wall-clock slot time cap (oracle session time limit,
+    /// `CheckForTimeOver`, UploadQueue.cpp:2440-2467). Zero disables the cap.
+    pub session_time_limit: Duration,
 }
 
 impl Default for Ed2kUploadQueueConfig {
@@ -67,6 +83,8 @@ impl Default for Ed2kUploadQueueConfig {
             waiting_timeout: Duration::from_secs(DEFAULT_WAITING_TIMEOUT_SECS),
             granted_timeout: Duration::from_secs(30),
             upload_timeout: Duration::from_secs(90),
+            session_transfer_percent: DEFAULT_SESSION_TRANSFER_PERCENT,
+            session_time_limit: Duration::from_secs(DEFAULT_SESSION_TIME_LIMIT_SECS),
         }
     }
 }
@@ -288,6 +306,11 @@ struct Ed2kUploadSessionEntry {
     /// Per-session upload-score modifiers (LowID, bad-guy/banned/GPL zeroing,
     /// old-client penalty, low-ratio bonus), captured at admission.
     score_modifiers: UploadScoreModifiers,
+    /// Size of the requested file, feeding the per-session transfer cap
+    /// (oracle `ResolveSessionTransferLimitBytes` reads
+    /// `CKnownFile::GetFileSize`, UploadQueue.cpp:137-149). 0 = unknown file,
+    /// which disables the byte cap like the oracle's NULL-file early return.
+    file_size: u64,
     uploaded_bytes: u64,
     upload_started_at: Option<Instant>,
     served_ranges: VecDeque<Ed2kUploadServedRange>,
@@ -421,6 +444,7 @@ impl Ed2kUploadQueueState {
         snapshot
     }
 
+    #[allow(clippy::too_many_arguments)] // flat per-admission inputs, mirroring the oracle call
     pub(super) fn begin_session(
         &mut self,
         key: Ed2kUploadSessionKey,
@@ -429,6 +453,7 @@ impl Ed2kUploadQueueState {
         file_priority_score: i128,
         credit_score_permille: i128,
         all_time_upload_ratio_permille: i128,
+        file_size: u64,
     ) -> Ed2kUploadSessionStatus {
         self.reap_expired_sessions(now);
         let low_id = key.peer.client_id.is_some_and(is_low_id_client_id);
@@ -454,6 +479,7 @@ impl Ed2kUploadQueueState {
             session.file_priority_score = file_priority_score;
             session.credit_score_permille = credit_score_permille;
             session.score_modifiers = score_modifiers;
+            session.file_size = file_size;
             self.sessions.insert(key.clone(), session);
             return self.status_for_key(&key, now);
         }
@@ -488,6 +514,7 @@ impl Ed2kUploadQueueState {
                 file_priority_score,
                 credit_score_permille,
                 score_modifiers,
+                file_size,
                 uploaded_bytes: 0,
                 upload_started_at: None,
                 served_ranges: VecDeque::new(),
@@ -993,6 +1020,7 @@ impl Ed2kUploadQueueState {
                         .then(|| (key.clone(), None)),
                     Ed2kUploadSessionPhase::Granted | Ed2kUploadSessionPhase::Uploading => self
                         .underfilled_active_recycle_diagnostics(session, now)
+                        .or_else(|| self.session_cap_rotation_diagnostics(key, session, now))
                         .map(|diag| (key.clone(), Some(diag))),
                 }
             })
@@ -1022,12 +1050,17 @@ impl Ed2kUploadQueueState {
                 active_before,
                 waiting_before,
             );
-            super::diag_bad_peer::upload_recycle(
-                &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
-                key.peer.user_hash,
-                &key.file_hash,
-                recycle.reason,
-            );
+            // Only the underfill recycles are bad-peer-shaped; a session-cap
+            // rotation is fair scheduling of a productive slot (MFC logs those as
+            // plain UlDl events, UploadQueue.cpp:2422/2452, with no bad-peer emit).
+            if matches!(recycle.reason, "noRequestUnderfill" | "slowUnderfill") {
+                super::diag_bad_peer::upload_recycle(
+                    &super::diag_sched::peer_label(key.peer.ip, key.peer.tcp_port),
+                    key.peer.user_hash,
+                    &key.file_hash,
+                    recycle.reason,
+                );
+            }
             let (file_priority_score, credit_score_permille) = self
                 .sessions
                 .get(&key)
@@ -1106,6 +1139,96 @@ impl Ed2kUploadQueueState {
         }
         (upload_speed_bytes_per_sec(session, now) < self.slow_upload_threshold_bytes_per_sec())
             .then(|| self.recycle_diagnostics(session, now, "slowUnderfill"))
+    }
+
+    /// Session rotation caps (oracle `CheckForTimeOver`, UploadQueue.cpp:2407-2467):
+    /// a slot past its per-session transferred-bytes cap (default 90% of the file)
+    /// or wall-clock time cap (default 7200 s) is recycled through the shared
+    /// OUTOFPARTREQS + requeue-at-tail path. Gating mirrors the fork's broadband
+    /// slot controller: rotate only when a queued replacement is available, and
+    /// retain a productive slot while the upload line is underfilled
+    /// (`ShouldRotateBroadbandLimitedUploadSession`, UploadQueueSeams.h:677-685).
+    fn session_cap_rotation_diagnostics(
+        &self,
+        key: &Ed2kUploadSessionKey,
+        session: &Ed2kUploadSessionEntry,
+        now: Instant,
+    ) -> Option<Ed2kUploadRecycleDiagnostics> {
+        // Friend slots are exempt from every session rotation (oracle
+        // CheckForTimeOver early return, UploadQueue.cpp:2303-2304).
+        if key.peer.friend_slot {
+            return None;
+        }
+        // Byte cap: one session may transfer up to the configured percent of the
+        // file (trigger `GetQueueSessionPayloadUp() > limit`, UploadQueue.cpp:2411).
+        let over_transfer = self
+            .session_transfer_limit_bytes(session)
+            .is_some_and(|limit| session.uploaded_bytes > limit);
+        // Time cap: rotate a slot session past the configured wall-clock age
+        // (`GetUpStartTimeDelay() > SEC2MS(limit)`, UploadQueue.cpp:2441).
+        // `queued_at` is the slot-grant time for an active session (reset on
+        // promotion), the analog of the oracle's per-session UpStartTime.
+        let over_time = !self.config.session_time_limit.is_zero()
+            && now.saturating_duration_since(session.queued_at) > self.config.session_time_limit;
+        if !over_transfer && !over_time {
+            return None;
+        }
+        // Oracle bNeedsReplacement is `ForceNewClient()` (a waiting admission
+        // candidate exists and slot policy would start another upload,
+        // UploadQueue.cpp:2412/2442). Under this queue's eager `promote_waiters`
+        // model the capacity half is saturated by construction (active == the
+        // effective limit whenever a waiter exists), so the surviving condition
+        // is replacement availability.
+        self.best_waiting_key(now)?;
+        // Retain a productive capped slot while the upload line is underfilled:
+        // rotating known throughput for an unknown replacement would widen the
+        // underfill (UploadQueueSeams.h:683-684). `underfill_since` is refreshed
+        // by the caller, so `is_some` is the instantaneous underfill state
+        // (oracle IsBroadbandUploadUnderfilled).
+        if self.underfill_since.is_some()
+            && upload_speed_bytes_per_sec(session, now)
+                >= self.productive_upload_threshold_bytes_per_sec()
+        {
+            return None;
+        }
+        Some(self.recycle_diagnostics(
+            session,
+            now,
+            if over_transfer {
+                "sessionTransferLimit"
+            } else {
+                "sessionTimeLimit"
+            },
+        ))
+    }
+
+    /// Per-session transferred-bytes cap (oracle
+    /// `ResolveSessionTransferLimitBytes` percent-of-file mode,
+    /// UploadQueue.cpp:137-149): `ceil(file_size * percent / 100)`. `None` when
+    /// the cap is disabled or the file size is unknown (the oracle's NULL-file
+    /// early return).
+    fn session_transfer_limit_bytes(&self, session: &Ed2kUploadSessionEntry) -> Option<u64> {
+        let percent = u64::from(self.config.session_transfer_percent.min(100));
+        if percent == 0 || session.file_size == 0 {
+            return None;
+        }
+        Some(
+            session
+                .file_size
+                .saturating_mul(percent)
+                .saturating_add(99)
+                / 100,
+        )
+    }
+
+    /// Productive-rate bar a capped session must beat to be retained while the
+    /// upload line is underfilled (oracle `GetSlowUploadRateThreshold`,
+    /// UploadQueue.cpp:1070-1078: target-per-slot x the default slow-upload
+    /// threshold factor 0.75, floored at 1 KiB/s).
+    fn productive_upload_threshold_bytes_per_sec(&self) -> u64 {
+        let base_slots = self.config.active_slots.max(1) as u64;
+        let target_per_slot = (self.config.upload_limit_bytes_per_sec / base_slots).max(3 * 1024);
+        (target_per_slot.saturating_mul(3) / 4).max(1024)
     }
 
     fn timeout_recycle_diagnostics(
@@ -1420,5 +1543,14 @@ mod tests {
             Ed2kUploadQueueConfig::default().waiting_timeout.as_secs(),
             DEFAULT_WAITING_TIMEOUT_SECS
         );
+    }
+
+    #[test]
+    fn default_session_caps_match_oracle_rotation_defaults() {
+        // Oracle defaults: rotate a slot session after 90% of the file
+        // (PreferenceValidationSeams.h:48) or 7200 s (:53).
+        let config = Ed2kUploadQueueConfig::default();
+        assert_eq!(config.session_transfer_percent, 90);
+        assert_eq!(config.session_time_limit.as_secs(), 7_200);
     }
 }

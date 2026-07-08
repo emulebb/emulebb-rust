@@ -8297,6 +8297,8 @@ mod tests {
             waiting_timeout_secs: 44,
             granted_timeout_secs: 22,
             upload_timeout_secs: 88,
+            session_transfer_percent: 45,
+            session_time_limit_secs: 1_234,
         };
 
         let policy = ed2k_upload_queue_policy_from_preferences(Some(&base), &preferences);
@@ -8318,6 +8320,10 @@ mod tests {
         assert_eq!(policy.waiting_timeout_secs, 44);
         assert_eq!(policy.granted_timeout_secs, 22);
         assert_eq!(policy.upload_timeout_secs, 88);
+        // Session rotation caps are queue-policy knobs, not preference-derived:
+        // a preferences update must pass them through untouched.
+        assert_eq!(policy.session_transfer_percent, 45);
+        assert_eq!(policy.session_time_limit_secs, 1_234);
     }
 
     #[test]
@@ -8333,6 +8339,8 @@ mod tests {
             waiting_timeout_secs: 44,
             granted_timeout_secs: 22,
             upload_timeout_secs: 88,
+            session_transfer_percent: 45,
+            session_time_limit_secs: 1_234,
         };
 
         let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &preferences);

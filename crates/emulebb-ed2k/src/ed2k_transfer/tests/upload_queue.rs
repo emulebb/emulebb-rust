@@ -30,6 +30,8 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
                 waiting_timeout_secs: 180,
                 granted_timeout_secs: 30,
                 upload_timeout_secs: 90,
+                session_transfer_percent: 0,
+                session_time_limit_secs: 0,
             },
             ..Ed2kConfig::default()
         },
@@ -79,6 +81,8 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
             waiting_timeout_secs: 180,
             granted_timeout_secs: 30,
             upload_timeout_secs: 90,
+            session_transfer_percent: 0,
+            session_time_limit_secs: 0,
         })
         .await;
 
@@ -104,6 +108,8 @@ async fn upload_queue_opens_elastic_slot_after_sustained_underfill() {
             waiting_timeout: std::time::Duration::from_secs(60),
             granted_timeout: std::time::Duration::from_secs(60),
             upload_timeout: std::time::Duration::from_secs(60),
+            session_transfer_percent: 0,
+            session_time_limit: std::time::Duration::ZERO,
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x41; 16]);
@@ -153,6 +159,8 @@ async fn upload_queue_keeps_elastic_slot_closed_when_upload_budget_is_full() {
             waiting_timeout: std::time::Duration::from_secs(60),
             granted_timeout: std::time::Duration::from_secs(60),
             upload_timeout: std::time::Duration::from_secs(60),
+            session_transfer_percent: 0,
+            session_time_limit: std::time::Duration::ZERO,
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x42; 16]);
@@ -209,6 +217,8 @@ async fn upload_queue_reserves_global_payload_budget() {
             waiting_timeout: std::time::Duration::from_secs(60),
             granted_timeout: std::time::Duration::from_secs(60),
             upload_timeout: std::time::Duration::from_secs(60),
+            session_transfer_percent: 0,
+            session_time_limit: std::time::Duration::ZERO,
         })
         .await;
     let now = std::time::Instant::now();
@@ -297,6 +307,8 @@ async fn upload_queue_capacity_snapshot_classifies_active_sessions() {
             waiting_timeout_secs: 180,
             granted_timeout_secs: 30,
             upload_timeout_secs: 90,
+            session_transfer_percent: 0,
+            session_time_limit_secs: 0,
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x3A; 16]);
@@ -507,6 +519,8 @@ async fn upload_queue_recycles_slow_active_slot_during_sustained_underfill() {
             waiting_timeout: std::time::Duration::from_secs(60),
             granted_timeout: std::time::Duration::from_secs(2),
             upload_timeout: std::time::Duration::from_secs(5),
+            session_transfer_percent: 0,
+            session_time_limit: std::time::Duration::ZERO,
         })
         .await;
     let file_hash = Ed2kHash::from_bytes([0x5C; 16]);

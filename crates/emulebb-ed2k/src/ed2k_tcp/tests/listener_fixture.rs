@@ -120,6 +120,8 @@ impl ListenerTestRuntime {
                 waiting_timeout: Duration::from_secs(30),
                 granted_timeout: Duration::from_secs(30),
                 upload_timeout: Duration::from_secs(30),
+                session_transfer_percent: 0,
+                session_time_limit: Duration::ZERO,
             })
             .await;
     }

@@ -99,6 +99,8 @@ fn test_network_config(
             waiting_timeout_secs: 5,
             granted_timeout_secs: 10,
             upload_timeout_secs: 30,
+            session_transfer_percent: 0,
+            session_time_limit_secs: 0,
         },
         ..Ed2kConfig::default()
     };

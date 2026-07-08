@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 
 /// eMule `MAX_PURGEQUEUETIME` (`Opcodes.h`) for stale waiting upload clients.
 const DEFAULT_UPLOAD_QUEUE_WAITING_TIMEOUT_SECS: u64 = 60 * 60;
+/// Oracle default upload session-transfer cap percent
+/// (`PreferenceValidationSeams::kDefaultSessionTransferPercent`).
+const DEFAULT_UPLOAD_SESSION_TRANSFER_PERCENT: u32 = 90;
+/// Oracle default upload session time cap seconds
+/// (`PreferenceValidationSeams::kDefaultSessionTimeLimitSeconds`).
+const DEFAULT_UPLOAD_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -110,6 +116,14 @@ pub struct Ed2kUploadQueuePolicyConfig {
     pub waiting_timeout_secs: u64,
     pub granted_timeout_secs: u64,
     pub upload_timeout_secs: u64,
+    /// Percent of the requested file's size one upload session may transfer
+    /// before the slot rotates back to the waiting queue (oracle
+    /// session-transfer limit, percent-of-file mode, default 90). 0 disables.
+    pub session_transfer_percent: u32,
+    /// Wall-clock seconds one upload session may hold a slot before it rotates
+    /// back to the waiting queue (oracle session time limit, default 7200).
+    /// 0 disables.
+    pub session_time_limit_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -198,6 +212,8 @@ impl Default for Ed2kUploadQueuePolicyConfig {
             waiting_timeout_secs: DEFAULT_UPLOAD_QUEUE_WAITING_TIMEOUT_SECS,
             granted_timeout_secs: 30,
             upload_timeout_secs: 90,
+            session_transfer_percent: DEFAULT_UPLOAD_SESSION_TRANSFER_PERCENT,
+            session_time_limit_secs: DEFAULT_UPLOAD_SESSION_TIME_LIMIT_SECS,
         }
     }
 }
@@ -229,6 +245,10 @@ mod tests {
         assert_eq!(config.download_limit_bytes_per_sec, 0);
         // eMule MAX_PURGEQUEUETIME (Opcodes.h) = HR2MS(1).
         assert_eq!(config.upload_queue.waiting_timeout_secs, 60 * 60);
+        // Oracle upload session rotation defaults: 90% of the file
+        // (PreferenceValidationSeams.h:48) or 7200 s (:53).
+        assert_eq!(config.upload_queue.session_transfer_percent, 90);
+        assert_eq!(config.upload_queue.session_time_limit_secs, 7_200);
         // eMule DeadServerRetry default is 1.
         assert_eq!(config.dead_server_retries, 1);
     }

@@ -629,6 +629,10 @@ pub(super) fn upload_queue_config_from_policy(
         waiting_timeout: Duration::from_secs(policy.waiting_timeout_secs.max(1)),
         granted_timeout: Duration::from_secs(policy.granted_timeout_secs.max(1)),
         upload_timeout: Duration::from_secs(policy.upload_timeout_secs.max(1)),
+        // Session rotation caps: 0 stays 0 (cap disabled), mirroring the oracle
+        // disabled session-transfer mode / zero time limit.
+        session_transfer_percent: policy.session_transfer_percent.min(100),
+        session_time_limit: Duration::from_secs(policy.session_time_limit_secs),
     }
 }
 
@@ -645,6 +649,8 @@ pub(super) fn upload_queue_policy_from_config(
         waiting_timeout_secs: config.waiting_timeout.as_secs(),
         granted_timeout_secs: config.granted_timeout.as_secs(),
         upload_timeout_secs: config.upload_timeout.as_secs(),
+        session_transfer_percent: config.session_transfer_percent,
+        session_time_limit_secs: config.session_time_limit.as_secs(),
     }
 }
 

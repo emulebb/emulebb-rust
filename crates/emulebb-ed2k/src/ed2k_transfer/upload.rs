@@ -107,6 +107,7 @@ impl Ed2kTransferRuntime {
         let handle = Ed2kUploadSessionHandle::new(peer, file_hash.to_string(), connection_id);
         let file_priority_score = self.file_priority_score(file_hash);
         let all_time_upload_ratio_permille = self.file_all_time_upload_ratio_permille(file_hash);
+        let file_size = self.shared_file_size(file_hash);
         let status = self.upload_queue.lock().await.begin_session(
             handle.key().clone(),
             connection_id,
@@ -114,6 +115,7 @@ impl Ed2kTransferRuntime {
             file_priority_score,
             credit_score_permille,
             all_time_upload_ratio_permille,
+            file_size,
         );
         (handle, status)
     }
@@ -360,6 +362,19 @@ impl Ed2kTransferRuntime {
     ) -> anyhow::Result<bool> {
         self.metadata
             .record_verified_secure_ident(&hex::encode(user_hash), public_key)
+    }
+
+    /// The requested file's size, feeding the queue's per-session transfer cap
+    /// (oracle `ResolveSessionTransferLimitBytes` reads
+    /// `CKnownFile::GetFileSize`, UploadQueue.cpp:137-149). 0 (unknown file)
+    /// disables the byte cap, like the oracle's NULL-file early return.
+    fn shared_file_size(&self, file_hash: &Ed2kHash) -> u64 {
+        self.metadata
+            .transfer_manifest_by_hash(&file_hash.to_string())
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.file_size)
+            .unwrap_or(0)
     }
 
     fn file_priority_score(&self, file_hash: &Ed2kHash) -> i128 {

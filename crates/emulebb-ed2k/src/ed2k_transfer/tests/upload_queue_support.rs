@@ -17,6 +17,10 @@ pub(super) fn one_slot_config() -> Ed2kUploadQueueConfig {
         waiting_timeout: Duration::from_secs(30),
         granted_timeout: Duration::from_secs(30),
         upload_timeout: Duration::from_secs(30),
+        // Session rotation caps disabled: the rotation fixtures set their own
+        // caps; everything else must not rotate under the test timelines.
+        session_transfer_percent: 0,
+        session_time_limit: Duration::ZERO,
     }
 }
 
