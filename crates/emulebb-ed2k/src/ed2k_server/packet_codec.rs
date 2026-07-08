@@ -5,19 +5,37 @@ use flate2::read::ZlibDecoder;
 use flate2::{Compression, write::ZlibEncoder};
 
 use super::{
-    MAX_SERVER_DECOMPRESSED_PACKET_LEN, OP_EDONKEYPROT, OP_PACKEDPROT, TCP_PACKET_HEADER_LEN,
+    MAX_SERVER_DECOMPRESSED_PACKET_LEN, OP_EDONKEYPROT, OP_OFFERFILES, OP_PACKEDPROT,
+    TCP_PACKET_HEADER_LEN,
 };
 
+/// Whether a server-bound packet of `opcode` is eligible for zlib packing on the
+/// TCP path. eMule packs **only** OP_OFFERFILES toward the server
+/// (CSharedFileList::SendListToServer, SharedFileList.cpp:2723-2725); every other
+/// server-bound opcode (OP_SEARCHREQUEST, OP_GETSOURCES, OP_GETSERVERLIST,
+/// OP_QUERY_MORE_RESULT, OP_CALLBACKREQUEST, OP_LOGINREQUEST, keepalive) is sent
+/// uncompressed as OP_EDONKEYPROT (0xE3) regardless of SRV_TCPFLG_COMPRESSION.
+pub(super) fn server_opcode_allows_compression(opcode: u8) -> bool {
+    opcode == OP_OFFERFILES
+}
+
 pub(super) fn encode_packet(opcode: u8, payload: &[u8], use_compression: bool) -> Result<Vec<u8>> {
-    let protocol = if use_compression {
-        OP_PACKEDPROT
+    // WHY: eMule keeps the packed form only when it is strictly smaller than the
+    // raw payload (Packet::PackPacket keep-if-smaller rule, Packets.cpp:259
+    // `newsize < size`; SharedFileList.cpp:2724-2727 sends the uncompressed packet
+    // otherwise). So an incompressible or tiny payload — e.g. the 0-file
+    // OP_OFFERFILES keepalive, which zlib expands — goes out as OP_EDONKEYPROT even
+    // when the caller permits compression. `use_compression` is set true by the
+    // caller only for OP_OFFERFILES on a compression-capable server.
+    let packed_payload = if use_compression {
+        let candidate = encode_packed_payload(payload)?;
+        (candidate.len() < payload.len()).then_some(candidate)
     } else {
-        OP_EDONKEYPROT
+        None
     };
-    let encoded_payload = if use_compression {
-        encode_packed_payload(payload)?
-    } else {
-        payload.to_vec()
+    let (protocol, encoded_payload): (u8, &[u8]) = match packed_payload.as_deref() {
+        Some(packed) => (OP_PACKEDPROT, packed),
+        None => (OP_EDONKEYPROT, payload),
     };
     let mut bytes = Vec::with_capacity(TCP_PACKET_HEADER_LEN + encoded_payload.len());
     bytes.push(protocol);
@@ -25,7 +43,7 @@ pub(super) fn encode_packet(opcode: u8, payload: &[u8], use_compression: bool) -
         &(u32::try_from(encoded_payload.len() + 1).context("payload too large")?).to_le_bytes(),
     );
     bytes.push(opcode);
-    bytes.extend_from_slice(&encoded_payload);
+    bytes.extend_from_slice(encoded_payload);
     Ok(bytes)
 }
 

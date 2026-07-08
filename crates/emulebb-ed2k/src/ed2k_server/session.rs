@@ -29,6 +29,7 @@ use super::{
     SERVER_OBFUSCATION_RANDOM_EXPONENT_LEN, SERVER_TCP_FLAG_COMPRESSION, TCP_PACKET_HEADER_LEN,
     biguint_to_fixed_be, decode_server_payload, derive_server_cipher, dump_ed2k_server_meta,
     dump_ed2k_server_packet, encode_packet, random_non_protocol_marker, random_nonzero_biguint,
+    server_opcode_allows_compression,
 };
 
 static NEXT_SERVER_SESSION_TRACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -196,8 +197,18 @@ impl ServerSession {
     }
 
     pub(super) async fn send_packet(&mut self, opcode: u8, payload: &[u8]) -> Result<()> {
-        let use_compression = self.server_supports_compression();
+        // Only OP_OFFERFILES is packed on the server-TCP path, and only when the
+        // server advertised SRV_TCPFLG_COMPRESSION; every other server-bound opcode
+        // (OP_SEARCHREQUEST, OP_GETSOURCES, OP_GETSERVERLIST, OP_QUERY_MORE_RESULT,
+        // OP_CALLBACKREQUEST, OP_LOGINREQUEST, keepalive) is sent uncompressed as
+        // OP_EDONKEYPROT (0xE3). Matches CSharedFileList::SendListToServer
+        // (SharedFileList.cpp:2723-2725), the sole server-bound PackPacket() call.
+        let use_compression =
+            server_opcode_allows_compression(opcode) && self.server_supports_compression();
         let mut packet = encode_packet(opcode, payload, use_compression)?;
+        // The wire may still be OP_EDONKEYPROT even when compression was permitted
+        // (keep-if-smaller left the packet raw): report the actual protocol byte.
+        let packed = packet[0] == OP_PACKEDPROT;
         debug!(
             "ED2K trace id={} role={} phase={} dir=tx endpoint={} opcode=0x{:02X} payload_len={} wire_len={} compressed={}",
             self.trace_id,
@@ -207,7 +218,7 @@ impl ServerSession {
             opcode,
             payload.len(),
             packet.len(),
-            use_compression
+            packed
         );
         dump_ed2k_server_packet(self, "tx", packet[0], opcode, payload);
         if let Some(cipher) = self.send_cipher.as_mut() {
@@ -485,7 +496,7 @@ impl ServerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     /// A peer that declares an oversized server packet length must be dropped
@@ -541,5 +552,84 @@ mod tests {
         );
         assert!(!guard.connected);
         assert!(guard.endpoint.is_none());
+    }
+
+    /// Establish a connected `ServerSession` (from the accepted end of a local
+    /// pair) plus the remote peer stream that receives whatever the session sends.
+    async fn connected_test_session_with_peer() -> (ServerSession, TcpStream) {
+        let listener = TcpListener::bind((crate::test_bind_ip(), 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = TcpStream::connect(addr).await.unwrap();
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        (ServerSession::from_stream_for_test(stream, peer_addr), peer)
+    }
+
+    /// Read just the eD2k packet header (protocol + length + opcode) the session
+    /// wrote to the wire.
+    async fn read_wire_header(peer: &mut TcpStream) -> [u8; TCP_PACKET_HEADER_LEN] {
+        let mut header = [0u8; TCP_PACKET_HEADER_LEN];
+        peer.read_exact(&mut header).await.unwrap();
+        header
+    }
+
+    /// RUST-PAR-019 R19-3: every server-bound opcode except OP_OFFERFILES is sent
+    /// uncompressed (OP_EDONKEYPROT / 0xE3) even when the server advertised
+    /// SRV_TCPFLG_COMPRESSION — eMule packs only OP_OFFERFILES toward the server
+    /// (SharedFileList.cpp:2723-2725). The 512-zero payload is highly compressible,
+    /// so a 0xE3 here proves the opcode gate rather than keep-if-smaller.
+    #[tokio::test]
+    async fn server_bound_non_offer_packets_stay_uncompressed_with_compression_flag() {
+        use super::super::{OP_GETSOURCES, OP_SEARCHREQUEST};
+
+        for opcode in [OP_SEARCHREQUEST, OP_GETSOURCES] {
+            let (mut session, mut peer) = connected_test_session_with_peer().await;
+            session.server_flags = Some(SERVER_TCP_FLAG_COMPRESSION);
+            session.send_packet(opcode, &vec![0u8; 512]).await.unwrap();
+            let header = read_wire_header(&mut peer).await;
+            assert_eq!(
+                header[0], OP_EDONKEYPROT,
+                "opcode 0x{opcode:02X} must be sent as 0xE3, not packed",
+            );
+            assert_eq!(header[5], opcode);
+        }
+    }
+
+    /// RUST-PAR-019 R19-3: OP_OFFERFILES is packed (0xD4) when the server supports
+    /// compression and the packed form is strictly smaller (keep-if-smaller,
+    /// Packets.cpp:259). A 512-zero payload compresses well below its raw size.
+    #[tokio::test]
+    async fn offer_files_is_packed_when_smaller_on_compression_server() {
+        use super::super::OP_OFFERFILES;
+
+        let (mut session, mut peer) = connected_test_session_with_peer().await;
+        session.server_flags = Some(SERVER_TCP_FLAG_COMPRESSION);
+        session
+            .send_packet(OP_OFFERFILES, &vec![0u8; 512])
+            .await
+            .unwrap();
+        let header = read_wire_header(&mut peer).await;
+        assert_eq!(header[0], OP_PACKEDPROT, "compressible OP_OFFERFILES must pack");
+        assert_eq!(header[5], OP_OFFERFILES);
+    }
+
+    /// RUST-PAR-019 R19-3: the empty-share OP_OFFERFILES keepalive (a 4-byte
+    /// zero-count payload) is NOT emitted as a larger packed packet — zlib expands
+    /// it, so keep-if-smaller leaves it as OP_EDONKEYPROT (0xE3).
+    #[tokio::test]
+    async fn empty_offer_files_keepalive_is_not_packed() {
+        use super::super::OP_OFFERFILES;
+
+        let (mut session, mut peer) = connected_test_session_with_peer().await;
+        session.server_flags = Some(SERVER_TCP_FLAG_COMPRESSION);
+        session
+            .send_packet(OP_OFFERFILES, &0u32.to_le_bytes())
+            .await
+            .unwrap();
+        let header = read_wire_header(&mut peer).await;
+        assert_eq!(
+            header[0], OP_EDONKEYPROT,
+            "0-file OP_OFFERFILES keepalive must stay uncompressed",
+        );
+        assert_eq!(header[5], OP_OFFERFILES);
     }
 }

@@ -27,8 +27,8 @@ use super::{
     ipv4_from_client_id, login_identity_for_server_transport, new_ed2k_server_search_channel,
     offer_files_catalog_fingerprint, search_keyword_via_background_session,
     search_source_batch_via_background_session, search_source_via_background_session,
-    server_capabilities, server_udp_endpoint, should_use_server_obfuscation, source_request_opcode,
-    validate_found_sources,
+    server_capabilities, server_opcode_allows_compression, server_udp_endpoint,
+    should_use_server_obfuscation, source_request_opcode, validate_found_sources,
 };
 use crate::{
     ed2k_tcp::{Ed2kHelloIdentity, emule_connect_options},

@@ -72,7 +72,7 @@ use obfuscation::{
     Rc4KeyStream, biguint_to_fixed_be, derive_server_cipher, random_non_protocol_marker,
     random_nonzero_biguint, should_use_server_obfuscation,
 };
-use packet_codec::{decode_server_payload, encode_packet};
+use packet_codec::{decode_server_payload, encode_packet, server_opcode_allows_compression};
 use packet_handler::handle_server_packet;
 #[cfg(test)]
 use packet_handler::{decode_callback_request, decode_id_change_payload, decode_server_ident};

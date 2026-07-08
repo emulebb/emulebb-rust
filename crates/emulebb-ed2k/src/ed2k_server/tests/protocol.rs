@@ -421,12 +421,42 @@ fn packed_server_payload_is_inflated() {
 }
 
 #[test]
-fn packet_encoder_uses_packed_framing_when_requested() {
-    let packet = encode_packet(OP_GETSERVERLIST, &[], true).unwrap();
-    assert_eq!(packet[0], OP_PACKEDPROT);
-    let decoded = decode_server_payload(OP_PACKEDPROT, packet[6..].to_vec()).unwrap();
-    assert!(decoded.is_empty());
-    assert_eq!(packet[5], OP_GETSERVERLIST);
+fn packet_encoder_keeps_packed_form_only_when_smaller() {
+    use super::super::TCP_PACKET_HEADER_LEN;
+    // A highly compressible payload packs smaller -> OP_PACKEDPROT (0xD4).
+    let compressible = vec![0u8; 512];
+    let packed = encode_packet(OP_OFFERFILES, &compressible, true).unwrap();
+    assert_eq!(packed[0], OP_PACKEDPROT);
+    assert_eq!(packed[5], OP_OFFERFILES);
+    assert!(packed.len() < TCP_PACKET_HEADER_LEN + compressible.len());
+    let decoded = decode_server_payload(OP_PACKEDPROT, packed[6..].to_vec()).unwrap();
+    assert_eq!(decoded, compressible);
+
+    // An empty payload zlib-expands, so keep-if-smaller (Packets.cpp:259) leaves it
+    // uncompressed as OP_EDONKEYPROT (0xE3) even though compression was permitted.
+    let raw = encode_packet(OP_OFFERFILES, &[], true).unwrap();
+    assert_eq!(raw[0], OP_EDONKEYPROT);
+    assert_eq!(raw[5], OP_OFFERFILES);
+}
+
+#[test]
+fn only_offer_files_is_eligible_for_server_compression() {
+    use super::super::{OP_CALLBACKREQUEST, OP_QUERY_MORE_RESULT, OP_SEARCHREQUEST};
+    // eMule packs only OP_OFFERFILES toward the server (SharedFileList.cpp:2723).
+    assert!(server_opcode_allows_compression(OP_OFFERFILES));
+    for opcode in [
+        OP_SEARCHREQUEST,
+        OP_GETSOURCES,
+        OP_GETSERVERLIST,
+        OP_QUERY_MORE_RESULT,
+        OP_CALLBACKREQUEST,
+        OP_LOGINREQUEST,
+    ] {
+        assert!(
+            !server_opcode_allows_compression(opcode),
+            "opcode 0x{opcode:02X} must never be packed on the server path",
+        );
+    }
 }
 
 #[test]
