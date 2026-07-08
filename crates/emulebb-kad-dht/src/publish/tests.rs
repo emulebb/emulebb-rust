@@ -157,49 +157,61 @@ fn build_keyword_publish_packet_skips_aich_for_v8_contacts() {
     assert_eq!(request.entries[0].tags.len(), 1);
 }
 
+/// A full high-ID (non-firewalled) source-publish tag set in the exact order
+/// `build_source_publish_tags` emits it (Search.cpp:731-745 open branch):
+/// SOURCETYPE, SOURCEPORT, SOURCEUPORT, FILESIZE, ENCRYPTION.
+fn full_source_publish_tags() -> Vec<Tag> {
+    vec![
+        Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
+        Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(41_001)),
+        Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41_000)),
+        Tag::filesize(2_097_152),
+        Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
+    ]
+}
+
+/// A Kad1 contact (version < `KADEMLIA_VERSION2_47a` = 2) must not receive the
+/// FILESIZE tag; every other tag keeps its value and relative order so the wire
+/// stays byte-exact to the oracle (Search.cpp:741 gates only FILESIZE).
 #[test]
 fn build_source_publish_packet_skips_filesize_for_pre_47a_contacts() {
     let packet = build_source_publish_packet(
         NodeId::from_bytes([1; 16]),
         NodeId::from_bytes([2; 16]),
-        &[
-            Tag::filesize(2_097_152),
-            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
-        ],
+        &full_source_publish_tags(),
         1,
     );
 
     let KadPacket::PublishSourceReq(request) = packet else {
         panic!("expected publish source packet");
     };
+    // Identical to the full set with only the FILESIZE tag removed in place.
     assert_eq!(
         request.tags,
-        vec![Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3))]
+        vec![
+            Tag::new_short(tag_name::SOURCETYPE, TagValue::UInt(1)),
+            Tag::new_short(tag_name::SOURCEPORT, TagValue::UInt(41_001)),
+            Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41_000)),
+            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
+        ]
     );
 }
 
+/// A `KADEMLIA_VERSION2_47a`+ contact (version >= 2) receives the whole tag set
+/// unchanged, FILESIZE included in its original position.
 #[test]
 fn build_source_publish_packet_keeps_filesize_for_47a_contacts() {
     let packet = build_source_publish_packet(
         NodeId::from_bytes([1; 16]),
         NodeId::from_bytes([2; 16]),
-        &[
-            Tag::filesize(2_097_152),
-            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3)),
-        ],
+        &full_source_publish_tags(),
         2,
     );
 
     let KadPacket::PublishSourceReq(request) = packet else {
         panic!("expected publish source packet");
     };
-    assert_eq!(
-        request.tags,
-        vec![
-            Tag::filesize(2_097_152),
-            Tag::new_short(tag_name::ENCRYPTION, TagValue::U8(3))
-        ]
-    );
+    assert_eq!(request.tags, full_source_publish_tags());
 }
 
 #[test]
