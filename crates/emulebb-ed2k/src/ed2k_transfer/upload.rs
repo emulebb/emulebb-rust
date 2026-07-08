@@ -120,6 +120,28 @@ impl Ed2kTransferRuntime {
         (handle, status)
     }
 
+    /// Purge upload-queue waiters whose requested file is no longer shared
+    /// (master `FindBestClientInQueue` waiting-list walk, UploadQueue.cpp:223
+    /// `!GetFileByID(client->GetUploadFileID())`). Driven from the upload
+    /// maintenance tick. A file is still shared when a servable catalog entry
+    /// exists for its hash (`is_servable`, the same gate the reask/serve path
+    /// consults); a bare compatibility hint is not servable and never keeps a
+    /// waiter alive. Returns the number of purged waiters.
+    pub(crate) async fn purge_unshared_upload_waiters(&self) -> usize {
+        let shared_file_hashes: std::collections::HashSet<String> = {
+            let catalog = self.shared_catalog.read().await;
+            catalog
+                .iter()
+                .filter(|entry| entry.is_servable())
+                .map(|entry| entry.file_hash.to_ascii_lowercase())
+                .collect()
+        };
+        self.upload_queue
+            .lock()
+            .await
+            .purge_waiters_for_unshared_files(&shared_file_hashes)
+    }
+
     /// Poll the current queue-visible state for one upload session.
     pub(crate) async fn poll_upload_session(
         &self,

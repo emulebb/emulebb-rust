@@ -74,6 +74,11 @@ impl UploadPromoteDriver {
     /// unusable endpoint) is dropped immediately like the oracle's failed
     /// `TryToConnect` so the slot moves on to the next waiter.
     pub(in crate::ed2k_tcp) async fn promote_pending_once(self: &Arc<Self>) {
+        // Purge waiters whose requested file is no longer shared before handing
+        // out slots (master `FindBestClientInQueue` waiting-list purge,
+        // UploadQueue.cpp:223 `!GetFileByID(client->GetUploadFileID())`); this
+        // maintenance tick is rust's analog of the master upload timer walk.
+        self.transfer_runtime.purge_unshared_upload_waiters().await;
         let grants = self.transfer_runtime.take_pending_upload_promotions().await;
         if grants.is_empty() {
             return;

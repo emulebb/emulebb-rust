@@ -1007,6 +1007,37 @@ impl Ed2kUploadQueueState {
         if count == 0 { 0 } else { sum / count }
     }
 
+    /// Drop waiting entries whose requested file is no longer shared (master
+    /// `FindBestClientInQueue` waiting-list walk, UploadQueue.cpp:223: the purge
+    /// condition also fires on `!GetFileByID(client->GetUploadFileID())`). Only
+    /// the waiting queue is walked — the master never purges an active
+    /// (`uploadinglist`) slot here — and the drop emits no slot event, mirroring
+    /// the plain `RemoveFromWaitingQueue`. `shared_file_hashes` holds the
+    /// lowercase-hex hashes we currently serve. Returns the purged waiter count.
+    pub(super) fn purge_waiters_for_unshared_files(
+        &mut self,
+        shared_file_hashes: &std::collections::HashSet<String>,
+    ) -> usize {
+        let stale: Vec<Ed2kUploadSessionKey> = self
+            .waiting_order
+            .iter()
+            .filter(|key| {
+                self.sessions
+                    .get(*key)
+                    .is_some_and(|session| session.phase == Ed2kUploadSessionPhase::Waiting)
+                    && !shared_file_hashes.contains(&key.file_hash.to_ascii_lowercase())
+            })
+            .cloned()
+            .collect();
+        for key in &stale {
+            self.sessions.remove(key);
+        }
+        if !stale.is_empty() {
+            self.waiting_order.retain(|key| !stale.contains(key));
+        }
+        stale.len()
+    }
+
     fn trim_waiting_queue(&mut self, now: Instant) {
         while self.waiting_order.len() > self.config.waiting_capacity {
             let Some(evicted) = self.worst_waiting_key(now) else {
