@@ -9,6 +9,11 @@
 //!     contacts, and HELLO-probe the single lowest-quality expired contact per
 //!     leaf to re-verify liveness (`RoutingZone.cpp:852-906`).
 //!
+//! `CKademlia::Process` additionally re-runs the NODECOMPLETE self-lookup on
+//! its own KadID every 4 hours (`m_tNextSelfLookup`, Kademlia.cpp:261-264) to
+//! keep the home-bucket neighborhood verified over long uptimes; that timer
+//! also lives in this loop.
+//!
 //! This loop ports both onto the rust `DhtNode`: the heavy decisions (which
 //! contacts are dead/stale, which leaves to refresh, the in-zone random target)
 //! live in the routing crate; this loop only drives the wire side (sending the
@@ -41,6 +46,55 @@ const CONSOLIDATE_SECS: u64 = 45 * 60;
 /// Bound the number of stale contacts we HELLO-probe per small-timer sweep so a
 /// large table stays gentle (the master probes one per leaf; we cap the total).
 const MAX_PROBES_PER_SWEEP: usize = 16;
+/// Oracle self-lookup cadence (`m_tNextSelfLookup` re-armed `tNow + HR2S(4)`
+/// each time it fires, Kademlia.cpp:261-264). The master seeds the first run
+/// `MIN2S(3)` after Kad start (Kademlia.cpp:144-145); our bootstrap already
+/// performs that first own-ID lookup, so the loop owes the NEXT one a full
+/// period of connected uptime.
+const SELF_LOOKUP_SECS: u64 = 4 * 60 * 60;
+
+/// Cadence bookkeeping for the 4-hour NODECOMPLETE self-lookup.
+///
+/// Only connected (bootstrapped) ticks advance toward the next run — the
+/// oracle timer only ticks while Kad runs — and a reconnect re-arms the full
+/// period, because the bootstrap self-lookup is the first run of a session
+/// (oracle `Start()` re-seeds `m_tNextSelfLookup`, Kademlia.cpp:144-145).
+struct SelfLookupTimer {
+    period_ticks: u64,
+    remaining_ticks: u64,
+    was_connected: bool,
+}
+
+impl SelfLookupTimer {
+    fn new(period_ticks: u64) -> Self {
+        let period_ticks = period_ticks.max(1);
+        Self {
+            period_ticks,
+            remaining_ticks: period_ticks,
+            was_connected: false,
+        }
+    }
+
+    /// Advance one maintenance tick. Returns true when the self-lookup is due,
+    /// re-arming for a full period (oracle `m_tNextSelfLookup = tNow + HR2S(4)`).
+    fn on_tick(&mut self, connected: bool) -> bool {
+        if !connected {
+            self.was_connected = false;
+            return false;
+        }
+        if !self.was_connected {
+            self.was_connected = true;
+            self.remaining_ticks = self.period_ticks;
+        }
+        self.remaining_ticks -= 1;
+        if self.remaining_ticks == 0 {
+            self.remaining_ticks = self.period_ticks;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Drive periodic routing-table maintenance for the life of the node.
 pub(crate) async fn run_kad_routing_maintenance_loop(
@@ -55,10 +109,21 @@ pub(crate) async fn run_kad_routing_maintenance_loop(
     let small_timer_ticks = SMALL_TIMER_SECS / BIG_TIMER_SECS.max(1);
     let mut ticks_since_consolidate = 0u64;
     let consolidate_ticks = CONSOLIDATE_SECS / BIG_TIMER_SECS.max(1);
+    let mut self_lookup_timer = SelfLookupTimer::new(SELF_LOOKUP_SECS / BIG_TIMER_SECS.max(1));
 
     while !shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(big_timer).await;
-        if shutdown.load(Ordering::SeqCst) || !dht.is_bootstrapped() {
+        if shutdown.load(Ordering::SeqCst) {
+            continue;
+        }
+
+        // ── 4-hour NODECOMPLETE self-lookup (oracle m_tNextSelfLookup,
+        // Kademlia.cpp:261-264). Never runs while disconnected. ──
+        if self_lookup_timer.on_tick(dht.is_bootstrapped()) {
+            run_self_lookup(&dht);
+        }
+
+        if !dht.is_bootstrapped() {
             continue;
         }
 
@@ -111,6 +176,32 @@ async fn run_bucket_refresh(dht: &DhtNode) {
             outcome.reqs_sent,
             outcome.contacts_ingested
         );
+    });
+}
+
+/// Kick off the 4-hour NODECOMPLETE self-lookup (oracle
+/// `CSearchManager::FindNode(GetKadID(), true)` from `CKademlia::Process`,
+/// Kademlia.cpp:261-264): a full ALPHA convergence walk on our own KadID —
+/// every `KADEMLIA2_REQ` with the NODE-family contact-count byte 0x0B
+/// (Search.cpp:1643-1647) — that re-verifies and refills the home-bucket
+/// neighborhood. Runs detached like the bucket refresh so a slow walk (up to
+/// the 45 s `SEARCHNODE_LIFETIME`) never stalls the timer loop.
+fn run_self_lookup(dht: &DhtNode) {
+    let dht = dht.clone();
+    tokio::spawn(async move {
+        let target = dht.own_id();
+        match dht
+            .self_node_complete_lookup(RpcWorkClass::Maintenance)
+            .await
+        {
+            Ok(closest) => tracing::debug!(
+                "kad self lookup (NODECOMPLETE) target={target} closest_responded={}",
+                closest.len()
+            ),
+            Err(error) => {
+                tracing::debug!("kad self lookup (NODECOMPLETE) target={target} failed: {error}");
+            }
+        }
     });
 }
 
@@ -175,5 +266,58 @@ async fn run_small_timer_sweep(
         {
             tracing::debug!("failed to send Kad re-probe HELLO to {addr}: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BIG_TIMER_SECS, SELF_LOOKUP_SECS, SelfLookupTimer};
+
+    fn period_ticks() -> u64 {
+        SELF_LOOKUP_SECS / BIG_TIMER_SECS
+    }
+
+    /// The self-lookup fires after exactly 4 hours of connected ticks and
+    /// re-arms for another full 4-hour period on each fire (oracle
+    /// `m_tNextSelfLookup = tNow + HR2S(4)`, Kademlia.cpp:261-264).
+    #[test]
+    fn self_lookup_timer_fires_at_four_hours_and_rearms() {
+        let period = period_ticks();
+        assert_eq!(period * BIG_TIMER_SECS, 4 * 60 * 60);
+
+        let mut timer = SelfLookupTimer::new(period);
+        for _ in 0..period - 1 {
+            assert!(!timer.on_tick(true), "must not fire before the 4h mark");
+        }
+        assert!(timer.on_tick(true), "fires exactly at the 4h mark");
+        for _ in 0..period - 1 {
+            assert!(!timer.on_tick(true), "re-armed for a full second period");
+        }
+        assert!(timer.on_tick(true), "fires again a full period later");
+    }
+
+    /// Disconnected ticks never fire the self-lookup and never advance the
+    /// cadence; a reconnect re-arms the full period, because the bootstrap
+    /// self-lookup is the first run of a session (oracle `Start()` re-seeds
+    /// `m_tNextSelfLookup`, Kademlia.cpp:144-145).
+    #[test]
+    fn self_lookup_timer_never_fires_disconnected_and_rearms_on_reconnect() {
+        let period = period_ticks();
+        let mut timer = SelfLookupTimer::new(period);
+
+        // Almost due, then a disconnect.
+        for _ in 0..period - 1 {
+            assert!(!timer.on_tick(true));
+        }
+        for _ in 0..2 * period {
+            assert!(!timer.on_tick(false), "never fires while disconnected");
+        }
+
+        // Reconnect: the accumulated progress is discarded — a full period of
+        // connected uptime is owed again before the next self-lookup.
+        for _ in 0..period - 1 {
+            assert!(!timer.on_tick(true), "reconnect re-arms the full period");
+        }
+        assert!(timer.on_tick(true));
     }
 }

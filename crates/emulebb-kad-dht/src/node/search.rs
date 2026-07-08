@@ -116,6 +116,34 @@ impl DhtNode {
         run_node_refresh_lookup(&self.inner.rpc, initial, config).await
     }
 
+    /// NODECOMPLETE self-lookup (oracle `CSearchManager::FindNode(GetKadID(),
+    /// true)` -> `CSearch` type NODECOMPLETE, fired every 4 hours by
+    /// `CKademlia::Process`, Kademlia.cpp:261-264). Unlike the feather-weight
+    /// NODE refresh above, NODECOMPLETE is a full convergence walk:
+    /// `CSearch::Go` fans out `ALPHA_QUERY` initial `KADEMLIA2_REQ`s
+    /// (`iCount = (m_uType == NODE) ? 1 : min(ALPHA_QUERY, ...)`,
+    /// Search.cpp:194), every `REQ` carries the NODE-family contact-count byte
+    /// `KADEMLIA_FIND_NODE` (0x0B, Search.cpp:1643-1647), and a `RES` feeds
+    /// closer candidates back into the walk instead of ending it (the
+    /// stop-on-first-response path at Search.cpp:369-387 covers NODE and
+    /// NODEFWCHECKUDP only; NODECOMPLETE runs the full response processing and
+    /// counts answers, Search.cpp:515-518). That is exactly the
+    /// [`Self::lookup_nodes_with_class`] traversal, whose 45 s budget matches
+    /// the NODECOMPLETE hard lifetime (`SEARCHNODE_LIFETIME`, Defines.h:53).
+    /// The oracle may delete the search earlier — 10 s old with >= 10 answers
+    /// (`SEARCHNODECOMP_LIFETIME`/`SEARCHNODECOMP_TOTAL`,
+    /// SearchManager.cpp:339-345, which also flips `SetPublish(true)`; our
+    /// publish gating keys off bootstrap state instead) — while our walk ends
+    /// on convergence, so the tail bookkeeping differs without changing which
+    /// contacts get queried.
+    pub async fn self_node_complete_lookup(
+        &self,
+        work_class: RpcWorkClass,
+    ) -> Result<Vec<TraversalContact>, DhtError> {
+        let own_id = self.inner.own_id;
+        self.lookup_nodes_with_class(&own_id, work_class).await
+    }
+
     /// FINDBUDDY buddy-acquisition walk (oracle `CSearchManager::FindBuddy` ->
     /// `CSearch` type FINDBUDDY): a full convergence lookup whose every
     /// `KADEMLIA2_REQ` requests the STORE contact count (`KADEMLIA_STORE` =
@@ -516,6 +544,14 @@ impl DhtNode {
 #[cfg(test)]
 mod tests {
     use super::FIND_BUDDY_LOOKUP_TIMEOUT;
+    use crate::{DhtConfig, DhtNode};
+    use emulebb_kad_net::RpcWorkClass;
+    use emulebb_kad_proto::{
+        KadPacket, NodeId, constants::KADEMLIA_FIND_NODE, packet::Res as KadRes,
+    };
+    use emulebb_kad_routing::Contact;
+    use std::net::{IpAddr, SocketAddr};
+    use std::time::Duration;
 
     /// FINDBUDDY honors the oracle 100 s search lifetime with the shared 20 s
     /// stop grace (`SEARCHFINDBUDDY_LIFETIME - SEC(20)`,
@@ -523,5 +559,72 @@ mod tests {
     #[test]
     fn find_buddy_walk_budget_is_lifetime_minus_stop_grace() {
         assert_eq!(FIND_BUDDY_LOOKUP_TIMEOUT.as_secs(), 80);
+    }
+
+    /// The 4-hour NODECOMPLETE self-lookup targets our OWN KadID and goes on
+    /// the wire as a `KADEMLIA2_REQ` with the NODE-family contact-count byte
+    /// `KADEMLIA_FIND_NODE` (0x0B) — oracle
+    /// `CSearchManager::FindNode(GetKadID(), true)` (Kademlia.cpp:261-264)
+    /// through `CSearch::GetRequestContactCount` (Search.cpp:1643-1647).
+    #[tokio::test]
+    async fn self_node_complete_lookup_sends_find_node_req_for_own_id() {
+        let bind_ip = crate::test_bind_ip();
+        let peer = tokio::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))
+            .await
+            .unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr: Some(SocketAddr::new(IpAddr::V4(bind_ip), 0)),
+            obfuscation_enabled: false,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let _handle = dht.start();
+        dht.add_contact(Contact::new(
+            NodeId::from_bytes([0x42; 16]),
+            bind_ip,
+            peer_addr.port(),
+            4662,
+            9,
+        ))
+        .await
+        .unwrap();
+
+        let own_id = dht.own_id();
+        let lookup = tokio::spawn({
+            let dht = dht.clone();
+            async move {
+                dht.self_node_complete_lookup(RpcWorkClass::Maintenance)
+                    .await
+            }
+        });
+
+        let mut buf = [0u8; 512];
+        let (len, from) = tokio::time::timeout(Duration::from_secs(10), peer.recv_from(&mut buf))
+            .await
+            .expect("self-lookup REQ should arrive")
+            .unwrap();
+        let KadPacket::Req(req) = KadPacket::decode(&buf[..len]).unwrap() else {
+            panic!("self-lookup must send a KADEMLIA2_REQ");
+        };
+        assert_eq!(req.count, KADEMLIA_FIND_NODE, "NODECOMPLETE count byte");
+        assert_eq!(req.target, own_id, "self-lookup targets our own KadID");
+
+        // Answer with an empty RES so the walk converges and returns.
+        let res = KadPacket::Res(KadRes {
+            target: own_id,
+            contacts: Vec::new(),
+        })
+        .encode()
+        .unwrap();
+        peer.send_to(&res, from).await.unwrap();
+        let closest = tokio::time::timeout(Duration::from_secs(30), lookup)
+            .await
+            .expect("self-lookup should finish once the pool is exhausted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(closest.len(), 1, "the sole responder is the closest set");
     }
 }

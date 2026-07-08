@@ -22,11 +22,11 @@
 //!     hits `SEARCHNODE_LIFETIME` (45 s, Defines.h:53; SearchManager.cpp:333-337
 //!     deletes NODE searches on lifetime only).
 //!
-//! NODECOMPLETE (the 4-hour self-lookup, KAD-G4) is intentionally NOT this
-//! shape: the oracle starts it with `iCount = ALPHA_QUERY` and walks it to
-//! convergence, so it belongs on the full [`super::run_traversal`] machinery;
-//! only its lifetime/termination bookkeeping differs. Keep the search-type
-//! distinction at the caller (`DhtNode`) level.
+//! NODECOMPLETE (the 4-hour self-lookup) is intentionally NOT this shape: the
+//! oracle starts it with `iCount = ALPHA_QUERY` and walks it to convergence,
+//! so it rides the full [`super::run_traversal`] machinery via
+//! `DhtNode::self_node_complete_lookup`; only its lifetime/termination
+//! bookkeeping differs.
 
 use super::{
     CandidateState, KadIpFilter, KadResContactSink, SEARCH_JUMPSTART_IDLE_GRACE,
