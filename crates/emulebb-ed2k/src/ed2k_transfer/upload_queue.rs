@@ -47,6 +47,14 @@ const UPLOAD_SLOT_OPEN_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// 102400` short-circuit, UploadQueue.cpp:972): once the pipe is already busy the
 /// fork stops throttling slot opens.
 const UPLOAD_SLOT_OPEN_BURST_DATARATE_BYTES_PER_SEC: u64 = 102_400;
+/// Sustained-underfill window before a slow/idle active upload slot is RECYCLED
+/// (oracle `HasSustainedBroadbandUnderfill` = `m_ullBroadbandUnderfillSince +
+/// SEC2MS(2)`, UploadQueue.cpp:1047-1050): the slow/idle recycle path
+/// (`ShouldTrackSlowUploadSlots`, UploadQueue.cpp:1114) fires at 2 s. This is a
+/// FIXED constant matching the fork's `SEC2MS(2)`, distinct from the config-driven
+/// 10 s elastic slot-OPEN window (`HasSustainedElasticBroadbandUnderfill`,
+/// UploadQueue.cpp:1052-1055; the `elastic_underfill` config).
+const SLOW_RECYCLE_UNDERFILL_WINDOW: Duration = Duration::from_secs(2);
 
 /// Upload-slot and waiting-queue policy used by the inbound ED2K listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1196,9 +1204,13 @@ impl Ed2kUploadQueueState {
         ) {
             return None;
         }
+        // The slow/idle recycle path keys off the 2 s sustained-underfill window
+        // (oracle HasSustainedBroadbandUnderfill, UploadQueue.cpp:1047-1050 via
+        // ShouldTrackSlowUploadSlots, :1114), NOT the 10 s elastic-open window: a
+        // slow/idle uploader is recycled + sent OP_OUTOFPARTREQS ~8 s sooner.
         if self.waiting_session_count() == 0
             || self.config.upload_limit_bytes_per_sec == 0
-            || !self.sustained_upload_underfill_ready(now)
+            || !self.sustained_recycle_underfill_ready(now)
         {
             return None;
         }
@@ -1555,6 +1567,18 @@ impl Ed2kUploadQueueState {
         self.config.upload_limit_bytes_per_sec != 0
             && self.underfill_since.is_some_and(|underfill_since| {
                 now.saturating_duration_since(underfill_since) >= self.config.elastic_underfill
+            })
+    }
+
+    /// Sustained-underfill readiness for the slow/idle active-slot RECYCLE path
+    /// (oracle `HasSustainedBroadbandUnderfill`, UploadQueue.cpp:1047-1050): the
+    /// same underfill-since clock as the elastic-open window, but at the fork's
+    /// fixed 2 s threshold (`SLOW_RECYCLE_UNDERFILL_WINDOW`) instead of the 10 s
+    /// elastic-open window, so a slow/idle uploader is recycled ~8 s sooner.
+    fn sustained_recycle_underfill_ready(&self, now: Instant) -> bool {
+        self.config.upload_limit_bytes_per_sec != 0
+            && self.underfill_since.is_some_and(|underfill_since| {
+                now.saturating_duration_since(underfill_since) >= SLOW_RECYCLE_UNDERFILL_WINDOW
             })
     }
 
