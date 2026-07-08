@@ -451,7 +451,7 @@ mod tests {
     use super::buddy_callback_check_matches;
 
     use std::collections::VecDeque;
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -485,7 +485,10 @@ mod tests {
     async fn buddy_link_stops_and_stops_pinging_when_cancelled() {
         // A fake buddy peer that accepts the connection and then stays silent, so
         // the driver would otherwise idle on its ping/read timers indefinitely.
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        // Bind X_LOCAL_IP (never a loopback literal: the VPN split tunnel breaks
+        // 127.0.0.1). CI exports X_LOCAL_IP=127.0.0.1.
+        let bind_ip = crate::test_bind_ip();
+        let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -517,8 +520,8 @@ mod tests {
         let driver = drive_buddy_link(
             &mut transport,
             &mut ping_timer,
-            Ipv4Addr::LOCALHOST,
-            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port()),
+            bind_ip,
+            SocketAddr::new(std::net::IpAddr::V4(bind_ip), addr.port()),
             hello,
             [0xAB; 16],
             &transfer_runtime,
