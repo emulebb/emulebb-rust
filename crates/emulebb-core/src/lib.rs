@@ -6645,11 +6645,14 @@ async fn kad_publishable_shared_files(
         kad_publishable_shared_file_entries(source_entries, now_unix_ms, |file_hash| {
             schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
         });
-    // KEYWORD lane keeps its own ordering, mirroring the source clock for now.
-    let keyword_files =
-        kad_publishable_shared_file_entries(keyword_entries, now_unix_ms, |file_hash| {
-            schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
-        });
+    // KEYWORD lane holds the age term CONSTANT, independent of the source-clock
+    // scan sort: the oracle keyword rank passes 0 for `tLastPublish`
+    // (SharedFileList.cpp:3316), so keyword selection is priority/demand-ordered,
+    // not perturbed by when each file was last SOURCE-published. `|_| 0` maps
+    // every file to `publish_age_score`'s flat max (80), matching that constant.
+    // (Corrects the round-20 cca3013 side effect where the keyword lane inherited
+    // the source-clock ordering from the shared scan sort.)
+    let keyword_files = kad_publishable_shared_file_entries(keyword_entries, now_unix_ms, |_| 0);
     let keyword_index = keyword_files
         .iter()
         .enumerate()
@@ -9748,6 +9751,75 @@ mod tests {
         assert_eq!(publish.all_time_upload_accepts, 4);
         assert_eq!(publish.comment, "synthetic note");
         assert_eq!(publish.rating, 5);
+    }
+
+    #[test]
+    fn keyword_ordering_holds_age_constant_and_ignores_source_publish_clock() {
+        // The keyword lane ranks candidates with the age term held at 0 (oracle
+        // passes 0 for tLastPublish, SharedFileList.cpp:3316), so two files
+        // identical except their SOURCE last-publish clock rank equally for
+        // keyword selection -- unlike the source lane, whose ordering the
+        // last-publish clock deliberately moves.
+        let now_unix_ms = 100_000_000i64;
+        let make = |hash: u8| MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
+            canonical_name: "ubuntu-python-sample.iso".to_string(),
+            file_size: 4096,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
+            comment: String::new(),
+            rating: 0,
+        };
+        let a = make(0xA1);
+        let b = make(0xB2);
+        let entries = vec![a.clone(), b.clone()];
+        let hashes = |entries: Vec<MetadataTransferPublishEntry>| {
+            entries.into_iter().map(|e| e.file_hash).collect::<Vec<_>>()
+        };
+
+        // SOURCE ordering DOES move with the clock: whichever file is
+        // "never published" (0 -> max age boost) sorts ahead of the other.
+        let source_a_overdue = hashes(kad_publishable_shared_file_entries(
+            entries.clone(),
+            now_unix_ms,
+            |file_hash| {
+                if file_hash == b.file_hash {
+                    now_unix_ms - 60_000
+                } else {
+                    0
+                }
+            },
+        ));
+        let source_b_overdue = hashes(kad_publishable_shared_file_entries(
+            entries.clone(),
+            now_unix_ms,
+            |file_hash| {
+                if file_hash == a.file_hash {
+                    now_unix_ms - 60_000
+                } else {
+                    0
+                }
+            },
+        ));
+        assert_ne!(source_a_overdue, source_b_overdue);
+
+        // KEYWORD ordering (age held at 0) is invariant to the source clock.
+        let keyword_first = hashes(kad_publishable_shared_file_entries(
+            entries.clone(),
+            now_unix_ms,
+            |_| 0,
+        ));
+        let keyword_again =
+            hashes(kad_publishable_shared_file_entries(entries, now_unix_ms, |_| 0));
+        assert_eq!(keyword_first, keyword_again);
     }
 
     #[test]
