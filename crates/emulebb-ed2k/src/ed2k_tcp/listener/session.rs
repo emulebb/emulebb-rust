@@ -210,6 +210,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
     let mut requested_file_hash: Option<Ed2kHash> = None;
     let mut peer_supports_aich = false;
+    // Whether the peer advertised secure-ident support in its hello. Gates the
+    // credit-accrual identity check for served upload bytes (eMule
+    // IS_NOTAVAILABLE legacy peers are still credited); see credit_accrual_allowed.
+    let mut peer_supports_secure_ident = false;
     let mut peer_supports_file_identifiers = false;
     // Peer's advertised comment-acceptance version (oracle m_byAcceptCommentVer);
     // gates whether we propagate our user-set comment/rating via OP_FILEDESC.
@@ -374,6 +378,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
                 bound_user_hash = Some(hello_profile.identity.user_hash);
                 peer_supports_aich = hello_profile.supports_aich;
+                peer_supports_secure_ident = hello_profile.supports_secure_ident;
                 peer_supports_file_identifiers = hello_profile.supports_file_identifiers;
                 // The modern hello MISCOPTIONS1 carries m_byAcceptCommentVer
                 // (bits 4-7). Capture it so OP_REQUESTFILENAME can answer with
@@ -716,6 +721,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     upload_queue: &mut upload_queue,
                     peer_upload_identity: peer_identity,
                     peer_ident_verified: peer_secure_ident.peer_ident_verified,
+                    peer_supports_secure_ident,
                     transport: &mut transport,
                     peer_addr,
                     opcode: packet.opcode,

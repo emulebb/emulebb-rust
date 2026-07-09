@@ -139,14 +139,18 @@ impl DownloadSessionState {
         }
     }
 
-    /// The peer user hash to attribute download credit to, returning `Some` only
-    /// when the peer's secure identity is cryptographically verified (eMule
-    /// `CClientCredits::AddDownloaded` gates the download direction on
-    /// IS_IDENTIFIED exactly as the upload direction; `ClientCredits.cpp:83-91`).
-    /// Mirrors the upload path which only sets the credit user hash on a verified
-    /// peer.
+    /// The peer user hash to attribute download credit to. Returns `Some` when
+    /// the eMule `CClientCredits::AddDownloaded` gate permits accrual
+    /// (ClientCredits.cpp:83-91): the peer's secure identity is verified
+    /// (IS_IDENTIFIED) or the peer is a legacy client with no secure-ident
+    /// capability (IS_NOTAVAILABLE). A crypto-capable-but-unverified peer
+    /// (IS_IDNEEDED/IDFAILED/IDBADGUY) is skipped because its user hash is
+    /// spoofable. Mirrors the upload path's identical gate.
     pub(super) fn verified_credit_user_hash(&self) -> Option<[u8; 16]> {
-        if self.peer_secure_ident.peer_ident_verified {
+        if super::super::super::credit_accrual_allowed(
+            self.peer_secure_ident.peer_ident_verified,
+            self.remote_supports_secure_ident,
+        ) {
             self.peer_user_hash
         } else {
             None

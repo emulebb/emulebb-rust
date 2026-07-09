@@ -185,6 +185,28 @@ pub(super) struct Ed2kPeerSecureIdentState {
     pub(super) our_external_ip: Option<Ipv4Addr>,
 }
 
+/// eMule credit-accrual gate for `CClientCredits::AddUploaded` /
+/// `AddDownloaded` (ClientCredits.cpp:83-113). Credit is accrued for the served
+/// / received bytes only when the peer's identity state permits it:
+///
+/// - `IS_IDENTIFIED` (`ident_verified`): the peer proved its user hash by secure
+///   identification, so its credit slot is authentic;
+/// - `IS_NOTAVAILABLE` (`!peer_supports_secure_ident`): a legacy peer that does
+///   not implement secure identification, credited for backward compatibility
+///   exactly like the oracle (crypto cannot be applied to it).
+///
+/// A crypto-capable peer that has not verified yet (`IS_IDNEEDED` /
+/// `IS_IDFAILED` / `IS_IDBADGUY`) is skipped: its user hash is spoofable while
+/// the local client can verify, so crediting it would let an attacker steal the
+/// upload ratio bound to that hash. This mirrors the oracle's `switch` that
+/// early-returns for those three states when `CryptoAvailable()`.
+pub(in crate::ed2k_tcp) fn credit_accrual_allowed(
+    ident_verified: bool,
+    peer_supports_secure_ident: bool,
+) -> bool {
+    ident_verified || !peer_supports_secure_ident
+}
+
 pub(super) fn encode_secident_state(state: u8, challenge: u32) -> Vec<u8> {
     let mut payload = Vec::with_capacity(5);
     payload.push(state);

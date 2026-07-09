@@ -339,3 +339,16 @@ fn outbound_v2_payload_differs_from_v1() {
     );
     assert_eq!(*v2.last().unwrap(), CRYPT_CIP_LOCALCLIENT);
 }
+
+#[test]
+fn credit_accrual_gate_matches_oracle_ident_states() {
+    // eMule CClientCredits::AddUploaded/AddDownloaded (ClientCredits.cpp:83-113).
+    // Verified peer (IS_IDENTIFIED): accrue, regardless of advertised support.
+    assert!(credit_accrual_allowed(true, true));
+    assert!(credit_accrual_allowed(true, false));
+    // Legacy peer with no secure-ident support (IS_NOTAVAILABLE): still accrue.
+    assert!(credit_accrual_allowed(false, false));
+    // Crypto-capable peer that has not verified yet (IS_IDNEEDED/IDFAILED/
+    // IDBADGUY): skip -- its user hash is spoofable.
+    assert!(!credit_accrual_allowed(false, true));
+}

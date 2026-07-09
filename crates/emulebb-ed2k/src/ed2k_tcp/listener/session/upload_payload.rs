@@ -30,6 +30,12 @@ pub(in crate::ed2k_tcp) struct UploadPayloadRequest<'a> {
     /// attributed to the peer's user hash only when this is true, so an
     /// unverified peer cannot spoof another client's credit-store identity.
     pub(in crate::ed2k_tcp) peer_ident_verified: bool,
+    /// Whether the peer advertised secure-ident support in its hello
+    /// (`hello_profile.supports_secure_ident`). A peer that does NOT support it
+    /// is a legacy client (eMule IS_NOTAVAILABLE) and is still credited; a peer
+    /// that DOES support it but has not verified yet is skipped. See
+    /// [`credit_accrual_allowed`].
+    pub(in crate::ed2k_tcp) peer_supports_secure_ident: bool,
     pub(in crate::ed2k_tcp) transport: &'a mut Ed2kTransport,
     pub(in crate::ed2k_tcp) peer_addr: SocketAddr,
     pub(in crate::ed2k_tcp) opcode: u8,
@@ -161,6 +167,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         upload_queue,
         peer_upload_identity,
         peer_ident_verified,
+        peer_supports_secure_ident,
         transport,
         peer_addr,
         opcode,
@@ -189,10 +196,15 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
         }
     }
     transfer_runtime.note_file_upload_request(&requested).await;
-    // Only a cryptographically verified peer may be credited: the credit store is
-    // keyed on the user hash and feeds the upload score, so an unverified hash is
-    // spoofable (eMule attributes credits only in IS_IDENTIFIED).
-    let peer_user_hash = if peer_ident_verified {
+    // eMule credit-accrual gate (CClientCredits::AddUploaded, ClientCredits.cpp
+    // :99-113): credit a verified peer (IS_IDENTIFIED) or a legacy peer with no
+    // secure-ident support (IS_NOTAVAILABLE), but skip a crypto-capable peer
+    // that has not verified yet -- the credit store is keyed on the user hash
+    // and feeds the upload score, so such a hash is spoofable.
+    let peer_user_hash = if crate::ed2k_tcp::credit_accrual_allowed(
+        peer_ident_verified,
+        peer_supports_secure_ident,
+    ) {
         peer_upload_identity.user_hash
     } else {
         None
