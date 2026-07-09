@@ -710,11 +710,11 @@ async fn mark_offer_files_published(
         .map(|(file_hash, _, _, _)| hex::encode(file_hash))
         .collect::<HashSet<_>>();
     let mut catalog = shared_catalog.write().await;
-    for entry in catalog.iter_mut() {
+    catalog.mutate_all(|entry| {
         if published.contains(&entry.file_hash.to_ascii_lowercase()) {
             entry.publish.last_ed2k_publish_unix_ms = published_at_ms;
         }
-    }
+    });
 }
 
 #[cfg(feature = "packet-diagnostics")]

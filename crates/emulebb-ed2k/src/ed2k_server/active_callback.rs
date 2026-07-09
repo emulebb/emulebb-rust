@@ -9,7 +9,11 @@ use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedEntry};
+use crate::{
+    config::Ed2kConfig,
+    ed2k_tcp::Ed2kHelloIdentity,
+    ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
+};
 
 use super::packet_handler::decode_id_change_payload;
 use super::{
@@ -101,7 +105,9 @@ pub async fn request_callback_on_server(options: Ed2kCallbackRequestOptions<'_>)
                 // ServerConnect, gated on AddServersFromServer).
                 send_connected_server_startup(
                     &mut session,
-                    &Arc::new(RwLock::new(shared_catalog.to_vec())),
+                    &Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
+                        shared_catalog.to_vec(),
+                    ))),
                     bind_ip,
                     hello_identity.tcp_port,
                     false,

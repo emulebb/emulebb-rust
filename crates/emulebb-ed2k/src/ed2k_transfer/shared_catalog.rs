@@ -34,7 +34,7 @@ impl Ed2kTransferRuntime {
         };
         preserved_verified.extend(hashes.iter().filter_map(Ed2kSharedEntry::from_popular_hash));
         let mut guard = self.shared_catalog.write().await;
-        *guard = dedupe_entries(preserved_verified);
+        guard.replace_with(dedupe_entries(preserved_verified));
     }
 
     pub(super) async fn upsert_verified_catalog_entry(&self, manifest: &Ed2kResumeManifest) {
@@ -43,7 +43,8 @@ impl Ed2kTransferRuntime {
         if manifest.completed || !manifest.verified_ranges.is_empty() {
             entries.push(Ed2kSharedEntry::from_manifest(manifest));
         }
-        *entries = dedupe_entries(entries.clone());
+        let deduped = dedupe_entries(entries.to_vec());
+        entries.replace_with(deduped);
     }
 
     /// Remove a locally verified file from the live serving/advertisement

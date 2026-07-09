@@ -9,7 +9,11 @@ use tokio::{sync::RwLock, time::Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedEntry};
+use crate::{
+    config::Ed2kConfig,
+    ed2k_tcp::Ed2kHelloIdentity,
+    ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
+};
 
 use super::packet_handler::decode_id_change_payload;
 use super::{
@@ -404,7 +408,9 @@ async fn search_keyword_on_server(
                     );
                 }
                 session.assigned_client_id = Some(id_change.client_id);
-                let active_catalog = Arc::new(RwLock::new(shared_catalog.to_vec()));
+                let active_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
+                    shared_catalog.to_vec(),
+                )));
                 // Ephemeral keyword-query session: never solicit the server list
                 // (stock issues OP_GETSERVERLIST only from its persistent
                 // ServerConnect, gated on AddServersFromServer).

@@ -9,7 +9,11 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedEntry};
+use crate::{
+    config::Ed2kConfig,
+    ed2k_tcp::Ed2kHelloIdentity,
+    ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
+};
 use emulebb_kad_proto::Ed2kHash;
 
 use super::packet_handler::decode_id_change_payload;
@@ -222,7 +226,9 @@ async fn search_sources_on_server(
         ServerSessionPhase::AwaitingIdChange,
         "login request sent; awaiting OP_IDCHANGE for source search",
     );
-    let active_catalog = Arc::new(RwLock::new(shared_catalog.to_vec()));
+    let active_catalog = Arc::new(RwLock::new(IndexedSharedCatalog::from_entries(
+        shared_catalog.to_vec(),
+    )));
 
     loop {
         if cancel.is_cancelled() {

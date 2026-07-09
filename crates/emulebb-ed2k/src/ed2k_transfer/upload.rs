@@ -476,16 +476,15 @@ impl Ed2kTransferRuntime {
         }
         self.metadata
             .add_file_all_time_uploaded(&file_hash.to_string(), delta)?;
-        let hash_text = file_hash.to_string();
+        // O(1) by-hash credit: the index resolves the unique non-hint (verified)
+        // entry for this file directly, so a per-fragment credit no longer scans the
+        // whole catalog under the write lock.
         if let Ok(mut catalog) = self.shared_catalog.try_write() {
-            for entry in catalog.iter_mut() {
-                if entry.file_hash.eq_ignore_ascii_case(&hash_text) && !entry.compatibility_hint {
-                    entry.all_time_uploaded_bytes =
-                        entry.all_time_uploaded_bytes.saturating_add(delta);
-                    entry.publish.session_uploaded_bytes =
-                        entry.publish.session_uploaded_bytes.saturating_add(delta);
-                }
-            }
+            catalog.update_by_hash(file_hash, |entry| {
+                entry.all_time_uploaded_bytes = entry.all_time_uploaded_bytes.saturating_add(delta);
+                entry.publish.session_uploaded_bytes =
+                    entry.publish.session_uploaded_bytes.saturating_add(delta);
+            });
         }
         Ok(())
     }
@@ -495,17 +494,10 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
         update: impl FnOnce(&mut super::Ed2kSharedEntry),
     ) {
-        let hash_text = file_hash.to_string();
-        let mut update = Some(update);
+        // O(1) by-hash resolution of the unique non-hint entry, replacing the
+        // former write-lock + full linear scan on every request/accept.
         let mut catalog = self.shared_catalog.write().await;
-        for entry in catalog.iter_mut() {
-            if entry.file_hash.eq_ignore_ascii_case(&hash_text) && !entry.compatibility_hint {
-                if let Some(update) = update.take() {
-                    update(entry);
-                }
-                break;
-            }
-        }
+        catalog.update_by_hash(file_hash, update);
     }
 
     /// Enable/disable the credit system live (eMule `thePrefs.GetCreditSystem()`).

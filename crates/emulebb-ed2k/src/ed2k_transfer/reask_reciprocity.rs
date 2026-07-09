@@ -22,8 +22,8 @@ use crate::ed2k_client_udp::reciprocity::{
 };
 use crate::ed2k_client_udp::service::TransferReaskInfo;
 
-use super::Ed2kTransferRuntime;
 use super::model::Ed2kTransferState;
+use super::{Ed2kSharedEntry, Ed2kTransferRuntime};
 use super::upload_queue::Ed2kUploadSessionPhaseSnapshot;
 
 impl Ed2kTransferRuntime {
@@ -50,12 +50,16 @@ impl Ed2kTransferRuntime {
         // part ("share while downloading"). `our_part_status` then advertises the
         // partfile's verified parts, mirroring eMule's OP_REASKFILEPING handler
         // answering `WritePartStatus` for an `IsPartFile()` reqfile.
+        //
+        // The by-hash index resolves the unique non-hint entry in O(1); a bare
+        // compatibility hint is never indexed and never servable, so the follow-up
+        // `is_servable` filter reproduces the previous `find(servable && hash)` scan.
         let serving_entry = {
             let catalog = self.shared_catalog.read().await;
             catalog
-                .iter()
-                .find(|e| e.is_servable() && e.file_hash.eq_ignore_ascii_case(&requested_hex))
-                .cloned()
+                .index_by_hash(&ping.file_hash)
+                .map(|idx| catalog[idx].clone())
+                .filter(Ed2kSharedEntry::is_servable)
         };
         let file_shared = serving_entry.is_some();
         let our_part_status = serving_entry.and_then(|e| {
