@@ -307,13 +307,17 @@ pub struct Ed2kResumeManifest {
     /// `None` for a real download whose payload lives in the piece store.
     #[serde(default)]
     pub source_path: Option<String>,
-    /// Last-modified time (Unix milliseconds) of the share-in-place source file
-    /// captured at ingest. The incremental shared-directory reload compares this
-    /// (plus `source_path` and `file_size`) against the on-disk `fs::metadata`
-    /// and reuses this manifest instead of re-hashing when all three match.
-    /// `None` for a real download or a share-in-place manifest written before
-    /// this field existed (treated as a reload miss, so the file is re-hashed
-    /// once and the mtime is then recorded).
+    /// Last-modified time (Unix milliseconds) captured for the incremental
+    /// shared-directory reload's reuse identity. For a share-in-place transfer
+    /// (`source_path` set) it is the source file's mtime at ingest; for a
+    /// completed DOWNLOAD (`source_path` `None`) it is the delivered file's mtime
+    /// captured at delivery, so a shared-dir rescan that re-finds the delivered
+    /// file reuses the download's hashset instead of re-hashing (HASH-2). The
+    /// reload compares this (plus `file_size` and the path key) against the
+    /// on-disk `fs::metadata` and reuses the manifest when they match. `None`
+    /// for a not-yet-delivered download or a pre-existing manifest written
+    /// before this field existed (a reload miss, so the file is re-hashed once
+    /// and the mtime is then recorded).
     #[serde(default)]
     pub source_mtime_ms: Option<i64>,
 }

@@ -84,6 +84,21 @@ impl Ed2kTransferRuntime {
             let _guard = self.manifest_io.lock().await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
             manifest.delivered_path = Some(final_path.to_string_lossy().into_owned());
+            // Record the delivered file's mtime baseline so a later
+            // shared-directory rescan that re-finds this file in a shared
+            // Incoming/category dir reuses the download's already-computed
+            // hashset instead of re-reading and re-hashing the whole payload
+            // (HASH-2; oracle FindKnownFile, SharedFileList.cpp:2138). Only for a
+            // real download (`source_path == None`); a share-in-place manifest
+            // keeps its own source mtime and is never delivered. The mtime is
+            // read AFTER the file is in place, through the same `long_path` stat
+            // the reload uses, so an unchanged delivered file compares equal on
+            // reload (a hard-link preserves the source mtime; a copy+rename sets
+            // it once at delivery and it is stable thereafter).
+            if manifest.source_path.is_none() {
+                manifest.source_mtime_ms = Ed2kTransferRuntime::scanned_source_identity(&final_path)
+                    .and_then(|(_key, _size, mtime_ms)| mtime_ms);
+            }
             self.store_manifest_unlocked(&manifest).await?;
         }
         Ok(Ed2kDeliveryOutcome::Delivered(final_path))

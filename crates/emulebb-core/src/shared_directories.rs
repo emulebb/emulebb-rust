@@ -595,6 +595,10 @@ async fn plan_incremental_reload(
     file_paths: Vec<PathBuf>,
 ) -> Result<ReloadPlan> {
     let index = core.ed2k_transfers.share_in_place_reload_index().await?;
+    // Completed downloads delivered into a shared dir are reuse-only (never
+    // pruned): recognized by delivered path + (size, mtime) so an unchanged
+    // delivered file is a cache hit instead of a needless whole-payload re-hash.
+    let delivered_index = core.ed2k_transfers.delivered_reuse_index().await?;
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -660,17 +664,40 @@ async fn plan_incremental_reload(
                                 });
                             }
                         }
-                        // Brand-new path: hash it, nothing stale to clean up.
+                        // Not a share-in-place source. Before treating it as a
+                        // brand-new file to hash, check whether it is a completed
+                        // download's delivered file re-found in a shared dir: if
+                        // its delivered identity (size + mtime) still matches, the
+                        // download already computed this hashset, so reuse it
+                        // (oracle FindKnownFile) rather than re-hashing the whole
+                        // payload. Reuse-only: this never contributes to pruning.
                         None => {
-                            stats.planned_hash_count += 1;
-                            stats.new_count += 1;
-                            to_hash.push(ReloadHashTarget {
-                                path,
-                                key,
-                                file_size: size,
-                                source_mtime_ms: mtime_ms,
-                                stale_hashes: Vec::new(),
-                            });
+                            match delivered_index.get(&key) {
+                                Some(entry)
+                                    if entry.file_size == size
+                                        && entry.source_mtime_ms.is_some()
+                                        && entry.source_mtime_ms == mtime_ms =>
+                                {
+                                    stats.reused_count += 1;
+                                    reused_shares.push(ReusedReloadShare {
+                                        file_hash: entry.file_hash.clone(),
+                                        source_path: path.clone(),
+                                        stale_hashes: Vec::new(),
+                                    });
+                                }
+                                // Brand-new path: hash it, nothing stale to clean up.
+                                _ => {
+                                    stats.planned_hash_count += 1;
+                                    stats.new_count += 1;
+                                    to_hash.push(ReloadHashTarget {
+                                        path,
+                                        key,
+                                        file_size: size,
+                                        source_mtime_ms: mtime_ms,
+                                        stale_hashes: Vec::new(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -1180,6 +1207,88 @@ mod tests {
         assert_eq!(plan.reused_shares[0].file_hash, file_hash);
         assert_eq!(plan.stats.planned_hash_count, 0);
         assert_eq!(plan.stats.reused_count, 1);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A completed DOWNLOAD delivered into a shared dir has NO share-in-place
+    /// source row, so it used to look brand-new on reload and its whole payload
+    /// was re-hashed just to reshare content it already hashed while downloading
+    /// (HASH-2). With the delivered file's `(size, mtime)` baseline recorded at
+    /// delivery, an unchanged delivered file is now a reuse cache HIT (oracle
+    /// FindKnownFile) -- reused, not re-hashed. If the operator later replaces
+    /// the delivered file (mtime changes), it correctly falls back to a re-hash.
+    #[tokio::test]
+    async fn incremental_reload_reuses_delivered_download_without_rehash() {
+        let root = scratch_dir("delivered-download");
+        let delivered = root.join("Completed.Download.bin");
+        fs::write(&delivered, b"completed download payload").unwrap();
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        let (_, size, mtime_ms) =
+            Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
+        let file_hash = "aabbccddeeff00112233445566778899".to_string();
+        // A completed download: delivered_path set, source_path NONE, and the
+        // delivered mtime baseline recorded (as deliver.rs does at delivery).
+        core.metadata_store
+            .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
+                file_hash: file_hash.clone(),
+                canonical_name: "Completed.Download.bin".to_string(),
+                file_size: size,
+                piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
+                completed: true,
+                md4_hashset_acquired: true,
+                md4_hashset: Vec::new(),
+                aich_hashset_acquired: false,
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                verified_ranges: vec![emulebb_metadata::MetadataTransferRange {
+                    start: 0,
+                    end: size,
+                }],
+                pieces: Vec::new(),
+                sources: Vec::new(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                comment: String::new(),
+                rating: 0,
+                category_id: 0,
+                control_state: None,
+                transfer_row_removed: false,
+                delivered_path: Some(delivered.display().to_string()),
+                source_path: None,
+                source_mtime_ms: mtime_ms,
+            })
+            .unwrap();
+
+        // Unchanged delivered file: reuse HIT, no re-hash.
+        let plan = plan_incremental_reload(&core, vec![delivered.clone()])
+            .await
+            .unwrap();
+        assert!(
+            plan.to_hash.is_empty(),
+            "an unchanged delivered download must not be re-hashed"
+        );
+        assert_eq!(plan.reused_shares.len(), 1);
+        assert_eq!(plan.reused_shares[0].file_hash, file_hash);
+        assert_eq!(plan.stats.reused_count, 1);
+        assert_eq!(plan.stats.planned_hash_count, 0);
+        assert_eq!(plan.stats.new_count, 0);
+
+        // Operator replaces the delivered file (new mtime): the stale reuse
+        // baseline no longer matches, so it is (correctly) re-hashed as new.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&delivered, b"a different payload the operator dropped in").unwrap();
+        let replaced = plan_incremental_reload(&core, vec![delivered.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced.to_hash.len(),
+            1,
+            "a replaced delivered file must be re-hashed, not served under the old hash"
+        );
+        assert!(replaced.reused_shares.is_empty());
+        assert_eq!(replaced.stats.new_count, 1);
         fs::remove_dir_all(&root).ok();
     }
 

@@ -112,6 +112,43 @@ async fn materialize_completed_payload_persists_across_reload() {
 }
 
 #[tokio::test]
+async fn materialize_records_delivered_mtime_for_reload_reuse() {
+    let root = unique_test_dir("ed2k-deliver-mtime");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let hash = ingest_completed(&runtime, &root, "Reusable.mkv").await;
+    let incoming = root.join("incoming");
+
+    let outcome = runtime
+        .materialize_completed_payload(&hash, &incoming)
+        .await
+        .unwrap();
+    let Ed2kDeliveryOutcome::Delivered(delivered) = outcome else {
+        panic!("expected a fresh delivery");
+    };
+
+    // The delivered download records its mtime baseline with source_path still
+    // None, so the shared-directory reload's delivered-reuse index picks it up
+    // and an unchanged delivered file is a cache hit rather than a re-hash.
+    let manifest = runtime.manifest(&hash).await.unwrap();
+    assert!(
+        manifest.source_path.is_none(),
+        "a delivered download must stay source_path == None"
+    );
+    let recorded = manifest
+        .source_mtime_ms
+        .expect("the delivered file's mtime baseline must be recorded");
+    // It equals exactly what the reload stats for the same file (the mtime is
+    // stable across delivery), so the (size, mtime) reuse identity matches.
+    let (_, _, scanned_mtime) =
+        Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
+    assert_eq!(
+        Some(recorded),
+        scanned_mtime,
+        "recorded delivered mtime must match the on-disk mtime the reload sees"
+    );
+}
+
+#[tokio::test]
 async fn materialize_skips_incomplete_transfer() {
     let root = unique_test_dir("ed2k-deliver-incomplete");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

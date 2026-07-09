@@ -4,10 +4,10 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     store::{bool_to_i64, decode_fixed_hex, unix_ms},
     transfer_model::{
-        MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure, MetadataTransferCatalogEntry,
-        MetadataTransferCounts, MetadataTransferManifest, MetadataTransferPiece,
-        MetadataTransferPublishEntry, MetadataTransferRange, MetadataTransferShareEntry,
-        MetadataTransferSource,
+        MetadataDeliveredReuseEntry, MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure,
+        MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
+        MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
+        MetadataTransferShareEntry, MetadataTransferSource,
     },
 };
 
@@ -468,6 +468,40 @@ impl super::MetadataStore {
                 file_size: row.get::<_, i64>(1)? as u64,
                 source_path: row.get(2)?,
                 source_mtime_ms: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Completed downloads whose delivered file can be reused (not re-hashed) if
+    /// a shared-directory rescan re-finds it in a configured shared dir. A real
+    /// download has NO `share_in_place_sources` row, so without this it looks
+    /// brand-new on reload and its whole payload is needlessly re-hashed to
+    /// convert it to a share. Only rows that recorded the delivered file's mtime
+    /// baseline (`source_mtime_ms`, captured at delivery for a delivered
+    /// download -- `source_path IS NULL` distinguishes it from a share-in-place
+    /// source) are returned, so an unchanged delivered file is a reload cache hit.
+    pub fn completed_delivered_reuse_entries(&self) -> Result<Vec<MetadataDeliveredReuseEntry>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
+                   transfers.delivered_path, transfers.source_mtime_ms
+            FROM transfers
+            JOIN known_files ON known_files.id = transfers.known_file_id
+            WHERE known_files.completed != 0
+              AND transfers.delivered_path IS NOT NULL
+              AND transfers.source_path IS NULL
+              AND transfers.source_mtime_ms IS NOT NULL
+            ORDER BY transfers.delivered_path
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MetadataDeliveredReuseEntry {
+                file_hash: row.get(0)?,
+                file_size: row.get::<_, i64>(1)? as u64,
+                delivered_path: row.get(2)?,
+                delivered_mtime_ms: row.get(3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

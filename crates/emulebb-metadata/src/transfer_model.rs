@@ -105,6 +105,24 @@ pub struct MetadataShareInPlaceReloadEntry {
     pub source_mtime_ms: Option<i64>,
 }
 
+/// One completed download whose delivered file can be reused (not re-hashed)
+/// when a shared-directory rescan re-finds it in a configured shared Incoming /
+/// category dir. The delivered payload already carries the download's computed
+/// MD4/AICH hashset, so on reload the delivered path + `(file_size,
+/// delivered_mtime_ms)` identity is a cache hit -- the oracle
+/// `FindKnownFile(name, date, size)` reuse (SharedFileList.cpp:2138), not a
+/// wasteful full re-hash of the whole payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataDeliveredReuseEntry {
+    pub file_hash: String,
+    pub file_size: u64,
+    pub delivered_path: String,
+    /// Last-modified time (Unix ms) of the delivered file captured at delivery,
+    /// compared against the on-disk mtime so a delivered file the operator later
+    /// replaced (same name, different content) is re-hashed instead of reused.
+    pub delivered_mtime_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSharedSourceFailure {
     pub source_path: String,
