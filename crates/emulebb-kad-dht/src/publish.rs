@@ -100,15 +100,6 @@ pub struct KeywordPublishEntry {
 
 /// Send the publish RPC to all selected contacts concurrently so the live wire
 /// shape stays bursty while the caller can widen contact coverage for harvest.
-async fn execute_publish_fanout(
-    rpc: &RpcManager,
-    contacts: &[TraversalContact],
-    packet: &KadPacket,
-    work_class: RpcWorkClass,
-) -> Vec<(PublishAttempt, Result<KadPacket, emulebb_kad_net::NetError>)> {
-    execute_publish_fanout_for_contacts(rpc, contacts, work_class, |_| packet.clone()).await
-}
-
 async fn execute_publish_fanout_for_contacts(
     rpc: &RpcManager,
     contacts: &[TraversalContact],
@@ -725,16 +716,41 @@ pub async fn publish_notes(
     )
     .await?;
 
-    let packet = KadPacket::PublishNotesReq(PublishNotesReq {
-        target,
-        publisher_id,
-        tags,
-    });
-
-    let results = execute_publish_fanout(rpc, &publish_contacts, &packet, work_class).await;
+    let results =
+        execute_publish_fanout_for_contacts(rpc, &publish_contacts, work_class, |contact| {
+            build_notes_publish_packet(target, publisher_id, &tags, contact.version)
+        })
+        .await;
     record_publish_results(&mut stats, "notes", "publish_notes", false, results);
 
     Ok(stats)
+}
+
+/// Build the oracle-style notes publish body for a specific target contact.
+///
+/// eMule attaches the file-size tag to `KADEMLIA2_PUBLISH_NOTES_REQ` only for
+/// contacts at `KADEMLIA_VERSION2_47a` or newer (`CSearch::StorePacket`
+/// STORENOTES, Search.cpp:839-840); older Kad2 peers receive the note without
+/// it, matching the per-contact gating already used by the source publish.
+fn build_notes_publish_packet(
+    target: NodeId,
+    publisher_id: NodeId,
+    tags: &[Tag],
+    contact_version: u8,
+) -> KadPacket {
+    let tags = if contact_version >= KADEMLIA_VERSION2_47A {
+        tags.to_vec()
+    } else {
+        tags.iter()
+            .filter(|tag| tag.name != TagName::Short(tag_name::FILESIZE))
+            .cloned()
+            .collect()
+    };
+    KadPacket::PublishNotesReq(PublishNotesReq {
+        target,
+        publisher_id,
+        tags,
+    })
 }
 
 async fn get_initial(

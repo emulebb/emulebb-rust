@@ -2,8 +2,8 @@ use super::{
     KEYWORD_PUBLISH_MAX_ENTRIES_PER_PACKET, KeywordPublishEntry, PUBLISH_KEYWORD_LOOKUP_TIMEOUT,
     PUBLISH_NOTES_LOOKUP_TIMEOUT, PUBLISH_SOURCE_LOOKUP_TIMEOUT, PublishAttempt,
     PublishAttemptStats, build_keyword_publish_packet, build_keyword_publish_packets,
-    build_source_publish_packet, keyword_publish_chunk_count, publish_target_is_within_tolerance,
-    record_keyword_publish_results, select_publish_contacts,
+    build_notes_publish_packet, build_source_publish_packet, keyword_publish_chunk_count,
+    publish_target_is_within_tolerance, record_keyword_publish_results, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
 use emulebb_kad_proto::{
@@ -212,6 +212,58 @@ fn build_source_publish_packet_keeps_filesize_for_47a_contacts() {
         panic!("expected publish source packet");
     };
     assert_eq!(request.tags, full_source_publish_tags());
+}
+
+/// A full notes tag set in the order `CSearch::StorePacket` STORENOTES emits it
+/// (Search.cpp:834-840): FILENAME, FILERATING, DESCRIPTION, FILESIZE.
+fn full_notes_publish_tags() -> Vec<Tag> {
+    vec![
+        Tag::filename("ubuntu.iso"),
+        Tag::new_short(tag_name::FILERATING, TagValue::UInt(3)),
+        Tag::new_short(tag_name::DESCRIPTION, TagValue::String("great".to_string())),
+        Tag::filesize(2_097_152),
+    ]
+}
+
+/// A pre-`KADEMLIA_VERSION2_47a` contact (version < 2) must not receive the
+/// notes FILESIZE tag, matching the source publish gating (Search.cpp:839).
+#[test]
+fn build_notes_publish_packet_skips_filesize_for_pre_47a_contacts() {
+    let packet = build_notes_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        NodeId::from_bytes([2; 16]),
+        &full_notes_publish_tags(),
+        1,
+    );
+
+    let KadPacket::PublishNotesReq(request) = packet else {
+        panic!("expected publish notes packet");
+    };
+    assert_eq!(
+        request.tags,
+        vec![
+            Tag::filename("ubuntu.iso"),
+            Tag::new_short(tag_name::FILERATING, TagValue::UInt(3)),
+            Tag::new_short(tag_name::DESCRIPTION, TagValue::String("great".to_string())),
+        ]
+    );
+}
+
+/// A `KADEMLIA_VERSION2_47a`+ contact (version >= 2) receives the whole notes
+/// tag set unchanged, FILESIZE included in its original position.
+#[test]
+fn build_notes_publish_packet_keeps_filesize_for_47a_contacts() {
+    let packet = build_notes_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        NodeId::from_bytes([2; 16]),
+        &full_notes_publish_tags(),
+        2,
+    );
+
+    let KadPacket::PublishNotesReq(request) = packet else {
+        panic!("expected publish notes packet");
+    };
+    assert_eq!(request.tags, full_notes_publish_tags());
 }
 
 #[test]
