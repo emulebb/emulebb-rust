@@ -32,12 +32,13 @@ async fn first_verified_key_keeps_credits_then_different_key_wipes() {
     let root = unique_test_dir("ed2k-transfer-verified-ident");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
 
-    // Accumulate some credit, then verify a first key: credits kept.
-    runtime.add_peer_credit_delta(HASH_A, 4000, 8000).unwrap();
+    // Verify a first key on a fresh slot (no prior credit): key bound, nothing
+    // wiped. Then accumulate credit under the verified key.
     let wiped_first = runtime
         .record_verified_secure_ident(HASH_A, &[1u8; 80])
         .unwrap();
     assert!(!wiped_first);
+    runtime.add_peer_credit_delta(HASH_A, 4000, 8000).unwrap();
     let credit = runtime.peer_credit_by_hash(HASH_A).unwrap().unwrap();
     assert_eq!(credit.uploaded_bytes, 4000);
     assert_eq!(credit.downloaded_bytes, 8000);
