@@ -5789,13 +5789,16 @@ async fn publish_kad_due_shared_files(
     publish_tasks: &mut JoinSet<KadSharedPublishOutcome>,
     active_counts: &mut KadSharedPublishActiveCounts,
 ) -> Result<usize> {
-    let KadPublishCandidateSets {
-        source_scan: shared_files,
-        keyword_files,
-        keyword_index,
-    } = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     let available_search_permits = runtime.dht.available_search_permits();
+    // Cheap per-tick prune input: read ONLY the source-publishable file hashes
+    // (one small allocation each), not the full ranked clone. The schedule is
+    // pruned on EVERY tick — including a gate-blocked / DHT-busy / budget-full one
+    // — so a file unshared while the tick cannot publish is still forgotten. The
+    // expensive ranked candidate set is built later (after the cheap gate / busy /
+    // in-flight-budget short-circuits), only on a tick that will actually publish.
+    let publishable_hashes = kad_source_publishable_hashes(&runtime.transfer_runtime).await;
+    let item_count = publishable_hashes.len();
     kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
         diagnostics.phase = "scanning".to_string();
         diagnostics.running = true;
@@ -5808,12 +5811,12 @@ async fn publish_kad_due_shared_files(
         diagnostics.keyword_budget = KAD_KEYWORD_PUBLISH_BUDGET;
         diagnostics.source_budget = KAD_SOURCE_PUBLISH_BUDGET;
         diagnostics.notes_budget = KAD_NOTES_PUBLISH_BUDGET;
-        diagnostics.item_count = shared_files.len();
+        diagnostics.item_count = item_count;
     });
     // Keep the per-file schedule from growing without bound: forget files that
     // are no longer publishable (removed / no longer complete).
-    schedule.retain_only(shared_files.iter().map(|entry| entry.file_hash.as_str()));
-    if shared_files.is_empty() {
+    schedule.retain_only(publishable_hashes.iter().map(String::as_str));
+    if item_count == 0 {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "idle".to_string();
             diagnostics.running = true;
@@ -5867,7 +5870,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.bootstrapped = true;
             diagnostics.gate_allowed = false;
             diagnostics.gate_block_reason = gate_block_reason.to_string();
-            diagnostics.item_count = shared_files.len();
+            diagnostics.item_count = item_count;
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
@@ -5950,7 +5953,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.bootstrapped = true;
             diagnostics.gate_allowed = false;
             diagnostics.gate_block_reason = "dhtSearchBusy".to_string();
-            diagnostics.item_count = shared_files.len();
+            diagnostics.item_count = item_count;
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
@@ -5969,7 +5972,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.notes_skipped_by_budget = 0;
             diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
         });
-        return Ok(shared_files.len());
+        return Ok(item_count);
     }
     if publish_tasks.len() >= in_flight_budget {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
@@ -5978,7 +5981,7 @@ async fn publish_kad_due_shared_files(
             diagnostics.bootstrapped = true;
             diagnostics.gate_allowed = true;
             diagnostics.gate_block_reason.clear();
-            diagnostics.item_count = shared_files.len();
+            diagnostics.item_count = item_count;
             diagnostics.inspected_count = 0;
             diagnostics.attempted_files = 0;
             diagnostics.file_budget = KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET;
@@ -6006,8 +6009,17 @@ async fn publish_kad_due_shared_files(
             diagnostics.notes_acked_contacts = notes_totals.acked_contacts;
             diagnostics.tick_secs = KAD_SHARED_FILE_PUBLISH_TICK_SECS;
         });
-        return Ok(shared_files.len());
+        return Ok(item_count);
     }
+    // Expensive ranked candidate build: reached only once the tick is committed
+    // to publishing (past the gate / DHT-busy / in-flight-budget short-circuits),
+    // so a gate-blocked, DHT-busy or in-flight-full tick never pays for the
+    // clone+rank+sort — only the cheap hash read above ran on those ticks.
+    let KadPublishCandidateSets {
+        source_scan: shared_files,
+        keyword_files,
+        keyword_index,
+    } = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
     let mut keyword_due_count = 0usize;
     let mut source_due_count = 0usize;
     let mut notes_due_count = 0usize;
@@ -6697,6 +6709,24 @@ fn kad_source_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
 /// an in-progress partfile.
 fn kad_keyword_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
     !entry.compatibility_hint && entry.verified_complete
+}
+
+/// Cheap per-tick read of the SOURCE-publishable file hashes (servable files that
+/// are not compatibility hints), one small hash-string allocation each and no
+/// rank/sort. Used to prune the publish schedule on every tick — including ticks
+/// the gate/DHT-busy/in-flight-budget short-circuits abort — and to size the
+/// pre-build diagnostics, without paying for the full ranked candidate clone. The
+/// hash set is identical to the SOURCE-scan set built by
+/// `kad_publishable_shared_files` (same `kad_source_publish_eligible` filter), so
+/// the schedule prune is unchanged from the previous build-first ordering.
+async fn kad_source_publishable_hashes(runtime: &Ed2kTransferRuntime) -> Vec<String> {
+    let shared_catalog = runtime.shared_catalog();
+    let guard = shared_catalog.read().await;
+    guard
+        .iter()
+        .filter(|entry| kad_source_publish_eligible(entry))
+        .map(|entry| entry.file_hash.clone())
+        .collect()
 }
 
 async fn kad_publishable_shared_files(
@@ -9969,6 +9999,88 @@ mod tests {
         };
         assert!(!kad_source_publish_eligible(&hint));
         assert!(!kad_keyword_publish_eligible(&hint));
+    }
+
+    #[test]
+    fn cheap_prune_hash_set_matches_old_source_scan_and_prunes_on_blocked_tick() {
+        use crate::kad_publish_schedule::KadPublishSchedule;
+        use std::collections::HashSet;
+        use std::time::Duration;
+
+        let base = |hash: u8, verified_complete: bool, complete_parts: Vec<bool>| Ed2kSharedEntry {
+            file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
+            canonical_name: "ubuntu-python-sample.iso".to_string(),
+            file_size: 4096,
+            verified_complete,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            all_time_uploaded_bytes: 0,
+            complete_parts,
+            publish: Default::default(),
+        };
+        let complete = base(0x01, true, Vec::new());
+        let servable_partfile = base(0x02, false, vec![true, false]);
+        let empty_partfile = base(0x03, false, vec![false, false]);
+        let hint = Ed2kSharedEntry {
+            compatibility_hint: true,
+            ..base(0x04, true, Vec::new())
+        };
+        let catalog = [
+            complete.clone(),
+            servable_partfile.clone(),
+            empty_partfile.clone(),
+            hint.clone(),
+        ];
+
+        // OPP-1 prune input: the cheap hash read (what a gate-blocked tick uses to
+        // prune) must select exactly the SOURCE-scan file set the expensive
+        // build+prune used before the reorder. Build the old set the way the
+        // pre-optimization prune did — from the fully ranked SOURCE clones.
+        let cheap: HashSet<String> = catalog
+            .iter()
+            .filter(|entry| kad_source_publish_eligible(entry))
+            .map(|entry| entry.file_hash.clone())
+            .collect();
+        let old_source_scan = kad_publishable_shared_file_entries(
+            catalog
+                .iter()
+                .filter(|entry| kad_source_publish_eligible(entry))
+                .map(kad_publish_entry_from_shared_entry)
+                .collect(),
+            0,
+            |_| 0,
+        );
+        let old_set: HashSet<String> = old_source_scan
+            .iter()
+            .map(|entry| entry.file_hash.clone())
+            .collect();
+        assert_eq!(cheap, old_set);
+        // Only the servable files (complete + servable partfile) are in the set.
+        assert_eq!(
+            cheap,
+            HashSet::from([complete.file_hash.clone(), servable_partfile.file_hash.clone()])
+        );
+
+        // The prune still runs on a gate-blocked tick from the cheap read alone: a
+        // file unshared while blocked is forgotten (reads as source-due again),
+        // while a still-shared file keeps its recent-publish clock.
+        let now = Instant::now();
+        let mut schedule = KadPublishSchedule::new();
+        schedule.mark_source_published(&complete.file_hash, now, None);
+        let gone = Ed2kHash::from_bytes([0x09; 16]).to_string();
+        schedule.mark_source_published(&gone, now, None);
+        schedule.retain_only(cheap.iter().map(String::as_str));
+        assert!(!schedule.source_due(&complete.file_hash, now, None));
+        assert!(schedule.source_due(&gone, now, None));
+        // Sanity: after the source interval elapses the retained file is due again.
+        let later = now + Duration::from_secs(6 * 3_600);
+        assert!(schedule.source_due(&complete.file_hash, later, None));
     }
 
     #[test]
