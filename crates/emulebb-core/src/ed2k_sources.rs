@@ -237,11 +237,26 @@ pub(crate) fn significant_keyword_words(query: &str) -> Vec<String> {
     // length is >= 3 (the oracle's `KadGetKeywordBytes(sWord).GetLength() >= 3`
     // gate, measured before lower-casing), then lower-case them
     // (KadTagStrMakeLower). All other characters stay inside the word.
-    let words = query
+    let mut words = query
         .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
         .filter(|word| word.len() >= 3)
         .map(|word| word.to_lowercase())
         .collect::<Vec<_>>();
+    // Trailing extension drop (SearchManager.cpp:284-286): when more than one
+    // word survived and the query's final token is exactly 3 chars and 3 bytes
+    // (a single-byte 3-char run, "in almost all cases a file's extension"), pop
+    // it. The oracle keys the drop off `uChars`/`uBytes` of the last raw token
+    // in the string, so a trailing separator (empty last token) never triggers
+    // it, and the popped word is exactly that surviving last token.
+    if words.len() > 1
+        && let Some(last_token) = query
+            .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
+            .next_back()
+        && last_token.len() == 3
+        && last_token.chars().count() == 3
+    {
+        words.pop();
+    }
     if words.is_empty() {
         vec![query.to_lowercase()]
     } else {

@@ -10730,6 +10730,42 @@ mod tests {
     }
 
     #[test]
+    fn significant_words_drop_trailing_three_char_extension() {
+        // GetWords pops a trailing 3-char/3-byte token (SearchManager.cpp:284-286)
+        // when more than one word survived; the drop applies to publish keywords
+        // and to search queries alike because both share this tokenizer.
+        assert_eq!(
+            significant_keyword_words("ubuntu.iso"),
+            vec!["ubuntu".to_string()]
+        );
+        assert_eq!(
+            significant_keyword_words("AT&T.avi"),
+            vec!["at&t".to_string()]
+        );
+        assert_eq!(
+            significant_keyword_words("C++ Tutorial.pdf"),
+            vec!["c++".to_string(), "tutorial".to_string()]
+        );
+        // A search query tokenizes identically: the trailing extension is dropped.
+        assert_eq!(
+            significant_keyword_words("ubuntu iso"),
+            vec!["ubuntu".to_string()]
+        );
+        // The extension drop only fires when more than one word survives, so a
+        // lone 3-char word is kept ("a.b.mp3" leaves only "mp3").
+        assert_eq!(
+            significant_keyword_words("a.b.mp3"),
+            vec!["mp3".to_string()]
+        );
+        // A trailing token longer than 3 chars is not an extension: "#1" is under
+        // the 3-byte minimum and drops out, "flac" is kept.
+        assert_eq!(
+            significant_keyword_words("R&B #1.flac"),
+            vec!["r&b".to_string(), "flac".to_string()]
+        );
+    }
+
+    #[test]
     fn significant_words_unique_preserve_first_occurrence_order() {
         assert_eq!(
             significant_keyword_words_unique("Ubuntu Python ubuntu programming Apache Camel"),
