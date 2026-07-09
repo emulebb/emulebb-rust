@@ -277,6 +277,20 @@ fn emit_kad_udp_diag_event(
     decoded_payload: &[u8],
     summary: &KadUdpDumpSummary,
 ) {
+    // Boundary parity with the MFC oracle's Kad recv hook, which sits AFTER the
+    // per-bucket anti-flood gate (`InTrackListIsAllowedPacket`): a flood-dropped
+    // packet never reaches MFC's kad_udp dump. So the converged `kad_udp/packet`
+    // stream carries only packets that passed the flood gate, keeping send/recv
+    // counts comparable. The flood drops are still fully represented — in the rich
+    // `udp_packet_v1` dump above (with `drop_reason`) and in the `bad_peer`
+    // anti_flood_drop/ban family. Non-flood drops (`decode_failed`,
+    // `unrequested_response`) occur post-gate, so MFC dumps them too and they stay.
+    if matches!(
+        summary.drop_reason,
+        Some("tracker_drop") | Some("tracker_massive_drop")
+    ) {
+        return;
+    }
     let severity = if summary.drop_reason.is_some() {
         "low"
     } else {
