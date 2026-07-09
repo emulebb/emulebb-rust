@@ -116,6 +116,34 @@ impl IndexedSharedCatalog {
         self.rebuild_index();
     }
 
+    /// Upsert a verified entry in place: drop the entries `keep` rejects, append
+    /// `new_entry` when present, canonicalise the survivors through `dedup`, and
+    /// rebuild the by-hash index ONCE.
+    ///
+    /// The owned inner `Vec` is moved through `dedup` via [`std::mem::take`], so
+    /// entries are MOVED, never deep cloned — this replaces the previous
+    /// `retain` → `to_vec` (whole-catalog deep clone) → `dedup` → `replace_with`
+    /// chain, which cloned every entry (and its inner `Vec`s) on each mutation.
+    ///
+    /// The end state is byte-identical to that chain: `keep` filters in place
+    /// (same predicate), the appended entry lands at the tail, `dedup` sees the
+    /// exact same ordered list `to_vec` would have produced, and the final index
+    /// is a single wholesale rebuild over the deduped order (first occurrence
+    /// wins, compatibility hints excluded).
+    pub fn retain_push_dedup(
+        &mut self,
+        keep: impl FnMut(&Ed2kSharedEntry) -> bool,
+        new_entry: Option<Ed2kSharedEntry>,
+        dedup: impl FnOnce(Vec<Ed2kSharedEntry>) -> Vec<Ed2kSharedEntry>,
+    ) {
+        self.entries.retain(keep);
+        if let Some(entry) = new_entry {
+            self.entries.push(entry);
+        }
+        self.entries = dedup(std::mem::take(&mut self.entries));
+        self.rebuild_index();
+    }
+
     /// O(1) index of the unique non-hint entry advertised under `hash`, if any.
     #[must_use]
     pub fn index_by_hash(&self, hash: &Ed2kHash) -> Option<usize> {
