@@ -89,16 +89,23 @@ fn transfer_cap_rotates_only_when_a_replacement_waits() {
 #[test]
 fn time_cap_rotates_only_when_a_replacement_waits() {
     let mut config = rotation_config();
-    config.session_transfer_percent = 0; // isolate the time cap
+    config.session_transfer_percent = 0; // isolate the time cap (no byte cap)
+    // Isolate the wall-clock TIME cap from the slow-slot recycle: since
+    // RUST-PAR-024 GAP-1 the per-slot datarate is a 10 s SLIDING WINDOW (oracle
+    // GetUploadDatarate over m_AverageUDR_hist, UploadClient.cpp:860-878), NOT a
+    // lifetime average, so a slot that bursts once then idles reads 0 B/s and would
+    // be slow-recycled once past `upload_timeout`. That is a DIFFERENT mechanism
+    // (CheckForTimeOver's rate path) from the time cap under test; push
+    // `upload_timeout` far out so only the 7200 s time branch can rotate here, the
+    // same way the no-request/cooldown fixtures neutralize unrelated gates.
+    config.upload_timeout = Duration::from_secs(100_000);
     let mut state = Ed2kUploadQueueState::new(config);
     let t0 = Instant::now();
     let (active, status) = begin(&mut state, 1, 0x31, 1, 0, t0);
     assert_eq!(status, Ed2kUploadSessionStatus::Granted);
-    // Keep the holder PRODUCTIVE so this fixture isolates the wall-clock time cap:
-    // under unlimited upload (upload_limit == 0) a 0-byte idle holder is now caught
-    // first by the slot-scarcity no-request recycle (RUST-PAR-021 Upload-GAP6), so a
-    // sustained payload (well above the 1 KiB/s slow-recycle bar across the whole
-    // 7200 s window) is what leaves ONLY the time cap able to rotate this slot.
+    // A single payload keeps `uploaded_bytes > 0` (cumulative, never decays), so the
+    // holder is never caught by the 0-byte no-request recycle; the time cap alone
+    // governs its rotation.
     state.note_uploaded_bytes(&active, 32 * 1024 * 1024, t0);
     let (waiter, waiter_status) = begin(&mut state, 2, 0x32, 2, 0, t0 + Duration::from_secs(5));
     assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
@@ -129,28 +136,32 @@ fn underfilled_line_retains_a_productive_capped_slot() {
     // 1 MB file: the 90% cap is 900_000 bytes.
     let (active, status) = begin(&mut state, 1, 0x41, 1, 1_000_000, t0);
     assert_eq!(status, Ed2kUploadSessionStatus::Granted);
-    state.note_uploaded_bytes(&active, 950_000, t0);
-    let (waiter, waiter_status) = begin(
-        &mut state,
-        2,
-        0x42,
-        2,
-        1_000_000,
-        t0 + Duration::from_secs(10),
-    );
+    let (waiter, waiter_status) = begin(&mut state, 2, 0x42, 2, 1_000_000, t0);
     assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
 
-    // 950 KB over 12 s ~= 79 KB/s: above the productive bar (75% of the
-    // 100 KB/s single-slot target) while the line is underfilled (spare
-    // ~21 KB/s >= the 10 KB/s margin) -> the capped slot is retained (oracle
+    // Sustain ~80 KB/s across the first 12 s (12 x 80 KB = 960 KB, past the 900 KB
+    // cap). RUST-PAR-024 GAP-1: the per-slot productive rate is now the 10 s
+    // SLIDING WINDOW (oracle GetUploadDatarate over m_AverageUDR_hist,
+    // UploadClient.cpp:860-878), NOT a lifetime average, so the slot reads
+    // "productive" only while it keeps feeding that window -- a single early burst
+    // would read 0 B/s by +12 s.
+    for second in 1..=12u64 {
+        state.note_uploaded_bytes(&active, 80_000, t0 + Duration::from_secs(second));
+    }
+
+    // At +12 s the 10 s window holds ~88 KB/s (10 in-window samples over a ~9 s
+    // span): above the productive bar (75% of the 100 KB/s single-slot target =
+    // 75 KB/s) while the line is underfilled (aggregate ~87 KB/s, spare ~13 KB/s >=
+    // the 10 KB/s margin) -> the capped slot is retained (oracle
     // ShouldRotateBroadbandLimitedUploadSession, UploadQueueSeams.h:683-684).
     assert_eq!(
         state.poll_session(&active, t0 + Duration::from_secs(12), false),
         Ed2kUploadSessionStatus::Granted
     );
 
-    // The same session decayed to ~40 KB/s: still underfilled but no longer
-    // productive -> the byte cap now rotates the slot to the waiter.
+    // +24 s, no feed since +12 s: the 10 s per-slot window has fully drained to
+    // 0 B/s -- still underfilled (the 30 s aggregate window keeps ~42 KB/s) but no
+    // longer productive -> the byte cap now rotates the slot to the waiter.
     assert_eq!(
         state.poll_session(&active, t0 + Duration::from_secs(24), false),
         Ed2kUploadSessionStatus::Waiting { rank: 1 }

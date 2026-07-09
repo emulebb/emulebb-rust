@@ -228,6 +228,55 @@ fn busy_line_bursts_all_freed_slots_in_one_pass() {
     );
 }
 
+/// RUST-PAR-024 GAP-1: the aggregate datarate the pace gate reads is a 30 s
+/// SLIDING WINDOW (oracle `CUploadQueue::datarate` over `average_ur_hist`,
+/// UploadQueue.cpp:2761-2764), NOT a lifetime average, so the burst that bypasses
+/// the 1/sec pacing DECAYS. The same 500 KB burst that bursts three freed slots
+/// open at +2 s (see `busy_line_bursts_all_freed_slots_in_one_pass`) no longer
+/// does at +31 s: the sample has aged past the 30 s window, the aggregate reads
+/// 0 B/s, and the 1/sec pacing re-engages. A lifetime meter would still read
+/// ~16 KB/s -- and if the burst were large enough, would pin the gate open
+/// forever.
+#[test]
+fn aggregate_pace_datarate_decays_over_thirty_seconds() {
+    let mut state = Ed2kUploadQueueState::new(pacing_config());
+    let t0 = Instant::now();
+    let (handles, t_base) = fill_slots_and_backlog(&mut state, t0);
+    let (w6, w7, w8) = (&handles[5], &handles[6], &handles[7]);
+
+    // Same burst as the busy-line test: 500 KB on one surviving slot at t_base.
+    state.note_uploaded_bytes(&handles[3], 500_000, t_base);
+
+    // Free three base slots at t_base.
+    for handle in &handles[0..3] {
+        state.release_session(handle, t_base);
+    }
+
+    // +31 s: the 500 KB sample has aged out of the 30 s aggregate window, so the
+    // datarate is back to 0 B/s and the 1/sec pace gate governs again -- exactly
+    // ONE freed slot opens, the other two are deferred (the burst bypass at +2 s
+    // is gone).
+    let t_decayed = t_base + Duration::from_secs(31);
+    assert_eq!(
+        state.poll_session(w6, t_decayed, false),
+        Ed2kUploadSessionStatus::Granted
+    );
+    assert!(matches!(
+        state.poll_session(w7, t_decayed, false),
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+    assert!(matches!(
+        state.poll_session(w8, t_decayed, false),
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+
+    // +32 s: the pace lets the next deferred slot open.
+    assert_eq!(
+        state.poll_session(w7, t_decayed + Duration::from_secs(1), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+}
+
 /// Three base slots, two filled immediately. A higher-ranked (earlier) waiter
 /// holds the pace-deferred third slot; when a lower-ranked newcomer connects it
 /// must NOT inline-grant ahead of the queued waiter (RUST-PAR-021 GAP1 effect

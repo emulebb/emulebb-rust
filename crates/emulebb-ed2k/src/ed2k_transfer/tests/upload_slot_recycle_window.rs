@@ -128,3 +128,64 @@ fn elastic_slot_opening_still_waits_ten_seconds() {
         Ed2kUploadSessionStatus::Granted
     );
 }
+
+/// RUST-PAR-024 GAP-1: a slot that uploaded a fast BURST and then stalls is
+/// slow-recycled once its per-slot datarate meter decays below the slow bar --
+/// which now happens within the 10 s window (oracle `GetUploadDatarate` over the
+/// 10 s `m_AverageUDR_hist`, UploadClient.cpp:860-878). Under the OLD lifetime
+/// cumulative average the same slot read `bytes / elapsed` ~= 1 MB/s forever and
+/// would never fall under the slow bar, holding the slot for thousands of seconds.
+#[test]
+fn burst_then_stall_slot_is_slow_recycled_within_the_ten_second_window() {
+    // Unlimited upload so the recycle signal is pure slot scarcity (no aggregate-
+    // budget underfill gate), a short 5 s upload timeout so the slow branch is
+    // reachable quickly, and a far-out granted-idle timer so ONLY the slow-rate
+    // path (not the 0-byte no-request path) can recycle this productive slot.
+    let config = Ed2kUploadQueueConfig {
+        active_slots: 1,
+        elastic_percent: 0,
+        upload_limit_bytes_per_sec: 0,
+        elastic_underfill_bytes_per_sec: 0,
+        elastic_underfill: Duration::from_secs(10),
+        waiting_capacity: 8,
+        soft_queue_size: 10_000,
+        waiting_timeout: Duration::from_secs(100_000),
+        granted_timeout: Duration::from_secs(100_000),
+        upload_timeout: Duration::from_secs(5),
+        session_transfer_percent: 0,
+        session_time_limit: Duration::ZERO,
+    };
+    let mut state = Ed2kUploadQueueState::new(config);
+    let t0 = Instant::now();
+    let (active, active_status) = begin(&mut state, 1, t0);
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (waiter, waiter_status) = begin(&mut state, 2, t0);
+    assert!(matches!(
+        waiter_status,
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+
+    // A 10 MB burst at t0, then silence.
+    state.note_uploaded_bytes(&active, 10 * 1024 * 1024, t0);
+
+    // +6 s: past the 5 s upload timeout, but the burst is still inside the 10 s
+    // per-slot window, so the datarate reads ~1.7 MB/s -- far above the 1 KiB/s
+    // slow bar -> the productive slot is RETAINED.
+    assert_eq!(
+        state.poll_session(&active, t0 + Duration::from_secs(6), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+
+    // +11 s: the burst has aged out of the 10 s window, so the per-slot datarate
+    // has decayed to 0 B/s (the lifetime meter would still read ~950 KB/s). Now
+    // below the slow bar and past the upload timeout -> the slot is slow-recycled
+    // and the waiter takes the freed slot.
+    assert!(matches!(
+        state.poll_session(&active, t0 + Duration::from_secs(11), false),
+        Ed2kUploadSessionStatus::Waiting { .. }
+    ));
+    assert_eq!(
+        state.poll_session(&waiter, t0 + Duration::from_secs(11), false),
+        Ed2kUploadSessionStatus::Granted
+    );
+}
