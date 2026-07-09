@@ -164,8 +164,8 @@ use ed2k_sources::{
 };
 #[cfg(test)]
 use ed2k_sources::{
-    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, select_kad_keyword_metadata,
-    significant_keyword_words,
+    ed2k_keyword_server_attempts, exact_ed2k_hash_query_token, kad_keyword_lowercase,
+    select_kad_keyword_metadata, significant_keyword_words,
 };
 use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, INCOMING_BUDDY_ATTACH_TIMEOUT_SECS, IncomingBuddy,
@@ -10780,6 +10780,41 @@ mod tests {
         assert_eq!(
             significant_keyword_words("R&B #1.flac"),
             vec!["r&b".to_string(), "flac".to_string()]
+        );
+    }
+
+    #[test]
+    fn kad_keyword_lowercase_matches_oracle_frozen_table() {
+        // ASCII A-Z lower-cases exactly as before (the common case).
+        assert_eq!(kad_keyword_lowercase("Ubuntu ISO"), "ubuntu iso".to_string());
+        // Latin-1 / Greek / Cyrillic uppercase letters that the oracle's
+        // `LANG_ENGLISH` map lowers are still lowered (À->à, Β->β, А->а).
+        assert_eq!(kad_keyword_lowercase("À"), "à".to_string());
+        assert_eq!(kad_keyword_lowercase("Β"), "β".to_string());
+        assert_eq!(kad_keyword_lowercase("А"), "а".to_string());
+        // Code points the oracle's frozen table leaves UNCHANGED but Rust's
+        // `str::to_lowercase()` would alter: U+0130 (İ, which Rust expands to two
+        // chars), U+1E9E (ẞ, Rust -> ß), the U+212A Kelvin sign (Rust -> k) and
+        // the U+00B5 micro sign (Rust -> μ). Keeping them verbatim is what makes
+        // the md4 keyword hash match eMule for these words.
+        assert_eq!(kad_keyword_lowercase("\u{0130}"), "\u{0130}".to_string());
+        assert_eq!(kad_keyword_lowercase("\u{1E9E}"), "\u{1E9E}".to_string());
+        assert_eq!(kad_keyword_lowercase("\u{212A}"), "\u{212A}".to_string());
+        assert_eq!(kad_keyword_lowercase("\u{00B5}"), "\u{00B5}".to_string());
+        // Already-lower and astral (identity-mapped surrogate) code points pass
+        // through untouched.
+        assert_eq!(kad_keyword_lowercase("café"), "café".to_string());
+        assert_eq!(kad_keyword_lowercase("\u{1F600}"), "\u{1F600}".to_string());
+    }
+
+    #[test]
+    fn significant_words_lowercase_uses_oracle_table_for_non_ascii() {
+        // The tokenizer lower-cases through the oracle table: "Café.İşi" keeps
+        // U+0130 verbatim (Rust's full lower-casing would expand it) so the
+        // produced keyword — and thus its md4 target — matches eMule's.
+        assert_eq!(
+            significant_keyword_words("Café İyi"),
+            vec!["café".to_string(), "\u{0130}yi".to_string()]
         );
     }
 

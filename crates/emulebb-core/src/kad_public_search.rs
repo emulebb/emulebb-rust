@@ -84,7 +84,11 @@ pub(crate) fn kad_public_search_keyword(query: &str) -> Result<String> {
             keyword = keyword[1..].to_string();
         }
     }
-    let keyword = keyword.trim().to_lowercase();
+    // Lower-case with the oracle's frozen keyword table (`KadTagStrMakeLower`),
+    // not Rust's `str::to_lowercase()`, so the interactive search hashes the
+    // primary keyword to the same md4 target eMule publishes it under — see
+    // `ed2k_sources::kad_keyword_lowercase`.
+    let keyword = crate::ed2k_sources::kad_keyword_lowercase(keyword.trim());
     ensure!(
         !keyword.is_empty()
             && !keyword
