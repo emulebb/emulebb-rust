@@ -425,17 +425,29 @@ pub(crate) fn significant_keyword_words(query: &str) -> Vec<String> {
     // gate, measured before lower-casing), then lower-case them with the oracle's
     // frozen table (`KadTagStrMakeLower`, via `kad_keyword_lowercase`). All other
     // characters stay inside the word.
-    let mut words = query
+    //
+    // De-duplicate keeping the LAST occurrence: for every surviving token the
+    // oracle does `rlistWords.remove(sWord); rlistWords.push_back(sWord);`, so a
+    // repeated word is moved to the end of the list (and the first word of the
+    // list — the primary keyword hashed by `keyword_target`/GetWords `front()` —
+    // becomes the first word that is not later repeated).
+    let mut words: Vec<String> = Vec::new();
+    for word in query
         .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
         .filter(|word| word.len() >= 3)
         .map(kad_keyword_lowercase)
-        .collect::<Vec<_>>();
+    {
+        words.retain(|existing| existing != &word);
+        words.push(word);
+    }
     // Trailing extension drop (SearchManager.cpp:284-286): when more than one
     // word survived and the query's final token is exactly 3 chars and 3 bytes
     // (a single-byte 3-char run, "in almost all cases a file's extension"), pop
     // it. The oracle keys the drop off `uChars`/`uBytes` of the last raw token
     // in the string, so a trailing separator (empty last token) never triggers
-    // it, and the popped word is exactly that surviving last token.
+    // it. It runs AFTER the remove+push_back de-duplication, so the popped word
+    // is the last word of the already-de-duplicated list (which is that surviving
+    // final token).
     if words.len() > 1
         && let Some(last_token) = query
             .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
@@ -453,11 +465,11 @@ pub(crate) fn significant_keyword_words(query: &str) -> Vec<String> {
 }
 
 pub(crate) fn significant_keyword_words_unique(query: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
+    // `significant_keyword_words` already de-duplicates keeping the last
+    // occurrence (the oracle's remove+push_back), so its result is the oracle's
+    // unique keyword-word list; expose it under this name for the publish/scan
+    // callers that consume it as the set of keyword terms.
     significant_keyword_words(query)
-        .into_iter()
-        .filter(|word| seen.insert(word.clone()))
-        .collect()
 }
 
 pub(crate) fn keyword_target(query: &str) -> NodeId {

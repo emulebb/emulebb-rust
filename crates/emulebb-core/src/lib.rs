@@ -10819,17 +10819,35 @@ mod tests {
     }
 
     #[test]
-    fn significant_words_unique_preserve_first_occurrence_order() {
+    fn significant_words_dedup_keeps_last_occurrence() {
+        // GetWords de-duplicates with `remove` + `push_back` (SearchManager.cpp:
+        // 277-278), moving a repeated word to the END of the list. "ubuntu"
+        // repeats, so it lands after "python" rather than staying at the front.
         assert_eq!(
             significant_keyword_words_unique("Ubuntu Python ubuntu programming Apache Camel"),
             vec![
-                "ubuntu".to_string(),
                 "python".to_string(),
+                "ubuntu".to_string(),
                 "programming".to_string(),
                 "apache".to_string(),
                 "camel".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn significant_words_repeated_first_token_shifts_primary_keyword() {
+        // When the first token repeats, the oracle's remove+push_back moves it to
+        // the end, so the primary keyword (GetWords `front()`, hashed by
+        // `keyword_target`) becomes the next distinct word. "love song love"
+        // dedups to ["song", "love"], not ["love", "song"].
+        assert_eq!(
+            significant_keyword_words("love song love"),
+            vec!["song".to_string(), "love".to_string()]
+        );
+        // The Kad keyword target therefore hashes "song", not "love".
+        assert_eq!(keyword_target("love song love"), keyword_target("song"));
+        assert_ne!(keyword_target("love song love"), keyword_target("love"));
     }
 
     #[test]
