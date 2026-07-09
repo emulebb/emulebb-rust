@@ -49,7 +49,8 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
-        SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
+        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
+        shared_publish_rank,
     },
 };
 use emulebb_index::{
@@ -6017,6 +6018,9 @@ async fn publish_kad_due_shared_files(
     // clone+rank+sort — only the cheap hash read above ran on those ticks.
     let KadPublishCandidateSets {
         source_scan: shared_files,
+        source_item_count,
+        source_cursor_start,
+        best_notes_hash,
         keyword_files,
         keyword_index,
     } = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
@@ -6033,23 +6037,18 @@ async fn publish_kad_due_shared_files(
     // Our Kad node id is the notes publisher identity (master STORENOTES writes
     // GetKadID() into the second 128-bit field of KADEMLIA2_PUBLISH_NOTES_REQ).
     let notes_publisher_id = runtime.dht.own_id();
-    let item_count = shared_files.len();
-    let start = schedule.cursor(item_count);
+    // `item_count` is the full ranked SOURCE population; `shared_files` is only the
+    // cursor scan window drawn from it (ranked order, starting at `start`), so the
+    // loop walks the window directly while the cursor advances over the full count.
+    // The single best-ranked notes-due file (oracle notes budget 1,
+    // SharedFileList.cpp:3412-3435) was picked over the FULL source set during the
+    // candidate build so it stays global despite the windowed scan.
+    let item_count = source_item_count;
+    let start = source_cursor_start;
     let mut inspected = 0usize;
     let mut attempted_files = 0usize;
-    // Notes budget is 1/tick: the oracle publishes only the single best-ranked
-    // notes-due file per Publish() tick, ranked on its own notes clock
-    // (SharedFileList.cpp:3412-3435). Pick that file once up front so the notes
-    // lane is not merely "first notes-due in the source-ordered scan".
-    let best_notes_hash = select_best_notes_publish_candidate(
-        &shared_files,
-        schedule,
-        Instant::now(),
-        Utc::now().timestamp_millis(),
-    );
 
-    for offset in 0..item_count.min(KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET) {
-        let entry = &shared_files[(start + offset) % item_count];
+    for (offset, entry) in shared_files.iter().enumerate() {
         let now = Instant::now();
         let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
         schedule.retain_keywords(&entry.file_hash, keyword_terms.iter().map(String::as_str));
@@ -6683,7 +6682,23 @@ struct KadPublishCandidateSets {
     /// iterating all of `m_Files_map` with no `IsPartFile()` filter
     /// (SharedFileList.cpp:3371-3388); `PublishSrc()` is inherited unchanged by
     /// `CPartFile` (KnownFile.cpp:1818).
+    ///
+    /// This holds ONLY the cursor scan window (≤ `KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET`
+    /// entries, in ranked order starting at `source_cursor_start`) — the source
+    /// lane is ranked over borrowed catalog entries and only the window the tick
+    /// inspects is cloned. `source_item_count` carries the full ranked population.
     source_scan: Vec<MetadataTransferPublishEntry>,
+    /// Full count of SOURCE-eligible files (the ranked population the window is
+    /// drawn from), used for the cursor rotation math and diagnostics.
+    source_item_count: usize,
+    /// Rotating cursor position the `source_scan` window starts at, so the loop
+    /// advances the schedule cursor with the same `start` the window was cut with.
+    source_cursor_start: usize,
+    /// Single best-ranked notes-due file this tick (ranked on the NOTES clock over
+    /// the FULL source-eligible set, in the source-sorted order), or `None` when no
+    /// annotated file is notes-due. Computed here so the notes lane still selects
+    /// the global best even though `source_scan` is only the window.
+    best_notes_hash: Option<String>,
     /// KEYWORD-lane candidate list: completed files only, mirroring the oracle
     /// keyword loop's `!IsPartFile()` gate (SharedFileList.cpp:3313) — "only
     /// publish complete files as someone else should have the full file."
@@ -6733,50 +6748,159 @@ async fn kad_publishable_shared_files(
     runtime: &Ed2kTransferRuntime,
     schedule: &kad_publish_schedule::KadPublishSchedule,
 ) -> Result<KadPublishCandidateSets> {
-    let shared_catalog = runtime.shared_catalog();
-    let (source_entries, keyword_entries) = {
-        let guard = shared_catalog.read().await;
-        let source_entries = guard
-            .iter()
-            .filter(|entry| kad_source_publish_eligible(entry))
-            .map(kad_publish_entry_from_shared_entry)
-            .collect::<Vec<_>>();
-        let keyword_entries = guard
-            .iter()
-            .filter(|entry| kad_keyword_publish_eligible(entry))
-            .map(kad_publish_entry_from_shared_entry)
-            .collect::<Vec<_>>();
-        (source_entries, keyword_entries)
-    };
-    // The Kad publish scan is driven by the SOURCE lane (every file, 5h
-    // interval), so the source scan order uses the source last-publish clock —
-    // the oracle source selection ranks due files by `GetLastPublishTimeKadSrc()`
-    // (SharedFileList.cpp:3377). The NOTES lane selects its own best candidate by
-    // the notes clock separately (see `select_best_notes_publish_candidate`).
     let now_instant = Instant::now();
     let now_unix_ms = Utc::now().timestamp_millis();
-    let source_scan =
-        kad_publishable_shared_file_entries(source_entries, now_unix_ms, |file_hash| {
-            schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
-        });
+    let shared_catalog = runtime.shared_catalog();
+    let guard = shared_catalog.read().await;
+    Ok(compute_kad_publish_candidates(
+        &guard,
+        schedule,
+        now_instant,
+        now_unix_ms,
+        KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET,
+    ))
+}
+
+/// Compute the balanced publish rank directly over a borrowed shared-catalog
+/// entry, without cloning it into a `MetadataTransferPublishEntry` first. The
+/// field mapping mirrors `kad_publish_entry_from_shared_entry` exactly, and
+/// `shared_publish_rank` is a pure function of these fields, so the resulting
+/// rank (and thus the sort order) is byte-identical to ranking the clone.
+fn shared_entry_publish_rank(
+    entry: &Ed2kSharedEntry,
+    sequence: usize,
+    last_publish_unix_ms: i64,
+    now_unix_ms: i64,
+) -> SharedPublishRank {
+    shared_publish_rank(SharedPublishRankInput {
+        file_hash: &entry.file_hash,
+        file_size: entry.file_size,
+        upload_priority: &entry.upload_priority,
+        auto_upload_priority: entry.auto_upload_priority,
+        queued_count: 0,
+        session_request_count: entry.publish.session_request_count,
+        session_accept_count: entry.publish.session_accept_count,
+        all_time_request_count: entry.publish.all_time_request_count,
+        all_time_accept_count: entry.publish.all_time_accept_count,
+        all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+        session_uploaded_bytes: entry.publish.session_uploaded_bytes,
+        last_request_unix_ms: entry.publish.last_request_unix_ms,
+        last_publish_unix_ms,
+        sequence,
+        now_unix_ms,
+    })
+}
+
+/// Rank a filtered list of borrowed shared entries and return their indices
+/// ordered best-first, WITHOUT materializing any clone. `last_publish_unix_ms`
+/// supplies the per-file age-term clock keyed by hash (the SOURCE/NOTES Kad clock,
+/// or a constant for the keyword lane whose oracle age term is 0). Because the
+/// sequence tie-break is the position in `entries` (the filtered catalog-iteration
+/// order) and the rank is pure, the returned order equals ranking the cloned list
+/// with `kad_publishable_shared_file_entries` — only the clones are avoided.
+fn ranked_shared_entry_order(
+    entries: &[&Ed2kSharedEntry],
+    now_unix_ms: i64,
+    last_publish_unix_ms: impl Fn(&str) -> i64,
+) -> Vec<usize> {
+    let mut ranked = entries
+        .iter()
+        .enumerate()
+        .map(|(sequence, entry)| {
+            (
+                shared_entry_publish_rank(
+                    entry,
+                    sequence,
+                    last_publish_unix_ms(&entry.file_hash),
+                    now_unix_ms,
+                ),
+                sequence,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right));
+    ranked.into_iter().map(|(_, index)| index).collect()
+}
+
+/// Build one publish cycle's candidate sets over borrowed catalog entries,
+/// cloning only what a tick actually consumes. The SOURCE lane is ranked over
+/// borrows and only the cursor scan window (≤ `scan_budget`, ranked order) is
+/// cloned; the NOTES best candidate is picked over the full source-eligible set
+/// (borrowed rank on the notes clock) so it stays global; the KEYWORD lane is
+/// ranked over borrows and materialized in full because the >150-file keyword
+/// batch builder scans the whole completed-file set. Selection (which files, in
+/// what order) is identical to ranking full clones — see the equivalence test.
+fn compute_kad_publish_candidates(
+    entries: &[Ed2kSharedEntry],
+    schedule: &kad_publish_schedule::KadPublishSchedule,
+    now_instant: Instant,
+    now_unix_ms: i64,
+    scan_budget: usize,
+) -> KadPublishCandidateSets {
+    // SOURCE lane: every servable file, ranked by the SOURCE last-publish clock
+    // (the oracle source selection ranks due files by `GetLastPublishTimeKadSrc()`,
+    // SharedFileList.cpp:3377).
+    let source_refs = entries
+        .iter()
+        .filter(|entry| kad_source_publish_eligible(entry))
+        .collect::<Vec<_>>();
+    let source_order = ranked_shared_entry_order(&source_refs, now_unix_ms, |file_hash| {
+        schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
+    });
+    let source_item_count = source_order.len();
+    let source_cursor_start = schedule.cursor(source_item_count);
+    // Materialize ONLY the cursor scan window (≤ scan_budget), in ranked order
+    // starting at the cursor — the same slice the loop inspects.
+    let window_len = source_item_count.min(scan_budget);
+    let source_scan = (0..window_len)
+        .map(|offset| {
+            let ranked_pos = (source_cursor_start + offset) % source_item_count;
+            kad_publish_entry_from_shared_entry(source_refs[source_order[ranked_pos]])
+        })
+        .collect::<Vec<_>>();
+    // NOTES lane: single best-ranked notes-due file across the FULL source-eligible
+    // set, taken in the SOURCE-sorted order so the sequence tie-break matches the
+    // pre-optimization full-scan selection, then re-ranked on the NOTES clock.
+    let notes_candidates = source_order
+        .iter()
+        .map(|&index| source_refs[index])
+        .filter(|entry| {
+            kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
+                && schedule.notes_due(&entry.file_hash, now_instant)
+        })
+        .map(kad_publish_entry_from_shared_entry)
+        .collect::<Vec<_>>();
+    let best_notes_hash =
+        select_best_notes_publish_candidate(&notes_candidates, schedule, now_instant, now_unix_ms);
     // KEYWORD lane holds the age term CONSTANT, independent of the source-clock
     // scan sort: the oracle keyword rank passes 0 for `tLastPublish`
     // (SharedFileList.cpp:3316), so keyword selection is priority/demand-ordered,
     // not perturbed by when each file was last SOURCE-published. `|_| 0` maps
     // every file to `publish_age_score`'s flat max (80), matching that constant.
-    // (Corrects the round-20 cca3013 side effect where the keyword lane inherited
-    // the source-clock ordering from the shared scan sort.)
-    let keyword_files = kad_publishable_shared_file_entries(keyword_entries, now_unix_ms, |_| 0);
+    // The batch builder walks the whole completed-file set (to fill a >150-file
+    // keyword batch), so this lane is materialized in full in ranked order.
+    let keyword_refs = entries
+        .iter()
+        .filter(|entry| kad_keyword_publish_eligible(entry))
+        .collect::<Vec<_>>();
+    let keyword_order = ranked_shared_entry_order(&keyword_refs, now_unix_ms, |_| 0);
+    let keyword_files = keyword_order
+        .iter()
+        .map(|&index| kad_publish_entry_from_shared_entry(keyword_refs[index]))
+        .collect::<Vec<_>>();
     let keyword_index = keyword_files
         .iter()
         .enumerate()
         .map(|(index, entry)| (entry.file_hash.clone(), index))
         .collect();
-    Ok(KadPublishCandidateSets {
+    KadPublishCandidateSets {
         source_scan,
+        source_item_count,
+        source_cursor_start,
+        best_notes_hash,
         keyword_files,
         keyword_index,
-    })
+    }
 }
 
 fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTransferPublishEntry {
@@ -10081,6 +10205,149 @@ mod tests {
         // Sanity: after the source interval elapses the retained file is due again.
         let later = now + Duration::from_secs(6 * 3_600);
         assert!(schedule.source_due(&complete.file_hash, later, None));
+    }
+
+    #[test]
+    fn windowed_candidate_build_selects_identically_to_full_clone_build() {
+        use crate::kad_publish_schedule::KadPublishSchedule;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        let now_instant = Instant::now();
+        let now_unix_ms = 1_700_000_000_000i64;
+
+        let mk = |hash: u8,
+                  name: &str,
+                  priority: &str,
+                  verified_complete: bool,
+                  complete_parts: Vec<bool>,
+                  comment: &str,
+                  rating: u8,
+                  all_time_uploaded_bytes: u64| Ed2kSharedEntry {
+            file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
+            canonical_name: name.to_string(),
+            file_size: 4096,
+            verified_complete,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            upload_priority: priority.to_string(),
+            auto_upload_priority: false,
+            comment: comment.to_string(),
+            rating,
+            all_time_uploaded_bytes,
+            complete_parts,
+            publish: Default::default(),
+        };
+
+        // Diverse catalog: completed files across priorities/upload stats (distinct
+        // ranks), two annotated (notes) files, a servable partfile (source-only,
+        // never keyword), an empty partfile + a hint (excluded from both lanes).
+        let catalog = vec![
+            mk(0x11, "alpha-release.iso", "release", true, Vec::new(), "note a", 3, 0),
+            mk(0x22, "bravo-normal.iso", "normal", true, Vec::new(), "", 0, 5000),
+            mk(0x33, "charlie-high.iso", "high", true, Vec::new(), "note c", 5, 100),
+            mk(0x44, "delta-low.iso", "low", true, Vec::new(), "", 0, 0),
+            mk(0x55, "echo-normal.iso", "normal", true, Vec::new(), "", 0, 0),
+            mk(0x66, "foxtrot-part.iso", "normal", false, vec![true, false], "", 0, 0),
+            mk(0x77, "golf-empty.iso", "normal", false, vec![false, false], "", 0, 0),
+            Ed2kSharedEntry {
+                compatibility_hint: true,
+                ..mk(0x88, "hotel-hint.iso", "normal", true, Vec::new(), "", 0, 0)
+            },
+        ];
+
+        let mut schedule = KadPublishSchedule::new();
+        // Vary the SOURCE clock so the source ordering is non-trivial (age term).
+        schedule.mark_source_published(
+            &catalog[0].file_hash,
+            now_instant - Duration::from_secs(3_600),
+            None,
+        );
+        schedule.mark_source_published(
+            &catalog[2].file_hash,
+            now_instant - Duration::from_secs(10 * 3_600),
+            None,
+        );
+        // NOTES clocks for the two annotated files: 0x11 recent (not due), 0x33
+        // stale (due) -> the notes lane must pick 0x33 in both builds.
+        schedule.mark_notes_published(
+            &catalog[0].file_hash,
+            now_instant - Duration::from_secs(3_600),
+        );
+        schedule.mark_notes_published(
+            &catalog[2].file_hash,
+            now_instant - Duration::from_secs(48 * 3_600),
+        );
+
+        let source_clock =
+            |file_hash: &str| schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms);
+
+        // OLD reference: full clone + rank + sort of BOTH lanes (the pre-OPP-2 path).
+        let old_source_full = kad_publishable_shared_file_entries(
+            catalog
+                .iter()
+                .filter(|e| kad_source_publish_eligible(e))
+                .map(kad_publish_entry_from_shared_entry)
+                .collect(),
+            now_unix_ms,
+            source_clock,
+        );
+        let old_keyword_files = kad_publishable_shared_file_entries(
+            catalog
+                .iter()
+                .filter(|e| kad_keyword_publish_eligible(e))
+                .map(kad_publish_entry_from_shared_entry)
+                .collect(),
+            now_unix_ms,
+            |_| 0,
+        );
+        let old_keyword_index: HashMap<String, usize> = old_keyword_files
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.file_hash.clone(), i))
+            .collect();
+
+        let n = old_source_full.len();
+        assert_eq!(n, 6, "5 completed + 1 servable partfile are source-eligible");
+        let scan_budget = 3usize;
+        assert!(scan_budget < n, "budget must be a strict subset to exercise wrap");
+
+        // Walk more than a full rotation, advancing the cursor each tick so the
+        // window wraps and every ranked position is materialized at some point.
+        // NEW (windowed borrow-rank-clone) must equal OLD (full clone) every tick.
+        for _ in 0..(2 * n + 1) {
+            let start = schedule.cursor(n);
+            let window_len = n.min(scan_budget);
+            let old_window: Vec<_> = (0..window_len)
+                .map(|off| old_source_full[(start + off) % n].clone())
+                .collect();
+            let old_best_notes = select_best_notes_publish_candidate(
+                &old_source_full,
+                &schedule,
+                now_instant,
+                now_unix_ms,
+            );
+
+            let cand = compute_kad_publish_candidates(
+                &catalog,
+                &schedule,
+                now_instant,
+                now_unix_ms,
+                scan_budget,
+            );
+
+            assert_eq!(cand.source_item_count, n);
+            assert_eq!(cand.source_cursor_start, start);
+            assert_eq!(cand.source_scan, old_window, "window differs at cursor {start}");
+            assert_eq!(cand.best_notes_hash, old_best_notes);
+            assert_eq!(cand.best_notes_hash.as_deref(), Some(catalog[2].file_hash.as_str()));
+            assert_eq!(cand.keyword_files, old_keyword_files);
+            assert_eq!(cand.keyword_index, old_keyword_index);
+
+            schedule.advance_cursor(start, window_len, n);
+        }
     }
 
     #[test]
