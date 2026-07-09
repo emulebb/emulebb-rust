@@ -6839,6 +6839,24 @@ fn select_best_notes_publish_candidate(
     .map(|entry| entry.file_hash)
 }
 
+/// Self-inclusive complete-source count published as the Kad keyword
+/// `TAG_SOURCES` value.
+///
+/// The oracle publishes `CKnownFile::m_nCompleteSourcesCount`
+/// (`CSearch::PreparePacketForTags`, Search.cpp:1479). The `CKnownFile`
+/// constructor seeds that counter to 1 (KnownFile.cpp:126) because we hold the
+/// complete file ourselves, and it only rises above 1 once source exchange
+/// reports other clients that hold every part — `acount.Add(m_nCompleteSourcesCount + 1)`,
+/// "plus 1 since we have the complete file too" (KnownFile.cpp:307-313). So the
+/// published count is self-inclusive: `other_complete_sources + 1`.
+///
+/// rust does not yet track other complete sources for shared library files, so
+/// the keyword-publish build site passes `other_complete_sources = 0` and the
+/// faithful published value is the self-only base of 1.
+fn keyword_publish_complete_source_count(other_complete_sources: u32) -> u32 {
+    other_complete_sources.saturating_add(1)
+}
+
 fn kad_keyword_publish_entries_for_keyword(
     shared_files: &[MetadataTransferPublishEntry],
     keyword: &str,
@@ -6875,7 +6893,7 @@ fn kad_keyword_publish_entries_for_keyword(
         let mut tags = vec![
             Tag::filename(entry.canonical_name.clone()),
             Tag::filesize(entry.file_size),
-            Tag::sources(1),
+            Tag::sources(keyword_publish_complete_source_count(0)),
         ];
         if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
             tags.push(Tag::filetype(file_type));
@@ -10869,6 +10887,56 @@ mod tests {
         assert_eq!(entries[4].1.file_hash, Ed2kHash::from_bytes([159_u8; 16]));
         assert_eq!(entries[5].1.file_hash, Ed2kHash::from_bytes([0_u8; 16]));
         assert_eq!(entries[149].1.file_hash, Ed2kHash::from_bytes([144_u8; 16]));
+    }
+
+    #[test]
+    fn keyword_publish_source_count_is_self_inclusive() {
+        // Oracle `CKnownFile::m_nCompleteSourcesCount` counts ourselves as one
+        // complete source and adds any other known complete sources on top
+        // (KnownFile.cpp:126,313). A file with no other known complete sources
+        // publishes SOURCES = 1; N others publish SOURCES = N + 1.
+        assert_eq!(keyword_publish_complete_source_count(0), 1);
+        assert_eq!(keyword_publish_complete_source_count(4), 5);
+    }
+
+    #[test]
+    fn keyword_publish_entry_publishes_self_inclusive_source_count() {
+        // rust tracks no other complete sources for shared files, so the built
+        // keyword entry carries the self-only TAG_SOURCES value of 1 rather than
+        // a hardcoded constant divorced from the oracle semantics.
+        let shared_files = vec![MetadataTransferPublishEntry {
+            file_hash: Ed2kHash::from_bytes([7_u8; 16]).to_string(),
+            canonical_name: "Ubuntu Sample.iso".to_string(),
+            file_size: 4096,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            session_uploaded_bytes: 0,
+            session_request_count: 0,
+            session_accept_count: 0,
+            all_time_uploaded_bytes: 0,
+            all_time_upload_requests: 0,
+            all_time_upload_accepts: 0,
+            last_upload_request_ms: 0,
+            comment: String::new(),
+            rating: 0,
+        }];
+
+        let entries = kad_keyword_publish_entries_for_keyword(
+            &shared_files,
+            "ubuntu",
+            KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+            0,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .1
+                .tags
+                .iter()
+                .any(|tag| tag == &Tag::sources(1))
+        );
     }
 
     #[test]
