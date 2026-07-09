@@ -33,10 +33,10 @@
 //! The OS watcher itself is impossible to unit-test deterministically, so the
 //! testable seam is [`classify_event`] / [`actions_for_events`]: given a settled
 //! debounced event, decide whether it means *share this path* or *drop this
-//! path*. The tests exercise that decision plus the consumer's path-keyed
-//! idempotency / removal bookkeeping.
+//! path*. The tests exercise that decision plus the consumer's in-order
+//! forwarding to the applier, which is the single authority on whether a
+//! Share/Remove actually has an effect.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -260,39 +260,30 @@ where
     })
 }
 
-/// Consume settled actions and apply them, with path-keyed idempotency.
+/// Consume settled actions and apply them in order.
 ///
-/// The consumer keeps a small set of paths it has already shared so a repeated
-/// `Share` for an unchanged path is dropped before it even reaches the (cheap,
-/// hash-keyed) ingest path, and a `Remove` for a path it never shared is a
-/// no-op. A `Share` after a `Remove` (remove-then-readd) correctly re-shares.
+/// The consumer is a thin drain loop: it forwards every action to the applier
+/// and lets the applier decide whether it has any effect. This is deliberate.
+/// The applier is the single authority: a `Share` goes through the (cheap,
+/// hash-keyed) ingest path, and a `Remove` resolves the vanished path's hash
+/// from the core's `monitor_shared_hashes` map -- which now records BOTH files
+/// the live monitor picked up AND the shares created by the initial startup
+/// reload -- and no-ops when the path was never shared.
+///
+/// A consumer-local "have I shared this path?" set was previously used to skip
+/// removes of never-shared paths, but it could only ever have seen shares the
+/// live monitor itself applied. That made it wrongly swallow a `Remove` for a
+/// file the startup reload had shared, leaving a deleted file offered/published
+/// until a manual reload. Keeping the gate solely in the applier (against the
+/// authoritative `monitor_shared_hashes` map) is what closes that gap, without
+/// two maps redundantly tracking the same "is this shared?" question.
 async fn run_consumer<F, Fut>(mut action_rx: UnboundedReceiver<MonitorAction>, apply: F)
 where
     F: Fn(MonitorAction) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    // path -> last action applied, used purely to coalesce duplicate shares and
-    // skip removes of never-shared paths. Authoritative dedup still lives in the
-    // hash-keyed share path; this is a cheap front-line filter.
-    let mut shared_paths: HashMap<PathBuf, ()> = HashMap::new();
     while let Some(action) = action_rx.recv().await {
-        match &action {
-            MonitorAction::Share(path) => {
-                // A modify on a file we already shared still goes through (the
-                // content may have changed and re-ingest is hash-cheap if not),
-                // but we always record it as shared.
-                shared_paths.insert(path.clone(), ());
-                apply(action).await;
-            }
-            MonitorAction::Remove(path) => {
-                // Only act if we believe we shared it; otherwise the un-share is
-                // a guaranteed no-op and we can skip the lookup.
-                let was_shared = shared_paths.remove(path).is_some();
-                if was_shared {
-                    apply(action).await;
-                }
-            }
-        }
+        apply(action).await;
     }
 }
 
@@ -306,8 +297,22 @@ where
 // / `unshare_file` ingest/catalog paths so MD4/AICH/catalog stay consistent.
 // ---------------------------------------------------------------------------
 
+use emulebb_ed2k::long_path::long_path;
+
 use crate::shared_directories::refresh_shared_directory_row;
 use crate::{EmulebbCore, LocalShareCreate};
+
+/// Canonical key for the `monitor_shared_hashes` source-path -> hash map.
+///
+/// The live watcher reports raw paths (it watches the raw configured root),
+/// while the startup reload walks the root through [`long_path`] and so sees the
+/// verbatim (`\\?\`) form. Both the auto-share/auto-remove sites here and the
+/// reload registration route their path through [`long_path`] (idempotent: a
+/// verbatim path stays verbatim) so a startup share and a later live Remove of
+/// the same file resolve to the SAME key regardless of which side observed it.
+fn monitor_shared_key(path: &Path) -> PathBuf {
+    long_path(path)
+}
 
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
 /// roots. Tears down any previous monitor first, then watches each accessible
@@ -372,7 +377,7 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
                 .lock()
                 .await
                 .monitor_shared_hashes
-                .insert(path.to_path_buf(), share.hash.clone());
+                .insert(monitor_shared_key(path), share.hash.clone());
             tracing::info!(path = %path.display(), hash = %share.hash, "auto-shared monitored file");
         }
         Err(error) => {
@@ -387,12 +392,15 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
 
 /// Auto-remove a file the live monitor saw removed / renamed away. The file is
 /// already gone (cannot be re-hashed), so we resolve the catalog hash from the
-/// source-path -> hash map recorded at auto-share time and drop it via the
-/// existing un-share catalog path. A path we never auto-shared is a no-op.
+/// `monitor_shared_hashes` source-path -> hash map and drop it via the existing
+/// un-share catalog path. That map is populated both here at auto-share time AND
+/// by the startup reload (see `reload_shared_directories`), so a file shared by
+/// the initial reload is de-offered/de-published on delete exactly like one the
+/// live monitor added. A path we never shared is a no-op.
 async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
     let hash = {
         let mut state = core.state.lock().await;
-        state.monitor_shared_hashes.remove(path)
+        state.monitor_shared_hashes.remove(&monitor_shared_key(path))
     };
     let Some(hash) = hash else {
         return;
@@ -508,7 +516,7 @@ mod tests {
     }
 
     /// Drive `run_consumer` over `inputs` and return the actions it actually
-    /// applied -- the consumer's idempotency / bookkeeping seam (the OS watcher
+    /// applied -- the consumer's in-order forwarding seam (the OS watcher
     /// cannot be tested deterministically).
     async fn applied_actions(inputs: Vec<MonitorAction>) -> Vec<MonitorAction> {
         let applied: Arc<Mutex<Vec<MonitorAction>>> = Arc::new(Mutex::new(Vec::new()));
@@ -528,21 +536,26 @@ mod tests {
         Arc::try_unwrap(applied).unwrap().into_inner().unwrap()
     }
 
-    /// Share a created path once, skip a remove of a never-shared path, apply a
-    /// remove only for a path that was shared.
+    /// The consumer forwards every action in order, including a Remove of a
+    /// path it never saw a Share for. The decision to actually un-share (or
+    /// no-op an unknown path) lives in the applier, which resolves the hash from
+    /// `monitor_shared_hashes`. This forwarding is what lets a Remove reach the
+    /// applier for a startup-reload share the consumer itself never observed.
     #[tokio::test]
-    async fn consumer_shares_then_removes_and_skips_unknown_removes() {
+    async fn consumer_forwards_every_action_in_order() {
         let applied = applied_actions(vec![
             share("/s/a.dat"),
             remove("/s/a.dat"),
             remove("/s/b.dat"),
         ])
         .await;
-        assert_eq!(applied, vec![share("/s/a.dat"), remove("/s/a.dat")]);
+        assert_eq!(
+            applied,
+            vec![share("/s/a.dat"), remove("/s/a.dat"), remove("/s/b.dat")]
+        );
     }
 
-    /// Remove-then-readd: a Share after a Remove must re-share (the bookkeeping
-    /// is cleared by the Remove).
+    /// Remove-then-readd: a Share after a Remove is forwarded and re-shares.
     #[tokio::test]
     async fn consumer_reshares_after_remove() {
         let applied = applied_actions(vec![
@@ -555,5 +568,76 @@ mod tests {
             applied,
             vec![share("/s/a.dat"), remove("/s/a.dat"), share("/s/a.dat")]
         );
+    }
+
+    /// A file shared by the INITIAL startup reload (never touched by the live
+    /// monitor) is registered in `monitor_shared_hashes`, so when its source is
+    /// deleted at runtime the monitor's Remove path resolves the hash and drops
+    /// it from the shared catalog -- the HASH-1 gap. Drives the reload + the
+    /// monitor's `auto_unshare_monitored_path` directly (the OS watcher cannot be
+    /// tested deterministically) to prove the de-offer happens.
+    #[tokio::test]
+    async fn startup_reload_share_is_de_offered_when_source_deleted() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "emulebb-monitor-startup-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("Deleted.At.Runtime.bin");
+        std::fs::write(&source, b"startup shared payload").unwrap();
+
+        let core =
+            EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
+                .unwrap();
+        core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
+            path: root.display().to_string(),
+            recursive: true,
+            monitor_owned: false,
+            shareable: true,
+            accessible: true,
+        }];
+
+        // The startup reload shares the file and registers its source path.
+        let shares = crate::shared_directories::reload_shared_directories(&core)
+            .await
+            .unwrap();
+        assert_eq!(shares.len(), 1);
+        let hash = shares[0].hash.clone();
+        assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+        assert_eq!(
+            core.state
+                .lock()
+                .await
+                .monitor_shared_hashes
+                .get(&monitor_shared_key(&source)),
+            Some(&hash),
+            "startup reload must register the shared source path -> hash so a live \
+             Remove can resolve it",
+        );
+
+        // Operator deletes the startup-shared file at runtime; the live monitor
+        // reports a Remove for the (now-gone) path.
+        std::fs::remove_file(&source).unwrap();
+        auto_unshare_monitored_path(&core, &source).await;
+
+        assert_eq!(
+            core.ed2k_transfers.shared_catalog_count().await,
+            0,
+            "the deleted startup-shared file must be de-offered/de-published",
+        );
+        assert!(core.share(&hash).await.is_none());
+        assert!(
+            !core
+                .state
+                .lock()
+                .await
+                .monitor_shared_hashes
+                .contains_key(&monitor_shared_key(&source)),
+            "the removed path must be dropped from the tracking map",
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

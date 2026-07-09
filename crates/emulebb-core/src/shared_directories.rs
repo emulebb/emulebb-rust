@@ -489,6 +489,10 @@ struct ReusedReloadShare {
     /// File hash reused from the persisted index because path, size, and mtime
     /// still match the scanned file.
     file_hash: String,
+    /// The scanned source path this share was reused for. Registered in
+    /// `monitor_shared_hashes` at reload time so the live directory monitor can
+    /// resolve and de-offer this file if its source is later deleted (HASH-1).
+    source_path: PathBuf,
     /// Older duplicate hashes for the same source path, if any.
     stale_hashes: Vec<String>,
 }
@@ -629,6 +633,7 @@ async fn plan_incremental_reload(
                                 stats.stale_hash_count += entries.len().saturating_sub(1);
                                 reused_shares.push(ReusedReloadShare {
                                     file_hash: entry.file_hash.clone(),
+                                    source_path: path.clone(),
                                     stale_hashes: entries
                                         .iter()
                                         .filter(|stale| stale.file_hash != entry.file_hash)
@@ -782,16 +787,22 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         if let Some(share) = core.share(&reused.file_hash).await {
             shares.push(share);
         }
+        // Register the source path -> hash so the live directory monitor can
+        // de-offer this file if its source is deleted at runtime (HASH-1).
+        register_monitor_shared_hash(core, reused.source_path.clone(), &reused.file_hash).await;
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
     forget_stale_shares(core, &plan.pruned_hashes, "").await;
     for target in plan.to_hash {
+        let source_path = target.path.clone();
         let share = core
             .share_local_file(LocalShareCreate {
                 path: target.path.display().to_string(),
                 name: None,
             })
             .await?;
+        // Same HASH-1 registration for a freshly (re)hashed startup share.
+        register_monitor_shared_hash(core, source_path, &share.hash).await;
         forget_stale_shares(core, &target.stale_hashes, &share.hash).await;
         shares.push(share);
         core.shared_hashing_count.fetch_sub(1, Ordering::Relaxed);
@@ -802,6 +813,25 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
     });
     core.queue_ed2k_shared_catalog_publish();
     Ok(shares)
+}
+
+/// Record a shared file's source path -> hash in the live monitor's tracking
+/// map so a runtime deletion of a startup-shared file is de-offered/de-published
+/// the same way a monitor-picked-up file already is (HASH-1). The live
+/// directory monitor watches the same roots the startup reload scans, so its
+/// `Remove` event for a vanished startup share resolves the hash here (the file
+/// is gone and can no longer be re-hashed) and drops it from the catalog.
+async fn register_monitor_shared_hash(core: &EmulebbCore, source_path: PathBuf, hash: &str) {
+    // Normalize through `long_path` so the key matches the form the live monitor
+    // resolves against (see `monitor_shared_key`): the scan already walks the
+    // root through `long_path`, but normalize here too so the invariant is local
+    // and holds even if a caller passes a raw path.
+    let key = long_path(&source_path);
+    core.state
+        .lock()
+        .await
+        .monitor_shared_hashes
+        .insert(key, hash.to_string());
 }
 
 /// Drop previous identities for the same share-in-place source path so modified
