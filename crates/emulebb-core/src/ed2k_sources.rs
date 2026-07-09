@@ -223,12 +223,24 @@ pub(crate) fn select_kad_keyword_metadata(
     (!metadata.is_empty()).then_some(metadata)
 }
 
+/// Kad keyword separators, mirroring eMuleBB-MFC's `INV_KAD_KEYWORD_CHARS`
+/// (`kademlia/kademlia/SearchManager.h:35`): space, round/square/curly
+/// brackets, angle brackets, comma, dot, underscore, hyphen, bang, question
+/// mark, colon, semicolon, backslash, slash and double-quote. Every other
+/// character (letters, digits and symbols such as `'`, `&`, `#`, `@`, `+`, `=`,
+/// `~`) is kept inside a keyword, exactly as `CSearchManager::GetWords`.
+const INV_KAD_KEYWORD_CHARS: &str = " ()[]{}<>,._-!?:;\\/\"";
+
 pub(crate) fn significant_keyword_words(query: &str) -> Vec<String> {
+    // Mirror `CSearchManager::GetWords` (SearchManager.cpp:260-287): split on the
+    // `INV_KAD_KEYWORD_CHARS` separators only, keep tokens whose UTF-8 byte
+    // length is >= 3 (the oracle's `KadGetKeywordBytes(sWord).GetLength() >= 3`
+    // gate, measured before lower-casing), then lower-case them
+    // (KadTagStrMakeLower). All other characters stay inside the word.
     let words = query
-        .split(|char: char| !char.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(|word| word.to_lowercase())
+        .split(|character: char| INV_KAD_KEYWORD_CHARS.contains(character))
         .filter(|word| word.len() >= 3)
+        .map(|word| word.to_lowercase())
         .collect::<Vec<_>>();
     if words.is_empty() {
         vec![query.to_lowercase()]

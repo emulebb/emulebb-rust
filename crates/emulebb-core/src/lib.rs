@@ -10712,6 +10712,24 @@ mod tests {
     }
 
     #[test]
+    fn significant_words_keep_in_word_symbols_matching_getwords_separators() {
+        // `INV_KAD_KEYWORD_CHARS` does not include `&`, `+`, `'` or `#`, so the
+        // oracle keeps them inside the word instead of over-splitting.
+        assert_eq!(
+            significant_keyword_words("AT&T Wireless"),
+            vec!["at&t".to_string(), "wireless".to_string()]
+        );
+        assert_eq!(
+            significant_keyword_words("C++ Tutorial"),
+            vec!["c++".to_string(), "tutorial".to_string()]
+        );
+        assert_eq!(
+            significant_keyword_words("rock'n'roll live"),
+            vec!["rock'n'roll".to_string(), "live".to_string()]
+        );
+    }
+
+    #[test]
     fn significant_words_unique_preserve_first_occurrence_order() {
         assert_eq!(
             significant_keyword_words_unique("Ubuntu Python ubuntu programming Apache Camel"),
