@@ -17,7 +17,6 @@ fn upload_part_packets_split_large_uncompressed_ranges() {
         0,
         payload.len() as u64,
         &payload,
-        false,
     )
     .unwrap();
 
@@ -35,6 +34,114 @@ fn upload_part_packets_split_large_uncompressed_ranges() {
     }
 
     assert_eq!(reconstructed, payload);
+}
+
+// RUST-PAR-022 (UploadDiskIOThread.cpp:705 `if (endpos > _UI32_MAX)`): the
+// standard SENDINGPART reply opcode is chosen PER PACKET from the fragment's
+// exclusive end offset, not once from the request opcode. For a >4GB range a
+// fragment ending at or below 4GiB emits the 32-bit OP_SENDINGPART (4-byte
+// offsets) while a fragment ending above 4GiB emits OP_SENDINGPART_I64 (8-byte
+// offsets). A packet straddling the 4GiB boundary uses I64 (its end > u32::MAX).
+#[test]
+fn upload_part_packets_select_sending_opcode_per_fragment() {
+    const BOUNDARY: u64 = u32::MAX as u64;
+    let file_hash = Ed2kHash::from_bytes([0x5A; 16]);
+    // Start below 4GiB so the range crosses the boundary; three fragments result:
+    // [start, start+10240) entirely below, [+10240, +20480) straddling, and
+    // [+20480, +25000) entirely above.
+    let start = BOUNDARY - 12_000;
+    let range_len = 25_000usize;
+    let end = start + range_len as u64;
+    let mut lcg = 0x0BAD_F00Du32;
+    let payload = (0..range_len)
+        .map(|_| {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (lcg >> 24) as u8
+        })
+        .collect::<Vec<_>>();
+
+    // ".mp4" is in the incompressible exclusion set, so the standard path is used
+    // deterministically (no compression attempt).
+    let packets = super::build_upload_part_packets(&file_hash, "movie.mp4", start, end, &payload)
+        .unwrap();
+    assert_eq!(packets.len(), 3, "25000 bytes split into 10240+10240+4520");
+
+    let expected_i64 = [false, true, true];
+    let mut reconstructed = Vec::new();
+    let mut expected_start = start;
+    for (index, packet) in packets.iter().enumerate() {
+        assert_eq!(packet.phase, "sending_part");
+        let want_i64 = expected_i64[index];
+        if want_i64 {
+            assert_eq!(packet.packet[0], OP_EMULEPROT);
+            assert_eq!(packet.packet[5], OP_SENDINGPART_I64);
+        } else {
+            assert_eq!(packet.packet[0], OP_EDONKEYPROT);
+            assert_eq!(packet.packet[5], OP_SENDINGPART);
+        }
+        let (decoded_hash, frag_start, frag_end, bytes) =
+            super::decode_sending_part_payload(&packet.packet[6..], want_i64).unwrap();
+        assert_eq!(decoded_hash, file_hash);
+        assert_eq!(frag_start, expected_start);
+        // Confirm the on-wire offset field WIDTH matches the chosen opcode:
+        // header = proto(1)+len(4)+opcode(1) + hash(16) + 2 offsets (8 or 16).
+        let offset_field_bytes = if want_i64 { 16 } else { 8 };
+        assert_eq!(packet.packet.len(), 6 + 16 + offset_field_bytes + bytes.len());
+        // The boundary-straddling fragment must be the I64 one.
+        assert_eq!(frag_end > BOUNDARY, want_i64);
+        expected_start = frag_end;
+        reconstructed.extend_from_slice(&bytes);
+    }
+    assert_eq!(expected_start, end);
+    assert_eq!(reconstructed, payload);
+}
+
+// RUST-PAR-022 (UploadDiskIOThread.cpp:770 `if (uEndOffset > UINT32_MAX)`): the
+// COMPRESSEDPART reply opcode is chosen PER BLOCK from the whole range's end
+// offset (all fragments share it, since the header advertises the block start +
+// total compressed size). A block ending above 4GiB uses OP_COMPRESSEDPART_I64;
+// a block entirely at or below 4GiB uses the 32-bit OP_COMPRESSEDPART.
+#[test]
+fn upload_part_packets_select_compressed_opcode_per_block() {
+    const BOUNDARY: u64 = u32::MAX as u64;
+    let file_hash = Ed2kHash::from_bytes([0x33; 16]);
+    // Highly repetitive payload so compression fires (compressed < original).
+    let mut payload = Vec::new();
+    for _ in 0..5_000 {
+        payload.extend_from_slice(b"parity");
+    }
+
+    // Block ending above 4GiB -> every fragment is OP_COMPRESSEDPART_I64.
+    let start_hi = BOUNDARY - 5_000;
+    let end_hi = start_hi + payload.len() as u64;
+    let hi = super::build_upload_part_packets(&file_hash, "notes.txt", start_hi, end_hi, &payload)
+        .unwrap();
+    assert!(!hi.is_empty());
+    for packet in &hi {
+        assert_eq!(packet.phase, "compressed_part");
+        assert_eq!(packet.packet[0], OP_EMULEPROT);
+        assert_eq!(packet.packet[5], OP_COMPRESSEDPART_I64);
+        let (decoded_hash, block_start, _len, _frag) =
+            super::decode_compressed_part_fragment(&packet.packet[6..], true).unwrap();
+        assert_eq!(decoded_hash, file_hash);
+        assert_eq!(block_start, start_hi);
+    }
+
+    // Block entirely below 4GiB -> every fragment is the 32-bit OP_COMPRESSEDPART.
+    let start_lo = 1_000u64;
+    let end_lo = start_lo + payload.len() as u64;
+    let lo = super::build_upload_part_packets(&file_hash, "notes.txt", start_lo, end_lo, &payload)
+        .unwrap();
+    assert!(!lo.is_empty());
+    for packet in &lo {
+        assert_eq!(packet.phase, "compressed_part");
+        assert_eq!(packet.packet[0], OP_EMULEPROT);
+        assert_eq!(packet.packet[5], OP_COMPRESSEDPART);
+        let (decoded_hash, block_start, _len, _frag) =
+            super::decode_compressed_part_fragment(&packet.packet[6..], false).unwrap();
+        assert_eq!(decoded_hash, file_hash);
+        assert_eq!(block_start, start_lo);
+    }
 }
 
 #[tokio::test]

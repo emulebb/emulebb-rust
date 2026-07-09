@@ -433,7 +433,6 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
                 fragment_start,
                 fragment_end,
                 &bytes,
-                is_i64,
             )?;
             request_diag.payload_packets += replies.len();
             for reply in replies {

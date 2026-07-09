@@ -405,7 +405,6 @@ pub(in crate::ed2k_tcp) fn build_upload_part_packets(
     start: u64,
     end: u64,
     bytes: &[u8],
-    use_i64: bool,
 ) -> Result<Vec<EncodedUploadPartPacket>> {
     let range_len = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
     if range_len != bytes.len() {
@@ -418,6 +417,12 @@ pub(in crate::ed2k_tcp) fn build_upload_part_packets(
     }
 
     if let Some(compressed) = compress_upload_payload(canonical_name, bytes)? {
+        // Compressed reply opcode is selected PER BLOCK from the block's end
+        // offset, matching CUploadDiskIOThread::CreatePackedPackets
+        // (UploadDiskIOThread.cpp:770 `if (uEndOffset > UINT32_MAX)`). Every
+        // fragment of this block carries the same OP_COMPRESSEDPART[_I64] opcode
+        // because the header advertises the block start + total compressed size.
+        let block_i64 = end > u64::from(u32::MAX);
         let mut packets = Vec::new();
         let mut offset = 0usize;
         while offset < compressed.len() {
@@ -427,7 +432,7 @@ pub(in crate::ed2k_tcp) fn build_upload_part_packets(
                 start,
                 compressed.len(),
                 &compressed[offset..offset + fragment_len],
-                use_i64,
+                block_i64,
             )?;
             packets.push(EncodedUploadPartPacket {
                 phase: "compressed_part",
@@ -444,12 +449,19 @@ pub(in crate::ed2k_tcp) fn build_upload_part_packets(
         let fragment_len = upload_packet_fragment_len(bytes.len() - offset);
         let fragment_start = start + u64::try_from(offset).unwrap_or(u64::MAX);
         let fragment_end = fragment_start + u64::try_from(fragment_len).unwrap_or(u64::MAX);
+        // Standard reply opcode is selected PER PACKET from this fragment's
+        // exclusive end offset, matching CUploadDiskIOThread::CreateStandardPackets
+        // (UploadDiskIOThread.cpp:705 `if (endpos > _UI32_MAX)`). A fragment
+        // ending above 4 GiB (u32::MAX) uses OP_SENDINGPART_I64 with 8-byte
+        // offsets; a fragment entirely at or below 4 GiB uses the 32-bit
+        // OP_SENDINGPART even when the request was OP_REQUESTPARTS_I64.
+        let fragment_i64 = fragment_end > u64::from(u32::MAX);
         let packet = encode_sending_part(
             file_hash,
             fragment_start,
             fragment_end,
             &bytes[offset..offset + fragment_len],
-            use_i64,
+            fragment_i64,
         )?;
         packets.push(EncodedUploadPartPacket {
             phase: "sending_part",
