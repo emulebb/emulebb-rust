@@ -362,6 +362,11 @@ struct Ed2kUploadSessionEntry {
     uploaded_bytes: u64,
     upload_started_at: Option<Instant>,
     served_ranges: VecDeque<Ed2kUploadServedRange>,
+    /// Per-slot sliding-window upload datarate meter (RUST-PAR-024 GAP-1): the
+    /// 10 s per-client window (oracle `m_AverageUDR_hist`,
+    /// UploadClient.cpp:860-878). Reset on recycle so a re-promoted slot starts a
+    /// fresh window.
+    rate_meter: WindowedRateMeter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +438,11 @@ pub(super) struct Ed2kUploadQueueState {
     /// (`client->Ban(...)` -> `CClientList::AddBannedClient`, UploadQueue.cpp:1640).
     /// `None` in the queue-state unit tests that do not exercise banning.
     ban_store: Option<Arc<BanStore>>,
+    /// Aggregate sliding-window upload datarate meter (RUST-PAR-024 GAP-1): the
+    /// 30 s whole-queue window (oracle `average_ur_hist` + `datarate`,
+    /// UploadQueue.cpp:923-931/2761-2764). Fed on every payload note across all
+    /// slots; read by the slot-open pace gate and the elastic-underfill gate.
+    aggregate_rate_meter: WindowedRateMeter,
 }
 
 impl Ed2kUploadQueueState {
@@ -448,6 +458,7 @@ impl Ed2kUploadQueueState {
             throttle_next_send_at: None,
             cooldown: UploadCooldownTracker::new(),
             ban_store: None,
+            aggregate_rate_meter: WindowedRateMeter::new(AGGREGATE_RATE_WINDOW),
         }
     }
 
@@ -623,6 +634,7 @@ impl Ed2kUploadQueueState {
                 uploaded_bytes: 0,
                 upload_started_at: None,
                 served_ranges: VecDeque::new(),
+                rate_meter: WindowedRateMeter::new(PER_SLOT_RATE_WINDOW),
             },
         );
         // Stamp the slot-open pacing clock on the inline grant, mirroring the
@@ -812,6 +824,11 @@ impl Ed2kUploadQueueState {
             session.upload_started_at.get_or_insert(now);
         }
         session.uploaded_bytes = session.uploaded_bytes.saturating_add(byte_count);
+        // Feed both sliding-window datarate meters (RUST-PAR-024 GAP-1): the
+        // per-slot 10 s window (oracle m_AverageUDR_hist, UploadClient.cpp:864) and
+        // the aggregate 30 s window (oracle average_ur_hist, UploadQueue.cpp:924-926).
+        session.rate_meter.record(byte_count, now);
+        self.aggregate_rate_meter.record(byte_count, now);
         self.refresh_elastic_underfill(now);
         self.promote_waiters(now);
         self.status_for_key(&handle.key, now)
@@ -1385,6 +1402,7 @@ impl Ed2kUploadQueueState {
                 session.upload_started_at = None;
                 session.uploaded_bytes = 0;
                 session.served_ranges.clear();
+                session.rate_meter.reset();
                 session.waiting_sequence = waiting_sequence;
             }
             self.waiting_order.push(key);
@@ -1952,19 +1970,14 @@ impl Ed2kUploadQueueState {
         }
     }
 
+    /// Aggregate upload datarate: the 30 s sliding-window meter (oracle
+    /// `CUploadQueue::datarate` computed from `average_ur_hist`,
+    /// UploadQueue.cpp:2761-2764). This is the value the oracle's `ForceNewClient`
+    /// pace gate (`datarate < 102400`, UploadQueue.cpp:972) and
+    /// `IsBroadbandUploadUnderfilled` (via `GetToNetworkDatarate`,
+    /// UploadQueue.cpp:1034) read -- NOT a lifetime cumulative average.
     fn upload_rate_bytes_per_sec(&self, now: Instant) -> u64 {
-        self.sessions
-            .values()
-            .filter_map(|session| {
-                let elapsed = session
-                    .upload_started_at
-                    .map(|started_at| now.saturating_duration_since(started_at).as_secs())
-                    .unwrap_or(0);
-                // checked_div yields None for elapsed == 0 (session too fresh to
-                // have a rate), else the per-second byte rate.
-                session.uploaded_bytes.checked_div(elapsed)
-            })
-            .sum()
+        self.aggregate_rate_meter.rate_bytes_per_sec(now)
     }
 
     fn slow_upload_threshold_bytes_per_sec(&self) -> u64 {
@@ -1994,12 +2007,14 @@ fn upload_payload_interval(byte_count: u64, limit_bytes_per_sec: u64) -> Duratio
 
 mod admission;
 mod helpers;
+mod rate_meter;
 mod score;
 pub(crate) use helpers::is_low_id_client_id;
 pub(super) use helpers::{credit_score_permille, upload_priority_score};
 use helpers::{
     phase_snapshot, upload_client_id_matches, upload_snapshot_sort_key, upload_speed_bytes_per_sec,
 };
+use rate_meter::{AGGREGATE_RATE_WINDOW, PER_SLOT_RATE_WINDOW, WindowedRateMeter};
 use score::UploadScoreModifiers;
 
 /// Construct a minimal default upload peer identity for the score module's unit

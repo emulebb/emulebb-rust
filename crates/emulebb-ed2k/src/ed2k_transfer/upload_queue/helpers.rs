@@ -89,17 +89,15 @@ pub(super) fn upload_snapshot_sort_key(entry: &Ed2kUploadQueueSnapshotEntry) -> 
     }
 }
 
+/// Per-slot upload datarate: the 10 s sliding-window meter (oracle
+/// `CUpDownClient::GetUploadDatarate` = `m_nUpDatarate`, computed over
+/// `m_AverageUDR_hist`, UploadClient.cpp:860-878) -- NOT a lifetime cumulative
+/// average. This is the value the oracle's slow-slot recycle
+/// (`GetUploadDatarate() < slowThreshold`, UploadQueue.cpp:519/544/1539) and the
+/// productive-slot retention read, so a slot that burst then stalled reads its
+/// decayed recent rate here, not its lifetime average.
 pub(super) fn upload_speed_bytes_per_sec(session: &Ed2kUploadSessionEntry, now: Instant) -> u64 {
-    let Some(started_at) = session.upload_started_at else {
-        return 0;
-    };
-    if session.uploaded_bytes == 0 {
-        return 0;
-    }
-    let elapsed_ms = now.saturating_duration_since(started_at).as_millis().max(1);
-    ((u128::from(session.uploaded_bytes) * 1_000) / elapsed_ms)
-        .try_into()
-        .unwrap_or(u64::MAX)
+    session.rate_meter.rate_bytes_per_sec(now)
 }
 
 pub(super) fn upload_client_id_matches(peer: &Ed2kUploadPeerIdentity, client_id: &str) -> bool {
