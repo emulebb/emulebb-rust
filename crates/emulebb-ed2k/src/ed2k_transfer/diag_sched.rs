@@ -144,6 +144,24 @@ pub(crate) fn upload_admission_rejected(peer: &str, peer_hash: Option<[u8; 16]>,
     emit(FAMILY, "upload_admission_rejected", "low", keys, body);
 }
 
+/// Normalize a rust request-level `outcome` string to the shared `outcomeClass`
+/// vocabulary (`served | partial | duplicateDone | duplicateQueued | rejected |
+/// signal`) that the MFC oracle also emits. rust's block dispositions are rolled
+/// up per request, so the fine `outcome` stays for rust detail while
+/// `outcomeClass` is the diff-comparable field both clients share. rust never
+/// emits `signal` (MFC's per-packet request-complete marker has no request-level
+/// rust analogue); anything that served no payload and is not a duplicate maps to
+/// `rejected`.
+fn upload_outcome_class(outcome: &str) -> &'static str {
+    match outcome {
+        "served" => "served",
+        "partial" => "partial",
+        "duplicateDone" => "duplicateDone",
+        "duplicateQueued" => "duplicateQueued",
+        _ => "rejected",
+    }
+}
+
 /// `upload_request_outcome` (schema extension): one OP_REQUESTPARTS admission and
 /// payload-serving result. This fills the parity gap between "request accepted"
 /// and "payload packet left the socket", without logging file names or payload.
@@ -170,6 +188,7 @@ pub(crate) fn upload_request_outcome(
     let keys = upload_keys(peer, peer_hash, file_hash);
     let mut body = json!({
         "outcome": outcome,
+        "outcomeClass": upload_outcome_class(outcome),
         "requestedRanges": requested_ranges,
         "servedRanges": served_ranges,
         "skippedRanges": skipped_ranges,
@@ -292,4 +311,24 @@ pub(crate) fn shared_publish_offer_batch(
         "fileHashes": file_hashes,
     });
     emit(FAMILY, "shared_publish_offer_batch", "info", keys, body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_outcome_class;
+
+    #[test]
+    fn outcome_class_maps_request_outcomes_to_shared_vocabulary() {
+        // The four outcomes that carry across verbatim.
+        assert_eq!(upload_outcome_class("served"), "served");
+        assert_eq!(upload_outcome_class("partial"), "partial");
+        assert_eq!(upload_outcome_class("duplicateDone"), "duplicateDone");
+        assert_eq!(upload_outcome_class("duplicateQueued"), "duplicateQueued");
+        // Everything that served no payload and is not a duplicate collapses to
+        // the shared `rejected` class (MFC's reject-not-uploading-* family).
+        assert_eq!(upload_outcome_class("noPayload"), "rejected");
+        assert_eq!(upload_outcome_class("noServableEntry"), "rejected");
+        assert_eq!(upload_outcome_class("queueWaitingBeforeRequest"), "rejected");
+        assert_eq!(upload_outcome_class("queueStaleAfterRequest"), "rejected");
+    }
 }
