@@ -242,6 +242,13 @@ impl Ed2kUploadSessionHandle {
     pub(super) const fn key(&self) -> &Ed2kUploadSessionKey {
         &self.key
     }
+
+    /// Hex file-hash this session's slot/waiter is keyed on. Used at session
+    /// release to drain any parked shared-catalog demand-upload bytes for the
+    /// served file (RUST-PAR-025 Note-1).
+    pub(super) fn file_hash_hex(&self) -> &str {
+        &self.key.file_hash
+    }
 }
 
 /// One granted upload slot whose peer had no live connection at promotion:

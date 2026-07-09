@@ -186,6 +186,18 @@ pub struct Ed2kTransferRuntime {
     /// hash) -> (count, first-seen) for MFC repeat_file_request parity. Bounded and
     /// window-pruned; observe-only.
     upload_file_churn: UploadFileChurnLedger,
+    /// Per-file accumulator of served-upload bytes still awaiting a shared-catalog
+    /// demand-counter flush (RUST-PAR-025 Note-1), keyed by file-hash hex. The
+    /// per-fragment catalog credit uses a NON-blocking `try_write` so a busy
+    /// catalog write lock (e.g. a publish-rank build holding the read lock) can
+    /// never stall the upload hot path (preserving the REST-starvation fix). When
+    /// that `try_write` cannot be taken the fragment's bytes are parked here
+    /// instead of being dropped, and the WHOLE parked amount is flushed on the
+    /// next successful `try_write` (per fragment) and unconditionally at session
+    /// release -- so the demand counter under-counts no served byte while the hot
+    /// path stays non-blocking. A tiny `std` Mutex held only for instant map ops
+    /// plus a non-blocking catalog `try_write`; never held across an `.await`.
+    pending_catalog_upload: Arc<StdMutex<HashMap<String, u64>>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received
@@ -352,6 +364,7 @@ impl Ed2kTransferRuntime {
             download_activity: Arc::new(StdMutex::new(HashMap::new())),
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
+            pending_catalog_upload: Arc::new(StdMutex::new(HashMap::new())),
             upload_queue: Arc::new(Mutex::new(upload_queue_state)),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,

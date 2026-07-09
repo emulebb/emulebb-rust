@@ -323,6 +323,13 @@ impl Ed2kTransferRuntime {
             .lock()
             .await
             .release_session(handle, Instant::now());
+        // Drain any demand-upload bytes a contended per-fragment `try_write` left
+        // parked for this file (RUST-PAR-025 Note-1). Session release is off the
+        // hot path, so this final flush may block briefly on the catalog write lock
+        // to guarantee the tail is credited rather than orphaned.
+        if let Ok(file_hash) = handle.file_hash_hex().parse::<Ed2kHash>() {
+            self.flush_pending_catalog_upload(&file_hash).await;
+        }
     }
 
     /// Seed the upload churn cooldown for a promoted waiter whose outbound
@@ -474,19 +481,98 @@ impl Ed2kTransferRuntime {
         if delta == 0 {
             return Ok(());
         }
+        // Authoritative credit (UNCHANGED): the SQL all-time-uploaded counter that
+        // feeds the credit/upload ratio is credited per fragment, unconditionally,
+        // before any catalog work -- so ratio/credit never depend on the catalog
+        // write lock being free.
         self.metadata
             .add_file_all_time_uploaded(&file_hash.to_string(), delta)?;
-        // O(1) by-hash credit: the index resolves the unique non-hint (verified)
-        // entry for this file directly, so a per-fragment credit no longer scans the
-        // whole catalog under the write lock.
+        // Demand counter (RUST-PAR-025 Note-1): accumulate this fragment into the
+        // file's pending bucket and try to flush the WHOLE pending into the catalog
+        // in one O(1) by-hash add. A busy catalog write lock only defers the flush
+        // (the bytes stay parked for the next attempt) -- it never drops the update
+        // and never blocks the upload hot path.
+        self.accumulate_and_try_flush_catalog_upload(file_hash, delta);
+        Ok(())
+    }
+
+    /// Add `delta` to the file's pending demand-upload bucket, then make ONE
+    /// non-blocking attempt to flush the entire pending into the shared catalog.
+    ///
+    /// Correctness (all under the instant, await-free `pending_catalog_upload`
+    /// std Mutex, so no add/flush can interleave):
+    /// - No loss: the fragment lands in `pending` first; if the `try_write` fails
+    ///   (catalog write lock contended) the bytes remain parked for a later flush.
+    /// - No double-count: on a successful `try_write` the parked amount is applied
+    ///   to the catalog exactly once and the bucket is removed atomically, so a
+    ///   concurrent add starts a fresh bucket and a concurrent flush finds none.
+    /// - Non-blocking: the catalog is only ever taken via `try_write`; the side-map
+    ///   lock is held solely for O(1) map ops + that non-blocking probe.
+    fn accumulate_and_try_flush_catalog_upload(&self, file_hash: &Ed2kHash, delta: u64) {
+        let key = file_hash.to_string();
+        let mut pending = self.pending_catalog_upload.lock().unwrap();
+        let amount = {
+            let slot = pending.entry(key.clone()).or_insert(0);
+            *slot = slot.saturating_add(delta);
+            *slot
+        };
+        if amount == 0 {
+            return;
+        }
         if let Ok(mut catalog) = self.shared_catalog.try_write() {
             catalog.update_by_hash(file_hash, |entry| {
-                entry.all_time_uploaded_bytes = entry.all_time_uploaded_bytes.saturating_add(delta);
+                entry.all_time_uploaded_bytes =
+                    entry.all_time_uploaded_bytes.saturating_add(amount);
                 entry.publish.session_uploaded_bytes =
-                    entry.publish.session_uploaded_bytes.saturating_add(delta);
+                    entry.publish.session_uploaded_bytes.saturating_add(amount);
+            });
+            // The write lock was taken: the pending is resolved. If the file has a
+            // catalog entry the whole amount landed in it; if it has none there is
+            // nothing to credit (the pre-fix `try_write` path was a no-op too), so
+            // either way the bucket is cleared, keeping the side map bounded.
+            pending.remove(&key);
+        }
+    }
+
+    /// Guaranteed (blocking) flush of a file's parked demand-upload bytes into the
+    /// shared catalog. Called at session release -- OFF the per-fragment hot path
+    /// -- so blocking on the catalog write lock is safe here and guarantees a tail
+    /// parked during a publish tick is never orphaned.
+    ///
+    /// Lock ordering: this takes the catalog write lock FIRST, then the side-map
+    /// lock. That is the reverse of the per-fragment path, but the per-fragment
+    /// path only ever probes the catalog with a NON-blocking `try_write` while
+    /// holding the side-map lock, so it never waits on the catalog -- no thread can
+    /// hold the side-map lock while blocked on the catalog, so no circular wait
+    /// (deadlock) is possible.
+    async fn flush_pending_catalog_upload(&self, file_hash: &Ed2kHash) {
+        let key = file_hash.to_string();
+        // Cheap pre-check: skip taking the catalog write lock when the continuous
+        // per-fragment flushes already drained this file (the common case).
+        let has_pending = self
+            .pending_catalog_upload
+            .lock()
+            .unwrap()
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        if !has_pending {
+            return;
+        }
+        let mut catalog = self.shared_catalog.write().await;
+        let mut pending = self.pending_catalog_upload.lock().unwrap();
+        // Re-read under the final lock: a concurrent per-fragment flush may have
+        // drained (or grown) the bucket since the pre-check.
+        if let Some(amount) = pending.remove(&key)
+            && amount > 0
+        {
+            catalog.update_by_hash(file_hash, |entry| {
+                entry.all_time_uploaded_bytes = entry.all_time_uploaded_bytes.saturating_add(amount);
+                entry.publish.session_uploaded_bytes =
+                    entry.publish.session_uploaded_bytes.saturating_add(amount);
             });
         }
-        Ok(())
     }
 
     async fn update_shared_publish_stats(
