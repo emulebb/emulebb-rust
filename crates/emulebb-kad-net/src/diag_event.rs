@@ -136,7 +136,9 @@ pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
 /// `family:"bad_peer"` abuse event (uniform-diagnostics-v2 §3.4): a Kad UDP peer
 /// was dropped or banned by the public-network anti-flood guard. `behavior` is
 /// the abuse classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason`
-/// the tracker classification (e.g. the tracker bucket/action label).
+/// the shared canonical anti-flood cause string (`request-token-deficit`) that
+/// the MFC oracle also emits; the machine action (`drop`/`massive_drop`) is
+/// carried separately in the body `action` field.
 /// `repeat_count` is the observed packet count in the tracker window;
 /// `window_seconds` the window. Only `peer` is known at the Kad UDP layer, so
 /// `peerHash`/`fileHash`/`searchId` are omitted (not faked). No-op when

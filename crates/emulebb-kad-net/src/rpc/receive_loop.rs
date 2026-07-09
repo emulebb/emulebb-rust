@@ -247,7 +247,13 @@ impl RpcManager {
                                     bad_event,
                                     bad_severity,
                                     bad_behavior,
-                                    decision.action.label(),
+                                    // Shared canonical anti-flood `reason` string the
+                                    // MFC oracle also emits (its kad_event flood
+                                    // milestone reason). The machine action
+                                    // (`drop`/`massive_drop`) stays in the bad_peer
+                                    // body `action` field and in the rich udp dump's
+                                    // `tracker_action`, so nothing is lost.
+                                    "request-token-deficit",
                                     from,
                                     decision.observed_packets,
                                     decision.window.as_secs(),
