@@ -35,6 +35,7 @@ mod block_bitmap;
 mod callback;
 mod catalog;
 mod corruption_blackbox;
+mod credit_ledger;
 mod deliver;
 pub(crate) mod diag_bad_peer;
 pub(crate) mod diag_sched;
@@ -212,6 +213,16 @@ pub struct Ed2kTransferRuntime {
     /// path stays non-blocking. A tiny `std` Mutex held only for instant map ops
     /// plus a non-blocking catalog `try_write`; never held across an `.await`.
     pending_catalog_upload: Arc<StdMutex<HashMap<String, u64>>>,
+    /// Parked peer-credit / file all-time-uploaded deltas awaiting the batched
+    /// SQLite flush (see `credit_ledger`): the per-fragment/per-block credit
+    /// commits (each a WAL fsync) are parked here instead, matching eMule's
+    /// in-memory CClientCredits/CKnownFile counters with periodic
+    /// clients.met/known.met saves. Queue-scoring reads go read-through over
+    /// this ledger, so scores never lag the parking.
+    parked_credit: Arc<StdMutex<credit_ledger::ParkedCreditLedger>>,
+    /// Serializes ledger drain+commit with credit writes needing a settled
+    /// ledger (secure-ident wipe, absolute totals seed) — see `credit_ledger`.
+    credit_flush_gate: Arc<StdMutex<()>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received
@@ -380,6 +391,8 @@ impl Ed2kTransferRuntime {
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
             pending_catalog_upload: Arc::new(StdMutex::new(HashMap::new())),
+            parked_credit: Arc::new(StdMutex::new(credit_ledger::ParkedCreditLedger::new())),
+            credit_flush_gate: Arc::new(StdMutex::new(())),
             upload_queue: Arc::new(Mutex::new(upload_queue_state)),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,

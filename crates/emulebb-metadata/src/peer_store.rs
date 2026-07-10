@@ -99,6 +99,69 @@ impl super::MetadataStore {
         Ok(())
     }
 
+    /// Apply a batch of parked peer-credit and file all-time-uploaded deltas
+    /// in ONE transaction (one WAL fsync), the flush half of the in-memory
+    /// credit parking that replaced the per-fragment/per-block commits.
+    pub fn apply_credit_deltas(
+        &self,
+        peer_deltas: &[(String, u64, u64)],
+        file_uploaded_deltas: &[(String, u64)],
+    ) -> Result<()> {
+        if peer_deltas.is_empty() && file_uploaded_deltas.is_empty() {
+            return Ok(());
+        }
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        for (user_hash, uploaded_delta, downloaded_delta) in peer_deltas {
+            let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
+            let current = tx
+                .prepare_cached(
+                    r#"
+                    SELECT uploaded_bytes, downloaded_bytes
+                    FROM peers
+                    WHERE user_hash = ?1
+                    "#,
+                )?
+                .query_row(params![user_hash_bytes], |row| {
+                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+                })
+                .optional()?
+                .unwrap_or((0, 0));
+            tx.prepare_cached(
+                r#"
+                INSERT INTO peers(
+                    user_hash, uploaded_bytes, downloaded_bytes, first_seen_ms, last_seen_ms
+                )
+                VALUES (?1, ?2, ?3, ?4, ?4)
+                ON CONFLICT(user_hash) DO UPDATE SET
+                    uploaded_bytes = excluded.uploaded_bytes,
+                    downloaded_bytes = excluded.downloaded_bytes,
+                    last_seen_ms = excluded.last_seen_ms
+                "#,
+            )?
+            .execute(params![
+                user_hash_bytes,
+                u64_to_i64_saturating(current.0.saturating_add(*uploaded_delta)),
+                u64_to_i64_saturating(current.1.saturating_add(*downloaded_delta)),
+                now,
+            ])?;
+        }
+        for (file_hash, delta) in file_uploaded_deltas {
+            let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+            tx.prepare_cached(
+                r#"
+                UPDATE known_files
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
+                WHERE ed2k_hash = ?1
+                "#,
+            )?
+            .execute(params![hash, *delta as i64])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Drop peer credit rows last seen more than 150 days ago, mirroring eMule
     /// `CClientCreditsList::LoadList` which discards entries with `tLastSeen <
     /// now - DAY2S(150)` (ClientCredits.cpp:240-251). Returns the number of rows

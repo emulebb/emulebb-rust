@@ -330,6 +330,10 @@ impl Ed2kTransferRuntime {
         if let Ok(file_hash) = handle.file_hash_hex().parse::<Ed2kHash>() {
             self.flush_pending_catalog_upload(&file_hash).await;
         }
+        // Same rationale for the parked credit/all-time counters: session
+        // release is off the hot path, so commit the tail durably here rather
+        // than leaving it to the next interval flush.
+        self.flush_parked_credit().await;
     }
 
     /// Seed the upload churn cooldown for a promoted waiter whose outbound
@@ -375,6 +379,9 @@ impl Ed2kTransferRuntime {
         uploaded_bytes: u64,
         downloaded_bytes: u64,
     ) -> anyhow::Result<()> {
+        // Absolute seed: parked deltas would be double-counted on their next
+        // flush after the totals below overwrite the row, so drop them.
+        self.discard_parked_peer_credit(user_hash);
         self.metadata.upsert_peer_credit(&MetadataPeerCredit {
             user_hash: hex::encode(user_hash),
             uploaded_bytes,
@@ -382,28 +389,28 @@ impl Ed2kTransferRuntime {
         })
     }
 
-    pub(crate) fn add_peer_credit_delta(
-        &self,
-        user_hash: [u8; 16],
-        uploaded_delta: u64,
-        downloaded_delta: u64,
-    ) -> anyhow::Result<()> {
-        if uploaded_delta == 0 && downloaded_delta == 0 {
-            return Ok(());
-        }
-        self.metadata.add_peer_credit_delta(
-            &hex::encode(user_hash),
-            uploaded_delta,
-            downloaded_delta,
-        )
-    }
-
+    /// Persisted + parked credit totals for one peer (read-through over the
+    /// parked ledger, so accrued-but-unflushed bytes are always visible).
     #[cfg(test)]
     pub(crate) fn peer_credit_by_hash(
         &self,
         user_hash: [u8; 16],
     ) -> anyhow::Result<Option<MetadataPeerCredit>> {
-        self.metadata.peer_credit_by_hash(&hex::encode(user_hash))
+        let stored = self.metadata.peer_credit_by_hash(&hex::encode(user_hash))?;
+        let (parked_uploaded, parked_downloaded) = self.parked_peer_credit_delta(user_hash);
+        if stored.is_none() && parked_uploaded == 0 && parked_downloaded == 0 {
+            return Ok(None);
+        }
+        let stored = stored.unwrap_or(MetadataPeerCredit {
+            user_hash: hex::encode(user_hash),
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
+        });
+        Ok(Some(MetadataPeerCredit {
+            user_hash: stored.user_hash,
+            uploaded_bytes: stored.uploaded_bytes.saturating_add(parked_uploaded),
+            downloaded_bytes: stored.downloaded_bytes.saturating_add(parked_downloaded),
+        }))
     }
 
     /// Prune peer credit rows last seen more than 150 days ago (eMule
@@ -422,6 +429,11 @@ impl Ed2kTransferRuntime {
         user_hash: [u8; 16],
         public_key: &[u8],
     ) -> anyhow::Result<bool> {
+        // Commit parked pre-bind deltas FIRST (under the flush gate) so the
+        // wipe below wipes them with the rest: a background flush landing
+        // after the wipe would otherwise resurrect pre-bind credit, breaking
+        // the anti-theft rule.
+        self.settle_parked_peer_credit(user_hash)?;
         self.metadata
             .record_verified_secure_ident(&hex::encode(user_hash), public_key)
     }
@@ -463,37 +475,22 @@ impl Ed2kTransferRuntime {
     fn file_all_time_upload_ratio_permille(&self, file_hash: &Ed2kHash) -> i128 {
         match self
             .metadata
-            .file_all_time_upload_ratio_permille_opt(&file_hash.to_string())
+            .file_all_time_upload_totals(&file_hash.to_string())
         {
-            Ok(Some(ratio)) => ratio,
+            Ok(Some((uploaded, size))) => {
+                // Read-through over the parked ledger so unflushed served
+                // bytes weight the ratio immediately, like eMule's in-memory
+                // CKnownFile statistic.
+                let uploaded =
+                    uploaded.saturating_add(self.parked_file_all_time_uploaded(file_hash));
+                if size > 0 {
+                    i128::from(uploaded) * 1000 / i128::from(size)
+                } else {
+                    0
+                }
+            }
             _ => super::upload_queue::LOW_RATIO_BONUS_DISABLED_RATIO_PERMILLE,
         }
-    }
-
-    /// Credit the lifetime-uploaded byte counter for a served file (eMule
-    /// all-time transferred accounting); best-effort, failures do not abort an
-    /// upload.
-    pub(crate) fn add_file_all_time_uploaded(
-        &self,
-        file_hash: &Ed2kHash,
-        delta: u64,
-    ) -> anyhow::Result<()> {
-        if delta == 0 {
-            return Ok(());
-        }
-        // Authoritative credit (UNCHANGED): the SQL all-time-uploaded counter that
-        // feeds the credit/upload ratio is credited per fragment, unconditionally,
-        // before any catalog work -- so ratio/credit never depend on the catalog
-        // write lock being free.
-        self.metadata
-            .add_file_all_time_uploaded(&file_hash.to_string(), delta)?;
-        // Demand counter (RUST-PAR-025 Note-1): accumulate this fragment into the
-        // file's pending bucket and try to flush the WHOLE pending into the catalog
-        // in one O(1) by-hash add. A busy catalog write lock only defers the flush
-        // (the bytes stay parked for the next attempt) -- it never drops the update
-        // and never blocks the upload hot path.
-        self.accumulate_and_try_flush_catalog_upload(file_hash, delta);
-        Ok(())
     }
 
     /// Add `delta` to the file's pending demand-upload bucket, then make ONE
@@ -508,7 +505,7 @@ impl Ed2kTransferRuntime {
     ///   concurrent add starts a fresh bucket and a concurrent flush finds none.
     /// - Non-blocking: the catalog is only ever taken via `try_write`; the side-map
     ///   lock is held solely for O(1) map ops + that non-blocking probe.
-    fn accumulate_and_try_flush_catalog_upload(&self, file_hash: &Ed2kHash, delta: u64) {
+    pub(super) fn accumulate_and_try_flush_catalog_upload(&self, file_hash: &Ed2kHash, delta: u64) {
         let key = file_hash.to_string();
         let mut pending = self.pending_catalog_upload.lock().unwrap();
         let amount = {
@@ -598,17 +595,28 @@ impl Ed2kTransferRuntime {
         if !self.credit_system_enabled.load(Ordering::Relaxed) {
             return DEFAULT_CREDIT_SCORE_PERMILLE;
         }
-        peer.user_hash
-            .map(hex::encode)
-            .and_then(|user_hash| self.metadata.peer_credit_by_hash(&user_hash).ok().flatten())
-            .map(|credit| {
-                credit_score_permille(
-                    credit.uploaded_bytes,
-                    credit.downloaded_bytes,
-                    peer.ident_verified,
-                )
-            })
-            .unwrap_or(DEFAULT_CREDIT_SCORE_PERMILLE)
+        let Some(user_hash) = peer.user_hash else {
+            return DEFAULT_CREDIT_SCORE_PERMILLE;
+        };
+        // Read-through over the parked ledger so accrued-but-unflushed bytes
+        // weight the score immediately, like eMule's in-memory CClientCredits.
+        let stored = self
+            .metadata
+            .peer_credit_by_hash(&hex::encode(user_hash))
+            .ok()
+            .flatten();
+        let (parked_uploaded, parked_downloaded) = self.parked_peer_credit_delta(user_hash);
+        if stored.is_none() && parked_uploaded == 0 && parked_downloaded == 0 {
+            return DEFAULT_CREDIT_SCORE_PERMILLE;
+        }
+        let (stored_uploaded, stored_downloaded) = stored
+            .map(|credit| (credit.uploaded_bytes, credit.downloaded_bytes))
+            .unwrap_or((0, 0));
+        credit_score_permille(
+            stored_uploaded.saturating_add(parked_uploaded),
+            stored_downloaded.saturating_add(parked_downloaded),
+            peer.ident_verified,
+        )
     }
 }
 

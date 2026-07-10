@@ -333,34 +333,27 @@ impl super::MetadataStore {
         Ok(updated != 0)
     }
 
-    /// Returns the file's all-time upload ratio scaled to permille
-    /// (`all_time_uploaded_bytes * 1000 / size_bytes`, eMule
-    /// `CKnownFile::GetAllTimeUploadRatio`), or `None` for an unknown hash (so the
-    /// caller can mirror eMule's `pRequestedFile == NULL` early return rather than
-    /// treating an unknown file as a zero ratio). A known zero-size file yields
-    /// ratio `0`.
-    pub fn file_all_time_upload_ratio_permille_opt(&self, file_hash: &str) -> Result<Option<i128>> {
+    /// Returns the file's persisted `(all_time_uploaded_bytes, size_bytes)`,
+    /// or `None` for an unknown hash (so the caller can mirror eMule's
+    /// `pRequestedFile == NULL` early return rather than treating an unknown
+    /// file as a zero ratio). The caller computes the all-time upload ratio
+    /// (eMule `CKnownFile::GetAllTimeUploadRatio`) so parked, not-yet-flushed
+    /// uploaded deltas can be added on top of the persisted total.
+    pub fn file_all_time_upload_totals(&self, file_hash: &str) -> Result<Option<(u64, u64)>> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let row = conn
-            .prepare_cached(
-                r#"
-                SELECT all_time_uploaded_bytes, size_bytes
-                FROM known_files
-                WHERE ed2k_hash = ?1
-                "#,
-            )?
-            .query_row(params![hash], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })
-            .optional()?;
-        Ok(row.map(|(uploaded, size)| {
-            if size > 0 {
-                i128::from(uploaded) * 1000 / i128::from(size)
-            } else {
-                0
-            }
-        }))
+        conn.prepare_cached(
+            r#"
+            SELECT all_time_uploaded_bytes, size_bytes
+            FROM known_files
+            WHERE ed2k_hash = ?1
+            "#,
+        )?
+        .query_row(params![hash], |row| {
+            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+        })
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Returns the persisted `(created_at_ms, completed_at_ms)` for a transfer,
