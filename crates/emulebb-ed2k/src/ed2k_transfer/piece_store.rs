@@ -151,7 +151,7 @@ impl Ed2kTransferRuntime {
     /// Mark a specific missing piece as requested.
     #[cfg(test)]
     pub async fn mark_piece_requested(&self, file_hash: &str, piece_index: u32) -> Result<bool> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let piece = manifest
             .pieces
@@ -181,12 +181,12 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         peer_bitmap: Option<&[bool]>,
     ) -> Result<Option<Ed2kClaimedPart>> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let part_total = u32::try_from(manifest.pieces.len()).unwrap_or(u32::MAX);
         // Per-part live-source availability is the rarity input. Sampled outside
         // the manifest lock's borrow so the manifest stays mutably borrowed for
-        // the claim below; this lock is independent of `manifest_io`.
+        // the claim below; this lock is independent of the manifest lock.
         let frequency = self.available_sources_per_part(file_hash, part_total);
         let Some(piece_index) = super::download_pick::pick_next_missing_part(
             &manifest.pieces,
@@ -216,7 +216,7 @@ impl Ed2kTransferRuntime {
     /// Any already persisted byte prefix is kept so a later peer session can
     /// resume from the exact missing range instead of discarding good data.
     pub async fn release_piece_request(&self, file_hash: &str, piece_index: u32) -> Result<()> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let piece = manifest
             .pieces
@@ -237,7 +237,7 @@ impl Ed2kTransferRuntime {
     /// back to `Missing` so resume can continue from the already persisted byte
     /// prefix instead of deadlocking on a stale in-flight marker.
     pub async fn reclaim_stale_piece_requests(&self, file_hash: &str) -> Result<bool> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
         for piece in &mut manifest.pieces {
@@ -264,7 +264,7 @@ impl Ed2kTransferRuntime {
     /// flag (true == still a complete, fully verified file).
     pub async fn recheck_transfer(&self, file_hash: &str) -> Result<bool> {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if !manifest.md4_hashset_acquired {
             // No hashset to verify against: a recheck cannot reclassify anything.
@@ -341,7 +341,7 @@ impl Ed2kTransferRuntime {
         piece_index: u32,
         data: &[u8],
     ) -> Result<()> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let piece_size = manifest.piece_size;
         let expected_piece_len =
@@ -412,7 +412,7 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let block_received_at = Instant::now();
         let piece_size = manifest.piece_size;
@@ -658,11 +658,11 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<Ed2kVerifiedRangeReader>> {
         let hash_hex = file_hash.to_string();
         // Read the manifest geometry (verified-range check + payload path) under
-        // the manifest_io lock, then drop it before touching the payload file, so
+        // the per-file manifest lock, then drop it before touching the payload, so
         // the file open/seek/read does not hold the lock and serialize concurrent
         // uploads/downloads against each other (FIX B4b).
         let (payload_path, verified_ranges) = {
-            let _guard = self.manifest_io.lock().await;
+            let _guard = self.lock_manifest(&hash_hex).await;
             let manifest = self.load_manifest_unlocked(&hash_hex).await?;
             if manifest.verified_ranges.is_empty() {
                 return Ok(None);

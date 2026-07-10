@@ -59,7 +59,7 @@ impl Ed2kTransferRuntime {
         master_hash: [u8; 20],
         recovery_body: &[u8],
     ) -> Result<Option<PartSalvageOutcome>> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
 
         // Need a trusted AICH root that matches the answer's master hash.
@@ -169,7 +169,7 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let part_index = u32::from(part);
         let piece_size = manifest.piece_size;
@@ -340,7 +340,7 @@ impl Ed2kTransferRuntime {
         data: &[u8],
     ) -> Result<(PieceWriteOutcome, super::Ed2kResumeManifest)> {
         let is_salvage = {
-            let _guard = self.manifest_io.lock().await;
+            let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
             manifest
                 .pieces

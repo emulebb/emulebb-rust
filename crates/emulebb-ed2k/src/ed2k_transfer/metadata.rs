@@ -77,7 +77,7 @@ impl Ed2kTransferRuntime {
 
     /// Ensure a transfer manifest exists for the provided job.
     pub async fn ensure_job(&self, job: &Ed2kTransferJob) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&job.file_hash).await;
         let transfer_dir = self.transfer_dir(&job.file_hash);
         tokio::fs::create_dir_all(&transfer_dir)
             .await
@@ -98,7 +98,7 @@ impl Ed2kTransferRuntime {
         canonical_name: Option<&str>,
         file_size: Option<u64>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
 
@@ -155,7 +155,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         md4_hashset: Vec<[u8; 16]>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let expected_hash_count = expected_md4_hash_count(manifest.file_size);
         if md4_hashset.len() != usize::from(expected_hash_count) {
@@ -180,7 +180,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         aich_hashset: Ed2kAichHashset,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if let Some(existing_root) = manifest.aich_root.as_deref() {
             let existing_root = decode_aich_hash_hex(existing_root)?;
@@ -212,7 +212,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         aich_root: Option<[u8; 20]>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
         if let Some(aich_root) = aich_root {
@@ -257,7 +257,7 @@ impl Ed2kTransferRuntime {
         aich_root: Option<[u8; 20]>,
         from_ip: std::net::IpAddr,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let Some(aich_root) = aich_root else {
             return Ok(manifest);
@@ -296,7 +296,7 @@ impl Ed2kTransferRuntime {
 
     /// Record one remembered source hint for a job.
     pub async fn remember_source(&self, file_hash: &str, source: Ed2kSourceHint) -> Result<()> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
         if let Some(existing) = manifest
@@ -323,7 +323,7 @@ impl Ed2kTransferRuntime {
 
     /// Remove one remembered source hint by public source selector.
     pub async fn remove_source(&self, file_hash: &str, client_id: &str) -> Result<bool> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let before = manifest.sources.len();
         manifest.sources.retain(|source| {
@@ -344,7 +344,7 @@ impl Ed2kTransferRuntime {
         priority: Option<(&str, bool)>,
         comment_rating: Option<(&str, u8)>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         if let Some((priority, auto_upload_priority)) = priority {
             manifest.upload_priority = priority.to_string();
@@ -380,7 +380,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         control_state: Option<&str>,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         manifest.control_state = control_state.map(str::to_string);
         self.store_manifest_unlocked(&manifest).await?;
@@ -393,7 +393,7 @@ impl Ed2kTransferRuntime {
         file_hash: &str,
         category_id: u32,
     ) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         manifest.category_id = category_id;
         self.store_manifest_unlocked(&manifest).await?;
@@ -404,7 +404,7 @@ impl Ed2kTransferRuntime {
     pub async fn restore_transfer_row(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&file_hash).await;
         let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
         if manifest.transfer_row_removed {
             manifest.transfer_row_removed = false;
@@ -420,7 +420,7 @@ impl Ed2kTransferRuntime {
     ) -> Result<Option<Ed2kResumeManifest>> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&file_hash).await;
         let mut manifest = self.load_manifest_unlocked(&file_hash).await?;
         if !manifest.completed {
             anyhow::bail!("only completed transfers can be removed without deleting files");
@@ -437,7 +437,7 @@ impl Ed2kTransferRuntime {
     pub async fn delete_transfer_files(&self, file_hash: &str) -> Result<bool> {
         let parsed_hash: Ed2kHash = file_hash.parse()?;
         let file_hash = parsed_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&file_hash).await;
         let transfer_dir = self.transfer_dir(&file_hash);
         if self
             .load_manifest_optional_unlocked(&file_hash)
@@ -478,7 +478,7 @@ impl Ed2kTransferRuntime {
     /// payload has been verified already.
     pub async fn local_entry(&self, file_hash: &Ed2kHash) -> Result<Option<Ed2kSharedEntry>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&hash_hex).await;
         Ok(self
             .load_manifest_optional_unlocked(&hash_hex)
             .await?
@@ -516,7 +516,7 @@ impl Ed2kTransferRuntime {
     /// Return the canonical MD4 hashset for this file when known.
     pub async fn md4_hashset(&self, file_hash: &Ed2kHash) -> Result<Option<Vec<[u8; 16]>>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&hash_hex).await;
         let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
             return Ok(None);
         };
@@ -545,7 +545,7 @@ impl Ed2kTransferRuntime {
         file_hash: &Ed2kHash,
     ) -> Result<Option<Ed2kAichHashset>> {
         let hash_hex = file_hash.to_string();
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&hash_hex).await;
         let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
             return Ok(None);
         };
@@ -574,7 +574,7 @@ impl Ed2kTransferRuntime {
 
         let hash_hex = file_hash.to_string();
         let (file_size, aich_root) = {
-            let _guard = self.manifest_io.lock().await;
+            let _guard = self.lock_manifest(&hash_hex).await;
             let Some(manifest) = self.load_manifest_optional_unlocked(&hash_hex).await? else {
                 return Ok(None);
             };
@@ -613,18 +613,33 @@ impl Ed2kTransferRuntime {
     /// Returns the persisted manifest for orchestration code that needs to read
     /// the current verification or hashset state.
     pub async fn manifest(&self, file_hash: &str) -> Result<Ed2kResumeManifest> {
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(file_hash).await;
         self.load_manifest_unlocked(file_hash).await
     }
 
     /// Returns all readable persisted manifests under the transfer root.
+    ///
+    /// The bulk SQL read runs on the blocking pool without any manifest lock;
+    /// for hashes with a live in-memory copy the CACHED manifest is returned
+    /// instead of the SQL row — between batched progress checkpoints the
+    /// cache is AHEAD of SQL, and returning (or worse, re-caching) the stale
+    /// row would roll live download progress back. Rows without a cached copy
+    /// are returned as-is and deliberately NOT inserted into the cache, so a
+    /// library-wide listing does not pin every completed manifest in memory.
     pub async fn manifests(&self) -> Result<Vec<Ed2kResumeManifest>> {
-        let _guard = self.manifest_io.lock().await;
-        let mut manifests = Vec::new();
-        for manifest in self.metadata.transfer_manifests()? {
-            let manifest = manifest_from_metadata(manifest)?;
-            self.mark_manifest_persisted_unlocked(&manifest).await;
-            manifests.push(manifest);
+        let metadata = self.metadata.clone();
+        let raw = tokio::task::spawn_blocking(move || metadata.transfer_manifests())
+            .await
+            .map_err(anyhow::Error::from)??;
+        let mut manifests = Vec::with_capacity(raw.len());
+        {
+            let cache = self.manifest_cache.lock().await;
+            for manifest in raw {
+                match cache.get(&manifest.file_hash) {
+                    Some(cached) => manifests.push(cached.clone()),
+                    None => manifests.push(manifest_from_metadata(manifest)?),
+                }
+            }
         }
         manifests.sort_by(|left, right| left.file_hash.cmp(&right.file_hash));
         Ok(manifests)

@@ -59,13 +59,13 @@ impl Ed2kTransferRuntime {
             anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
         }
 
-        // Hash OFF the `manifest_io` lock AND off the async runtime. MD4/AICH read
+        // Hash OFF the manifest lock AND off the async runtime. MD4/AICH read
         // and hash the whole (potentially many-GB) file with blocking `std::fs`,
         // which on a slow disk takes far longer than any HTTP timeout. Holding
-        // `manifest_io` across that froze every REST read (they all funnel through
+        // the manifest lock across that froze every REST read (they funneled through
         // `manifests()`), and running the blocking hash inline starved a tokio
         // worker. We therefore compute both hashsets under `spawn_blocking` with no
-        // lock held, and only take `manifest_io` for the short manifest write below.
+        // lock held, and only take the manifest lock for the short write below.
         let md4_len = metadata.len();
         let md4_path = source_path.clone();
         let (file_hash, md4_hashset) =
@@ -126,9 +126,9 @@ impl Ed2kTransferRuntime {
             })
             .collect();
         rebuild_verified_ranges(&mut manifest);
-        // Only the manifest write needs `manifest_io`; held briefly (no hashing
+        // Only the manifest write needs the manifest lock; held briefly (no hashing
         // under it), so concurrent REST reads of `manifests()` are not starved.
-        let _guard = self.manifest_io.lock().await;
+        let _guard = self.lock_manifest(&manifest.file_hash).await;
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;
         drop(_guard);

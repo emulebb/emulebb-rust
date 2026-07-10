@@ -64,7 +64,7 @@ impl Ed2kTransferRuntime {
     /// Re-run the MD4 part check over the full on-disk bytes of an
     /// ICH-corrupted, still-incomplete part after a flush touched it (oracle
     /// `FlushBuffer` ICH branch, PartFile.cpp:5214-5232). Call under the
-    /// `manifest_io` lock with the caller's write handle already flushed so
+    /// per-file manifest lock with the caller's write handle already flushed so
     /// the just-written bytes are visible to the re-hash read.
     ///
     /// On a match the part is promoted to `Verified` with the remaining gaps

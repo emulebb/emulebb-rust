@@ -2,6 +2,7 @@
 
 use std::{
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -28,6 +29,21 @@ const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const ED2K_RESUME_CHECKPOINT_BYTES: u64 = 8 * ED2K_EMBLOCK_SIZE;
 
 impl Ed2kTransferRuntime {
+    /// Acquire the manifest IO lock for one transfer. Manifest state (cache,
+    /// checkpoint bookkeeping, payload handle, SQL rows) is always keyed by a
+    /// single file hash, so the lock is per hash: concurrent transfers no
+    /// longer serialize each other's block appends. The lock-map mutex is
+    /// held only for the entry lookup, never across the await; entries are
+    /// never removed (a removed entry could hand out a second lock for the
+    /// same hash while an old guard is still alive).
+    pub(super) async fn lock_manifest(&self, file_hash: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.manifest_locks.lock().unwrap();
+            Arc::clone(locks.entry(file_hash.to_ascii_lowercase()).or_default())
+        };
+        lock.lock_owned().await
+    }
+
     pub(super) async fn load_manifest_or_rebuild_unlocked(
         &self,
         job: &Ed2kTransferJob,

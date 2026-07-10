@@ -58,7 +58,7 @@ impl Ed2kTransferRuntime {
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
         let canonical_name = {
-            let _guard = self.manifest_io.lock().await;
+            let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
             if !manifest.completed {
                 return Ok(Ed2kDeliveryOutcome::NotCompleted);
@@ -81,7 +81,7 @@ impl Ed2kTransferRuntime {
 
         // Phase 2: persist the delivered path under the lock.
         {
-            let _guard = self.manifest_io.lock().await;
+            let _guard = self.lock_manifest(file_hash).await;
             let mut manifest = self.load_manifest_unlocked(file_hash).await?;
             manifest.delivered_path = Some(final_path.to_string_lossy().into_owned());
             // Record the delivered file's mtime baseline so a later

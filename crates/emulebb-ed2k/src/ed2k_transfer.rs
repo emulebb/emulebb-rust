@@ -166,7 +166,12 @@ pub struct Ed2kTransferRuntime {
     metadata: MetadataStore,
     shared_catalog: Ed2kSharedCatalog,
     callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
-    manifest_io: Arc<Mutex<()>>,
+    /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
+    /// state is keyed by one file hash everywhere, so transfers only serialize
+    /// against themselves; a single global lock here used to serialize every
+    /// block append of every concurrent download (and upload reader opens)
+    /// behind one mutex.
+    manifest_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
     /// Cached read+write payload handles, one per transfer with active piece
@@ -365,7 +370,7 @@ impl Ed2kTransferRuntime {
             metadata,
             shared_catalog,
             callback_intents: Arc::new(RwLock::new(Vec::new())),
-            manifest_io: Arc::new(Mutex::new(())),
+            manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
             payload_handles: Arc::new(StdMutex::new(HashMap::new())),
