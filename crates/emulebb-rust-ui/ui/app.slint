@@ -57,49 +57,6 @@ export struct LogItem {
     message: string,
 }
 
-export struct SpeedSample {
-    down: float,
-    up: float,
-}
-
-component SparkBars inherits Rectangle {
-    in property <[SpeedSample]> samples;
-
-    background: transparent;
-    height: 26px;
-
-    HorizontalLayout {
-        height: 26px;
-        padding-left: 4px;
-        padding-right: 4px;
-        spacing: 2px;
-        alignment: end;
-
-        for sample in root.samples : Rectangle {
-            width: 6px;
-            height: 20px;
-            background: transparent;
-
-            Rectangle {
-                x: 0px;
-                y: 20px - self.height;
-                width: 2px;
-                height: 20px * sample.down;
-                background: #2563eb;
-                border-radius: 1px;
-            }
-            Rectangle {
-                x: 3px;
-                y: 20px - self.height;
-                width: 2px;
-                height: 20px * sample.up;
-                background: #16a34a;
-                border-radius: 1px;
-            }
-        }
-    }
-}
-
 component TabButton inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -184,19 +141,21 @@ export component MainWindow inherits Window {
     in-out property <string> shared-summary;
     in-out property <[TransferItem]> transfers;
     in-out property <[UploadItem]> uploads;
+    in-out property <[UploadItem]> queued-uploads;
     in-out property <[ServerItem]> servers;
     in-out property <[SharedFileItem]> shared-files;
     in-out property <[LogItem]> logs;
-    in-out property <[SpeedSample]> speed-samples;
     in-out property <[TableColumn]> transfer-columns;
     in-out property <[TableColumn]> server-columns;
     in-out property <[TableColumn]> shared-file-columns;
     in-out property <[TableColumn]> upload-columns;
+    in-out property <[TableColumn]> queued-client-columns;
     in-out property <[TableColumn]> log-columns;
     in-out property <[[StandardListViewItem]]> transfer-rows;
     in-out property <[[StandardListViewItem]]> server-rows;
     in-out property <[[StandardListViewItem]]> shared-file-rows;
     in-out property <[[StandardListViewItem]]> upload-rows;
+    in-out property <[[StandardListViewItem]]> queued-client-rows;
     in-out property <[[StandardListViewItem]]> log-rows;
     in-out property <int> selected-tab;
     in-out property <string> selected-kind;
@@ -293,21 +252,15 @@ export component MainWindow inherits Window {
                 padding-top: 3px;
                 padding-bottom: 3px;
                 spacing: 6px;
-                TabButton { text: "Transfers"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
+                TabButton { text: "Kad"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
                 TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.selected-tab = 1; } }
-                TabButton { text: "Shared Files"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
-                TabButton { text: "Uploads"; selected: root.selected-tab == 3; clicked => { root.selected-tab = 3; } }
-                TabButton { text: "Logs"; selected: root.selected-tab == 4; clicked => { root.selected-tab = 4; } }
-                Text {
-                    text: root.speed-line;
-                    color: #166534;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
-                    overflow: elide;
-                }
-                SparkBars { samples: root.speed-samples; width: 220px; }
+                TabButton { text: "Search"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
+                TabButton { text: "Downloads"; selected: root.selected-tab == 3; clicked => { root.selected-tab = 3; } }
+                TabButton { text: "Uploads"; selected: root.selected-tab == 4; clicked => { root.selected-tab = 4; } }
+                TabButton { text: "Queued Clients"; selected: root.selected-tab == 5; clicked => { root.selected-tab = 5; } }
+                TabButton { text: "Known Clients"; selected: root.selected-tab == 6; clicked => { root.selected-tab = 6; } }
+                TabButton { text: "Shared Files"; selected: root.selected-tab == 7; clicked => { root.selected-tab = 7; } }
+                TabButton { text: "Logs"; selected: root.selected-tab == 8; clicked => { root.selected-tab = 8; } }
             }
         }
 
@@ -327,6 +280,7 @@ export component MainWindow inherits Window {
                 StatusText { value: root.server-summary; block-width: 108px; }
                 StatusText { value: root.shared-summary; block-width: 108px; }
                 StatusText { value: root.upload-summary; block-width: 130px; }
+                StatusText { value: root.speed-line; block-width: 180px; }
                 Text {
                     text: root.error-message == "" ? root.network-line : root.error-message;
                     color: root.error-message == "" ? #64748b : #9a3412;
@@ -344,26 +298,11 @@ export component MainWindow inherits Window {
             border-width: 1px;
             border-radius: 3px;
 
-            if root.selected-tab == 0 && root.transfer-rows.length > 0 : StandardTableView {
+            if root.selected-tab == 0 : EmptyState {
                 width: parent.width;
                 height: parent.height;
-                columns <=> root.transfer-columns;
-                rows: root.transfer-rows;
-                current-row-changed(row) => {
-                    if row >= 0 && row < root.transfers.length {
-                        root.selected-kind = "transfer";
-                        root.selected-id = root.transfers[row].hash;
-                        root.inspector-title = root.transfers[row].name;
-                        root.inspector-detail = root.transfers[row].detail;
-                    }
-                }
-            }
-
-            if root.selected-tab == 0 && root.transfer-rows.length == 0 : EmptyState {
-                width: parent.width;
-                height: parent.height;
-                title: "No transfers";
-                detail: "The REST snapshot currently reports zero download transfers. Servers, uploads, shared files, and logs may still have live data.";
+                title: "Kad";
+                detail: root.network-line;
             }
 
             if root.selected-tab == 1 && root.server-rows.length > 0 : StandardTableView {
@@ -388,29 +327,36 @@ export component MainWindow inherits Window {
                 detail: "The REST snapshot did not return any known servers.";
             }
 
-            if root.selected-tab == 2 && root.shared-file-rows.length > 0 : StandardTableView {
+            if root.selected-tab == 2 : EmptyState {
                 width: parent.width;
                 height: parent.height;
-                columns <=> root.shared-file-columns;
-                rows: root.shared-file-rows;
+                title: "Search";
+                detail: "Search is reserved for the eD2K/Kad search workflow. The current REST snapshot does not expose search sessions or results yet.";
+            }
+
+            if root.selected-tab == 3 && root.transfer-rows.length > 0 : StandardTableView {
+                width: parent.width;
+                height: parent.height;
+                columns <=> root.transfer-columns;
+                rows: root.transfer-rows;
                 current-row-changed(row) => {
-                    if row >= 0 && row < root.shared-files.length {
-                        root.selected-kind = "shared";
-                        root.selected-id = root.shared-files[row].hash;
-                        root.inspector-title = root.shared-files[row].name;
-                        root.inspector-detail = root.shared-files[row].detail;
+                    if row >= 0 && row < root.transfers.length {
+                        root.selected-kind = "transfer";
+                        root.selected-id = root.transfers[row].hash;
+                        root.inspector-title = root.transfers[row].name;
+                        root.inspector-detail = root.transfers[row].detail;
                     }
                 }
             }
 
-            if root.selected-tab == 2 && root.shared-file-rows.length == 0 : EmptyState {
+            if root.selected-tab == 3 && root.transfer-rows.length == 0 : EmptyState {
                 width: parent.width;
                 height: parent.height;
-                title: "No shared files";
-                detail: "The REST snapshot did not return shared files.";
+                title: "No downloads";
+                detail: "The REST snapshot currently reports zero download transfers. Uploads and queued clients are shown in their own tabs.";
             }
 
-            if root.selected-tab == 3 && root.upload-rows.length > 0 : StandardTableView {
+            if root.selected-tab == 4 && root.upload-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.upload-columns;
@@ -425,21 +371,72 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.selected-tab == 3 && root.upload-rows.length == 0 : EmptyState {
+            if root.selected-tab == 4 && root.upload-rows.length == 0 : EmptyState {
                 width: parent.width;
                 height: parent.height;
                 title: "No uploads";
-                detail: "The REST snapshot currently reports no active or queued uploads.";
+                detail: "The REST snapshot currently reports no active uploads.";
             }
 
-            if root.selected-tab == 4 && root.log-rows.length > 0 : StandardTableView {
+            if root.selected-tab == 5 && root.queued-client-rows.length > 0 : StandardTableView {
+                width: parent.width;
+                height: parent.height;
+                columns <=> root.queued-client-columns;
+                rows: root.queued-client-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.queued-uploads.length {
+                        root.selected-kind = "upload";
+                        root.selected-id = root.queued-uploads[row].client-id;
+                        root.inspector-title = root.queued-uploads[row].user;
+                        root.inspector-detail = root.queued-uploads[row].detail;
+                    }
+                }
+            }
+
+            if root.selected-tab == 5 && root.queued-client-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No queued clients";
+                detail: "The REST snapshot currently reports no clients waiting for upload slots.";
+            }
+
+            if root.selected-tab == 6 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "Known Clients";
+                detail: "Known clients are reserved for the peer/client registry. The current REST snapshot does not expose a known-client table yet.";
+            }
+
+            if root.selected-tab == 7 && root.shared-file-rows.length > 0 : StandardTableView {
+                width: parent.width;
+                height: parent.height;
+                columns <=> root.shared-file-columns;
+                rows: root.shared-file-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.shared-files.length {
+                        root.selected-kind = "shared";
+                        root.selected-id = root.shared-files[row].hash;
+                        root.inspector-title = root.shared-files[row].name;
+                        root.inspector-detail = root.shared-files[row].detail;
+                    }
+                }
+            }
+
+            if root.selected-tab == 7 && root.shared-file-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No shared files";
+                detail: "The REST snapshot did not return shared files.";
+            }
+
+            if root.selected-tab == 8 && root.log-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.log-columns;
                 rows: root.log-rows;
             }
 
-            if root.selected-tab == 4 && root.log-rows.length == 0 : EmptyState {
+            if root.selected-tab == 8 && root.log-rows.length == 0 : EmptyState {
                 width: parent.width;
                 height: parent.height;
                 title: "No logs";

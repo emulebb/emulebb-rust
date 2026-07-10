@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::env;
 use std::rc::Rc;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -17,7 +16,6 @@ slint::include_modules!();
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
 const SNAPSHOT_LIMIT: usize = 200;
-const SPEED_HISTORY_LIMIT: usize = 36;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -224,19 +222,21 @@ fn main() -> Result<()> {
     ui.set_shared_summary("0 shared".into());
     ui.set_transfers(empty_model());
     ui.set_uploads(empty_model());
+    ui.set_queued_uploads(empty_model());
     ui.set_servers(empty_model());
     ui.set_shared_files(empty_model());
     ui.set_logs(empty_model());
-    ui.set_speed_samples(empty_model());
     ui.set_transfer_columns(model(transfer_columns()));
     ui.set_server_columns(model(server_columns()));
     ui.set_shared_file_columns(model(shared_file_columns()));
     ui.set_upload_columns(model(upload_columns()));
+    ui.set_queued_client_columns(model(upload_columns()));
     ui.set_log_columns(model(log_columns()));
     ui.set_transfer_rows(empty_table_model());
     ui.set_server_rows(empty_table_model());
     ui.set_shared_file_rows(empty_table_model());
     ui.set_upload_rows(empty_table_model());
+    ui.set_queued_client_rows(empty_table_model());
     ui.set_log_rows(empty_table_model());
     ui.set_selected_kind("".into());
     ui.set_selected_id("".into());
@@ -298,7 +298,6 @@ fn worker_loop(
     };
     let client = Client::new();
     let mut config: Option<ConnectionConfig> = None;
-    let mut speed_history = VecDeque::<(f64, f64)>::new();
     let mut consecutive_failures = 0_u32;
 
     loop {
@@ -311,14 +310,12 @@ fn worker_loop(
         let command = match command {
             Some(UiCommand::Connect(next_config)) => {
                 config = Some(next_config.clone());
-                speed_history.clear();
                 consecutive_failures = 0;
                 publish_refreshing(&weak, true);
                 let result = runtime.block_on(fetch_snapshot(&client, &next_config));
                 match result {
                     Ok(snapshot) => {
-                        push_speed_sample(&mut speed_history, &snapshot.status.stats);
-                        publish_snapshot(&weak, snapshot, &speed_history);
+                        publish_snapshot(&weak, snapshot);
                     }
                     Err(error) => {
                         consecutive_failures += 1;
@@ -370,8 +367,7 @@ fn worker_loop(
         match result {
             Ok(snapshot) => {
                 consecutive_failures = 0;
-                push_speed_sample(&mut speed_history, &snapshot.status.stats);
-                publish_snapshot(&weak, snapshot, &speed_history);
+                publish_snapshot(&weak, snapshot);
             }
             Err(error) => {
                 consecutive_failures += 1;
@@ -461,19 +457,7 @@ fn decode_error(status: StatusCode, bytes: &[u8]) -> anyhow::Error {
     }
 }
 
-fn push_speed_sample(history: &mut VecDeque<(f64, f64)>, stats: &Stats) {
-    history.push_back((stats.download_speed_ki_bps, stats.upload_speed_ki_bps));
-    while history.len() > SPEED_HISTORY_LIMIT {
-        let _ = history.pop_front();
-    }
-}
-
-fn publish_snapshot(
-    weak: &slint::Weak<MainWindow>,
-    snapshot: Snapshot,
-    speed_history: &VecDeque<(f64, f64)>,
-) {
-    let speed_samples = speed_samples(speed_history);
+fn publish_snapshot(weak: &slint::Weak<MainWindow>, snapshot: Snapshot) {
     let update = move |ui: MainWindow| {
         ui.set_connection_state(
             format!(
@@ -492,21 +476,23 @@ fn publish_snapshot(
         ui.set_server_summary(server_summary(&snapshot).into());
         ui.set_shared_summary(shared_summary(&snapshot).into());
         let transfers = transfer_items(&snapshot.transfers);
-        let uploads = upload_items(&snapshot.uploads, &snapshot.upload_queue);
+        let uploads = upload_items(&snapshot.uploads);
+        let queued_uploads = upload_items(&snapshot.upload_queue);
         let servers = server_items(&snapshot.servers);
         let shared_files = shared_file_items(&snapshot.shared_files);
         let logs = log_items(&snapshot.logs);
         ui.set_transfer_rows(table_model(transfer_table_rows(&transfers)));
         ui.set_upload_rows(table_model(upload_table_rows(&uploads)));
+        ui.set_queued_client_rows(table_model(upload_table_rows(&queued_uploads)));
         ui.set_server_rows(table_model(server_table_rows(&servers)));
         ui.set_shared_file_rows(table_model(shared_file_table_rows(&shared_files)));
         ui.set_log_rows(table_model(log_table_rows(&logs)));
         ui.set_transfers(model(transfers));
         ui.set_uploads(model(uploads));
+        ui.set_queued_uploads(model(queued_uploads));
         ui.set_servers(model(servers));
         ui.set_shared_files(model(shared_files));
         ui.set_logs(model(logs));
-        ui.set_speed_samples(model(speed_samples));
     };
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -599,10 +585,9 @@ fn transfer_items(transfers: &[TransferDto]) -> Vec<TransferItem> {
         .collect()
 }
 
-fn upload_items(active: &[UploadDto], queued: &[UploadDto]) -> Vec<UploadItem> {
-    active
+fn upload_items(items: &[UploadDto]) -> Vec<UploadItem> {
+    items
         .iter()
-        .chain(queued.iter())
         .map(|item| {
             let requested_size = item.requested_file_size_bytes.unwrap_or(0);
             let file = item.requested_file_name.as_deref().unwrap_or("-");
@@ -891,20 +876,6 @@ fn log_table_rows(items: &[LogItem]) -> Vec<Vec<StandardListViewItem>> {
 
 fn row<const N: usize>(values: [SharedString; N]) -> Vec<StandardListViewItem> {
     values.into_iter().map(StandardListViewItem::from).collect()
-}
-
-fn speed_samples(history: &VecDeque<(f64, f64)>) -> Vec<SpeedSample> {
-    let max_speed = history
-        .iter()
-        .map(|(down, up)| down.max(*up))
-        .fold(1.0_f64, f64::max);
-    history
-        .iter()
-        .map(|(down, up)| SpeedSample {
-            down: ratio(down / max_speed).max(0.04),
-            up: ratio(up / max_speed).max(0.04),
-        })
-        .collect()
 }
 
 fn lifecycle_line(app: &AppInfo, status: &StatusInfo) -> String {
