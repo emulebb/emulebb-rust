@@ -1178,7 +1178,7 @@ fn columns_for_state(
     if let Some(table_state) = state.tables.get(table) {
         for (column, width) in columns.iter_mut().zip(table_state.column_widths.iter()) {
             if *width >= 24.0 {
-                column.width = (*width).into();
+                column.width = *width;
             }
         }
     }
@@ -1559,7 +1559,7 @@ fn transfer_items(transfers: &[TransferDto]) -> Vec<TransferItem> {
             });
             let done = item
                 .completed_bytes
-                .unwrap_or_else(|| (item.size_bytes as f64 * progress) as u64);
+                .unwrap_or((item.size_bytes as f64 * progress) as u64);
             let detail = format!(
                 "Hash: {}\nState: {}\nProgress: {:.1}%\nSize: {} / {}\nSpeed: {:.1} KiB/s\nSources: {} total, {} active\nCategory: {}",
                 item.hash,
@@ -1846,8 +1846,8 @@ fn columns(specs: &[(&str, f32, f32)]) -> Vec<TableColumn> {
         .map(|(title, width, stretch)| {
             let mut column = TableColumn::default();
             column.title = text(*title);
-            column.width = (*width).into();
-            column.min_width = (*width).into();
+            column.width = *width;
+            column.min_width = *width;
             column.horizontal_stretch = *stretch;
             column
         })

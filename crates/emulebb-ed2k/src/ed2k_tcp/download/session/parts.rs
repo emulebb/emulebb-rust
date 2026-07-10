@@ -73,9 +73,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "unexpected_part_hash",
                 || {
-                    (format!(
-                    "expected_file_hash={file_hash_hex} returned_file_hash={returned_hash} start={start} compressed_len={advertised_compressed_len}"
-                )).into()
+                    format!(
+                        "expected_file_hash={file_hash_hex} returned_file_hash={returned_hash} start={start} compressed_len={advertised_compressed_len}"
+                    )
                 },
             );
             return Ok(None);
@@ -86,9 +86,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "unexpected_compressed_part_without_queued_request",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len}"
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len}"
+                    )
                 },
             );
             let has_pending_blocks = has_sent_block_requests(pending_part_requests);
@@ -112,9 +112,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "unexpected_compressed_part_range",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len} pending={pending_part_requests:?}",
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} start={start} compressed_len={advertised_compressed_len} pending={pending_part_requests:?}",
+                    )
                 },
             );
             let has_pending_blocks = has_sent_block_requests(pending_part_requests);
@@ -146,9 +146,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "compressed_part_ignored_zstream_error",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} piece_index={expected_part} start={start} compressed_len={advertised_compressed_len}"
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} piece_index={expected_part} start={start} compressed_len={advertised_compressed_len}"
+                        )
                     },
                 );
                 return Ok(None);
@@ -165,10 +165,10 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "compressed_part_framing_changed",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} piece_index={expected_part} start={start} advertised={advertised_compressed_len} expected_advertised={}",
-                        pending_compressed_parts[index].advertised_compressed_len
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} piece_index={expected_part} start={start} advertised={advertised_compressed_len} expected_advertised={}",
+                            pending_compressed_parts[index].advertised_compressed_len
+                        )
                     },
                 );
                 return Ok(None);
@@ -203,9 +203,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "compressed_part_zstream_error",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} piece_index={expected_part} start={start} error={error:#}"
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} piece_index={expected_part} start={start} error={error:#}"
+                        )
                     },
                 );
                 return Ok(None);
@@ -229,9 +229,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "out_of_order_compressed_part_range",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} piece_index={expected_part} expected_start={expected_received_start} start={stream_start} end={stream_end} pending={pending_part_requests:?}",
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} piece_index={expected_part} expected_start={expected_received_start} start={stream_start} end={stream_end} pending={pending_part_requests:?}",
+                        )
                     },
                 );
                 return Ok(None);
@@ -259,9 +259,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "compressed_part_stream_length_mismatch",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} piece_index={expected_part} wrote={uncompressed_written} expected={piece_len} finished={finished}"
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} piece_index={expected_part} wrote={uncompressed_written} expected={piece_len} finished={finished}"
+                    )
                 },
             );
         } else if pending.uncompressed_written == piece_len {
@@ -286,9 +286,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "unexpected_part_hash",
                 || {
-                    (format!(
-                    "expected_file_hash={file_hash_hex} returned_file_hash={returned_hash} start={start} end={end}"
-                )).into()
+                    format!(
+                        "expected_file_hash={file_hash_hex} returned_file_hash={returned_hash} start={start} end={end}"
+                    )
                 },
             );
             return Ok(None);
@@ -303,7 +303,7 @@ pub(super) async fn handle_download_part_packet(
                 peer_addr,
                 Some(transport_mode),
                 "part_ignored_zstream_error",
-                || (format!("file_hash={file_hash_hex} start={start} end={end}")).into(),
+                || format!("file_hash={file_hash_hex} start={start} end={end}"),
             );
             return Ok(None);
         }
@@ -312,7 +312,7 @@ pub(super) async fn handle_download_part_packet(
                 peer_addr,
                 Some(transport_mode),
                 "unexpected_part_without_queued_request",
-                || (format!("file_hash={file_hash_hex} start={start} end={end}")).into(),
+                || format!("file_hash={file_hash_hex} start={start} end={end}"),
             );
             let has_pending_blocks = has_sent_block_requests(pending_part_requests);
             return drop_stale_block_packet(StaleBlockPacketDrop {
@@ -338,9 +338,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "unexpected_part_length",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} start={start} end={end} payload_len={payload_len}"
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} start={start} end={end} payload_len={payload_len}"
+                        )
                     },
                 );
                 let has_pending_blocks = has_sent_block_requests(pending_part_requests);
@@ -381,9 +381,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "duplicate_part_prefix_consumed",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} start={start} end={end} received_end={received_end}"
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} start={start} end={end} received_end={received_end}"
+                        )
                     },
                 );
             } else {
@@ -394,9 +394,9 @@ pub(super) async fn handle_download_part_packet(
                     Some(transport_mode),
                     "duplicate_part_range",
                     || {
-                        (format!(
-                        "file_hash={file_hash_hex} start={start} end={end} received_end={received_end}"
-                    )).into()
+                        format!(
+                            "file_hash={file_hash_hex} start={start} end={end} received_end={received_end}"
+                        )
                     },
                 );
                 let has_pending_blocks = has_sent_block_requests(pending_part_requests);
@@ -418,9 +418,9 @@ pub(super) async fn handle_download_part_packet(
                 Some(transport_mode),
                 "unexpected_part_range",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} start={start} end={end} pending={pending_part_requests:?}",
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} start={start} end={end} pending={pending_part_requests:?}",
+                    )
                 },
             );
             let has_pending_blocks = has_sent_block_requests(pending_part_requests);
@@ -532,10 +532,7 @@ async fn drop_stale_block_packet(
         peer_addr,
         Some(transport.mode),
         "stale_block_packet_abort",
-        || {
-            (format!("file_hash={file_hash_hex} stale_packets={stale_count} duplicate={duplicate}"))
-                .into()
-        },
+        || format!("file_hash={file_hash_hex} stale_packets={stale_count} duplicate={duplicate}"),
     );
     Ok(Some(Ed2kPeerDownloadOutcome::AcceptedButIncomplete))
 }

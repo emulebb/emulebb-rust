@@ -126,11 +126,10 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             Some(transport_mode),
             "piece_block_flushed",
             || {
-                (format!(
+                format!(
                     "file_hash={file_hash_hex} piece_index={} start={} end={} completed={}",
                     request.piece_index, request.start, request.end, manifest.completed
-                ))
-                .into()
+                )
             },
         );
         *completed_block_count = completed_block_count.saturating_add(1);
@@ -237,9 +236,9 @@ fn note_ich_outcome(
                 Some(transport_mode),
                 "ich_salvage_success",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} part={part_index} bytes_salvaged={salvaged_bytes}"
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} part={part_index} bytes_salvaged={salvaged_bytes}"
+                    )
                 },
             );
         }
@@ -248,7 +247,7 @@ fn note_ich_outcome(
                 peer_addr,
                 Some(transport_mode),
                 "ich_rehash_attempt",
-                || (format!("file_hash={file_hash_hex} part={part_index}")).into(),
+                || format!("file_hash={file_hash_hex} part={part_index}"),
             );
         }
         _ => {}
@@ -352,10 +351,10 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             Some(transport_mode),
             "piece_prefix_flushed",
             || {
-                (format!(
-                "file_hash={file_hash_hex} piece_index={piece_index} start={start} end={end} completed={}",
-                manifest.completed
-            )).into()
+                format!(
+                    "file_hash={file_hash_hex} piece_index={piece_index} start={start} end={end} completed={}",
+                    manifest.completed
+                )
             },
         );
 

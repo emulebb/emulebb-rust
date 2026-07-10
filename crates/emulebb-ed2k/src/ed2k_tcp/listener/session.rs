@@ -136,7 +136,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
             })?;
             dump_ed2k_tcp_listener_meta(peer_addr, None, "tcp_accept", || {
-                (format!("local_addr={local_addr}")).into()
+                format!("local_addr={local_addr}")
             });
             let transport = match tokio::time::timeout(
                 ED2K_CONNECTION_IDLE_TIMEOUT,
@@ -147,7 +147,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 Ok(Ok(transport)) => transport,
                 Ok(Err(error)) => {
                     dump_ed2k_tcp_listener_meta(peer_addr, None, "accept_failed", || {
-                        (format!("local_addr={local_addr} error={error:#}")).into()
+                        format!("local_addr={local_addr} error={error:#}")
                     });
                     return Err(error).with_context(|| {
                         format!("failed to accept inbound eD2k peer transport from {peer_addr}")
@@ -155,11 +155,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
                 Err(_) => {
                     dump_ed2k_tcp_listener_meta(peer_addr, None, "accept_timeout", || {
-                        (format!(
+                        format!(
                             "local_addr={local_addr} idle_timeout_secs={}",
                             ED2K_CONNECTION_IDLE_TIMEOUT.as_secs()
-                        ))
-                        .into()
+                        )
                     });
                     anyhow::bail!("timed out waiting for initial eD2k peer bytes");
                 }
@@ -171,7 +170,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         // transport handshake already happened in the promote driver.
         Ed2kSessionSource::PromotedUpload { transport, grant } => {
             dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "promote_connect", || {
-                (format!("file_hash={}", grant.file_hash)).into()
+                format!("file_hash={}", grant.file_hash)
             });
             (*transport, Some(*grant))
         }
@@ -190,7 +189,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     );
     if promoted_grant.is_none() {
         dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "accept", || {
-            (format!("udp_port={kad_udp_port}")).into()
+            format!("udp_port={kad_udp_port}")
         });
     }
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
@@ -568,7 +567,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                         peer_addr,
                         Some(transport.mode),
                         "start_upload_unknown_file",
-                        || (format!("file_hash={requested} failed_file_req_count={failed_file_req_count}")).into(),
+                        || format!("file_hash={requested} failed_file_req_count={failed_file_req_count}"),
                     );
                 }
                 if failed_file_req_count >= crate::ed2k_transfer::diag_bad_peer::FAILED_FILE_REQ_FLOOD_THRESHOLD
@@ -598,11 +597,11 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "end_of_download",
-                    || (format!(
+                    || format!(
                         "file_hash={} payload_len={}",
                         ended_hash.map_or_else(|| "none".to_string(), |hash| hash.to_string()),
                         packet.payload.len()
-                    )).into(),
+                    ),
                 );
                 // Release the granted slot ONLY when the END is for the file the
                 // slot is keyed on, so END_OF_DOWNLOAD(B) can't release a slot
@@ -821,14 +820,14 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "kad_callback",
-                    || (format!(
+                    || format!(
                         "file_hash={} callback_peer={}:{} buddy_check={} trailing_len={}",
                         callback.file_hash,
                         callback.peer_ip,
                         callback.peer_tcp_port,
                         hex::encode(callback.buddy_check),
                         callback.trailing_len
-                    )).into(),
+                    ),
                 );
                 // Firewalled-callback completion (oracle ListenSocket.cpp:1596-1633
                 // OP_CALLBACK): the requester wants us — the firewalled LowID
@@ -890,12 +889,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "fwcheck_request",
-                    || (format!(
+                    || format!(
                         "internal_udp_port={} external_udp_port={} sender_udp_key={}",
                         request.internal_udp_port,
                         request.external_udp_port,
                         request.sender_udp_key
-                    )).into(),
+                    ),
                 );
                 reply_with_firewall_udp(dht, peer_addr.ip(), request).await?;
             }
@@ -913,7 +912,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "kad_firewall_tcp_ack",
-                    || (format!("received=true accepted={accepted}")).into(),
+                    || format!("received=true accepted={accepted}"),
                 );
             }
             (OP_EMULEPROT, OP_BUDDYPING) => {
@@ -921,7 +920,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "kad_buddy_ping",
-                    || (format!("held_buddy={}", buddy_hold.is_some())).into(),
+                    || format!("held_buddy={}", buddy_hold.is_some()),
                 );
                 // Oracle ListenSocket.cpp: answer OP_BUDDYPING with OP_BUDDYPONG
                 // only when the pinger is the buddy we serve (buddy == client) and
@@ -959,12 +958,12 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "aich_recovery_request",
-                    || (format!(
+                    || format!(
                         "file_hash={} part={} master_hash={}",
                         request.file_hash,
                         request.part,
                         hex::encode(request.master_hash)
-                    )).into(),
+                    ),
                 );
                 let recovery = transfer_runtime
                     .create_aich_recovery_data(&request.file_hash, request.part, request.master_hash)
@@ -996,7 +995,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     peer_addr,
                     Some(transport.mode),
                     "aich_recovery_answer",
-                    || (format!(
+                    || format!(
                         "file_hash={} part={:?} master_hash={} recovery_payload_len={}",
                         answer.file_hash,
                         answer.part,
@@ -1005,7 +1004,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                             .map(hex::encode)
                             .unwrap_or_else(|| "none".to_string()),
                         answer.recovery_payload_len
-                    )).into(),
+                    ),
                 );
                 let answer_file_hash = answer.file_hash.to_string();
                 handle_aich_recovery_answer(

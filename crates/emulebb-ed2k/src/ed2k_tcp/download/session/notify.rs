@@ -23,7 +23,7 @@ pub(super) fn handle_public_ip_answer(
 ) -> Result<()> {
     let public_ip = decode_public_ip_answer_payload(payload)?;
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "public_ip_answer", || {
-        (format!("public_ip={public_ip}")).into()
+        format!("public_ip={public_ip}")
     });
     Ok(())
 }
@@ -36,15 +36,14 @@ pub(super) fn handle_kad_callback(
 ) -> Result<()> {
     let callback = decode_kad_callback_payload(payload)?;
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "kad_callback", || {
-        (format!(
+        format!(
             "file_hash={} callback_peer={}:{} buddy_check={} trailing_len={}",
             callback.file_hash,
             callback.peer_ip,
             callback.peer_tcp_port,
             hex::encode(callback.buddy_check),
             callback.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -61,11 +60,10 @@ pub(super) fn handle_reask_callback_tcp(
         Some(transport.mode),
         "reask_callback_tcp",
         || {
-            (format!(
+            format!(
                 "file_hash={} dest={}:{} extended_info_len={}",
                 reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-            ))
-            .into()
+            )
         },
     );
     Ok(())
@@ -83,11 +81,10 @@ pub(super) fn handle_chat_captcha_request(
         Some(transport.mode),
         "chat_captcha_request",
         || {
-            (format!(
+            format!(
                 "tag_count={} data_len={}",
                 request.tag_count, request.data_len
-            ))
-            .into()
+            )
         },
     );
     Ok(())
@@ -104,7 +101,7 @@ pub(super) fn handle_chat_captcha_result(
         peer_addr,
         Some(transport.mode),
         "chat_captcha_result",
-        || (format!("status={status}")).into(),
+        || format!("status={status}"),
     );
     Ok(())
 }
@@ -125,7 +122,7 @@ pub(super) fn handle_buddy_ping_pong(transport: &Ed2kTransport, peer_addr: Socke
         peer_addr,
         Some(transport.mode),
         "kad_buddy_ping_pong",
-        || (format!("opcode=0x{opcode:02X}")).into(),
+        || format!("opcode=0x{opcode:02X}"),
     );
 }
 
@@ -138,12 +135,11 @@ pub(super) fn handle_file_desc(
 ) -> Result<()> {
     let file_desc = decode_file_description_payload(payload)?;
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "file_desc", || {
-        (format!(
+        format!(
             "file_hash={file_hash_hex} rating={} comment_len={}",
             file_desc.rating,
             file_desc.comment.len()
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -156,11 +152,10 @@ pub(super) fn handle_preview_request(
 ) -> Result<()> {
     let preview_request = decode_preview_request_payload(payload)?;
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "preview_request", || {
-        (format!(
+        format!(
             "file_hash={} trailing_len={}",
             preview_request.file_hash, preview_request.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -173,14 +168,13 @@ pub(super) fn handle_preview_answer(
 ) -> Result<()> {
     let preview_answer = decode_preview_answer_payload(payload)?;
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "preview_answer", || {
-        (format!(
+        format!(
             "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
             preview_answer.file_hash,
             preview_answer.frame_count,
             preview_answer.frame_payload_bytes,
             preview_answer.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }

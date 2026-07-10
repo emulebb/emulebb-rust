@@ -37,11 +37,10 @@ pub(super) fn handle_change_client_id(
 ) -> Result<()> {
     let change = decode_client_id_change_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "change_client_id", || {
-        (format!(
+        format!(
             "new_user_id={} new_server_ip={} trailing_len={}",
             change.new_user_id, change.new_server_ip, change.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -50,12 +49,11 @@ pub(super) fn handle_change_client_id(
 pub(super) fn handle_change_slot(transport: &Ed2kTransport, peer_addr: SocketAddr, payload: &[u8]) {
     let changed_file = decode_optional_file_hash_payload(payload);
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "change_slot", || {
-        (format!(
+        format!(
             "file_hash={} payload_len={}",
             changed_file.map_or_else(|| "none".to_string(), |hash| hash.to_string()),
             payload.len()
-        ))
-        .into()
+        )
     });
 }
 
@@ -67,11 +65,10 @@ pub(super) fn handle_client_message(
 ) -> Result<()> {
     let message = decode_client_message_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "client_message", || {
-        (format!(
+        format!(
             "message_len={} accepted_len={}",
             message.message_len, message.accepted_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -84,7 +81,7 @@ pub(super) fn handle_edonkey_queue_rank(
 ) -> Result<()> {
     let rank = decode_edonkey_queue_rank_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "queue_ranking", || {
-        (format!("rank={rank} protocol=edonkey")).into()
+        format!("rank={rank} protocol=edonkey")
     });
     Ok(())
 }
@@ -97,7 +94,7 @@ pub(super) fn handle_emule_queue_ranking(
 ) -> Result<()> {
     let rank = decode_emule_queue_ranking_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "queue_ranking", || {
-        (format!("rank={rank} protocol=emule")).into()
+        format!("rank={rank} protocol=emule")
     });
     Ok(())
 }
@@ -110,7 +107,7 @@ pub(super) fn handle_public_ip_answer(
 ) -> Result<()> {
     let public_ip = decode_public_ip_answer_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "public_ip_answer", || {
-        (format!("public_ip={public_ip}")).into()
+        format!("public_ip={public_ip}")
     });
     Ok(())
 }
@@ -127,11 +124,10 @@ pub(super) fn handle_reask_callback_tcp(
         Some(transport.mode),
         "reask_callback_tcp",
         || {
-            (format!(
+            format!(
                 "file_hash={} dest={}:{} extended_info_len={}",
                 reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-            ))
-            .into()
+            )
         },
     );
     Ok(())
@@ -149,11 +145,10 @@ pub(super) fn handle_chat_captcha_request(
         Some(transport.mode),
         "chat_captcha_request",
         || {
-            (format!(
+            format!(
                 "tag_count={} data_len={}",
                 request.tag_count, request.data_len
-            ))
-            .into()
+            )
         },
     );
     Ok(())
@@ -170,7 +165,7 @@ pub(super) fn handle_chat_captcha_result(
         peer_addr,
         Some(transport.mode),
         "chat_captcha_result",
-        || (format!("status={status}")).into(),
+        || format!("status={status}"),
     );
     Ok(())
 }
@@ -183,12 +178,11 @@ pub(super) fn handle_file_desc(
 ) -> Result<()> {
     let file_desc = decode_file_description_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "file_desc", || {
-        (format!(
+        format!(
             "rating={} comment_len={}",
             file_desc.rating,
             file_desc.comment.len()
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -201,11 +195,10 @@ pub(super) fn handle_preview_request(
 ) -> Result<()> {
     let preview_request = decode_preview_request_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "preview_request", || {
-        (format!(
+        format!(
             "file_hash={} trailing_len={}",
             preview_request.file_hash, preview_request.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -218,14 +211,13 @@ pub(super) fn handle_preview_answer(
 ) -> Result<()> {
     let preview_answer = decode_preview_answer_payload(payload)?;
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "preview_answer", || {
-        (format!(
+        format!(
             "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
             preview_answer.file_hash,
             preview_answer.frame_count,
             preview_answer.frame_payload_bytes,
             preview_answer.trailing_len
-        ))
-        .into()
+        )
     });
     Ok(())
 }
@@ -237,6 +229,6 @@ pub(super) fn handle_buddy_pong(
     held_buddy: bool,
 ) {
     dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "kad_buddy_pong", || {
-        (format!("held_buddy={held_buddy}")).into()
+        format!("held_buddy={held_buddy}")
     });
 }

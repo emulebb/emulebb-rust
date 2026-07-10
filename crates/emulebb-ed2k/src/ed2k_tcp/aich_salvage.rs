@@ -37,7 +37,7 @@ pub(super) async fn handle_aich_recovery_answer(
             peer_addr,
             Some(transport_mode),
             "aich_recovery_unavailable",
-            || (format!("file_hash={file_hash_hex}")).into(),
+            || format!("file_hash={file_hash_hex}"),
         );
         return Ok(());
     };
@@ -46,7 +46,7 @@ pub(super) async fn handle_aich_recovery_answer(
             peer_addr,
             Some(transport_mode),
             "aich_recovery_empty_body",
-            || (format!("file_hash={file_hash_hex} part={part}")).into(),
+            || format!("file_hash={file_hash_hex} part={part}"),
         );
         return Ok(());
     }
@@ -62,11 +62,11 @@ pub(super) async fn handle_aich_recovery_answer(
                 Some(transport_mode),
                 "aich_salvage_started",
                 || {
-                    (format!(
-                    "file_hash={file_hash_hex} part={part} recovered_blocks={} needed_blocks={}",
-                    outcome.recovered_ranges.len(),
-                    outcome.needed_ranges.len()
-                )).into()
+                    format!(
+                        "file_hash={file_hash_hex} part={part} recovered_blocks={} needed_blocks={}",
+                        outcome.recovered_ranges.len(),
+                        outcome.needed_ranges.len()
+                    )
                 },
             );
         }
@@ -77,7 +77,7 @@ pub(super) async fn handle_aich_recovery_answer(
                 peer_addr,
                 Some(transport_mode),
                 "aich_salvage_skipped",
-                || (format!("file_hash={file_hash_hex} part={part}")).into(),
+                || format!("file_hash={file_hash_hex} part={part}"),
             );
         }
         Err(error) => {
@@ -87,7 +87,7 @@ pub(super) async fn handle_aich_recovery_answer(
                 peer_addr,
                 Some(transport_mode),
                 "aich_salvage_failed",
-                || (format!("file_hash={file_hash_hex} part={part} error={error}")).into(),
+                || format!("file_hash={file_hash_hex} part={part} error={error}"),
             );
         }
     }

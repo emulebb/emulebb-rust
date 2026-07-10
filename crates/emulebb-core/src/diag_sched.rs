@@ -4,7 +4,7 @@
 //! §3.5) from real call-site data and forward them to the shared writer
 //! (`emulebb_ed2k::diag_event::emit`). They live in `emulebb-core` because the
 //! cross-transfer source/connection decisions they observe (the download driver
-//! + source registry) live here. Emit is compiled to a no-op unless
+//! and source registry) live here. Emit is compiled to a no-op unless
 //! `packet-diagnostics` is enabled and then remains runtime-gated by
 //! `EMULEBB_RUST_LOG_DIR`.
 //!
