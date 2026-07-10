@@ -10,6 +10,7 @@ use clap::Parser;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
+use slint::language::{StandardListViewItem, TableColumn};
 use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -227,6 +228,16 @@ fn main() -> Result<()> {
     ui.set_shared_files(empty_model());
     ui.set_logs(empty_model());
     ui.set_speed_samples(empty_model());
+    ui.set_transfer_columns(model(transfer_columns()));
+    ui.set_server_columns(model(server_columns()));
+    ui.set_shared_file_columns(model(shared_file_columns()));
+    ui.set_upload_columns(model(upload_columns()));
+    ui.set_log_columns(model(log_columns()));
+    ui.set_transfer_rows(empty_table_model());
+    ui.set_server_rows(empty_table_model());
+    ui.set_shared_file_rows(empty_table_model());
+    ui.set_upload_rows(empty_table_model());
+    ui.set_log_rows(empty_table_model());
     ui.set_selected_kind("".into());
     ui.set_selected_id("".into());
     ui.set_inspector_title("Inspector".into());
@@ -480,14 +491,21 @@ fn publish_snapshot(
         ui.set_upload_summary(upload_summary(&snapshot).into());
         ui.set_server_summary(server_summary(&snapshot).into());
         ui.set_shared_summary(shared_summary(&snapshot).into());
-        ui.set_transfers(model(transfer_items(&snapshot.transfers)));
-        ui.set_uploads(model(upload_items(
-            &snapshot.uploads,
-            &snapshot.upload_queue,
-        )));
-        ui.set_servers(model(server_items(&snapshot.servers)));
-        ui.set_shared_files(model(shared_file_items(&snapshot.shared_files)));
-        ui.set_logs(model(log_items(&snapshot.logs)));
+        let transfers = transfer_items(&snapshot.transfers);
+        let uploads = upload_items(&snapshot.uploads, &snapshot.upload_queue);
+        let servers = server_items(&snapshot.servers);
+        let shared_files = shared_file_items(&snapshot.shared_files);
+        let logs = log_items(&snapshot.logs);
+        ui.set_transfer_rows(table_model(transfer_table_rows(&transfers)));
+        ui.set_upload_rows(table_model(upload_table_rows(&uploads)));
+        ui.set_server_rows(table_model(server_table_rows(&servers)));
+        ui.set_shared_file_rows(table_model(shared_file_table_rows(&shared_files)));
+        ui.set_log_rows(table_model(log_table_rows(&logs)));
+        ui.set_transfers(model(transfers));
+        ui.set_uploads(model(uploads));
+        ui.set_servers(model(servers));
+        ui.set_shared_files(model(shared_files));
+        ui.set_logs(model(logs));
         ui.set_speed_samples(model(speed_samples));
     };
     let weak = weak.clone();
@@ -720,6 +738,161 @@ fn log_items(logs: &[LogEntryDto]) -> Vec<LogItem> {
         .collect()
 }
 
+fn transfer_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("Name", 360.0, 2.0),
+        ("State", 92.0, 0.0),
+        ("Progress", 86.0, 0.0),
+        ("Size", 138.0, 0.0),
+        ("Down", 92.0, 0.0),
+        ("Sources", 132.0, 0.0),
+        ("Category", 128.0, 1.0),
+    ])
+}
+
+fn server_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("Name", 230.0, 2.0),
+        ("Endpoint", 190.0, 1.0),
+        ("Status", 96.0, 0.0),
+        ("Users", 100.0, 0.0),
+        ("Files", 100.0, 0.0),
+        ("Ping", 78.0, 0.0),
+        ("Priority", 90.0, 0.0),
+        ("Fails", 82.0, 0.0),
+    ])
+}
+
+fn shared_file_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("Name", 360.0, 2.0),
+        ("Size", 96.0, 0.0),
+        ("Priority", 82.0, 0.0),
+        ("Rating", 82.0, 0.0),
+        ("Requests", 132.0, 0.0),
+        ("Transferred", 120.0, 0.0),
+        ("Directory", 280.0, 1.0),
+    ])
+}
+
+fn upload_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("User", 220.0, 1.0),
+        ("File", 420.0, 2.0),
+        ("State", 110.0, 0.0),
+        ("Up", 92.0, 0.0),
+        ("Uploaded", 110.0, 0.0),
+        ("Ratio", 90.0, 0.0),
+    ])
+}
+
+fn log_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("Time", 180.0, 0.0),
+        ("Level", 82.0, 0.0),
+        ("Message", 780.0, 2.0),
+    ])
+}
+
+fn columns(specs: &[(&str, f32, f32)]) -> Vec<TableColumn> {
+    specs
+        .iter()
+        .map(|(title, width, stretch)| {
+            let mut column = TableColumn::default();
+            column.title = text(*title);
+            column.width = (*width).into();
+            column.min_width = (*width).into();
+            column.horizontal_stretch = *stretch;
+            column
+        })
+        .collect()
+}
+
+fn transfer_table_rows(items: &[TransferItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.name.clone(),
+                item.state.clone(),
+                item.progress_text.clone(),
+                item.size_text.clone(),
+                item.speed_text.clone(),
+                item.sources_text.clone(),
+                item.category.clone(),
+            ])
+        })
+        .collect()
+}
+
+fn server_table_rows(items: &[ServerItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.name.clone(),
+                item.endpoint.clone(),
+                item.status.clone(),
+                item.users_text.clone(),
+                item.files_text.clone(),
+                item.ping_text.clone(),
+                item.priority.clone(),
+                item.failed_text.clone(),
+            ])
+        })
+        .collect()
+}
+
+fn shared_file_table_rows(items: &[SharedFileItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.name.clone(),
+                item.size_text.clone(),
+                item.priority.clone(),
+                item.rating_text.clone(),
+                item.requests_text.clone(),
+                item.transferred_text.clone(),
+                item.directory.clone(),
+            ])
+        })
+        .collect()
+}
+
+fn upload_table_rows(items: &[UploadItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.user.clone(),
+                item.file.clone(),
+                item.state.clone(),
+                item.speed_text.clone(),
+                item.uploaded_text.clone(),
+                format!("{:.0}%", item.ratio * 100.0).into(),
+            ])
+        })
+        .collect()
+}
+
+fn log_table_rows(items: &[LogItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.timestamp.clone(),
+                item.level.clone(),
+                item.message.clone(),
+            ])
+        })
+        .collect()
+}
+
+fn row<const N: usize>(values: [SharedString; N]) -> Vec<StandardListViewItem> {
+    values.into_iter().map(StandardListViewItem::from).collect()
+}
+
 fn speed_samples(history: &VecDeque<(f64, f64)>) -> Vec<SpeedSample> {
     let max_speed = history
         .iter()
@@ -843,8 +1016,17 @@ fn empty_model<T: Clone + 'static>() -> ModelRc<T> {
     model(Vec::<T>::new())
 }
 
+fn empty_table_model() -> ModelRc<ModelRc<StandardListViewItem>> {
+    table_model(Vec::new())
+}
+
 fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(Rc::new(VecModel::from(items)))
+}
+
+fn table_model(items: Vec<Vec<StandardListViewItem>>) -> ModelRc<ModelRc<StandardListViewItem>> {
+    let rows = items.into_iter().map(model).collect::<Vec<_>>();
+    model(rows)
 }
 
 fn timestamp_text(value: Option<&Value>) -> String {

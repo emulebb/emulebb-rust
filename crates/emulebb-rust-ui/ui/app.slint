@@ -1,4 +1,4 @@
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, LineEdit, StandardTableView } from "std-widgets.slint";
 
 export struct TransferItem {
     hash: string,
@@ -62,106 +62,14 @@ export struct SpeedSample {
     up: float,
 }
 
-component HeaderCell inherits Text {
-    in property <string> label;
-    in property <length> cell-width;
-
-    text: label;
-    width: cell-width;
-    height: 26px;
-    color: #334155;
-    font-size: 11px;
-    font-weight: 700;
-    vertical-alignment: center;
-    overflow: elide;
-}
-
-component DataCell inherits Text {
-    in property <string> value;
-    in property <length> cell-width;
-
-    text: value;
-    width: cell-width;
-    height: 28px;
-    color: #111827;
-    font-size: 12px;
-    vertical-alignment: center;
-    overflow: elide;
-}
-
-component MutedCell inherits Text {
-    in property <string> value;
-    in property <length> cell-width;
-
-    text: value;
-    width: cell-width;
-    height: 28px;
-    color: #64748b;
-    font-size: 12px;
-    vertical-alignment: center;
-    overflow: elide;
-}
-
-component NumberCell inherits Text {
-    in property <string> value;
-    in property <length> cell-width;
-
-    text: value;
-    width: cell-width;
-    height: 28px;
-    color: #334155;
-    font-size: 12px;
-    horizontal-alignment: right;
-    vertical-alignment: center;
-    overflow: elide;
-}
-
-component RowBadge inherits Rectangle {
-    in property <string> text;
-    in property <color> fill;
-    in property <color> ink;
-
-    height: 18px;
-    width: max(58px, label.preferred-width + 14px);
-    background: fill;
-    border-radius: 3px;
-
-    label := Text {
-        x: 7px;
-        y: 0px;
-        height: parent.height;
-        text: root.text;
-        color: root.ink;
-        font-size: 10px;
-        font-weight: 700;
-        vertical-alignment: center;
-    }
-}
-
-component ProgressBar inherits Rectangle {
-    in property <float> value;
-    in property <color> fill;
-
-    height: 6px;
-    background: #e5e7eb;
-    border-radius: 3px;
-
-    Rectangle {
-        width: parent.width * root.value;
-        height: parent.height;
-        background: root.fill;
-        border-radius: 3px;
-    }
-}
-
 component SparkBars inherits Rectangle {
     in property <[SpeedSample]> samples;
 
     background: transparent;
-    height: 28px;
+    height: 26px;
 
     HorizontalLayout {
-        height: 28px;
+        height: 26px;
         padding-left: 4px;
         padding-right: 4px;
         spacing: 2px;
@@ -169,22 +77,22 @@ component SparkBars inherits Rectangle {
 
         for sample in root.samples : Rectangle {
             width: 6px;
-            height: 22px;
+            height: 20px;
             background: transparent;
 
             Rectangle {
                 x: 0px;
-                y: 22px - self.height;
+                y: 20px - self.height;
                 width: 2px;
-                height: 22px * sample.down;
+                height: 20px * sample.down;
                 background: #2563eb;
                 border-radius: 1px;
             }
             Rectangle {
                 x: 3px;
-                y: 22px - self.height;
+                y: 20px - self.height;
                 width: 2px;
-                height: 22px * sample.up;
+                height: 20px * sample.up;
                 background: #16a34a;
                 border-radius: 1px;
             }
@@ -197,12 +105,12 @@ component TabButton inherits Rectangle {
     in property <bool> selected;
     callback clicked;
 
-    height: 30px;
+    height: 28px;
     width: max(92px, label.preferred-width + 24px);
-    background: selected ? #1f2937 : #ffffff;
+    background: selected ? #1f2937 : transparent;
     border-color: selected ? #1f2937 : #cbd5e1;
-    border-width: 1px;
-    border-radius: 4px;
+    border-width: selected ? 1px : 0px;
+    border-radius: 3px;
 
     label := Text {
         x: 12px;
@@ -222,274 +130,17 @@ component TabButton inherits Rectangle {
     }
 }
 
-component TransferHeader inherits Rectangle {
-    height: 26px;
-    background: #eef2f7;
-    border-color: #cbd5e1;
-    border-width: 1px;
+component StatusText inherits Text {
+    in property <string> value;
+    in property <length> block-width;
 
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        HeaderCell { label: "Name"; cell-width: 330px; }
-        HeaderCell { label: "State"; cell-width: 82px; }
-        HeaderCell { label: "Progress"; cell-width: 124px; }
-        HeaderCell { label: "Size"; cell-width: 138px; }
-        HeaderCell { label: "Down"; cell-width: 82px; }
-        HeaderCell { label: "Sources"; cell-width: 126px; }
-        HeaderCell { label: "Category"; cell-width: 130px; }
-    }
-}
-
-component TransferRow inherits Rectangle {
-    in property <TransferItem> item;
-    in property <bool> selected-row;
-    callback selected;
-
-    height: 28px;
-    background: selected-row ? #dbeafe : #ffffff;
-    border-color: selected-row ? #93c5fd : #e5e7eb;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        DataCell { value: item.name; cell-width: 330px; }
-        Rectangle {
-            width: 82px;
-            height: 28px;
-            background: transparent;
-            RowBadge {
-                y: 5px;
-                text: item.state;
-                fill: item.state == "downloading" ? #dcfce7 : item.state == "error" ? #fee2e2 : #f1f5f9;
-                ink: item.state == "downloading" ? #166534 : item.state == "error" ? #991b1b : #334155;
-            }
-        }
-        Rectangle {
-            width: 124px;
-            height: 28px;
-            background: transparent;
-            ProgressBar { x: 0px; y: 11px; width: 72px; value: item.progress; fill: #2563eb; }
-            DataCell { x: 80px; value: item.progress-text; cell-width: 44px; }
-        }
-        NumberCell { value: item.size-text; cell-width: 138px; }
-        NumberCell { value: item.speed-text; cell-width: 82px; }
-        MutedCell { value: item.sources-text; cell-width: 126px; }
-        MutedCell { value: item.category; cell-width: 130px; }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.selected(); }
-    }
-}
-
-component ServerHeader inherits Rectangle {
-    height: 26px;
-    background: #eef2f7;
-    border-color: #cbd5e1;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        HeaderCell { label: "Name"; cell-width: 220px; }
-        HeaderCell { label: "Endpoint"; cell-width: 178px; }
-        HeaderCell { label: "Status"; cell-width: 86px; }
-        HeaderCell { label: "Users"; cell-width: 92px; }
-        HeaderCell { label: "Files"; cell-width: 92px; }
-        HeaderCell { label: "Ping"; cell-width: 72px; }
-        HeaderCell { label: "Priority"; cell-width: 86px; }
-        HeaderCell { label: "Fails"; cell-width: 82px; }
-    }
-}
-
-component ServerRow inherits Rectangle {
-    in property <ServerItem> item;
-    in property <bool> selected-row;
-    callback selected;
-
-    height: 28px;
-    background: selected-row ? #dbeafe : item.current ? #eff6ff : #ffffff;
-    border-color: selected-row || item.current ? #93c5fd : #e5e7eb;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        DataCell { value: item.name; cell-width: 220px; }
-        MutedCell { value: item.endpoint; cell-width: 178px; }
-        Rectangle {
-            width: 86px;
-            height: 28px;
-            background: transparent;
-            RowBadge {
-                y: 5px;
-                text: item.status;
-                fill: item.status == "connected" ? #dbeafe : item.status == "connecting" ? #fef3c7 : #f1f5f9;
-                ink: item.status == "connected" ? #1d4ed8 : item.status == "connecting" ? #92400e : #334155;
-            }
-        }
-        NumberCell { value: item.users-text; cell-width: 92px; }
-        NumberCell { value: item.files-text; cell-width: 92px; }
-        NumberCell { value: item.ping-text; cell-width: 72px; }
-        MutedCell { value: item.priority; cell-width: 86px; }
-        NumberCell { value: item.failed-text; cell-width: 82px; }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.selected(); }
-    }
-}
-
-component SharedFileHeader inherits Rectangle {
-    height: 26px;
-    background: #eef2f7;
-    border-color: #cbd5e1;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        HeaderCell { label: "Name"; cell-width: 320px; }
-        HeaderCell { label: "Size"; cell-width: 90px; }
-        HeaderCell { label: "Priority"; cell-width: 76px; }
-        HeaderCell { label: "Rating"; cell-width: 76px; }
-        HeaderCell { label: "Requests"; cell-width: 126px; }
-        HeaderCell { label: "Transferred"; cell-width: 112px; }
-        HeaderCell { label: "Directory"; cell-width: 260px; }
-    }
-}
-
-component SharedFileRow inherits Rectangle {
-    in property <SharedFileItem> item;
-    in property <bool> selected-row;
-    callback selected;
-
-    height: 28px;
-    background: selected-row ? #dbeafe : #ffffff;
-    border-color: selected-row ? #93c5fd : #e5e7eb;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        DataCell { value: item.name; cell-width: 320px; }
-        NumberCell { value: item.size-text; cell-width: 90px; }
-        MutedCell { value: item.priority; cell-width: 76px; }
-        NumberCell { value: item.rating-text; cell-width: 76px; }
-        MutedCell { value: item.requests-text; cell-width: 126px; }
-        NumberCell { value: item.transferred-text; cell-width: 112px; }
-        MutedCell { value: item.directory; cell-width: 260px; }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.selected(); }
-    }
-}
-
-component UploadHeader inherits Rectangle {
-    height: 26px;
-    background: #eef2f7;
-    border-color: #cbd5e1;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        HeaderCell { label: "User"; cell-width: 210px; }
-        HeaderCell { label: "File"; cell-width: 360px; }
-        HeaderCell { label: "State"; cell-width: 96px; }
-        HeaderCell { label: "Up"; cell-width: 86px; }
-        HeaderCell { label: "Uploaded"; cell-width: 100px; }
-        HeaderCell { label: "Ratio"; cell-width: 124px; }
-    }
-}
-
-component UploadRow inherits Rectangle {
-    in property <UploadItem> item;
-    in property <bool> selected-row;
-    callback selected;
-
-    height: 28px;
-    background: selected-row ? #dbeafe : #ffffff;
-    border-color: selected-row ? #93c5fd : #e5e7eb;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        DataCell { value: item.user; cell-width: 210px; }
-        MutedCell { value: item.file; cell-width: 360px; }
-        Rectangle {
-            width: 96px;
-            height: 28px;
-            background: transparent;
-            RowBadge { y: 5px; text: item.state; fill: #ecfdf5; ink: #047857; }
-        }
-        NumberCell { value: item.speed-text; cell-width: 86px; }
-        NumberCell { value: item.uploaded-text; cell-width: 100px; }
-        Rectangle {
-            width: 124px;
-            height: 28px;
-            background: transparent;
-            ProgressBar { x: 0px; y: 11px; width: 112px; value: item.ratio; fill: #16a34a; }
-        }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.selected(); }
-    }
-}
-
-component LogHeader inherits Rectangle {
-    height: 26px;
-    background: #eef2f7;
-    border-color: #cbd5e1;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        HeaderCell { label: "Time"; cell-width: 176px; }
-        HeaderCell { label: "Level"; cell-width: 76px; }
-        HeaderCell { label: "Message"; cell-width: 780px; }
-    }
-}
-
-component LogRow inherits Rectangle {
-    in property <LogItem> item;
-
-    height: 28px;
-    background: item.level == "error" ? #fef2f2 : item.level == "warning" ? #fffbeb : #ffffff;
-    border-color: #e5e7eb;
-    border-width: 1px;
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
-        MutedCell { value: item.timestamp; cell-width: 176px; }
-        DataCell { value: item.level; cell-width: 76px; }
-        DataCell { value: item.message; cell-width: 780px; }
-    }
+    text: value;
+    color: #334155;
+    font-size: 12px;
+    height: 24px;
+    width: block-width;
+    vertical-alignment: center;
+    overflow: elide;
 }
 
 export component MainWindow inherits Window {
@@ -511,6 +162,16 @@ export component MainWindow inherits Window {
     in-out property <[SharedFileItem]> shared-files;
     in-out property <[LogItem]> logs;
     in-out property <[SpeedSample]> speed-samples;
+    in-out property <[TableColumn]> transfer-columns;
+    in-out property <[TableColumn]> server-columns;
+    in-out property <[TableColumn]> shared-file-columns;
+    in-out property <[TableColumn]> upload-columns;
+    in-out property <[TableColumn]> log-columns;
+    in-out property <[[StandardListViewItem]]> transfer-rows;
+    in-out property <[[StandardListViewItem]]> server-rows;
+    in-out property <[[StandardListViewItem]]> shared-file-rows;
+    in-out property <[[StandardListViewItem]]> upload-rows;
+    in-out property <[[StandardListViewItem]]> log-rows;
     in-out property <int> selected-tab;
     in-out property <string> selected-kind;
     in-out property <string> selected-id;
@@ -528,29 +189,29 @@ export component MainWindow inherits Window {
     preferred-height: 820px;
     min-width: 980px;
     min-height: 620px;
-    background: #f5f7fb;
+    background: #f4f6f9;
 
     VerticalLayout {
         padding: 8px;
         spacing: 6px;
 
         Rectangle {
-            height: 46px;
+            height: 44px;
             background: #ffffff;
             border-color: #cbd5e1;
             border-width: 1px;
-            border-radius: 4px;
+            border-radius: 3px;
 
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                padding-top: 6px;
-                padding-bottom: 6px;
+                padding-top: 5px;
+                padding-bottom: 5px;
                 spacing: 8px;
 
                 Text {
                     text: "eMuleBB Rust";
-                    font-size: 17px;
+                    font-size: 16px;
                     font-weight: 700;
                     color: #111827;
                     vertical-alignment: center;
@@ -560,7 +221,7 @@ export component MainWindow inherits Window {
                 LineEdit {
                     text <=> root.base-url;
                     placeholder-text: "REST base URL";
-                    min-width: 330px;
+                    min-width: 340px;
                 }
 
                 LineEdit {
@@ -588,6 +249,7 @@ export component MainWindow inherits Window {
                     font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: right;
+                    overflow: elide;
                 }
             }
         }
@@ -597,12 +259,14 @@ export component MainWindow inherits Window {
             background: #ffffff;
             border-color: #d7dee8;
             border-width: 1px;
-            border-radius: 4px;
+            border-radius: 3px;
 
             HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
-                spacing: 8px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                spacing: 6px;
                 TabButton { text: "Transfers"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
                 TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.selected-tab = 1; } }
                 TabButton { text: "Shared Files"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
@@ -615,6 +279,7 @@ export component MainWindow inherits Window {
                     font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: right;
+                    overflow: elide;
                 }
                 SparkBars { samples: root.speed-samples; width: 220px; }
             }
@@ -625,21 +290,22 @@ export component MainWindow inherits Window {
             background: root.error-message == "" ? #f8fafc : #fff7ed;
             border-color: root.error-message == "" ? #d7dee8 : #fdba74;
             border-width: 1px;
-            border-radius: 4px;
+            border-radius: 3px;
 
             HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
                 spacing: 12px;
-                Text { text: root.lifecycle-line; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 160px; overflow: elide; }
-                Text { text: root.transfer-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 146px; overflow: elide; }
-                Text { text: root.server-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 104px; overflow: elide; }
-                Text { text: root.shared-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 104px; overflow: elide; }
-                Text { text: root.upload-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 126px; overflow: elide; }
+                StatusText { value: root.lifecycle-line; block-width: 160px; }
+                StatusText { value: root.transfer-summary; block-width: 150px; }
+                StatusText { value: root.server-summary; block-width: 108px; }
+                StatusText { value: root.shared-summary; block-width: 108px; }
+                StatusText { value: root.upload-summary; block-width: 130px; }
                 Text {
                     text: root.error-message == "" ? root.network-line : root.error-message;
                     color: root.error-message == "" ? #64748b : #9a3412;
                     font-size: 12px;
+                    height: 24px;
                     vertical-alignment: center;
                     overflow: elide;
                 }
@@ -650,111 +316,82 @@ export component MainWindow inherits Window {
             background: #ffffff;
             border-color: #cbd5e1;
             border-width: 1px;
-            border-radius: 4px;
+            border-radius: 3px;
 
-            if root.selected-tab == 0 : VerticalLayout {
+            if root.selected-tab == 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
-                TransferHeader {}
-                ScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for item in root.transfers : TransferRow {
-                            item: item;
-                            selected-row: root.selected-kind == "transfer" && root.selected-id == item.hash;
-                            selected => {
-                                root.selected-kind = "transfer";
-                                root.selected-id = item.hash;
-                                root.inspector-title = item.name;
-                                root.inspector-detail = item.detail;
-                            }
-                        }
+                columns <=> root.transfer-columns;
+                rows: root.transfer-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.transfers.length {
+                        root.selected-kind = "transfer";
+                        root.selected-id = root.transfers[row].hash;
+                        root.inspector-title = root.transfers[row].name;
+                        root.inspector-detail = root.transfers[row].detail;
                     }
                 }
             }
 
-            if root.selected-tab == 1 : VerticalLayout {
+            if root.selected-tab == 1 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
-                ServerHeader {}
-                ScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for item in root.servers : ServerRow {
-                            item: item;
-                            selected-row: root.selected-kind == "server" && root.selected-id == item.endpoint-id;
-                            selected => {
-                                root.selected-kind = "server";
-                                root.selected-id = item.endpoint-id;
-                                root.inspector-title = item.name;
-                                root.inspector-detail = item.detail;
-                            }
-                        }
+                columns <=> root.server-columns;
+                rows: root.server-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.servers.length {
+                        root.selected-kind = "server";
+                        root.selected-id = root.servers[row].endpoint-id;
+                        root.inspector-title = root.servers[row].name;
+                        root.inspector-detail = root.servers[row].detail;
                     }
                 }
             }
 
-            if root.selected-tab == 2 : VerticalLayout {
+            if root.selected-tab == 2 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
-                SharedFileHeader {}
-                ScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for item in root.shared-files : SharedFileRow {
-                            item: item;
-                            selected-row: root.selected-kind == "shared" && root.selected-id == item.hash;
-                            selected => {
-                                root.selected-kind = "shared";
-                                root.selected-id = item.hash;
-                                root.inspector-title = item.name;
-                                root.inspector-detail = item.detail;
-                            }
-                        }
+                columns <=> root.shared-file-columns;
+                rows: root.shared-file-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.shared-files.length {
+                        root.selected-kind = "shared";
+                        root.selected-id = root.shared-files[row].hash;
+                        root.inspector-title = root.shared-files[row].name;
+                        root.inspector-detail = root.shared-files[row].detail;
                     }
                 }
             }
 
-            if root.selected-tab == 3 : VerticalLayout {
+            if root.selected-tab == 3 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
-                UploadHeader {}
-                ScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for item in root.uploads : UploadRow {
-                            item: item;
-                            selected-row: root.selected-kind == "upload" && root.selected-id == item.client-id;
-                            selected => {
-                                root.selected-kind = "upload";
-                                root.selected-id = item.client-id;
-                                root.inspector-title = item.user;
-                                root.inspector-detail = item.detail;
-                            }
-                        }
+                columns <=> root.upload-columns;
+                rows: root.upload-rows;
+                current-row-changed(row) => {
+                    if row >= 0 && row < root.uploads.length {
+                        root.selected-kind = "upload";
+                        root.selected-id = root.uploads[row].client-id;
+                        root.inspector-title = root.uploads[row].user;
+                        root.inspector-detail = root.uploads[row].detail;
                     }
                 }
             }
 
-            if root.selected-tab == 4 : VerticalLayout {
+            if root.selected-tab == 4 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
-                LogHeader {}
-                ScrollView {
-                    VerticalLayout {
-                        spacing: 0px;
-                        for item in root.logs : LogRow { item: item; }
-                    }
-                }
+                columns <=> root.log-columns;
+                rows: root.log-rows;
             }
         }
 
         Rectangle {
-            height: 94px;
+            height: 104px;
             background: #ffffff;
             border-color: #cbd5e1;
             border-width: 1px;
-            border-radius: 4px;
+            border-radius: 3px;
 
             VerticalLayout {
                 padding: 8px;
