@@ -47,7 +47,15 @@ impl Ed2kTransferRuntime {
         if let Some(manifest) = self.manifest_cache.lock().await.get(file_hash).cloned() {
             return Ok(Some(manifest));
         }
-        let Some(manifest) = self.metadata.transfer_manifest_by_hash(file_hash)? else {
+        // Cache miss: the SQL read (global connection mutex + row mapping)
+        // runs on the blocking pool so it cannot stall the async runtime.
+        let metadata = self.metadata.clone();
+        let owned_hash = file_hash.to_string();
+        let row =
+            tokio::task::spawn_blocking(move || metadata.transfer_manifest_by_hash(&owned_hash))
+                .await
+                .context("ED2K manifest load task panicked")??;
+        let Some(manifest) = row else {
             return Ok(None);
         };
         let manifest = manifest_from_metadata(manifest)?;
@@ -77,8 +85,14 @@ impl Ed2kTransferRuntime {
                     transfer_dir.display()
                 )
             })?;
-        self.metadata
-            .upsert_transfer_manifest(&manifest_to_metadata(manifest))?;
+        // The upsert commits a SQLite transaction (a WAL fsync under
+        // `synchronous = FULL`): run it on the blocking pool so the fsync
+        // never parks an async worker thread.
+        let metadata = self.metadata.clone();
+        let row = manifest_to_metadata(manifest);
+        tokio::task::spawn_blocking(move || metadata.upsert_transfer_manifest(&row))
+            .await
+            .context("ED2K manifest upsert task panicked")??;
         self.mark_manifest_persisted_unlocked(manifest).await;
         Ok(())
     }
@@ -109,6 +123,7 @@ impl Ed2kTransferRuntime {
             .map(|state| state.dirty_piece_indexes.clone())
             .unwrap_or_default();
         dirty_piece_indexes.insert(current_piece);
+        let mut rows = Vec::with_capacity(dirty_piece_indexes.len());
         for piece_index in dirty_piece_indexes {
             let Some(piece) = manifest
                 .pieces
@@ -117,12 +132,25 @@ impl Ed2kTransferRuntime {
             else {
                 return self.store_manifest_unlocked(manifest).await;
             };
-            if !self.metadata.checkpoint_transfer_piece_progress(
-                &manifest.file_hash,
-                &piece_to_metadata(piece),
-            )? {
-                return self.store_manifest_unlocked(manifest).await;
+            rows.push(piece_to_metadata(piece));
+        }
+        // One blocking-pool hop persists every dirty row (each UPDATE commits
+        // a WAL fsync under `synchronous = FULL`), keeping the fsyncs off the
+        // async worker threads.
+        let metadata = self.metadata.clone();
+        let owned_hash = manifest.file_hash.clone();
+        let all_rows_updated = tokio::task::spawn_blocking(move || -> Result<bool> {
+            for row in &rows {
+                if !metadata.checkpoint_transfer_piece_progress(&owned_hash, row)? {
+                    return Ok(false);
+                }
             }
+            Ok(true)
+        })
+        .await
+        .context("ED2K piece checkpoint task panicked")??;
+        if !all_rows_updated {
+            return self.store_manifest_unlocked(manifest).await;
         }
         self.mark_manifest_persisted_unlocked(manifest).await;
         Ok(())
