@@ -130,11 +130,11 @@ review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRME
 id = "server-udp-description-poll"
 area = "ed2k"
 stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connected server (up to twice, GetLastDescPingedCount() < 2) with OP_SERVER_DESC_REQ carrying a uint32 challenge ((GetRandomUInt16() << 16) | INV_SERV_DESC_LEN=0xF0FF), and parses the OP_SERVER_DESC_RES answer (legacy <name_len><name><desc_len><desc> strings, or the eserver 16.45+ challenge-echo taglist with name/description/dynip/version/aux ports) to refresh server-list name/description/version metadata (UDPSocket.cpp:481-540)."
-rust_behavior = "The Rust client does not send OP_SERVER_DESC_REQ and does not parse OP_SERVER_DESC_RES (opcodes 0xA2/0xA3 are unhandled). Server description/name for the CONNECTED server is still captured from the TCP ident/tag path; the rest of the server list keeps the name/description it was imported/configured with and is surfaced over the REST server routes."
-reason = "Cosmetic-only for a headless client: the description poll refreshes human-facing server name/description/version strings for the non-connected server list, which the REST controller neither drives nor needs (server selection is explicit over /api/v1, and server metadata comes from server.met import + the connected-server ident). Implementing a client-initiated cosmetic UDP poll adds outbound server traffic with no functional benefit, against the be-gentle posture."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the poll is client-initiated and optional, so omitting it only means non-connected server entries are not refreshed with wire-sourced descriptions. No server or peer behavior depends on the client sending it."
-review_disposition = "defer"
-review_disposition_note = "RUST-PAR-018 round-18 server-lane re-audit (2026-07-08): confirmed omitted (opcodes 0xA2/0xA3 unhandled, no OP_SERVER_DESC_REQ emitter). DEFER - cosmetic metadata refresh for non-connected servers with no functional or wire dependency; not worth implementing for a headless client under the be-gentle posture. Revisit only if a discovered-server metadata requirement appears."
+rust_behavior = "IMPLEMENTED (RUST-PAR-028): a paced one-shot background pass status-pings non-connected servers, sends challenge-bearing OP_SERVER_DESC_REQ only after a validated status response, decodes legacy strings and challenge-tag OP_SERVER_DESC_RES, and persists refreshed name/description metadata."
+reason = "RUST-PAR-028 implemented the requested server-list metadata parity with conservative one-second pacing and one poll per server per daemon run."
+compatibility = "The 0xA2/0xA3 packet and challenge shapes match MFC; no proprietary extension was introduced."
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-028 (2026-07-10): IMPLEMENTED with challenge, legacy/tag decoder, mismatch, persistence, and diagnostic-name tests. No longer an omission; retained as audit history."
 
 [[omissions]]
 id = "kad-flood-lan-exemption"
