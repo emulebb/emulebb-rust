@@ -220,6 +220,32 @@ impl EmulebbCore {
         }
     }
 
+    pub(crate) async fn note_ed2k_server_metadata(
+        &self,
+        endpoint: &str,
+        name: Option<String>,
+        description: Option<String>,
+    ) {
+        let Some(stored_endpoint) = self.resolve_server_event_endpoint(endpoint).await else {
+            return;
+        };
+        let Some(mut server) = self.server(&stored_endpoint).await else {
+            return;
+        };
+        if let Some(name) = name {
+            server.name = name;
+        }
+        if let Some(description) = description {
+            server.description = description;
+        }
+        let _ = profile_state::persist_server(&self.metadata_store, &server, false);
+        self.state
+            .lock()
+            .await
+            .servers
+            .insert(stored_endpoint, server);
+    }
+
     /// Endpoints whose consecutive-failure count is at or over the dead-server
     /// retry threshold, so a UDP source/keyword walk can skip them exactly like
     /// eMule (`GetFailedCount() >= GetDeadServerRetries()`, DownloadQueue.cpp:1798

@@ -11,6 +11,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+use super::server_description_poll::poll_server_descriptions;
 use super::server_entry::{ConfiguredServerEntry, ResolvedServerEntry};
 use super::server_events::Ed2kServerListEvent;
 use super::types::{Ed2kServerState, ServerSessionContext};
@@ -78,6 +79,13 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         );
         return;
     }
+    tokio::spawn(poll_server_descriptions(
+        bind_ip,
+        configured_servers.clone(),
+        Arc::clone(&state),
+        Arc::clone(&shutdown),
+        session_context.server_list_events.clone(),
+    ));
     let reconnect_enabled = config.reconnect_enabled;
 
     while !shutdown.load(Ordering::Relaxed) {

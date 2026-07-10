@@ -427,6 +427,14 @@ pub(crate) async fn run_ed2k_server_list_events(
             Ed2kServerListEvent::ConnectSucceeded { endpoint } => {
                 core.note_ed2k_server_connect_succeeded(&endpoint).await;
             }
+            Ed2kServerListEvent::MetadataUpdated {
+                endpoint,
+                name,
+                description,
+            } => {
+                core.note_ed2k_server_metadata(&endpoint, name, description)
+                    .await;
+            }
         }
     }
 }

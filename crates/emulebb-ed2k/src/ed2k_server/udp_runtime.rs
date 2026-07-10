@@ -6,10 +6,11 @@ use tokio::net::UdpSocket;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
-    Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, ResolvedServerEntry,
-    ServerUdpPacket, decode_server_udp_datagram, diagnostics::dump_ed2k_server_udp_packet,
-    encode_server_udp_datagram, encode_udp_search_request, encode_udp_source_request_batch,
-    server_status::server_status_challenge,
+    Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
+    ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
+    diagnostics::dump_ed2k_server_udp_packet, encode_server_udp_datagram,
+    encode_udp_search_request, encode_udp_source_request_batch,
+    server_description::server_description_challenge, server_status::server_status_challenge,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -24,6 +25,15 @@ pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocke
     )
     .with_context(|| format!("failed to pin ED2K server UDP egress for {bind_ip}"))?;
     Ok(socket)
+}
+
+pub(super) async fn send_server_udp_description_request(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+) -> Result<u32> {
+    let challenge = server_description_challenge();
+    send_server_udp_packet(socket, server, OP_SERVER_DESC_REQ, &challenge.to_le_bytes()).await?;
+    Ok(challenge)
 }
 
 async fn send_server_udp_packet(

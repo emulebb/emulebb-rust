@@ -258,6 +258,32 @@ async fn effective_ed2k_config_honors_safe_server_connect_preference() {
 }
 
 #[tokio::test]
+async fn udp_server_description_metadata_updates_the_persisted_server() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.add_server(ServerCreate {
+        address: "192.0.2.44".to_string(),
+        port: 4661,
+        name: Some("Old Name".to_string()),
+        priority: None,
+        static_server: None,
+        connect: None,
+    })
+    .await
+    .unwrap();
+
+    core.note_ed2k_server_metadata(
+        "192.0.2.44:4661",
+        Some("New Name".to_string()),
+        Some("New Description".to_string()),
+    )
+    .await;
+
+    let server = core.server("192.0.2.44:4661").await.expect("server");
+    assert_eq!(server.name, "New Name");
+    assert_eq!(server.description, "New Description");
+}
+
+#[tokio::test]
 async fn explicit_server_connect_targets_running_server_loop() {
     let transfer_root = unique_runtime_dir("emulebb-core-target-running-server-loop");
     let mut network = test_network_config_with_store(

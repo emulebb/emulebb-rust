@@ -30,6 +30,12 @@ pub enum Ed2kServerListEvent {
     /// A connect to `endpoint` succeeded (login accepted); the core clears the
     /// fail-count (eMule resets the count on a successful response/connect).
     ConnectSucceeded { endpoint: String },
+    /// Name/description refreshed through UDP `OP_SERVER_DESC_RES`.
+    MetadataUpdated {
+        endpoint: String,
+        name: Option<String>,
+        description: Option<String>,
+    },
 }
 
 /// Sender half handed to the server session loop.
