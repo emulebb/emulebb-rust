@@ -240,6 +240,24 @@ async fn effective_ed2k_config_honors_reconnect_preference() {
 }
 
 #[tokio::test]
+async fn effective_ed2k_config_honors_safe_server_connect_preference() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.update_preferences(PreferencesUpdate {
+        safe_server_connect: Some(false),
+        ..PreferencesUpdate::default()
+    })
+    .await
+    .unwrap();
+
+    let config = core
+        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .await
+        .unwrap();
+
+    assert!(!config.safe_server_connect);
+}
+
+#[tokio::test]
 async fn explicit_server_connect_targets_running_server_loop() {
     let transfer_root = unique_runtime_dir("emulebb-core-target-running-server-loop");
     let mut network = test_network_config_with_store(

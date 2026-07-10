@@ -41,6 +41,9 @@ pub struct Ed2kConfig {
     /// Whether the background ED2K server session should reconnect after the
     /// initial configured-server pass. Mirrors eMule's `Reconnect` preference.
     pub reconnect_enabled: bool,
+    /// Limit automatic server connection attempts to one at a time. When
+    /// disabled, MFC keeps up to two attempts in flight.
+    pub safe_server_connect: bool,
     /// Idle interval before the client refreshes the ED2K server session with an
     /// empty OP_OFFERFILES keepalive (eMule `ServerKeepAliveTimeout`,
     /// ServerConnect.cpp:672-674). 0 disables the keepalive. Stock defaults this
@@ -199,6 +202,7 @@ impl Default for Ed2kConfig {
             callback_timeout_secs: 45,
             reconnect_interval_secs: 30,
             reconnect_enabled: true,
+            safe_server_connect: true,
             // eMule ServerKeepAliveTimeout is 0/disabled by default and, when
             // enabled, minutes-scale (cap 1440 min). 60s was a sub-minute
             // non-stock fingerprint; 20 minutes matches the stock posture while

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use emulebb_kad_proto::Ed2kHash;
-use tokio::{sync::RwLock, time::Instant as TokioInstant};
+use tokio::{
+    sync::{Mutex, RwLock},
+    time::Instant as TokioInstant,
+};
 use tracing::{debug, info, warn};
 
 use super::server_status::status_ping_due_at;
@@ -37,7 +40,7 @@ pub(super) enum ServerSessionExit {
 pub(super) async fn run_one_server_session(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,
-    search_inbox: &mut Ed2kServerSearchInbox,
+    search_inbox: &Arc<Mutex<Ed2kServerSearchInbox>>,
 ) -> Result<ServerSessionExit> {
     let use_server_obfuscation =
         should_use_server_obfuscation(context.hello_identity.connect_options, server);
@@ -214,7 +217,9 @@ pub(super) async fn run_one_server_session(
                 clear_server_connection_state(&context.state).await;
                 return Ok(ServerSessionExit::RestartPreferredOrder);
             }
-            request = search_inbox.receiver.recv(), if queued_background_search.is_none() && pending_background_search.is_none() => {
+            request = async {
+                search_inbox.lock().await.receiver.recv().await
+            }, if queued_background_search.is_none() && pending_background_search.is_none() => {
                 if let Some(request) = request {
                     if session.login_accepted {
                         match start_background_server_search(
