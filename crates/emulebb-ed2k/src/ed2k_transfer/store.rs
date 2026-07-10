@@ -15,10 +15,17 @@ use super::{
 };
 
 const ED2K_RESUME_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
-// WHY: request-window bitmap recovery may have to seed from the durable
-// manifest after a later block arrives out of order. Persist every full eMule
-// block so accepted ranges cannot be lost at that transition.
-const ED2K_RESUME_CHECKPOINT_BYTES: u64 = ED2K_EMBLOCK_SIZE;
+// Batch the durable mid-piece progress checkpoint: persist once per this many
+// received bytes (or on the interval above), instead of committing SQLite (a
+// WAL fsync under `synchronous = FULL`) for every 180 K block. The crash-loss
+// window is bounded to this many re-downloadable bytes per transfer — the
+// same class of loss as eMule's ~1.5 MB in-memory write buffer that only
+// flushes on threshold/part-completion — while state transitions
+// (verified/failed/salvage/completion) still checkpoint immediately. The
+// dirty pieces accumulated between checkpoints are tracked in
+// `Ed2kManifestCheckpointState::dirty_piece_indexes`, so a batched checkpoint
+// persists every piece touched since the last durable store.
+const ED2K_RESUME_CHECKPOINT_BYTES: u64 = 8 * ED2K_EMBLOCK_SIZE;
 
 impl Ed2kTransferRuntime {
     pub(super) async fn load_manifest_or_rebuild_unlocked(
@@ -76,23 +83,37 @@ impl Ed2kTransferRuntime {
         Ok(())
     }
 
-    /// Persist the progress of the given pieces WITHOUT rewriting the
-    /// manifest's child tables — the per-block download checkpoint. Only valid
-    /// when piece progress (state / bytes_written / block_bitmap /
-    /// ich_corrupted) is the sole dirt since the last persisted state;
-    /// structural transitions (piece verified/failed, hashsets, completion,
-    /// sources) must use `store_manifest_unlocked`. Falls back to the full
-    /// store when a piece row is not persisted yet.
+    /// Persist mid-piece progress WITHOUT rewriting the manifest's child
+    /// tables — the batched download checkpoint. Persists `current_piece`
+    /// plus every piece dirtied by cache-only appends since the last durable
+    /// store (multiple sessions of one file dirty different pieces between
+    /// batched checkpoints). Only valid when piece progress (state /
+    /// bytes_written / block_bitmap / ich_corrupted) is the sole dirt since
+    /// the last persisted state; structural transitions (piece
+    /// verified/failed, hashsets, completion, sources) must use
+    /// `store_manifest_unlocked`. Falls back to the full store when a piece
+    /// row is not persisted yet.
     pub(super) async fn store_manifest_piece_progress_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
-        dirty_piece_indexes: &[u32],
+        current_piece: u32,
     ) -> Result<()> {
+        // Snapshot (not take) the dirty set: it is only cleared by
+        // `mark_manifest_persisted_unlocked` after every row landed, so a
+        // failed persist keeps the pieces tracked for the next checkpoint.
+        let mut dirty_piece_indexes: std::collections::BTreeSet<u32> = self
+            .manifest_checkpoint_state
+            .lock()
+            .await
+            .get(&manifest.file_hash)
+            .map(|state| state.dirty_piece_indexes.clone())
+            .unwrap_or_default();
+        dirty_piece_indexes.insert(current_piece);
         for piece_index in dirty_piece_indexes {
             let Some(piece) = manifest
                 .pieces
                 .iter()
-                .find(|piece| piece.piece_index == *piece_index)
+                .find(|piece| piece.piece_index == piece_index)
             else {
                 return self.store_manifest_unlocked(manifest).await;
             };
@@ -105,6 +126,27 @@ impl Ed2kTransferRuntime {
         }
         self.mark_manifest_persisted_unlocked(manifest).await;
         Ok(())
+    }
+
+    /// Record a cache-only progress append so the next batched checkpoint
+    /// persists this piece's row even if the checkpoint is triggered by a
+    /// block landing in a different piece.
+    pub(super) async fn note_dirty_piece_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        piece_index: u32,
+    ) {
+        let current_progress = manifest_progress_bytes(manifest);
+        let mut states = self.manifest_checkpoint_state.lock().await;
+        states
+            .entry(manifest.file_hash.clone())
+            .or_insert_with(|| Ed2kManifestCheckpointState {
+                persisted_bytes_written: current_progress,
+                last_persisted_at: Instant::now(),
+                dirty_piece_indexes: std::collections::BTreeSet::new(),
+            })
+            .dirty_piece_indexes
+            .insert(piece_index);
     }
 
     pub(super) async fn cache_manifest_unlocked(&self, manifest: &Ed2kResumeManifest) {
@@ -121,6 +163,7 @@ impl Ed2kTransferRuntime {
             Ed2kManifestCheckpointState {
                 persisted_bytes_written: manifest_progress_bytes(manifest),
                 last_persisted_at: Instant::now(),
+                dirty_piece_indexes: std::collections::BTreeSet::new(),
             },
         );
     }
@@ -135,6 +178,7 @@ impl Ed2kTransferRuntime {
             Ed2kManifestCheckpointState {
                 persisted_bytes_written: current_progress,
                 last_persisted_at: Instant::now(),
+                dirty_piece_indexes: std::collections::BTreeSet::new(),
             }
         });
         let dirty_bytes = current_progress.saturating_sub(state.persisted_bytes_written);

@@ -451,12 +451,18 @@ async fn out_of_order_transition_preserves_cached_prefix_blocks() {
         );
     }
 
+    // Durability is batched (8-block / 2 s checkpoint policy, the scale of
+    // eMule's ~1.5 MB write buffer): after 29 accepted blocks the byte
+    // threshold guarantees at least 24 durable blocks; interval checkpoints
+    // may have persisted more on a slow run. The bitmap transition below
+    // works off the live runtime's cached manifest, which always holds all 29.
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     let reloaded_manifest = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
-    assert_eq!(
-        reloaded_manifest.pieces[0].bytes_written,
-        29 * ED2K_EMBLOCK_SIZE,
-        "every accepted full request block is durable before bitmap transition"
+    assert!(
+        reloaded_manifest.pieces[0].bytes_written >= 24 * ED2K_EMBLOCK_SIZE
+            && reloaded_manifest.pieces[0].bytes_written <= 29 * ED2K_EMBLOCK_SIZE,
+        "accepted request blocks are durable up to the batched checkpoint floor, got {}",
+        reloaded_manifest.pieces[0].bytes_written
     );
 
     let later_start = 30 * ED2K_EMBLOCK_SIZE;

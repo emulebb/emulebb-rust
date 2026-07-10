@@ -188,16 +188,27 @@ impl Ed2kTransferRuntime {
             self.upsert_verified_catalog_entry(manifest).await;
         }
         // A plain out-of-order block only dirties this piece's row (bitmap +
-        // state), so it takes the single-piece UPDATE; verification outcomes
-        // and ICH salvage change verified ranges / completion and keep the
-        // full child-table store. An ICH re-hash miss leaves the manifest
-        // untouched beyond the piece, so it stays on the light path too.
+        // state), so it follows the batched progress-checkpoint policy: cache
+        // the manifest and record the dirty piece between checkpoints, persist
+        // via the piece-row UPDATE when the byte/interval threshold trips.
+        // Verification outcomes and ICH salvage change verified ranges /
+        // completion and keep the immediate full child-table store; an ICH
+        // re-hash miss leaves the manifest untouched beyond the piece, so it
+        // stays on the batched light path too.
+        let mut should_checkpoint = true;
         if matches!(
             outcome,
             PieceWriteOutcome::Incomplete | PieceWriteOutcome::IchRehashFailed { .. }
         ) {
-            self.store_manifest_piece_progress_unlocked(manifest, &[piece_index])
-                .await?;
+            should_checkpoint = self.should_checkpoint_manifest_unlocked(manifest).await;
+            if should_checkpoint {
+                self.store_manifest_piece_progress_unlocked(manifest, piece_index)
+                    .await?;
+            } else {
+                checkpoint_reason = None;
+                self.note_dirty_piece_unlocked(manifest, piece_index).await;
+                self.cache_manifest_unlocked(manifest).await;
+            }
         } else {
             self.store_manifest_unlocked(manifest).await?;
         }
@@ -207,7 +218,7 @@ impl Ed2kTransferRuntime {
             start,
             end,
             block_received_at,
-            should_checkpoint: true,
+            should_checkpoint,
             checkpoint_reason,
         });
         Ok(outcome)

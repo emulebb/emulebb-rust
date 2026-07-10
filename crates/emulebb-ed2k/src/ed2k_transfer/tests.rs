@@ -808,7 +808,8 @@ async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint()
 async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() {
     let root = unique_test_dir("ed2k-transfer-piece-row-checkpoint");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
-    let payload = vec![0x3Cu8; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap() * 2 + 1024];
+    let block = usize::try_from(ED2K_EMBLOCK_SIZE).unwrap();
+    let payload = vec![0x3Cu8; block * 9 + 1024];
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let job = new_transfer_job(
         file_hash,
@@ -822,22 +823,83 @@ async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() 
         .unwrap()
         .unwrap();
 
-    // One full eMule block reaches the checkpoint byte threshold, so the
-    // progress checkpoint fires — via the single-piece row UPDATE, not the
-    // full child-table rewrite.
-    let block = usize::try_from(ED2K_EMBLOCK_SIZE).unwrap();
-    let outcome = runtime
-        .append_piece_block(&job.file_hash, 0, 0, block as u64, &payload[..block])
-        .await
-        .unwrap();
-    assert!(!outcome.is_completed());
+    // Eight full eMule blocks reach the batched checkpoint byte threshold, so
+    // the progress checkpoint fires — via the piece-row UPDATE, never a full
+    // child-table rewrite (no state transition happens here).
+    for index in 0..8usize {
+        let start = index * block;
+        let end = start + block;
+        let outcome = runtime
+            .append_piece_block(
+                &job.file_hash,
+                0,
+                start as u64,
+                end as u64,
+                &payload[start..end],
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.is_completed());
+    }
 
     // A fresh runtime bypasses the in-memory manifest cache: the mid-piece
-    // progress must have been durably persisted by the piece-row UPDATE.
+    // progress must have been durably persisted by the piece-row UPDATE. At
+    // least the first block is durable even if a slow run trips the interval
+    // checkpoint before the byte threshold.
     let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
     let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
     assert_eq!(persisted.pieces[0].state, Ed2kTransferState::Requested);
-    assert_eq!(persisted.pieces[0].bytes_written, ED2K_EMBLOCK_SIZE);
+    assert!(
+        persisted.pieces[0].bytes_written >= ED2K_EMBLOCK_SIZE,
+        "batched checkpoint must have durably persisted mid-piece progress, got {}",
+        persisted.pieces[0].bytes_written
+    );
+}
+
+#[tokio::test]
+async fn batched_checkpoint_persists_pieces_dirtied_by_other_appends() {
+    let root = unique_test_dir("ed2k-transfer-dirty-piece-tracking");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let block = usize::try_from(ED2K_EMBLOCK_SIZE).unwrap();
+    let part = usize::try_from(ED2K_PART_SIZE).unwrap();
+    let payload = vec![0x7Du8; part + block * 8 + 1024];
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let job = new_transfer_job(
+        file_hash,
+        "dirty-piece-tracking.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+
+    // One cache-only block into piece 0 (below the batch threshold).
+    runtime
+        .append_piece_block(&job.file_hash, 0, 0, block as u64, &payload[..block])
+        .await
+        .unwrap();
+    // Blocks into piece 1 until the batched checkpoint trips. The checkpoint
+    // is triggered by piece 1, but it must also persist piece 0's row, which
+    // was dirtied by the earlier cache-only append (dirty-piece tracking).
+    for index in 0..8usize {
+        let start = part + index * block;
+        let end = start + block;
+        runtime
+            .append_piece_block(
+                &job.file_hash,
+                1,
+                start as u64,
+                end as u64,
+                &payload[start..end],
+            )
+            .await
+            .unwrap();
+    }
+
+    let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
+    let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(
+        persisted.pieces[0].bytes_written, ED2K_EMBLOCK_SIZE,
+        "a checkpoint triggered by piece 1 must persist piece 0's dirty progress"
+    );
 }
 
 #[tokio::test]

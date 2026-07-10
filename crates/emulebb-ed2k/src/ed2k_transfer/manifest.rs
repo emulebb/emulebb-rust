@@ -8,10 +8,16 @@ use super::{
     ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kSharedRange, Ed2kTransferJob, Ed2kTransferState,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct Ed2kManifestCheckpointState {
     pub(super) persisted_bytes_written: u64,
     pub(super) last_persisted_at: Instant,
+    /// Pieces whose progress advanced since the last durable persist (the
+    /// cache-only appends between batched checkpoints). The next progress
+    /// checkpoint persists every listed piece row, so a checkpoint triggered
+    /// by one session cannot skip pieces dirtied by another session of the
+    /// same file; any full manifest store clears the set.
+    pub(super) dirty_piece_indexes: std::collections::BTreeSet<u32>,
 }
 
 pub(super) fn manifest_progress_bytes(manifest: &Ed2kResumeManifest) -> u64 {

@@ -553,7 +553,7 @@ impl Ed2kTransferRuntime {
                 file.flush().await?;
                 drop(file);
                 if progress_only {
-                    self.store_manifest_piece_progress_unlocked(&manifest, &[piece_index])
+                    self.store_manifest_piece_progress_unlocked(&manifest, piece_index)
                         .await?;
                 } else {
                     self.store_manifest_unlocked(&manifest).await?;
@@ -571,6 +571,7 @@ impl Ed2kTransferRuntime {
             }
 
             drop(file);
+            self.note_dirty_piece_unlocked(&manifest, piece_index).await;
             self.cache_manifest_unlocked(&manifest).await;
             log_append_piece_block(AppendPieceBlockLog {
                 manifest: &manifest,
