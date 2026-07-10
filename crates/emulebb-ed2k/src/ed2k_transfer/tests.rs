@@ -805,6 +805,42 @@ async fn append_piece_block_keeps_subblock_progress_in_memory_until_checkpoint()
 }
 
 #[tokio::test]
+async fn append_piece_block_checkpoint_persists_progress_via_piece_row_update() {
+    let root = unique_test_dir("ed2k-transfer-piece-row-checkpoint");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let payload = vec![0x3Cu8; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap() * 2 + 1024];
+    let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
+    let job = new_transfer_job(
+        file_hash,
+        "piece-row-checkpoint.bin".to_string(),
+        payload.len() as u64,
+    );
+    runtime.ensure_job(&job).await.unwrap();
+    runtime
+        .claim_next_missing_part(&job.file_hash, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // One full eMule block reaches the checkpoint byte threshold, so the
+    // progress checkpoint fires — via the single-piece row UPDATE, not the
+    // full child-table rewrite.
+    let block = usize::try_from(ED2K_EMBLOCK_SIZE).unwrap();
+    let outcome = runtime
+        .append_piece_block(&job.file_hash, 0, 0, block as u64, &payload[..block])
+        .await
+        .unwrap();
+    assert!(!outcome.is_completed());
+
+    // A fresh runtime bypasses the in-memory manifest cache: the mid-piece
+    // progress must have been durably persisted by the piece-row UPDATE.
+    let reloaded_runtime = Ed2kTransferRuntime::load_or_create(Path::new(&root)).unwrap();
+    let persisted = reloaded_runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(persisted.pieces[0].state, Ed2kTransferState::Requested);
+    assert_eq!(persisted.pieces[0].bytes_written, ED2K_EMBLOCK_SIZE);
+}
+
+#[tokio::test]
 async fn reclaim_stale_piece_requests_restores_missing_state_with_progress() {
     let root = unique_test_dir("ed2k-transfer-reclaim-stale-request");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();

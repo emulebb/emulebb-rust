@@ -541,12 +541,23 @@ impl Ed2kTransferRuntime {
             let should_checkpoint = checkpoint_reason.is_some()
                 || self.should_checkpoint_manifest_unlocked(&manifest).await;
             if should_checkpoint {
-                if checkpoint_reason.is_none() {
+                // A pure progress checkpoint (no state transition) only dirties
+                // this piece's row, so it takes the single-piece UPDATE instead
+                // of the full child-table rewrite; ICH salvage promoted the
+                // piece (verified ranges / completion changed) and keeps the
+                // full store.
+                let progress_only = checkpoint_reason.is_none();
+                if progress_only {
                     checkpoint_reason = Some("periodic_progress");
                 }
                 file.flush().await?;
                 drop(file);
-                self.store_manifest_unlocked(&manifest).await?;
+                if progress_only {
+                    self.store_manifest_piece_progress_unlocked(&manifest, &[piece_index])
+                        .await?;
+                } else {
+                    self.store_manifest_unlocked(&manifest).await?;
+                }
                 log_append_piece_block(AppendPieceBlockLog {
                     manifest: &manifest,
                     piece_index,

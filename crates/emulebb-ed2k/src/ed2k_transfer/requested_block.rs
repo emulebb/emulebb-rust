@@ -187,7 +187,20 @@ impl Ed2kTransferRuntime {
         if outcome.is_completed() {
             self.upsert_verified_catalog_entry(manifest).await;
         }
-        self.store_manifest_unlocked(manifest).await?;
+        // A plain out-of-order block only dirties this piece's row (bitmap +
+        // state), so it takes the single-piece UPDATE; verification outcomes
+        // and ICH salvage change verified ranges / completion and keep the
+        // full child-table store. An ICH re-hash miss leaves the manifest
+        // untouched beyond the piece, so it stays on the light path too.
+        if matches!(
+            outcome,
+            PieceWriteOutcome::Incomplete | PieceWriteOutcome::IchRehashFailed { .. }
+        ) {
+            self.store_manifest_piece_progress_unlocked(manifest, &[piece_index])
+                .await?;
+        } else {
+            self.store_manifest_unlocked(manifest).await?;
+        }
         log_append_piece_block(AppendPieceBlockLog {
             manifest,
             piece_index,

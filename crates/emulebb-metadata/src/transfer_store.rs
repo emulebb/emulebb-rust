@@ -233,6 +233,52 @@ impl super::MetadataStore {
         row.map(|row| manifest_from_row(&conn, row)).transpose()
     }
 
+    /// Persist ONE piece's progress fields for an already-persisted transfer
+    /// manifest — the per-block download checkpoint. This is the lightweight
+    /// sibling of `upsert_transfer_manifest`: mid-piece progress only ever
+    /// changes the piece row itself (state / bytes_written / block_bitmap /
+    /// ich_corrupted), so rewriting every child table (all pieces + both
+    /// hashsets + ranges + sources) per received block was pure write
+    /// amplification. Structural transitions (piece verified/failed, hashset
+    /// acquisition, completion, source changes) still take the full upsert.
+    ///
+    /// Returns `false` when the transfer or piece row does not exist yet, so
+    /// the caller can fall back to the full upsert.
+    pub fn checkpoint_transfer_piece_progress(
+        &self,
+        file_hash: &str,
+        piece: &MetadataTransferPiece,
+    ) -> Result<bool> {
+        let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
+        let now = unix_ms();
+        let conn = self.connection()?;
+        let updated = conn
+            .prepare_cached(
+                r#"
+                UPDATE transfer_pieces
+                SET state = ?3, bytes_written = ?4, block_bitmap = ?5,
+                    ich_corrupted = ?6, updated_at_ms = ?7
+                WHERE piece_index = ?2
+                  AND transfer_id = (
+                      SELECT transfers.id
+                      FROM transfers
+                      JOIN known_files ON known_files.id = transfers.known_file_id
+                      WHERE known_files.ed2k_hash = ?1
+                  )
+                "#,
+            )?
+            .execute(params![
+                hash,
+                i64::from(piece.piece_index),
+                piece.state,
+                piece.bytes_written as i64,
+                piece.block_bitmap,
+                piece.ich_corrupted,
+                now,
+            ])?;
+        Ok(updated != 0)
+    }
+
     /// Add `delta` lifetime-uploaded bytes to a known file (eMule all-time
     /// transferred accounting). No-op for an unknown hash or a zero delta;
     /// returns `true` when a row was updated.

@@ -29,17 +29,7 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
                 end: range.end,
             })
             .collect(),
-        pieces: manifest
-            .pieces
-            .iter()
-            .map(|piece| MetadataTransferPiece {
-                piece_index: piece.piece_index,
-                state: transfer_state_to_sql(piece.state).to_string(),
-                bytes_written: piece.bytes_written,
-                block_bitmap: piece.block_bitmap.clone(),
-                ich_corrupted: piece.ich_corrupted,
-            })
-            .collect(),
+        pieces: manifest.pieces.iter().map(piece_to_metadata).collect(),
         sources: manifest
             .sources
             .iter()
@@ -59,6 +49,18 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
         delivered_path: manifest.delivered_path.clone(),
         source_path: manifest.source_path.clone(),
         source_mtime_ms: manifest.source_mtime_ms,
+    }
+}
+
+/// SQL form of one runtime piece state, shared by the full manifest upsert and
+/// the per-block single-piece progress checkpoint.
+pub(super) fn piece_to_metadata(piece: &Ed2kPieceState) -> MetadataTransferPiece {
+    MetadataTransferPiece {
+        piece_index: piece.piece_index,
+        state: transfer_state_to_sql(piece.state).to_string(),
+        bytes_written: piece.bytes_written,
+        block_bitmap: piece.block_bitmap.clone(),
+        ich_corrupted: piece.ich_corrupted,
     }
 }
 

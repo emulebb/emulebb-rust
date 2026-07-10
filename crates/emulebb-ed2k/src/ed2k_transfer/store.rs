@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 
 use super::manifest::manifest_progress_bytes;
-use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata};
+use super::transfer_sql::{manifest_from_metadata, manifest_to_metadata, piece_to_metadata};
 use super::{
     ED2K_EMBLOCK_SIZE, Ed2kManifestCheckpointState, Ed2kResumeManifest, Ed2kTransferJob,
     Ed2kTransferRuntime, PAYLOAD_FILE_NAME,
@@ -72,6 +72,37 @@ impl Ed2kTransferRuntime {
             })?;
         self.metadata
             .upsert_transfer_manifest(&manifest_to_metadata(manifest))?;
+        self.mark_manifest_persisted_unlocked(manifest).await;
+        Ok(())
+    }
+
+    /// Persist the progress of the given pieces WITHOUT rewriting the
+    /// manifest's child tables — the per-block download checkpoint. Only valid
+    /// when piece progress (state / bytes_written / block_bitmap /
+    /// ich_corrupted) is the sole dirt since the last persisted state;
+    /// structural transitions (piece verified/failed, hashsets, completion,
+    /// sources) must use `store_manifest_unlocked`. Falls back to the full
+    /// store when a piece row is not persisted yet.
+    pub(super) async fn store_manifest_piece_progress_unlocked(
+        &self,
+        manifest: &Ed2kResumeManifest,
+        dirty_piece_indexes: &[u32],
+    ) -> Result<()> {
+        for piece_index in dirty_piece_indexes {
+            let Some(piece) = manifest
+                .pieces
+                .iter()
+                .find(|piece| piece.piece_index == *piece_index)
+            else {
+                return self.store_manifest_unlocked(manifest).await;
+            };
+            if !self.metadata.checkpoint_transfer_piece_progress(
+                &manifest.file_hash,
+                &piece_to_metadata(piece),
+            )? {
+                return self.store_manifest_unlocked(manifest).await;
+            }
+        }
         self.mark_manifest_persisted_unlocked(manifest).await;
         Ok(())
     }
