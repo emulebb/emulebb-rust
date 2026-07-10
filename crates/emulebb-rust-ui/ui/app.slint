@@ -1,0 +1,703 @@
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+export struct TransferItem {
+    hash: string,
+    name: string,
+    state: string,
+    progress: float,
+    progress-text: string,
+    size-text: string,
+    speed-text: string,
+    sources-text: string,
+    category: string,
+    detail: string,
+}
+
+export struct UploadItem {
+    client-id: string,
+    user: string,
+    state: string,
+    file: string,
+    speed-text: string,
+    uploaded-text: string,
+    ratio: float,
+    detail: string,
+}
+
+export struct ServerItem {
+    name: string,
+    endpoint-id: string,
+    endpoint: string,
+    status: string,
+    users-text: string,
+    files-text: string,
+    ping-text: string,
+    priority: string,
+    failed-text: string,
+    current: bool,
+    detail: string,
+}
+
+export struct SharedFileItem {
+    hash: string,
+    name: string,
+    directory: string,
+    size-text: string,
+    requests-text: string,
+    transferred-text: string,
+    priority: string,
+    rating-text: string,
+    demand-ratio: float,
+    detail: string,
+}
+
+export struct LogItem {
+    timestamp: string,
+    level: string,
+    message: string,
+}
+
+export struct SpeedSample {
+    down: float,
+    up: float,
+}
+
+component Metric inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> accent;
+
+    background: #ffffff;
+    border-color: #d7dee8;
+    border-width: 1px;
+    border-radius: 6px;
+    height: 58px;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: parent.height;
+        background: accent;
+        border-radius: 2px;
+    }
+
+    VerticalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        padding-top: 7px;
+        spacing: 2px;
+
+        Text {
+            text: label;
+            color: #64748b;
+            font-size: 11px;
+        }
+        Text {
+            text: value;
+            color: #111827;
+            font-size: 14px;
+            font-weight: 700;
+            overflow: elide;
+        }
+    }
+}
+
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> fill;
+    in property <color> ink;
+
+    height: 24px;
+    width: max(72px, label.preferred-width + 18px);
+    background: fill;
+    border-radius: 4px;
+
+    label := Text {
+        x: 9px;
+        y: 0px;
+        height: parent.height;
+        text: root.text;
+        color: root.ink;
+        font-size: 11px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
+component ProgressBar inherits Rectangle {
+    in property <float> value;
+    in property <color> fill;
+
+    height: 8px;
+    background: #e5e7eb;
+    border-radius: 4px;
+
+    Rectangle {
+        width: parent.width * root.value;
+        height: parent.height;
+        background: root.fill;
+        border-radius: 4px;
+    }
+}
+
+component SparkBars inherits Rectangle {
+    in property <[SpeedSample]> samples;
+
+    background: #ffffff;
+    border-color: #d7dee8;
+    border-width: 1px;
+    border-radius: 6px;
+    height: 112px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            height: 18px;
+            Text {
+                text: "Throughput";
+                color: #111827;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Text {
+                text: "download / upload";
+                color: #64748b;
+                font-size: 12px;
+                horizontal-alignment: right;
+            }
+        }
+
+        Rectangle {
+            height: 64px;
+            background: #f8fafc;
+            border-color: #e5e7eb;
+            border-width: 1px;
+            border-radius: 4px;
+
+            HorizontalLayout {
+                height: 64px;
+                padding: 8px;
+                spacing: 3px;
+                alignment: end;
+
+                for sample in root.samples : Rectangle {
+                    width: 8px;
+                    height: 48px;
+                    background: transparent;
+
+                    Rectangle {
+                        x: 0px;
+                        y: 48px - self.height;
+                        width: 3px;
+                        height: 48px * sample.down;
+                        background: #2563eb;
+                        border-radius: 2px;
+                    }
+                    Rectangle {
+                        x: 5px;
+                        y: 48px - self.height;
+                        width: 3px;
+                        height: 48px * sample.up;
+                        background: #16a34a;
+                        border-radius: 2px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component TransferRow inherits Rectangle {
+    in property <TransferItem> item;
+    callback selected;
+
+    height: 74px;
+    background: #ffffff;
+    border-color: #e5e7eb;
+    border-width: 1px;
+    border-radius: 5px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            height: 24px;
+            spacing: 8px;
+            Badge {
+                text: item.state;
+                fill: item.state == "downloading" ? #dcfce7 : item.state == "error" ? #fee2e2 : #f1f5f9;
+                ink: item.state == "downloading" ? #166534 : item.state == "error" ? #991b1b : #334155;
+            }
+            Text {
+                text: item.name;
+                color: #111827;
+                font-size: 13px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: item.speed-text;
+                color: #2563eb;
+                font-size: 12px;
+                horizontal-alignment: right;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            ProgressBar {
+                value: item.progress;
+                fill: #2563eb;
+            }
+            Text {
+                text: item.progress-text;
+                color: #475569;
+                font-size: 12px;
+                width: 56px;
+            }
+        }
+
+        Text {
+            text: item.size-text + " | " + item.sources-text + " | " + item.category;
+            color: #64748b;
+            font-size: 12px;
+            overflow: elide;
+        }
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.selected(); }
+    }
+}
+
+component UploadRow inherits Rectangle {
+    in property <UploadItem> item;
+    callback selected;
+
+    height: 62px;
+    background: #ffffff;
+    border-color: #e5e7eb;
+    border-width: 1px;
+    border-radius: 5px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Badge { text: item.state; fill: #ecfdf5; ink: #047857; }
+            Text {
+                text: item.user + " -> " + item.file;
+                color: #111827;
+                font-size: 13px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: item.speed-text;
+                color: #16a34a;
+                font-size: 12px;
+                horizontal-alignment: right;
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            ProgressBar { value: item.ratio; fill: #16a34a; }
+            Text {
+                text: item.uploaded-text;
+                color: #64748b;
+                font-size: 12px;
+                width: 84px;
+            }
+        }
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.selected(); }
+    }
+}
+
+component ServerRow inherits Rectangle {
+    in property <ServerItem> item;
+    callback selected;
+
+    height: 58px;
+    background: item.current ? #eff6ff : #ffffff;
+    border-color: item.current ? #93c5fd : #e5e7eb;
+    border-width: 1px;
+    border-radius: 5px;
+
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        Badge {
+            text: item.status;
+            fill: item.status == "connected" ? #dbeafe : item.status == "connecting" ? #fef3c7 : #f1f5f9;
+            ink: item.status == "connected" ? #1d4ed8 : item.status == "connecting" ? #92400e : #334155;
+        }
+        VerticalLayout {
+            spacing: 2px;
+            Text { text: item.name; color: #111827; font-size: 13px; font-weight: 700; overflow: elide; }
+            Text { text: item.endpoint; color: #64748b; font-size: 12px; overflow: elide; }
+        }
+        Text { text: item.users-text; color: #334155; font-size: 12px; width: 84px; horizontal-alignment: right; }
+        Text { text: item.files-text; color: #334155; font-size: 12px; width: 84px; horizontal-alignment: right; }
+        Text { text: item.ping-text; color: #334155; font-size: 12px; width: 64px; horizontal-alignment: right; }
+        Text { text: item.priority + " | " + item.failed-text; color: #64748b; font-size: 12px; width: 110px; horizontal-alignment: right; }
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.selected(); }
+    }
+}
+
+component SharedFileRow inherits Rectangle {
+    in property <SharedFileItem> item;
+    callback selected;
+
+    height: 70px;
+    background: #ffffff;
+    border-color: #e5e7eb;
+    border-width: 1px;
+    border-radius: 5px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: item.name; color: #111827; font-size: 13px; font-weight: 700; overflow: elide; }
+            Text { text: item.size-text; color: #334155; font-size: 12px; width: 90px; horizontal-alignment: right; }
+            Text { text: item.priority; color: #334155; font-size: 12px; width: 70px; horizontal-alignment: right; }
+            Text { text: item.rating-text; color: #92400e; font-size: 12px; width: 64px; horizontal-alignment: right; }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            ProgressBar { value: item.demand-ratio; fill: #f97316; }
+            Text { text: item.requests-text; color: #64748b; font-size: 12px; width: 112px; }
+            Text { text: item.transferred-text; color: #64748b; font-size: 12px; width: 110px; }
+        }
+        Text { text: item.directory; color: #64748b; font-size: 11px; overflow: elide; }
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.selected(); }
+    }
+}
+
+component LogRow inherits Rectangle {
+    in property <LogItem> item;
+
+    height: 34px;
+    background: item.level == "error" ? #fef2f2 : item.level == "warning" ? #fffbeb : #ffffff;
+    border-color: #e5e7eb;
+    border-width: 1px;
+    border-radius: 4px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text { text: item.timestamp; color: #64748b; font-size: 11px; width: 170px; overflow: elide; }
+        Text { text: item.level; color: #334155; font-size: 11px; font-weight: 700; width: 64px; }
+        Text { text: item.message; color: #111827; font-size: 12px; overflow: elide; }
+    }
+}
+
+component TabButton inherits Button {
+    in property <bool> selected;
+}
+
+export component MainWindow inherits Window {
+    in-out property <string> base-url;
+    in-out property <string> api-key;
+    in-out property <string> connection-state;
+    in-out property <string> lifecycle-line;
+    in-out property <string> network-line;
+    in-out property <string> speed-line;
+    in-out property <string> counts-line;
+    in-out property <string> error-message;
+    in-out property <string> transfer-summary;
+    in-out property <string> upload-summary;
+    in-out property <string> server-summary;
+    in-out property <string> shared-summary;
+    in-out property <[TransferItem]> transfers;
+    in-out property <[UploadItem]> uploads;
+    in-out property <[ServerItem]> servers;
+    in-out property <[SharedFileItem]> shared-files;
+    in-out property <[LogItem]> logs;
+    in-out property <[SpeedSample]> speed-samples;
+    in-out property <int> selected-tab;
+    in-out property <string> selected-kind;
+    in-out property <string> selected-id;
+    in-out property <string> inspector-title;
+    in-out property <string> inspector-detail;
+    in-out property <bool> is-refreshing;
+
+    callback connect-requested(string, string);
+    callback refresh-requested();
+    callback transfer-action-requested(string, string);
+    callback server-action-requested(string);
+
+    title: "eMuleBB Rust UI";
+    preferred-width: 1240px;
+    preferred-height: 820px;
+    min-width: 980px;
+    min-height: 620px;
+    background: #f5f7fb;
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+
+        Rectangle {
+            height: 68px;
+            background: #ffffff;
+            border-color: #d7dee8;
+            border-width: 1px;
+            border-radius: 6px;
+
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 10px;
+
+                Text {
+                    text: "eMuleBB Rust";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: #111827;
+                    vertical-alignment: center;
+                    min-width: 150px;
+                }
+
+                LineEdit {
+                    text <=> root.base-url;
+                    placeholder-text: "REST base URL";
+                    min-width: 360px;
+                }
+
+                LineEdit {
+                    text <=> root.api-key;
+                    placeholder-text: "API key";
+                    min-width: 170px;
+                }
+
+                Button {
+                    text: root.is-refreshing ? "Refreshing" : "Connect";
+                    enabled: !root.is-refreshing;
+                    clicked => { root.connect-requested(root.base-url, root.api-key); }
+                }
+
+                Button {
+                    text: "Refresh";
+                    enabled: !root.is-refreshing;
+                    clicked => { root.refresh-requested(); }
+                }
+            }
+        }
+
+        if root.error-message != "" : Rectangle {
+            height: 40px;
+            background: #fff7ed;
+            border-color: #fdba74;
+            border-width: 1px;
+            border-radius: 6px;
+
+            Text {
+                x: 12px;
+                width: parent.width - 24px;
+                height: parent.height;
+                text: root.error-message;
+                color: #9a3412;
+                font-size: 13px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            Rectangle {
+                width: 178px;
+                background: #ffffff;
+                border-color: #d7dee8;
+                border-width: 1px;
+                border-radius: 6px;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    Text { text: "Workbench"; color: #111827; font-size: 15px; font-weight: 700; }
+                    TabButton { text: "Transfers"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
+                    Text { text: root.transfer-summary; color: #64748b; font-size: 11px; }
+                    TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.selected-tab = 1; } }
+                    Text { text: root.server-summary; color: #64748b; font-size: 11px; }
+                    TabButton { text: "Shared Files"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
+                    Text { text: root.shared-summary; color: #64748b; font-size: 11px; }
+                    TabButton { text: "Uploads"; selected: root.selected-tab == 3; clicked => { root.selected-tab = 3; } }
+                    Text { text: root.upload-summary; color: #64748b; font-size: 11px; }
+                    TabButton { text: "Logs"; selected: root.selected-tab == 4; clicked => { root.selected-tab = 4; } }
+                    Rectangle { height: 1px; background: #e5e7eb; }
+                    Text { text: root.connection-state; color: #334155; font-size: 11px; wrap: word-wrap; }
+                    Text { text: root.network-line; color: #334155; font-size: 11px; wrap: word-wrap; }
+                    Text { text: root.speed-line; color: #166534; font-size: 11px; font-weight: 700; }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 10px;
+
+                GridLayout {
+                    height: 62px;
+                    spacing: 8px;
+                    Row {
+                        Metric { col: 0; label: "Lifecycle"; value: root.lifecycle-line; accent: #64748b; }
+                        Metric { col: 1; label: "Transfers"; value: root.transfer-summary; accent: #0ea5e9; }
+                        Metric { col: 2; label: "Servers"; value: root.server-summary; accent: #f97316; }
+                        Metric { col: 3; label: "Shared"; value: root.shared-summary; accent: #a855f7; }
+                    }
+                }
+
+                SparkBars { samples: root.speed-samples; height: 92px; }
+
+                Rectangle {
+                    background: #ffffff;
+                    border-color: #d7dee8;
+                    border-width: 1px;
+                    border-radius: 6px;
+
+                    if root.selected-tab == 0 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            for item in root.transfers : TransferRow {
+                                item: item;
+                                selected => {
+                                    root.selected-kind = "transfer";
+                                    root.selected-id = item.hash;
+                                    root.inspector-title = item.name;
+                                    root.inspector-detail = item.detail;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.selected-tab == 1 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            for item in root.servers : ServerRow {
+                                item: item;
+                                selected => {
+                                    root.selected-kind = "server";
+                                    root.selected-id = item.endpoint-id;
+                                    root.inspector-title = item.name;
+                                    root.inspector-detail = item.detail;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.selected-tab == 2 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            for item in root.shared-files : SharedFileRow {
+                                item: item;
+                                selected => {
+                                    root.selected-kind = "shared";
+                                    root.selected-id = item.hash;
+                                    root.inspector-title = item.name;
+                                    root.inspector-detail = item.detail;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.selected-tab == 3 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            for item in root.uploads : UploadRow {
+                                item: item;
+                                selected => {
+                                    root.selected-kind = "upload";
+                                    root.selected-id = item.client-id;
+                                    root.inspector-title = item.user;
+                                    root.inspector-detail = item.detail;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.selected-tab == 4 : ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+                            for item in root.logs : LogRow { item: item; }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 132px;
+                    background: #ffffff;
+                    border-color: #d7dee8;
+                    border-width: 1px;
+                    border-radius: 6px;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            height: 30px;
+                            Text {
+                                text: root.inspector-title == "" ? "Inspector" : root.inspector-title;
+                                color: #111827;
+                                font-size: 14px;
+                                font-weight: 700;
+                                overflow: elide;
+                            }
+                            if root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
+                            if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
+                            if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
+                            if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
+                            if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
+                            if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect"); } }
+                            if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect"); } }
+                        }
+                        Text {
+                            text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
+                            color: #334155;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "emulebb-rust-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Slint UI for the emulebb-rust REST API"
+
+[[bin]]
+name = "emulebb-rust-ui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slint.workspace = true
+tokio.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
