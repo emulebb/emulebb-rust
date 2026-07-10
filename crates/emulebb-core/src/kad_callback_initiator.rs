@@ -28,11 +28,17 @@
 //! When the buddy endpoint is unknown, the same request is sent through the
 //! bounded `CSearch::FINDSOURCE`-shaped Kad traversal.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
-use emulebb_kad_proto::{CallbackReq, Ed2kHash, NodeId};
+use emulebb_ed2k::{
+    ed2k_server::Ed2kFoundSource,
+    ed2k_transfer::{Ed2kCallbackIntent, Ed2kSourceHint},
+};
+use emulebb_kad_dht::RpcWorkClass;
+use emulebb_kad_proto::{CallbackReq, Ed2kHash, KadPacket, NodeId};
+
+use super::{Ed2kNetworkConfig, EmulebbCore, Transfer};
 
 /// How long we suppress a repeat `KADEMLIA_CALLBACK_REQ` for the same
 /// (source, file). This mirrors the oracle's `DS_WAITCALLBACKKAD` reap window
@@ -129,6 +135,102 @@ pub(crate) fn build_kad_callback_req(
         buddy_id: NodeId::from_bytes(buddy_id),
         file_hash: Ed2kHash::from_bytes(kad_file_id.0),
         tcp_port: our_tcp_port,
+    }
+}
+
+impl EmulebbCore {
+    /// Originate direct or FINDSOURCE-assisted Kad callbacks for LowID sources.
+    pub(super) async fn send_kad_buddy_callbacks(
+        &self,
+        network: &Ed2kNetworkConfig,
+        transfer: &Transfer,
+        file_hash: Ed2kHash,
+        sources: &[Ed2kFoundSource],
+    ) {
+        if !sources.iter().any(is_kad_callback_candidate) || self.ed2k_self_tcp_firewalled().await {
+            return;
+        }
+        let Some(dht) = self
+            .ed2k_dht_node()
+            .await
+            .filter(|dht| dht.is_bootstrapped())
+        else {
+            return;
+        };
+        let our_tcp_port = self
+            .ed2k_reachability
+            .advertised_tcp_port(network.listen_port);
+        for source in sources.iter().filter(|s| is_kad_callback_candidate(s)) {
+            let Some(buddy_id) = source.buddy_id else {
+                continue;
+            };
+            let Some(key) = kad_callback_key(source, file_hash) else {
+                continue;
+            };
+            let now = Instant::now();
+            {
+                let mut state = self.state.lock().await;
+                if !should_send_kad_callback(
+                    state.ed2k_kad_callback_last_sent.get(&key).copied(),
+                    now,
+                    KAD_CALLBACK_INITIATOR_COOLDOWN,
+                ) {
+                    continue;
+                }
+                state.ed2k_kad_callback_last_sent.insert(key, now);
+            }
+            self.ed2k_transfers
+                .register_callback_intent(Ed2kCallbackIntent {
+                    client_id: source.client_id,
+                    file_hash: transfer.hash.clone(),
+                    canonical_name: transfer.name.clone(),
+                    file_size: transfer.size_bytes,
+                    source: Ed2kSourceHint {
+                        ip: source.ip.to_string(),
+                        tcp_port: source.tcp_port,
+                        user_hash: source.user_hash.map(hex::encode),
+                    },
+                })
+                .await;
+            let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
+            let request = build_kad_callback_req(buddy_id, file_hash, our_tcp_port);
+            if !is_direct_kad_callback_candidate(source) {
+                let dht = dht.clone();
+                let transfer_hash = transfer.hash.clone();
+                let buddy_id_hex = hex::encode(buddy_id);
+                tokio::spawn(async move {
+                    tracing::info!(
+                        "starting Kad FINDSOURCE callback walk file_hash={transfer_hash} source={source_peer} buddy_id={buddy_id_hex}"
+                    );
+                    dht.find_source_search(request, RpcWorkClass::Interactive)
+                        .await;
+                });
+                continue;
+            }
+            let Some((buddy_ip, buddy_port)) = source.buddy_endpoint else {
+                continue;
+            };
+            let buddy_peer = SocketAddr::new(IpAddr::V4(buddy_ip), buddy_port);
+            let outcome = dht
+                .send_packet(buddy_peer, &KadPacket::CallbackReq(request))
+                .await;
+            let milestone = if outcome.is_ok() {
+                "sent"
+            } else {
+                "send_failed"
+            };
+            crate::diag_kad_event::callback(milestone, buddy_peer, source_peer, &transfer.hash);
+            match outcome {
+                Ok(()) => tracing::info!(
+                    "sent Kad KADEMLIA_CALLBACK_REQ file_hash={} source={source_peer} buddy={buddy_peer} our_tcp_port={our_tcp_port}",
+                    transfer.hash
+                ),
+                Err(error) => tracing::warn!(
+                    "Kad KADEMLIA_CALLBACK_REQ send failed file_hash={} source={source_peer} buddy={buddy_peer}: {error}",
+                    transfer.hash
+                ),
+            }
+        }
     }
 }
 

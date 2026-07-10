@@ -183,10 +183,7 @@ use kad_buddy::{
     BuddyNeedInput, FindBuddyReqRefusal, INCOMING_BUDDY_ATTACH_TIMEOUT_SECS, IncomingBuddy,
     KadBuddyState, OutgoingBuddy, buddy_search_target, find_buddy_res_matches,
 };
-use kad_callback_initiator::{
-    KAD_CALLBACK_INITIATOR_COOLDOWN, build_kad_callback_req, is_direct_kad_callback_candidate,
-    is_kad_callback_candidate, kad_callback_key, should_send_kad_callback,
-};
+use kad_callback_initiator::{KAD_CALLBACK_INITIATOR_COOLDOWN, should_send_kad_callback};
 #[cfg(test)]
 use kad_hello::{
     build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
@@ -2396,129 +2393,6 @@ impl EmulebbCore {
                     "sent OP_DIRECTCALLBACKREQ file_hash={} source={dest} our_tcp_port={our_tcp_port}",
                     transfer.hash
                 );
-            }
-        }
-    }
-
-    /// Originate outbound Kad callbacks (`KADEMLIA_CALLBACK_REQ`, oracle
-    /// `BaseClient.cpp` `CCS_KADCALLBACK`) for firewalled buddy sources of this
-    /// file. When the buddy relay endpoint is unknown, a bounded FINDSOURCE
-    /// traversal locates it. The source's buddy relays an
-    /// `OP_CALLBACK`, prompting the firewalled source to TCP-connect back to us so
-    /// the download can start; the inbound listener correlates the connect-back to
-    /// the registered callback intent by the source's client-id.
-    ///
-    /// Preconditions mirror the oracle: Kad connected, we are not ourselves LowID
-    /// (lowid2lowid can never connect), and the source is a direct-callback
-    /// candidate. Each (source, file) is rate-limited by
-    /// [`KAD_CALLBACK_INITIATOR_COOLDOWN`] via the per-core last-sent map.
-    async fn send_kad_buddy_callbacks(
-        &self,
-        network: &Ed2kNetworkConfig,
-        transfer: &Transfer,
-        file_hash: Ed2kHash,
-        sources: &[Ed2kFoundSource],
-    ) {
-        if !sources.iter().any(is_kad_callback_candidate) {
-            return;
-        }
-        // A firewalled requester cannot receive the connect-back (lowid2lowid).
-        if self.ed2k_self_tcp_firewalled().await {
-            return;
-        }
-        let Some(dht) = self.ed2k_dht_node().await else {
-            return;
-        };
-        if !dht.is_bootstrapped() {
-            return;
-        }
-        // The source connects back to our externally-advertised eD2k TCP port.
-        let our_tcp_port = self
-            .ed2k_reachability
-            .advertised_tcp_port(network.listen_port);
-        // Also register a callback intent so the inbound connect-back is claimed as
-        // this download (the source hellos with its LowID client-id).
-        for source in sources.iter().filter(|s| is_kad_callback_candidate(s)) {
-            let Some(buddy_id) = source.buddy_id else {
-                continue;
-            };
-            let Some(key) = kad_callback_key(source, file_hash) else {
-                continue;
-            };
-            let now = Instant::now();
-            {
-                let mut state = self.state.lock().await;
-                let last_sent = state.ed2k_kad_callback_last_sent.get(&key).copied();
-                if !should_send_kad_callback(last_sent, now, KAD_CALLBACK_INITIATOR_COOLDOWN) {
-                    continue;
-                }
-                // Record the attempt up-front so a concurrent requery round cannot
-                // race a second send within the cooldown.
-                state.ed2k_kad_callback_last_sent.insert(key, now);
-            }
-            self.ed2k_transfers
-                .register_callback_intent(Ed2kCallbackIntent {
-                    client_id: source.client_id,
-                    file_hash: transfer.hash.clone(),
-                    canonical_name: transfer.name.clone(),
-                    file_size: transfer.size_bytes,
-                    source: Ed2kSourceHint {
-                        ip: source.ip.to_string(),
-                        tcp_port: source.tcp_port,
-                        user_hash: source.user_hash.map(hex::encode),
-                    },
-                })
-                .await;
-            let source_peer = SocketAddr::new(IpAddr::V4(source.ip), source.tcp_port);
-            let request = build_kad_callback_req(buddy_id, file_hash, our_tcp_port);
-            if !is_direct_kad_callback_candidate(source) {
-                let dht = dht.clone();
-                let transfer_hash = transfer.hash.clone();
-                let buddy_id_hex = hex::encode(buddy_id);
-                tokio::spawn(async move {
-                    tracing::info!(
-                        "starting Kad FINDSOURCE callback walk file_hash={transfer_hash} source={source_peer} buddy_id={buddy_id_hex}"
-                    );
-                    dht.find_source_search(request, RpcWorkClass::Interactive)
-                        .await;
-                });
-                continue;
-            }
-            let Some((buddy_ip, buddy_port)) = source.buddy_endpoint else {
-                continue;
-            };
-            let buddy_peer = SocketAddr::new(IpAddr::V4(buddy_ip), buddy_port);
-            // MFC sends this unencrypted because the buddy's Kad version/key is
-            // unknown; rust's plain send_packet likewise carries no obfuscation for
-            // a contact we hold no verify key for.
-            match dht
-                .send_packet(buddy_peer, &KadPacket::CallbackReq(request))
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        "sent Kad KADEMLIA_CALLBACK_REQ file_hash={} source={source_peer} buddy={buddy_peer} our_tcp_port={our_tcp_port}",
-                        transfer.hash
-                    );
-                    crate::diag_kad_event::callback(
-                        "sent",
-                        buddy_peer,
-                        source_peer,
-                        &transfer.hash,
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "Kad KADEMLIA_CALLBACK_REQ send failed file_hash={} source={source_peer} buddy={buddy_peer}: {error}",
-                        transfer.hash
-                    );
-                    crate::diag_kad_event::callback(
-                        "send_failed",
-                        buddy_peer,
-                        source_peer,
-                        &transfer.hash,
-                    );
-                }
             }
         }
     }
