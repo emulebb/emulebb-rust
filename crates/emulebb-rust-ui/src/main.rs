@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use reqwest::{Client, StatusCode, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slint::language::{StandardListViewItem, TableColumn};
 use slint::{ModelRc, SharedString, VecModel};
@@ -41,8 +41,24 @@ struct ConnectionConfig {
 enum UiCommand {
     Connect(ConnectionConfig),
     Refresh,
-    TransferAction { hash: String, action: String },
-    ServerAction { action: String },
+    SearchStart {
+        query: String,
+        method: String,
+        file_type: String,
+    },
+    SearchRefresh,
+    SearchDownload {
+        search_id: String,
+        hash: String,
+        paused: bool,
+    },
+    TransferAction {
+        hash: String,
+        action: String,
+    },
+    ServerAction {
+        action: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,6 +218,65 @@ struct LogEntryDto {
     message: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SearchDto {
+    id: String,
+    query: String,
+    method: String,
+    #[serde(rename = "type")]
+    file_type: String,
+    status: String,
+    status_reason: Option<String>,
+    total: Option<u64>,
+    items: Vec<SearchResultDto>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SearchListDto {
+    items: Vec<SearchSessionDto>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SearchSessionDto {
+    id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultDto {
+    search_id: String,
+    method: String,
+    #[serde(rename = "type")]
+    result_type: String,
+    hash: String,
+    name: String,
+    size_bytes: u64,
+    sources: u64,
+    complete_sources: u64,
+    file_type: String,
+    complete: Option<bool>,
+    known_type: String,
+    directory: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchCreateRequest {
+    query: String,
+    method: String,
+    #[serde(rename = "type")]
+    file_type: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultDownloadRequest {
+    paused: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let initial_config = ConnectionConfig {
@@ -220,19 +295,26 @@ fn main() -> Result<()> {
     ui.set_upload_summary("0 active / 0 queued".into());
     ui.set_server_summary("0 known".into());
     ui.set_shared_summary("0 shared".into());
+    ui.set_search_query("".into());
+    ui.set_search_method("automatic".into());
+    ui.set_search_type("".into());
+    ui.set_search_status_line("No active search".into());
     ui.set_transfers(empty_model());
+    ui.set_search_results(empty_model());
     ui.set_uploads(empty_model());
     ui.set_queued_uploads(empty_model());
     ui.set_servers(empty_model());
     ui.set_shared_files(empty_model());
     ui.set_logs(empty_model());
     ui.set_transfer_columns(model(transfer_columns()));
+    ui.set_search_result_columns(model(search_result_columns()));
     ui.set_server_columns(model(server_columns()));
     ui.set_shared_file_columns(model(shared_file_columns()));
     ui.set_upload_columns(model(upload_columns()));
     ui.set_queued_client_columns(model(upload_columns()));
     ui.set_log_columns(model(log_columns()));
     ui.set_transfer_rows(empty_table_model());
+    ui.set_search_result_rows(empty_table_model());
     ui.set_server_rows(empty_table_model());
     ui.set_shared_file_rows(empty_table_model());
     ui.set_upload_rows(empty_table_model());
@@ -240,6 +322,7 @@ fn main() -> Result<()> {
     ui.set_log_rows(empty_table_model());
     ui.set_selected_kind("".into());
     ui.set_selected_id("".into());
+    ui.set_selected_search_id("".into());
     ui.set_inspector_title("Inspector".into());
     ui.set_inspector_detail("Select a row to inspect details and actions.".into());
 
@@ -251,6 +334,9 @@ fn main() -> Result<()> {
 
     let connect_tx = tx.clone();
     let refresh_tx = tx.clone();
+    let search_tx = tx.clone();
+    let search_refresh_tx = tx.clone();
+    let search_download_tx = tx.clone();
     let transfer_tx = tx.clone();
     let server_tx = tx.clone();
     ui.on_connect_requested(move |base_url, api_key| {
@@ -262,6 +348,26 @@ fn main() -> Result<()> {
 
     ui.on_refresh_requested(move || {
         let _ = refresh_tx.send(UiCommand::Refresh);
+    });
+
+    ui.on_search_requested(move |query, method, file_type| {
+        let _ = search_tx.send(UiCommand::SearchStart {
+            query: query.to_string(),
+            method: method.to_string(),
+            file_type: file_type.to_string(),
+        });
+    });
+
+    ui.on_search_refresh_requested(move || {
+        let _ = search_refresh_tx.send(UiCommand::SearchRefresh);
+    });
+
+    ui.on_search_download_requested(move |search_id, hash, paused| {
+        let _ = search_download_tx.send(UiCommand::SearchDownload {
+            search_id: search_id.to_string(),
+            hash: hash.to_string(),
+            paused,
+        });
     });
 
     ui.on_transfer_action_requested(move |hash, action| {
@@ -298,6 +404,7 @@ fn worker_loop(
     };
     let client = Client::new();
     let mut config: Option<ConnectionConfig> = None;
+    let mut active_search_id: Option<String> = None;
     let mut consecutive_failures = 0_u32;
 
     loop {
@@ -310,11 +417,25 @@ fn worker_loop(
         let command = match command {
             Some(UiCommand::Connect(next_config)) => {
                 config = Some(next_config.clone());
+                active_search_id = None;
                 consecutive_failures = 0;
                 publish_refreshing(&weak, true);
-                let result = runtime.block_on(fetch_snapshot(&client, &next_config));
+                let result = runtime.block_on(async {
+                    let snapshot = fetch_snapshot(&client, &next_config).await?;
+                    let search = fetch_latest_search(&client, &next_config)
+                        .await
+                        .ok()
+                        .flatten();
+                    Ok::<_, anyhow::Error>((snapshot, search))
+                });
                 match result {
-                    Ok(snapshot) => {
+                    Ok((snapshot, search)) => {
+                        if let Some(search) = search {
+                            active_search_id = Some(search.id.clone());
+                            publish_search(&weak, search);
+                        } else {
+                            publish_empty_search(&weak, "No active search");
+                        }
                         publish_snapshot(&weak, snapshot);
                     }
                     Err(error) => {
@@ -337,6 +458,7 @@ fn worker_loop(
             publish_refreshing(&weak, true);
         }
 
+        let active_search_id_for_poll = active_search_id.clone();
         let result = match command {
             Some(UiCommand::TransferAction { hash, action }) => runtime.block_on(async {
                 if hash.trim().is_empty() {
@@ -348,7 +470,8 @@ fn worker_loop(
                     &format!("transfers/{hash}/operations/{action}"),
                 )
                 .await?;
-                fetch_snapshot(&client, &config_for_command).await
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, None, None))
             }),
             Some(UiCommand::ServerAction { action }) => runtime.block_on(async {
                 post_operation(
@@ -357,16 +480,82 @@ fn worker_loop(
                     &format!("servers/operations/{action}"),
                 )
                 .await?;
-                fetch_snapshot(&client, &config_for_command).await
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, None, None))
             }),
-            Some(UiCommand::Refresh) | None => {
-                runtime.block_on(fetch_snapshot(&client, &config_for_command))
-            }
+            Some(UiCommand::SearchStart {
+                query,
+                method,
+                file_type,
+            }) => runtime.block_on(async {
+                let created =
+                    create_search(&client, &config_for_command, query, method, file_type).await?;
+                let search_id = created.id.clone();
+                let search = fetch_search(&client, &config_for_command, &search_id)
+                    .await
+                    .unwrap_or(created);
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, Some(search), Some(search_id)))
+            }),
+            Some(UiCommand::SearchRefresh) => runtime.block_on(async {
+                let search = match active_search_id_for_poll {
+                    Some(search_id) => {
+                        fetch_search(&client, &config_for_command, &search_id).await?
+                    }
+                    None => fetch_latest_search(&client, &config_for_command)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("start a search before polling"))?,
+                };
+                let search_id = search.id.clone();
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, Some(search), Some(search_id)))
+            }),
+            Some(UiCommand::SearchDownload {
+                search_id,
+                hash,
+                paused,
+            }) => runtime.block_on(async {
+                if search_id.trim().is_empty() || hash.trim().is_empty() {
+                    anyhow::bail!("select a search result before downloading");
+                }
+                download_search_result(&client, &config_for_command, &search_id, &hash, paused)
+                    .await?;
+                let search = fetch_search(&client, &config_for_command, &search_id)
+                    .await
+                    .ok();
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, search, Some(search_id)))
+            }),
+            Some(UiCommand::Refresh) | None => runtime.block_on(async {
+                let search = match active_search_id_for_poll.as_deref() {
+                    Some(search_id) => fetch_search(&client, &config_for_command, search_id)
+                        .await
+                        .ok(),
+                    None => fetch_latest_search(&client, &config_for_command)
+                        .await
+                        .ok()
+                        .flatten(),
+                };
+                let next_search_id = active_search_id_for_poll.or_else(|| {
+                    search
+                        .as_ref()
+                        .filter(|search| !search.id.trim().is_empty())
+                        .map(|search| search.id.clone())
+                });
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, search, next_search_id))
+            }),
             Some(UiCommand::Connect(_)) => unreachable!("connect commands are handled separately"),
         };
         match result {
-            Ok(snapshot) => {
+            Ok((snapshot, search, next_active_search_id)) => {
                 consecutive_failures = 0;
+                if let Some(search_id) = next_active_search_id {
+                    active_search_id = Some(search_id);
+                }
+                if let Some(search) = search {
+                    publish_search(&weak, search);
+                }
                 publish_snapshot(&weak, snapshot);
             }
             Err(error) => {
@@ -390,6 +579,67 @@ async fn fetch_snapshot(client: &Client, config: &ConnectionConfig) -> Result<Sn
     get(client, config, &format!("snapshot?limit={SNAPSHOT_LIMIT}")).await
 }
 
+async fn create_search(
+    client: &Client,
+    config: &ConnectionConfig,
+    query: String,
+    method: String,
+    file_type: String,
+) -> Result<SearchDto> {
+    let query = query.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    if query.is_empty() {
+        anyhow::bail!("enter a search query");
+    }
+    let request = SearchCreateRequest {
+        query,
+        method: normalize_search_method(&method),
+        file_type: normalize_search_type(&file_type),
+    };
+    post_json(client, config, "searches", &request).await
+}
+
+async fn fetch_search(
+    client: &Client,
+    config: &ConnectionConfig,
+    search_id: &str,
+) -> Result<SearchDto> {
+    get(
+        client,
+        config,
+        &format!("searches/{search_id}?limit=200&includeEvidence=false&exactTotal=true"),
+    )
+    .await
+}
+
+async fn fetch_latest_search(
+    client: &Client,
+    config: &ConnectionConfig,
+) -> Result<Option<SearchDto>> {
+    let searches: SearchListDto = get(client, config, "searches").await?;
+    let Some(search_id) = latest_search_id(&searches.items) else {
+        return Ok(None);
+    };
+    fetch_search(client, config, &search_id).await.map(Some)
+}
+
+async fn download_search_result(
+    client: &Client,
+    config: &ConnectionConfig,
+    search_id: &str,
+    hash: &str,
+    paused: bool,
+) -> Result<()> {
+    let request = SearchResultDownloadRequest { paused };
+    let _: Value = post_json(
+        client,
+        config,
+        &format!("searches/{search_id}/results/{hash}/operations/download"),
+        &request,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn get<T>(client: &Client, config: &ConnectionConfig, path: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -406,6 +656,36 @@ where
         .bytes()
         .await
         .context("failed to read REST response")?;
+    if status.is_success() {
+        let envelope: Envelope<T> =
+            serde_json::from_slice(&bytes).context("failed to decode REST envelope")?;
+        Ok(envelope.data)
+    } else {
+        Err(decode_error(status, &bytes))
+    }
+}
+
+async fn post_json<T, U>(
+    client: &Client,
+    config: &ConnectionConfig,
+    path: &str,
+    body: &U,
+) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+    U: Serialize + ?Sized,
+{
+    let url = endpoint(&config.base_url, path)?;
+    let mut request = client.post(url).json(body);
+    if !config.api_key.trim().is_empty() {
+        request = request.header("X-API-Key", config.api_key.trim());
+    }
+    let response = request.send().await.context("REST operation failed")?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .context("failed to read REST operation response")?;
     if status.is_success() {
         let envelope: Envelope<T> =
             serde_json::from_slice(&bytes).context("failed to decode REST envelope")?;
@@ -502,6 +782,37 @@ fn publish_snapshot(weak: &slint::Weak<MainWindow>, snapshot: Snapshot) {
     });
 }
 
+fn publish_search(weak: &slint::Weak<MainWindow>, search: SearchDto) {
+    let update = move |ui: MainWindow| {
+        let results = search_result_items(&search);
+        ui.set_search_query(search.query.clone().into());
+        ui.set_search_method(search.method.clone().into());
+        ui.set_search_type(search.file_type.clone().into());
+        ui.set_search_status_line(search_status_line(&search).into());
+        ui.set_search_result_rows(table_model(search_result_table_rows(&results)));
+        ui.set_search_results(model(results));
+    };
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            update(ui);
+        }
+    });
+}
+
+fn publish_empty_search(weak: &slint::Weak<MainWindow>, status: &str) {
+    let status = status.to_string();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_search_status_line(status.into());
+            ui.set_search_result_rows(empty_table_model());
+            ui.set_search_results(empty_model());
+            ui.set_selected_search_id("".into());
+        }
+    });
+}
+
 fn publish_poll_error(
     weak: &slint::Weak<MainWindow>,
     message: String,
@@ -579,6 +890,45 @@ fn transfer_items(transfers: &[TransferDto]) -> Vec<TransferItem> {
                     item.sources_transferring.unwrap_or(0)
                 )),
                 category: text(item.category_name.as_deref().unwrap_or("Uncategorized")),
+                detail: text(detail),
+            }
+        })
+        .collect()
+}
+
+fn search_result_items(search: &SearchDto) -> Vec<SearchResultItem> {
+    search
+        .items
+        .iter()
+        .map(|item| {
+            let detail = format!(
+                "Search: {} ({})\nHash: {}\nName: {}\nSize: {}\nSources: {} total, {} complete\nMethod: {}\nKnown state: {}\nType: {}\nDirectory: {}",
+                search.id,
+                search.query,
+                item.hash,
+                item.name,
+                bytes(item.size_bytes),
+                item.sources,
+                item.complete_sources,
+                item.method,
+                item.known_type,
+                display_or(&item.file_type, &item.result_type),
+                item.directory.as_deref().unwrap_or("-")
+            );
+            SearchResultItem {
+                search_id: text(&item.search_id),
+                hash: text(&item.hash),
+                name: text(display_or(&item.name, &item.hash)),
+                size_text: text(bytes(item.size_bytes)),
+                sources_text: text(item.sources.to_string()),
+                complete_sources_text: text(item.complete_sources.to_string()),
+                file_type: text(display_or(&item.file_type, &item.result_type)),
+                method: text(&item.method),
+                known_type: text(if item.complete.unwrap_or(false) {
+                    "complete"
+                } else {
+                    display_or(&item.known_type, "unknown")
+                }),
                 detail: text(detail),
             }
         })
@@ -735,6 +1085,19 @@ fn transfer_columns() -> Vec<TableColumn> {
     ])
 }
 
+fn search_result_columns() -> Vec<TableColumn> {
+    columns(&[
+        ("Name", 410.0, 2.0),
+        ("Size", 96.0, 0.0),
+        ("Sources", 82.0, 0.0),
+        ("Complete", 86.0, 0.0),
+        ("Type", 92.0, 0.0),
+        ("Method", 92.0, 0.0),
+        ("Known", 112.0, 0.0),
+        ("Hash", 260.0, 1.0),
+    ])
+}
+
 fn server_columns() -> Vec<TableColumn> {
     columns(&[
         ("Name", 230.0, 2.0),
@@ -805,6 +1168,24 @@ fn transfer_table_rows(items: &[TransferItem]) -> Vec<Vec<StandardListViewItem>>
                 item.speed_text.clone(),
                 item.sources_text.clone(),
                 item.category.clone(),
+            ])
+        })
+        .collect()
+}
+
+fn search_result_table_rows(items: &[SearchResultItem]) -> Vec<Vec<StandardListViewItem>> {
+    items
+        .iter()
+        .map(|item| {
+            row([
+                item.name.clone(),
+                item.size_text.clone(),
+                item.sources_text.clone(),
+                item.complete_sources_text.clone(),
+                item.file_type.clone(),
+                item.method.clone(),
+                item.known_type.clone(),
+                item.hash.clone(),
             ])
         })
         .collect()
@@ -981,6 +1362,44 @@ fn shared_summary(snapshot: &Snapshot) -> String {
         snapshot.shared_files.len(),
         bytes(total_size)
     )
+}
+
+fn search_status_line(search: &SearchDto) -> String {
+    let total = search.total.unwrap_or(search.items.len() as u64);
+    let reason = search
+        .status_reason
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" | {value}"))
+        .unwrap_or_default();
+    format!(
+        "{} | {} | {} results{}",
+        search.query,
+        display_or(&search.status, "unknown"),
+        total,
+        reason
+    )
+}
+
+fn normalize_search_method(method: &str) -> String {
+    match method.trim().to_ascii_lowercase().as_str() {
+        "" => "automatic".to_string(),
+        "auto" => "automatic".to_string(),
+        "automatic" | "server" | "global" | "kad" => method.trim().to_ascii_lowercase(),
+        _ => method.trim().to_ascii_lowercase(),
+    }
+}
+
+fn normalize_search_type(file_type: &str) -> String {
+    file_type.trim().to_ascii_lowercase()
+}
+
+fn latest_search_id(items: &[SearchSessionDto]) -> Option<String> {
+    items
+        .iter()
+        .filter(|item| !item.id.trim().is_empty())
+        .max_by_key(|item| item.id.parse::<u64>().unwrap_or(0))
+        .map(|item| item.id.clone())
 }
 
 fn empty_model<T: Clone + 'static>() -> ModelRc<T> {

@@ -57,6 +57,19 @@ export struct LogItem {
     message: string,
 }
 
+export struct SearchResultItem {
+    search-id: string,
+    hash: string,
+    name: string,
+    size-text: string,
+    sources-text: string,
+    complete-sources-text: string,
+    file-type: string,
+    method: string,
+    known-type: string,
+    detail: string,
+}
+
 component TabButton inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -139,19 +152,26 @@ export component MainWindow inherits Window {
     in-out property <string> upload-summary;
     in-out property <string> server-summary;
     in-out property <string> shared-summary;
+    in-out property <string> search-query;
+    in-out property <string> search-method;
+    in-out property <string> search-type;
+    in-out property <string> search-status-line;
     in-out property <[TransferItem]> transfers;
+    in-out property <[SearchResultItem]> search-results;
     in-out property <[UploadItem]> uploads;
     in-out property <[UploadItem]> queued-uploads;
     in-out property <[ServerItem]> servers;
     in-out property <[SharedFileItem]> shared-files;
     in-out property <[LogItem]> logs;
     in-out property <[TableColumn]> transfer-columns;
+    in-out property <[TableColumn]> search-result-columns;
     in-out property <[TableColumn]> server-columns;
     in-out property <[TableColumn]> shared-file-columns;
     in-out property <[TableColumn]> upload-columns;
     in-out property <[TableColumn]> queued-client-columns;
     in-out property <[TableColumn]> log-columns;
     in-out property <[[StandardListViewItem]]> transfer-rows;
+    in-out property <[[StandardListViewItem]]> search-result-rows;
     in-out property <[[StandardListViewItem]]> server-rows;
     in-out property <[[StandardListViewItem]]> shared-file-rows;
     in-out property <[[StandardListViewItem]]> upload-rows;
@@ -160,12 +180,16 @@ export component MainWindow inherits Window {
     in-out property <int> selected-tab;
     in-out property <string> selected-kind;
     in-out property <string> selected-id;
+    in-out property <string> selected-search-id;
     in-out property <string> inspector-title;
     in-out property <string> inspector-detail;
     in-out property <bool> is-refreshing;
 
     callback connect-requested(string, string);
     callback refresh-requested();
+    callback search-requested(string, string, string);
+    callback search-refresh-requested();
+    callback search-download-requested(string, string, bool);
     callback transfer-action-requested(string, string);
     callback server-action-requested(string);
 
@@ -327,11 +351,83 @@ export component MainWindow inherits Window {
                 detail: "The REST snapshot did not return any known servers.";
             }
 
-            if root.selected-tab == 2 : EmptyState {
+            if root.selected-tab == 2 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                title: "Search";
-                detail: "Search is reserved for the eD2K/Kad search workflow. The current REST snapshot does not expose search sessions or results yet.";
+                background: #ffffff;
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 38px;
+                        background: #f8fafc;
+                        border-color: #d7dee8;
+                        border-width: 1px;
+                        border-radius: 3px;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 6px;
+
+                            LineEdit {
+                                text <=> root.search-query;
+                                placeholder-text: "Search query";
+                                min-width: 360px;
+                            }
+                            LineEdit {
+                                text <=> root.search-method;
+                                placeholder-text: "automatic, global, server, kad";
+                                min-width: 150px;
+                            }
+                            LineEdit {
+                                text <=> root.search-type;
+                                placeholder-text: "type";
+                                min-width: 92px;
+                            }
+                            Button {
+                                text: "Start";
+                                enabled: !root.is-refreshing;
+                                clicked => { root.search-requested(root.search-query, root.search-method, root.search-type); }
+                            }
+                            Button {
+                                text: "Poll";
+                                enabled: !root.is-refreshing;
+                                clicked => { root.search-refresh-requested(); }
+                            }
+                            Text {
+                                text: root.search-status-line;
+                                color: #334155;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    if root.search-result-rows.length > 0 : StandardTableView {
+                        columns <=> root.search-result-columns;
+                        rows: root.search-result-rows;
+                        current-row-changed(row) => {
+                            if row >= 0 && row < root.search-results.length {
+                                root.selected-kind = "search-result";
+                                root.selected-id = root.search-results[row].hash;
+                                root.selected-search-id = root.search-results[row].search-id;
+                                root.inspector-title = root.search-results[row].name;
+                                root.inspector-detail = root.search-results[row].detail;
+                            }
+                        }
+                    }
+
+                    if root.search-result-rows.length == 0 : EmptyState {
+                        title: "No search results";
+                        detail: root.search-status-line == "" ? "Start a search to populate this table." : root.search-status-line;
+                    }
+                }
             }
 
             if root.selected-tab == 3 && root.transfer-rows.length > 0 : StandardTableView {
@@ -470,6 +566,8 @@ export component MainWindow inherits Window {
                     if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
                     if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
                     if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
+                    if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
+                    if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
                     if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect"); } }
                     if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect"); } }
                 }
