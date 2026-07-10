@@ -4,10 +4,13 @@ use crate::traversal::refresh::{NodeRefreshConfig, NodeRefreshOutcome, run_node_
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use emulebb_kad_net::RpcWorkClass;
-use emulebb_kad_proto::packet::FindBuddyReq;
+use emulebb_kad_proto::packet::{CallbackReq, FindBuddyReq};
 use emulebb_kad_proto::{
     Ed2kHash, NodeId, SearchKeyReq, SearchSourceReq,
-    constants::{K, SEARCHFINDBUDDY_LIFETIME_SECS, SEARCHFINDBUDDY_TOTAL, STORE_STOP_GRACE_SECS},
+    constants::{
+        K, SEARCHFINDBUDDY_LIFETIME_SECS, SEARCHFINDBUDDY_TOTAL, SEARCHFINDSOURCE_LIFETIME_SECS,
+        SEARCHFINDSOURCE_TOTAL, STORE_STOP_GRACE_SECS,
+    },
 };
 use emulebb_kad_routing::Contact;
 use std::net::{IpAddr, SocketAddr};
@@ -21,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 /// dispatch, so the walk itself ends at the stop mark.
 const FIND_BUDDY_LOOKUP_TIMEOUT: Duration =
     Duration::from_secs(SEARCHFINDBUDDY_LIFETIME_SECS - STORE_STOP_GRACE_SECS);
+const FIND_SOURCE_LOOKUP_TIMEOUT: Duration =
+    Duration::from_secs(SEARCHFINDSOURCE_LIFETIME_SECS - STORE_STOP_GRACE_SECS);
 
 impl DhtNode {
     /// Iterative node lookup. Returns up to K contacts closest to target.
@@ -167,6 +172,29 @@ impl DhtNode {
             timeout: FIND_BUDDY_LOOKUP_TIMEOUT,
             query_timeout: Duration::from_secs(10),
             phase2_fanout: SEARCHFINDBUDDY_TOTAL,
+            cancel: CancellationToken::new(),
+            result_tx: None,
+            work_class,
+            ip_filter: self.ip_filter(),
+            res_contact_sink: Some(self.res_contact_sink()),
+        };
+        let _ = run_traversal(&self.inner.rpc, initial, config).await;
+    }
+
+    /// Locate an unknown buddy endpoint and send the source callback request to
+    /// close contacts, matching MFC's `CSearch::FINDSOURCE` fallback.
+    pub async fn find_source_search(&self, request: CallbackReq, work_class: RpcWorkClass) {
+        let target = request.buddy_id;
+        let Ok(_permit) = self.try_acquire_search_permit(target) else {
+            return;
+        };
+        let initial = self.closest_traversal_seed(&target).await;
+        let config = TraversalConfig {
+            target,
+            search_kind: TraversalKind::FindSource { request },
+            timeout: FIND_SOURCE_LOOKUP_TIMEOUT,
+            query_timeout: Duration::from_secs(10),
+            phase2_fanout: SEARCHFINDSOURCE_TOTAL,
             cancel: CancellationToken::new(),
             result_tx: None,
             work_class,
@@ -543,7 +571,7 @@ impl DhtNode {
 
 #[cfg(test)]
 mod tests {
-    use super::FIND_BUDDY_LOOKUP_TIMEOUT;
+    use super::{FIND_BUDDY_LOOKUP_TIMEOUT, FIND_SOURCE_LOOKUP_TIMEOUT};
     use crate::{DhtConfig, DhtNode};
     use emulebb_kad_net::RpcWorkClass;
     use emulebb_kad_proto::{
@@ -559,6 +587,11 @@ mod tests {
     #[test]
     fn find_buddy_walk_budget_is_lifetime_minus_stop_grace() {
         assert_eq!(FIND_BUDDY_LOOKUP_TIMEOUT.as_secs(), 80);
+    }
+
+    #[test]
+    fn find_source_walk_budget_is_lifetime_minus_stop_grace() {
+        assert_eq!(FIND_SOURCE_LOOKUP_TIMEOUT.as_secs(), 25);
     }
 
     /// The 4-hour NODECOMPLETE self-lookup targets our OWN KadID and goes on

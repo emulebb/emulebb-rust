@@ -2,7 +2,7 @@ use super::*;
 use emulebb_kad_net::MockTransport;
 use emulebb_kad_net::{ObfuscationLayer, RpcConfig};
 use emulebb_kad_proto::constants::OP_KADEMLIAHEADER;
-use emulebb_kad_proto::{Ed2kHash, packet::SearchRes};
+use emulebb_kad_proto::{CallbackReq, Ed2kHash, packet::SearchRes};
 use emulebb_kad_proto::{KadPacket, NodeId};
 use std::sync::Arc;
 
@@ -48,6 +48,25 @@ fn test_candidate_sorting() {
     candidates.sort_by_key(|candidate| candidate.distance);
     // 0x01... is closer to ZERO than 0xFF...
     assert_eq!(candidates[0].contact.id, NodeId::from_bytes([0x01; 16]));
+}
+
+#[test]
+fn find_source_uses_value_lookup_and_callback_packet() {
+    let target = NodeId::from_bytes([0x52; 16]);
+    let request = CallbackReq {
+        buddy_id: target,
+        file_hash: Ed2kHash::from_bytes([0xA4; 16]),
+        tcp_port: 4662,
+    };
+    let kind = TraversalKind::FindSource {
+        request: request.clone(),
+    };
+
+    assert_eq!(req_count_for_kind(&kind), KADEMLIA_FIND_VALUE);
+    let KadPacket::CallbackReq(sent) = search_phase_packet(&kind, target) else {
+        panic!("expected KADEMLIA_CALLBACK_REQ");
+    };
+    assert_eq!(sent, request);
 }
 
 #[test]

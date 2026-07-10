@@ -58,6 +58,10 @@ pub const SEARCHFINDBUDDY_LIFETIME_SECS: u64 = 100;
 /// (`Search.cpp:892` `++m_uAnswers`); the manager stops the search once the
 /// target is reached (`SearchManager.cpp:324`).
 pub const SEARCHFINDBUDDY_TOTAL: usize = 10;
+/// FINDSOURCE search lifetime in seconds (MFC `SEARCHFINDSOURCE_LIFETIME`).
+pub const SEARCHFINDSOURCE_LIFETIME_SECS: u64 = 45;
+/// Maximum callback relays contacted by one FINDSOURCE walk.
+pub const SEARCHFINDSOURCE_TOTAL: usize = 20;
 pub const REPUBLISH_INTERVAL_SECS: u64 = 18_000;
 
 /// Contacts to request in Req for value lookups (Keyword/Source/Notes/File).

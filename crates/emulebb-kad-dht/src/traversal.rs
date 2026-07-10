@@ -18,7 +18,9 @@ use emulebb_kad_proto::{
         KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
     },
     opcode,
-    packet::{ContactEntry, FindBuddyReq, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq},
+    packet::{
+        CallbackReq, ContactEntry, FindBuddyReq, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq,
+    },
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -106,6 +108,9 @@ pub enum TraversalKind {
     /// tolerance-passing responded contact (oracle `CSearch` type FINDBUDDY,
     /// `Search.cpp:864-896`).
     FindBuddy { request: FindBuddyReq },
+    /// FINDSOURCE walk used when a LowID source's buddy ID is known but the
+    /// buddy endpoint is not. Sends `KADEMLIA_CALLBACK_REQ` to close contacts.
+    FindSource { request: CallbackReq },
 }
 
 /// Inputs for one full traversal run.
@@ -879,6 +884,7 @@ fn search_phase_packet(kind: &TraversalKind, target: NodeId) -> KadPacket {
         // target id + own client hash + own TCP port, sent to each
         // tolerance-passing responded contact as the walk progresses.
         TraversalKind::FindBuddy { request } => KadPacket::FindBuddyReq(request.clone()),
+        TraversalKind::FindSource { request } => KadPacket::CallbackReq(request.clone()),
         TraversalKind::FindNode | TraversalKind::Store => unreachable!(),
     }
 }

@@ -25,15 +25,8 @@
 //!   `token = MIN2MS(1) / 1`); the sender additionally never re-issues while a
 //!   source sits in `DS_WAITCALLBACKKAD` (reaped at `SEC2MS(45)`).
 //!
-//! The `Search.cpp:918` `FINDSOURCE` traversal variant — used when the buddy's
-//! IP/port is NOT known and a Kad lookup must first locate the buddy — is
-//! deliberately OUT of scope here (see the module-level TODO below).
-//
-// TODO(RUST-FEAT buddy-callback): the FINDSOURCE traversal variant
-// (`Search.cpp` `CSearch::FINDSOURCE`, ~line 897-925) sends `KADEMLIA_CALLBACK_REQ`
-// to every contact discovered near the buddy target when the buddy IP:port is
-// unknown. That path needs a dedicated Kad search kind and is intentionally not
-// implemented yet; only the direct callback (buddy endpoint known) is handled.
+//! When the buddy endpoint is unknown, the same request is sent through the
+//! bounded `CSearch::FINDSOURCE`-shaped Kad traversal.
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -66,10 +59,17 @@ pub(crate) fn kad_callback_key(
     source: &Ed2kFoundSource,
     file_hash: Ed2kHash,
 ) -> Option<KadCallbackKey> {
-    if !is_direct_kad_callback_candidate(source) {
+    if !is_kad_callback_candidate(source) {
         return None;
     }
     Some((source.ip, source.tcp_port, file_hash))
+}
+
+/// Whether the source has the identity required for either direct callback or
+/// the FINDSOURCE fallback.
+#[must_use]
+pub(crate) fn is_kad_callback_candidate(source: &Ed2kFoundSource) -> bool {
+    source.low_id && source.buddy_id.is_some()
 }
 
 /// Whether `source` can be reached with a *direct* Kad callback right now: it is a
@@ -169,7 +169,16 @@ mod tests {
         let mut zero_port = buddy_source(file_hash);
         zero_port.buddy_endpoint = Some((Ipv4Addr::new(198, 51, 100, 9), 0));
         assert!(!is_direct_kad_callback_candidate(&zero_port));
-        assert_eq!(kad_callback_key(&zero_port, file_hash), None);
+        assert_eq!(
+            kad_callback_key(&zero_port, file_hash),
+            Some((Ipv4Addr::new(192, 0, 2, 77), 4662, file_hash))
+        );
+
+        let mut unknown_endpoint = buddy_source(file_hash);
+        unknown_endpoint.buddy_endpoint = None;
+        assert!(is_kad_callback_candidate(&unknown_endpoint));
+        assert!(!is_direct_kad_callback_candidate(&unknown_endpoint));
+        assert!(kad_callback_key(&unknown_endpoint, file_hash).is_some());
 
         // A HighID (direct-dialable) source is never a callback candidate.
         let mut high_id = buddy_source(file_hash);
