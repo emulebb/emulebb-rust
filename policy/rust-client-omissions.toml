@@ -20,11 +20,11 @@ review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRME
 id = "conn-rate-spike-modifier"
 area = "ed2k"
 stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (CListenSocket::TooManySockets / GetMaxConperFiveModifier, ListenSocket.cpp:2653,2722-2728). The modifier is a SUPPRESSOR, not a raiser: it returns a multiplier in [0,1) computed from the recent open-socket spike ((SpikeSize > SpikeTolerance) ? 0 : 1 - SpikeSize/SpikeTolerance), so during a connection spike stock throttles its effective per-5s budget BELOW GetMaxConperFive() (down to 0), then relaxes back to the flat budget as the spike subsides."
-rust_behavior = "The Rust coordinator does not implement the spike modifier: the per-window new-connection budget is a flat max_connections_per_window (GetMaxConperFive) with no spike-driven suppression."
-reason = "The rolling 5s window rust does implement (see conn-rate-rolling-five-second-window) already keeps the steady-state rate at or below stock and never per-tick-bursts, which covers the common case. The spike suppressor is the one connection-pacing behavior whose omission leaves rust MORE aggressive than stock on the spike axis (rust holds the flat budget where stock would throttle toward 0). Practical exposure on a headless VPN'd node is low because GetOpenSockets rarely spikes far above its average, so it is deferred rather than a blocker - but unlike the other conn-rate omissions this one runs counter to the be-gentle posture, so implementing it would move rust toward the goal (see review_disposition)."
-compatibility = "Does not affect eD2K or Kad wire compatibility (connection pacing only, no protocol packet difference). Correction to the earlier claim: this omission is NOT strictly equal-or-gentler - during a connection spike rust admits new connections at the flat budget where stock suppresses below it, so rust can be momentarily more aggressive than the master on the spike axis."
-review_disposition = "defer"
-review_disposition_note = "RUST-PAR-019 round-19 omission re-audit (2026-07-08): the registry stock_behavior was factually INVERTED (described the modifier as raising the rate; GetMaxConperFiveModifier ListenSocket.cpp:2722-2728 is a [0,1) suppressor). Text corrected. DEFER: no protocol-packet surface and low headless exposure, but this is the single conn-rate omission whose implementation would make rust gentler (spike suppression), so rank it first for a be-gentle revisit."
+rust_behavior = "IMPLEMENTED (RUST-PAR-026): the Rust download coordinator samples its live connection count once per second, maintains MFC's capped moving average, and applies GetMaxConperFiveModifier's [0,1) spike suppressor to the five-second admission window with the same strict-greater-than boundary."
+reason = "RUST-PAR-026 closed the only connection-pacing axis where Rust could be more aggressive than MFC during a sudden socket burst."
+compatibility = "No packet shape changed; connection admission pacing now matches MFC's adaptive suppressor."
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-026 (2026-07-10): IMPLEMENTED in download_coordinator.rs with focused burst and zero-modifier boundary tests. No longer an omission; retained as audit history."
 
 [[omissions]]
 id = "upload-throttle-focus-slot-distribution"
