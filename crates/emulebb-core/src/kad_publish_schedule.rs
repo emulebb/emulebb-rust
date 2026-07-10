@@ -87,11 +87,13 @@ fn instant_to_wall_ms(last: Instant, now_instant: Instant, now_unix_ms: i64) -> 
     now_unix_ms.saturating_sub(i64::try_from(elapsed_ms).unwrap_or(i64::MAX))
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct FilePublishState {
     last_source: Option<Instant>,
     last_source_buddy_ip: Option<Ipv4Addr>,
     last_notes: Option<Instant>,
+    keywords: HashMap<String, Instant>,
+    keyword_terms: Vec<String>,
 }
 
 /// Node-load average above which a completed keyword store defers that
@@ -108,7 +110,6 @@ const KEYWORD_LOAD_DEFER_FULL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 #[derive(Debug, Default)]
 pub(crate) struct KadPublishSchedule {
     files: HashMap<String, FilePublishState>,
-    keywords: HashMap<(String, String), Instant>,
     /// Per-keyword load deferrals (oracle `CIndexed::AddLoad` keyed by the
     /// keyword target id — global across files sharing the keyword).
     keyword_load_deferrals: HashMap<String, Instant>,
@@ -131,8 +132,9 @@ impl KadPublishSchedule {
             return false;
         }
         match self
-            .keywords
-            .get(&(file_hash.to_string(), keyword.to_string()))
+            .files
+            .get(file_hash)
+            .and_then(|state| state.keywords.get(keyword))
             .copied()
         {
             None => true,
@@ -179,9 +181,11 @@ impl KadPublishSchedule {
 
     /// Record that the file's keyword was (re)published at `now`.
     pub(crate) fn mark_keyword_published(&mut self, file_hash: &str, keyword: &str, now: Instant) {
-        self.files.entry(file_hash.to_string()).or_default();
-        self.keywords
-            .insert((file_hash.to_string(), keyword.to_string()), now);
+        self.files
+            .entry(file_hash.to_string())
+            .or_default()
+            .keywords
+            .insert(keyword.to_string(), now);
     }
 
     /// Record that the file's source was (re)published at `now`.
@@ -240,8 +244,9 @@ impl KadPublishSchedule {
     /// the keyword kind. Only this (file, keyword) pair is affected; sibling
     /// keywords and the source/notes timers are unaffected.
     pub(crate) fn reset_keyword(&mut self, file_hash: &str, keyword: &str) {
-        self.keywords
-            .remove(&(file_hash.to_string(), keyword.to_string()));
+        if let Some(state) = self.files.get_mut(file_hash) {
+            state.keywords.remove(keyword);
+        }
     }
 
     /// Record that the file's notes were (re)published at `now`.
@@ -312,21 +317,26 @@ impl KadPublishSchedule {
     pub(crate) fn retain_only<'a>(&mut self, keep: impl IntoIterator<Item = &'a str>) {
         let keep: std::collections::HashSet<&str> = keep.into_iter().collect();
         self.files.retain(|hash, _| keep.contains(hash.as_str()));
-        self.keywords
-            .retain(|(hash, _), _| keep.contains(hash.as_str()));
     }
 
-    /// Drop keyword bookkeeping for terms no longer derived from this file's
-    /// current filename. This bounds per-file keyword state when metadata changes.
-    pub(crate) fn retain_keywords<'a>(
-        &mut self,
-        file_hash: &str,
-        keep_keywords: impl IntoIterator<Item = &'a str>,
-    ) {
-        let keep_keywords: std::collections::HashSet<&str> = keep_keywords.into_iter().collect();
-        self.keywords.retain(|(hash, keyword), _| {
-            hash != file_hash || keep_keywords.contains(keyword.as_str())
-        });
+    /// Update remembered filename-derived keyword terms for one file, pruning only
+    /// that file's keyword clocks when the derived set actually changed. Returns
+    /// true when pruning ran.
+    pub(crate) fn sync_keyword_terms(&mut self, file_hash: &str, keep_keywords: &[String]) -> bool {
+        let state = self.files.entry(file_hash.to_string()).or_default();
+        if state.keyword_terms.as_slice() == keep_keywords {
+            return false;
+        }
+
+        let keep_set = keep_keywords
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        state
+            .keywords
+            .retain(|keyword, _| keep_set.contains(keyword.as_str()));
+        state.keyword_terms = keep_keywords.to_vec();
+        true
     }
 
     /// Rotating scan cursor for budgeted publish rounds. The publish loop uses
@@ -640,16 +650,37 @@ mod tests {
     }
 
     #[test]
-    fn retain_keywords_drops_stale_filename_terms() {
+    fn sync_keyword_terms_drops_stale_filename_terms() {
         let mut sched = KadPublishSchedule::new();
         let now = Instant::now();
         sched.mark_keyword_published(HASH, "ubuntu", now);
         sched.mark_keyword_published(HASH, "python", now);
 
-        sched.retain_keywords(HASH, ["python"]);
+        sched.sync_keyword_terms(HASH, &["python".to_string()]);
 
         assert!(sched.keyword_due(HASH, "ubuntu", now));
         assert!(!sched.keyword_due(HASH, "python", now));
+    }
+
+    #[test]
+    fn sync_keyword_terms_prunes_only_when_terms_change() {
+        let mut sched = KadPublishSchedule::new();
+        let now = Instant::now();
+        sched.mark_keyword_published(HASH, "ubuntu", now);
+        sched.mark_keyword_published(HASH, "python", now);
+        sched.mark_keyword_published("otherhash", "ubuntu", now);
+
+        let original_terms = vec!["ubuntu".to_string(), "python".to_string()];
+        assert!(sched.sync_keyword_terms(HASH, &original_terms));
+        assert!(!sched.sync_keyword_terms(HASH, &original_terms));
+        assert!(!sched.keyword_due(HASH, "ubuntu", now));
+        assert!(!sched.keyword_due(HASH, "python", now));
+
+        let changed_terms = vec!["python".to_string()];
+        assert!(sched.sync_keyword_terms(HASH, &changed_terms));
+        assert!(sched.keyword_due(HASH, "ubuntu", now));
+        assert!(!sched.keyword_due(HASH, "python", now));
+        assert!(!sched.keyword_due("otherhash", "ubuntu", now));
     }
 
     #[test]

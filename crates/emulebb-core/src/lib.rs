@@ -6051,7 +6051,7 @@ async fn publish_kad_due_shared_files(
     for (offset, entry) in shared_files.iter().enumerate() {
         let now = Instant::now();
         let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
-        schedule.retain_keywords(&entry.file_hash, keyword_terms.iter().map(String::as_str));
+        schedule.sync_keyword_terms(&entry.file_hash, &keyword_terms);
         // Only completed files trigger keyword publishes (oracle `!IsPartFile()`
         // gate); an in-progress partfile in the source scan never emits keywords.
         let due_keyword = if keyword_index.contains_key(&entry.file_hash) {
@@ -6702,11 +6702,35 @@ struct KadPublishCandidateSets {
     /// KEYWORD-lane candidate list: completed files only, mirroring the oracle
     /// keyword loop's `!IsPartFile()` gate (SharedFileList.cpp:3313) — "only
     /// publish complete files as someone else should have the full file."
-    keyword_files: Vec<MetadataTransferPublishEntry>,
+    ///
+    /// This is intentionally narrower than `MetadataTransferPublishEntry`: keyword
+    /// STORE packets only need name, size, file hash and AICH root. Keeping the full
+    /// transfer-publish entry here clones upload counters/comments/priority for
+    /// every complete file on every Kad publish tick.
+    keyword_files: Vec<KadKeywordPublishCandidate>,
     /// Position of each keyword-eligible (completed) file within `keyword_files`,
     /// so a scanned file can be tested for keyword eligibility and its keyword
     /// batch can start at the triggering file and wrap.
     keyword_index: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KadKeywordPublishCandidate {
+    file_hash: String,
+    canonical_name: String,
+    file_size: u64,
+    aich_root: Option<String>,
+}
+
+fn kad_keyword_publish_candidate_from_shared_entry(
+    entry: &Ed2kSharedEntry,
+) -> KadKeywordPublishCandidate {
+    KadKeywordPublishCandidate {
+        file_hash: entry.file_hash.clone(),
+        canonical_name: entry.canonical_name.clone(),
+        file_size: entry.file_size,
+        aich_root: entry.aich_root.clone(),
+    }
 }
 
 /// Whether a shared-catalog entry may be published as a Kad SOURCE: one of our
@@ -6886,7 +6910,7 @@ fn compute_kad_publish_candidates(
     let keyword_order = ranked_shared_entry_order(&keyword_refs, now_unix_ms, |_| 0);
     let keyword_files = keyword_order
         .iter()
-        .map(|&index| kad_publish_entry_from_shared_entry(keyword_refs[index]))
+        .map(|&index| kad_keyword_publish_candidate_from_shared_entry(keyword_refs[index]))
         .collect::<Vec<_>>();
     let keyword_index = keyword_files
         .iter()
@@ -7012,7 +7036,7 @@ fn keyword_publish_complete_source_count(other_complete_sources: u32) -> u32 {
 }
 
 fn kad_keyword_publish_entries_for_keyword(
-    shared_files: &[MetadataTransferPublishEntry],
+    shared_files: &[KadKeywordPublishCandidate],
     keyword: &str,
     limit: usize,
     start_index: usize,
@@ -10308,6 +10332,15 @@ mod tests {
             .enumerate()
             .map(|(i, e)| (e.file_hash.clone(), i))
             .collect();
+        let old_keyword_candidates = old_keyword_files
+            .iter()
+            .map(|entry| KadKeywordPublishCandidate {
+                file_hash: entry.file_hash.clone(),
+                canonical_name: entry.canonical_name.clone(),
+                file_size: entry.file_size,
+                aich_root: entry.aich_root.clone(),
+            })
+            .collect::<Vec<_>>();
 
         let n = old_source_full.len();
         assert_eq!(n, 6, "5 completed + 1 servable partfile are source-eligible");
@@ -10343,7 +10376,7 @@ mod tests {
             assert_eq!(cand.source_scan, old_window, "window differs at cursor {start}");
             assert_eq!(cand.best_notes_hash, old_best_notes);
             assert_eq!(cand.best_notes_hash.as_deref(), Some(catalog[2].file_hash.as_str()));
-            assert_eq!(cand.keyword_files, old_keyword_files);
+            assert_eq!(cand.keyword_files, old_keyword_candidates);
             assert_eq!(cand.keyword_index, old_keyword_index);
 
             schedule.advance_cursor(start, window_len, n);
@@ -11232,40 +11265,18 @@ mod tests {
     #[test]
     fn keyword_publish_entries_batch_matching_files_up_to_stock_limit() {
         let mut shared_files = (0..160)
-            .map(|index| MetadataTransferPublishEntry {
+            .map(|index| KadKeywordPublishCandidate {
                 file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
                 canonical_name: format!("Ubuntu Python Sample {index}.iso"),
                 file_size: 1000 + index,
                 aich_root: None,
-                upload_priority: "normal".to_string(),
-                auto_upload_priority: false,
-                session_uploaded_bytes: 0,
-                session_request_count: 0,
-                session_accept_count: 0,
-                all_time_uploaded_bytes: 0,
-                all_time_upload_requests: 0,
-                all_time_upload_accepts: 0,
-                last_upload_request_ms: 0,
-                comment: String::new(),
-                rating: 0,
             })
             .collect::<Vec<_>>();
-        shared_files.push(MetadataTransferPublishEntry {
+        shared_files.push(KadKeywordPublishCandidate {
             file_hash: Ed2kHash::from_bytes([0xFE; 16]).to_string(),
             canonical_name: "Apache Camel Sample.iso".to_string(),
             file_size: 1,
             aich_root: None,
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            session_uploaded_bytes: 0,
-            session_request_count: 0,
-            session_accept_count: 0,
-            all_time_uploaded_bytes: 0,
-            all_time_upload_requests: 0,
-            all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
-            comment: String::new(),
-            rating: 0,
         });
 
         let entries = kad_keyword_publish_entries_for_keyword(
@@ -11288,22 +11299,11 @@ mod tests {
     #[test]
     fn keyword_publish_entries_start_at_triggering_file_and_wrap() {
         let shared_files = (0..160)
-            .map(|index| MetadataTransferPublishEntry {
+            .map(|index| KadKeywordPublishCandidate {
                 file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
                 canonical_name: format!("Ubuntu Python Sample {index}.iso"),
                 file_size: 1000 + index,
                 aich_root: None,
-                upload_priority: "normal".to_string(),
-                auto_upload_priority: false,
-                session_uploaded_bytes: 0,
-                session_request_count: 0,
-                session_accept_count: 0,
-                all_time_uploaded_bytes: 0,
-                all_time_upload_requests: 0,
-                all_time_upload_accepts: 0,
-                last_upload_request_ms: 0,
-                comment: String::new(),
-                rating: 0,
             })
             .collect::<Vec<_>>();
 
@@ -11336,22 +11336,11 @@ mod tests {
         // rust tracks no other complete sources for shared files, so the built
         // keyword entry carries the self-only TAG_SOURCES value of 1 rather than
         // a hardcoded constant divorced from the oracle semantics.
-        let shared_files = vec![MetadataTransferPublishEntry {
+        let shared_files = vec![KadKeywordPublishCandidate {
             file_hash: Ed2kHash::from_bytes([7_u8; 16]).to_string(),
             canonical_name: "Ubuntu Sample.iso".to_string(),
             file_size: 4096,
             aich_root: None,
-            upload_priority: "normal".to_string(),
-            auto_upload_priority: false,
-            session_uploaded_bytes: 0,
-            session_request_count: 0,
-            session_accept_count: 0,
-            all_time_uploaded_bytes: 0,
-            all_time_upload_requests: 0,
-            all_time_upload_accepts: 0,
-            last_upload_request_ms: 0,
-            comment: String::new(),
-            rating: 0,
         }];
 
         let entries = kad_keyword_publish_entries_for_keyword(
