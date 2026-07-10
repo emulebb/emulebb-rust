@@ -200,7 +200,7 @@ rationale = "frozen legacy REST route/controller aggregation; split routes, requ
 
 [[structure.large_file_allowlist]]
 path = "crates/emulebb-core/src/tests.rs"
-hard_limit_lines = 4974
+hard_limit_lines = 4567
 rationale = "mechanically extracted legacy emulebb-core unit-test module; split by subsystem under src/tests as the next RUST-REF-005 slices, preserving test names and assertions"
 
 [ipv4_only]
