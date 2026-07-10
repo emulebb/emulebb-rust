@@ -16,6 +16,7 @@ OMISSIONS_PATH = ROOT / "policy" / "rust-client-omissions.toml"
 P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-core/src/lib.rs",
     "crates/emulebb-core/src/kad_hello.rs",
+    "crates/emulebb-core/src/network_api.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/transport.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/mod.rs",
     "crates/emulebb-ed2k/src/ed2k_server/session.rs",
