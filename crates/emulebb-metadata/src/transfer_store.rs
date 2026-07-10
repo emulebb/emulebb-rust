@@ -19,7 +19,7 @@ impl super::MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
 
-        tx.execute(
+        tx.prepare_cached(
             r#"
             INSERT INTO content_objects(
                 kind, primary_hash_kind, primary_hash, display_name, size_bytes,
@@ -33,23 +33,26 @@ impl super::MetadataStore {
                 updated_at_ms = excluded.updated_at_ms,
                 deleted_at_ms = NULL
             "#,
-            params![
-                hash,
-                manifest.canonical_name,
-                manifest.file_size as i64,
-                now
-            ],
-        )?;
-        let content_object_id: i64 = tx.query_row(
-            r#"
-            SELECT id FROM content_objects
-            WHERE kind = 'ed2k_file' AND primary_hash_kind = 'ed2k' AND primary_hash = ?1
-            "#,
-            params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
-            |row| row.get(0),
-        )?;
+        )?
+        .execute(params![
+            hash,
+            manifest.canonical_name,
+            manifest.file_size as i64,
+            now
+        ])?;
+        let content_object_id: i64 = tx
+            .prepare_cached(
+                r#"
+                SELECT id FROM content_objects
+                WHERE kind = 'ed2k_file' AND primary_hash_kind = 'ed2k' AND primary_hash = ?1
+                "#,
+            )?
+            .query_row(
+                params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
+                |row| row.get(0),
+            )?;
 
-        tx.execute(
+        tx.prepare_cached(
             r#"
             INSERT INTO known_files(
                 content_object_id, ed2k_hash, size_bytes, canonical_name,
@@ -76,31 +79,32 @@ impl super::MetadataStore {
                 last_seen_ms = excluded.last_seen_ms,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-            params![
-                content_object_id,
-                decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?,
-                manifest.file_size as i64,
-                manifest.canonical_name,
-                manifest.piece_size as i64,
-                manifest.pieces.len() as i64,
-                bool_to_i64(manifest.completed),
-                bool_to_i64(manifest.md4_hashset_acquired),
-                bool_to_i64(manifest.aich_hashset_acquired),
-                aich_root,
-                manifest.upload_priority,
-                bool_to_i64(manifest.auto_upload_priority),
-                manifest.comment,
-                i64::from(manifest.rating),
-                now,
-            ],
-        )?;
-        let known_file_id: i64 = tx.query_row(
-            "SELECT id FROM known_files WHERE ed2k_hash = ?1",
-            params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
-            |row| row.get(0),
-        )?;
+        )?
+        .execute(params![
+            content_object_id,
+            decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?,
+            manifest.file_size as i64,
+            manifest.canonical_name,
+            manifest.piece_size as i64,
+            manifest.pieces.len() as i64,
+            bool_to_i64(manifest.completed),
+            bool_to_i64(manifest.md4_hashset_acquired),
+            bool_to_i64(manifest.aich_hashset_acquired),
+            aich_root,
+            manifest.upload_priority,
+            bool_to_i64(manifest.auto_upload_priority),
+            manifest.comment,
+            i64::from(manifest.rating),
+            now,
+        ])?;
+        let known_file_id: i64 = tx
+            .prepare_cached("SELECT id FROM known_files WHERE ed2k_hash = ?1")?
+            .query_row(
+                params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
+                |row| row.get(0),
+            )?;
 
-        tx.execute(
+        tx.prepare_cached(
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, control_state, priority,
@@ -121,31 +125,29 @@ impl super::MetadataStore {
                 completed_at_ms = excluded.completed_at_ms,
                 removed_at_ms = excluded.removed_at_ms
             "#,
-            params![
-                known_file_id,
-                visible_state(manifest),
-                manifest.control_state,
-                (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
-                manifest.file_hash,
-                manifest.delivered_path,
-                now,
-                if manifest.completed { Some(now) } else { None },
-                if manifest.transfer_row_removed {
-                    Some(now)
-                } else {
-                    None
-                },
-                manifest.source_path,
-                manifest.source_mtime_ms,
-            ],
-        )?;
-        let transfer_id: i64 = tx.query_row(
-            "SELECT id FROM transfers WHERE known_file_id = ?1",
-            params![known_file_id],
-            |row| row.get(0),
-        )?;
+        )?
+        .execute(params![
+            known_file_id,
+            visible_state(manifest),
+            manifest.control_state,
+            (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
+            manifest.file_hash,
+            manifest.delivered_path,
+            now,
+            if manifest.completed { Some(now) } else { None },
+            if manifest.transfer_row_removed {
+                Some(now)
+            } else {
+                None
+            },
+            manifest.source_path,
+            manifest.source_mtime_ms,
+        ])?;
+        let transfer_id: i64 = tx
+            .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
+            .query_row(params![known_file_id], |row| row.get(0))?;
         if let Some(source_path) = manifest.source_path.as_ref() {
-            tx.execute(
+            tx.prepare_cached(
                 r#"
                 INSERT INTO share_in_place_sources(
                     known_file_id, source_path, file_size, source_mtime_ms,
@@ -158,18 +160,16 @@ impl super::MetadataStore {
                     source_mtime_ms = excluded.source_mtime_ms,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
-                params![
-                    known_file_id,
-                    source_path,
-                    manifest.file_size as i64,
-                    manifest.source_mtime_ms,
-                    now,
-                ],
-            )?;
-            tx.execute(
-                "DELETE FROM shared_source_failures WHERE source_path = ?1",
-                params![source_path],
-            )?;
+            )?
+            .execute(params![
+                known_file_id,
+                source_path,
+                manifest.file_size as i64,
+                manifest.source_mtime_ms,
+                now,
+            ])?;
+            tx.prepare_cached("DELETE FROM shared_source_failures WHERE source_path = ?1")?
+                .execute(params![source_path])?;
         }
 
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
@@ -184,7 +184,7 @@ impl super::MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let row = conn
-            .query_row(
+            .prepare_cached(
                 r#"
                 SELECT known_files.id, transfers.id,
                        lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
@@ -204,32 +204,31 @@ impl super::MetadataStore {
                 JOIN transfers ON transfers.known_file_id = known_files.id
                 WHERE known_files.ed2k_hash = ?1
                 "#,
-                params![hash],
-                |row| {
-                    Ok(TransferRow {
-                        known_file_id: row.get(0)?,
-                        transfer_id: row.get(1)?,
-                        file_hash: row.get(2)?,
-                        canonical_name: row.get(3)?,
-                        file_size: row.get::<_, i64>(4)? as u64,
-                        piece_size: row.get::<_, i64>(5)? as u64,
-                        completed: row.get::<_, i64>(6)? != 0,
-                        md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
-                        aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
-                        aich_root: row.get(9)?,
-                        upload_priority: row.get(10)?,
-                        auto_upload_priority: row.get::<_, i64>(11)? != 0,
-                        comment: row.get(12)?,
-                        rating: row.get::<_, i64>(13)? as u8,
-                        category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
-                        control_state: row.get(15)?,
-                        transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
-                        delivered_path: row.get(17)?,
-                        source_path: row.get(18)?,
-                        source_mtime_ms: row.get(19)?,
-                    })
-                },
-            )
+            )?
+            .query_row(params![hash], |row| {
+                Ok(TransferRow {
+                    known_file_id: row.get(0)?,
+                    transfer_id: row.get(1)?,
+                    file_hash: row.get(2)?,
+                    canonical_name: row.get(3)?,
+                    file_size: row.get::<_, i64>(4)? as u64,
+                    piece_size: row.get::<_, i64>(5)? as u64,
+                    completed: row.get::<_, i64>(6)? != 0,
+                    md4_hashset_acquired: row.get::<_, i64>(7)? != 0,
+                    aich_hashset_acquired: row.get::<_, i64>(8)? != 0,
+                    aich_root: row.get(9)?,
+                    upload_priority: row.get(10)?,
+                    auto_upload_priority: row.get::<_, i64>(11)? != 0,
+                    comment: row.get(12)?,
+                    rating: row.get::<_, i64>(13)? as u8,
+                    category_id: row.get::<_, Option<i64>>(14)?.unwrap_or_default() as u32,
+                    control_state: row.get(15)?,
+                    transfer_row_removed: row.get::<_, Option<i64>>(16)?.is_some(),
+                    delivered_path: row.get(17)?,
+                    source_path: row.get(18)?,
+                    source_mtime_ms: row.get(19)?,
+                })
+            })
             .optional()?;
         row.map(|row| manifest_from_row(&conn, row)).transpose()
     }
@@ -243,14 +242,15 @@ impl super::MetadataStore {
         }
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let updated = conn.execute(
-            r#"
-            UPDATE known_files
-            SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
-            WHERE ed2k_hash = ?1
-            "#,
-            params![hash, delta as i64],
-        )?;
+        let updated = conn
+            .prepare_cached(
+                r#"
+                UPDATE known_files
+                SET all_time_uploaded_bytes = all_time_uploaded_bytes + ?2
+                WHERE ed2k_hash = ?1
+                "#,
+            )?
+            .execute(params![hash, delta as i64])?;
         Ok(updated != 0)
     }
 
@@ -258,15 +258,16 @@ impl super::MetadataStore {
     pub fn add_file_upload_request(&self, file_hash: &str, at_ms: i64) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let updated = conn.execute(
-            r#"
-            UPDATE known_files
-            SET all_time_upload_requests = all_time_upload_requests + 1,
-                last_upload_request_ms = max(last_upload_request_ms, ?2)
-            WHERE ed2k_hash = ?1
-            "#,
-            params![hash, at_ms],
-        )?;
+        let updated = conn
+            .prepare_cached(
+                r#"
+                UPDATE known_files
+                SET all_time_upload_requests = all_time_upload_requests + 1,
+                    last_upload_request_ms = max(last_upload_request_ms, ?2)
+                WHERE ed2k_hash = ?1
+                "#,
+            )?
+            .execute(params![hash, at_ms])?;
         Ok(updated != 0)
     }
 
@@ -274,14 +275,15 @@ impl super::MetadataStore {
     pub fn add_file_upload_accept(&self, file_hash: &str) -> Result<bool> {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
-        let updated = conn.execute(
-            r#"
-            UPDATE known_files
-            SET all_time_upload_accepts = all_time_upload_accepts + 1
-            WHERE ed2k_hash = ?1
-            "#,
-            params![hash],
-        )?;
+        let updated = conn
+            .prepare_cached(
+                r#"
+                UPDATE known_files
+                SET all_time_upload_accepts = all_time_upload_accepts + 1
+                WHERE ed2k_hash = ?1
+                "#,
+            )?
+            .execute(params![hash])?;
         Ok(updated != 0)
     }
 
@@ -295,15 +297,16 @@ impl super::MetadataStore {
         let hash = decode_fixed_hex(file_hash, 16, "ED2K hash")?;
         let conn = self.connection()?;
         let row = conn
-            .query_row(
+            .prepare_cached(
                 r#"
                 SELECT all_time_uploaded_bytes, size_bytes
                 FROM known_files
                 WHERE ed2k_hash = ?1
                 "#,
-                params![hash],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
+            )?
+            .query_row(params![hash], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
             .optional()?;
         Ok(row.map(|(uploaded, size)| {
             if size > 0 {
@@ -898,95 +901,94 @@ fn replace_transfer_children(
     manifest: &MetadataTransferManifest,
     now: i64,
 ) -> Result<()> {
-    tx.execute(
-        "DELETE FROM transfer_pieces WHERE transfer_id = ?1",
-        params![transfer_id],
-    )?;
-    tx.execute(
-        "DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM aich_part_hashes WHERE known_file_id = ?1",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM verified_ranges WHERE known_file_id = ?1",
-        params![known_file_id],
-    )?;
-    tx.execute(
-        "DELETE FROM transfer_sources WHERE transfer_id = ?1",
-        params![transfer_id],
-    )?;
+    tx.prepare_cached("DELETE FROM transfer_pieces WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
+    tx.prepare_cached("DELETE FROM ed2k_part_hashes WHERE known_file_id = ?1")?
+        .execute(params![known_file_id])?;
+    tx.prepare_cached("DELETE FROM aich_part_hashes WHERE known_file_id = ?1")?
+        .execute(params![known_file_id])?;
+    tx.prepare_cached("DELETE FROM verified_ranges WHERE known_file_id = ?1")?
+        .execute(params![known_file_id])?;
+    tx.prepare_cached("DELETE FROM transfer_sources WHERE transfer_id = ?1")?
+        .execute(params![transfer_id])?;
 
+    let mut insert_piece = tx.prepare_cached(
+        r#"
+        INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+    )?;
     for piece in &manifest.pieces {
-        tx.execute(
-            r#"
-            INSERT INTO transfer_pieces(transfer_id, piece_index, state, bytes_written, block_bitmap, ich_corrupted, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                transfer_id,
-                i64::from(piece.piece_index),
-                piece.state,
-                piece.bytes_written as i64,
-                piece.block_bitmap,
-                piece.ich_corrupted,
-                now,
-            ],
-        )?;
+        insert_piece.execute(params![
+            transfer_id,
+            i64::from(piece.piece_index),
+            piece.state,
+            piece.bytes_written as i64,
+            piece.block_bitmap,
+            piece.ich_corrupted,
+            now,
+        ])?;
     }
+    drop(insert_piece);
+    let mut insert_md4 = tx.prepare_cached(
+        r#"
+        INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash)
+        VALUES (?1, ?2, ?3)
+        "#,
+    )?;
     for (index, hash) in manifest.md4_hashset.iter().enumerate() {
-        tx.execute(
-            r#"
-            INSERT INTO ed2k_part_hashes(known_file_id, part_index, md4_hash)
-            VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                known_file_id,
-                index as i64,
-                decode_fixed_hex(hash, 16, "MD4 part hash")?,
-            ],
-        )?;
+        insert_md4.execute(params![
+            known_file_id,
+            index as i64,
+            decode_fixed_hex(hash, 16, "MD4 part hash")?,
+        ])?;
     }
+    drop(insert_md4);
+    let mut insert_aich = tx.prepare_cached(
+        r#"
+        INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash)
+        VALUES (?1, ?2, ?3)
+        "#,
+    )?;
     for (index, hash) in manifest.aich_hashset.iter().enumerate() {
-        tx.execute(
-            r#"
-            INSERT INTO aich_part_hashes(known_file_id, part_index, aich_hash)
-            VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                known_file_id,
-                index as i64,
-                decode_fixed_hex(hash, 20, "AICH part hash")?,
-            ],
-        )?;
+        insert_aich.execute(params![
+            known_file_id,
+            index as i64,
+            decode_fixed_hex(hash, 20, "AICH part hash")?,
+        ])?;
     }
+    drop(insert_aich);
+    let mut insert_range = tx.prepare_cached(
+        r#"
+        INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, source_kind, created_at_ms)
+        VALUES (?1, ?2, ?3, 'ed2k_transfer', ?4)
+        "#,
+    )?;
     for range in &manifest.verified_ranges {
-        tx.execute(
-            r#"
-            INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, source_kind, created_at_ms)
-            VALUES (?1, ?2, ?3, 'ed2k_transfer', ?4)
-            "#,
-            params![known_file_id, range.start as i64, range.end as i64, now],
-        )?;
+        insert_range.execute(params![
+            known_file_id,
+            range.start as i64,
+            range.end as i64,
+            now
+        ])?;
     }
+    drop(insert_range);
+    let mut insert_source = tx.prepare_cached(
+        r#"
+        INSERT INTO transfer_sources(
+            transfer_id, ip, tcp_port, user_hash, first_seen_ms, last_seen_ms
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+        "#,
+    )?;
     for source in &manifest.sources {
-        tx.execute(
-            r#"
-            INSERT INTO transfer_sources(
-                transfer_id, ip, tcp_port, user_hash, first_seen_ms, last_seen_ms
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-            "#,
-            params![
-                transfer_id,
-                source.ip,
-                i64::from(source.tcp_port),
-                optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
-                now,
-            ],
-        )?;
+        insert_source.execute(params![
+            transfer_id,
+            source.ip,
+            i64::from(source.tcp_port),
+            optional_fixed_hex(source.user_hash.as_deref(), 16, "source user hash")?,
+            now,
+        ])?;
     }
     Ok(())
 }
@@ -1058,7 +1060,7 @@ fn transfer_counts_from_connection(conn: &rusqlite::Connection) -> Result<Metada
 }
 
 fn read_hex_list(conn: &rusqlite::Connection, sql: &str, id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare_cached(sql)?;
     let rows = stmt.query_map(params![id], |row| row.get(0))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
@@ -1068,7 +1070,7 @@ fn read_pieces(
     conn: &rusqlite::Connection,
     transfer_id: i64,
 ) -> Result<Vec<MetadataTransferPiece>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT piece_index, state, bytes_written, block_bitmap, ich_corrupted
         FROM transfer_pieces
@@ -1093,7 +1095,7 @@ fn read_ranges(
     conn: &rusqlite::Connection,
     known_file_id: i64,
 ) -> Result<Vec<MetadataTransferRange>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT start_offset, end_offset
         FROM verified_ranges
@@ -1115,7 +1117,7 @@ fn read_sources(
     conn: &rusqlite::Connection,
     transfer_id: i64,
 ) -> Result<Vec<MetadataTransferSource>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT ip, tcp_port,
                CASE WHEN user_hash IS NULL THEN NULL ELSE lower(hex(user_hash)) END

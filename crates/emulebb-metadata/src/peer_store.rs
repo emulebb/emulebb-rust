@@ -34,21 +34,20 @@ impl super::MetadataStore {
     pub fn peer_credit_by_hash(&self, user_hash: &str) -> Result<Option<MetadataPeerCredit>> {
         let user_hash_bytes = decode_fixed_hex(user_hash, 16, "peer user hash")?;
         self.connection()?
-            .query_row(
+            .prepare_cached(
                 r#"
                 SELECT lower(hex(user_hash)), uploaded_bytes, downloaded_bytes
                 FROM peers
                 WHERE user_hash = ?1
                 "#,
-                params![user_hash_bytes],
-                |row| {
-                    Ok(MetadataPeerCredit {
-                        user_hash: row.get(0)?,
-                        uploaded_bytes: row.get::<_, i64>(1)? as u64,
-                        downloaded_bytes: row.get::<_, i64>(2)? as u64,
-                    })
-                },
-            )
+            )?
+            .query_row(params![user_hash_bytes], |row| {
+                Ok(MetadataPeerCredit {
+                    user_hash: row.get(0)?,
+                    uploaded_bytes: row.get::<_, i64>(1)? as u64,
+                    downloaded_bytes: row.get::<_, i64>(2)? as u64,
+                })
+            })
             .optional()
             .map_err(Into::into)
     }
@@ -64,20 +63,21 @@ impl super::MetadataStore {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         let current = tx
-            .query_row(
+            .prepare_cached(
                 r#"
                 SELECT uploaded_bytes, downloaded_bytes
                 FROM peers
                 WHERE user_hash = ?1
                 "#,
-                params![user_hash_bytes],
-                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
-            )
+            )?
+            .query_row(params![user_hash_bytes], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+            })
             .optional()?
             .unwrap_or((0, 0));
         let uploaded_bytes = current.0.saturating_add(uploaded_delta);
         let downloaded_bytes = current.1.saturating_add(downloaded_delta);
-        tx.execute(
+        tx.prepare_cached(
             r#"
             INSERT INTO peers(
                 user_hash, uploaded_bytes, downloaded_bytes, first_seen_ms, last_seen_ms
@@ -88,13 +88,13 @@ impl super::MetadataStore {
                 downloaded_bytes = excluded.downloaded_bytes,
                 last_seen_ms = excluded.last_seen_ms
             "#,
-            params![
-                user_hash_bytes,
-                u64_to_i64_saturating(uploaded_bytes),
-                u64_to_i64_saturating(downloaded_bytes),
-                now,
-            ],
-        )?;
+        )?
+        .execute(params![
+            user_hash_bytes,
+            u64_to_i64_saturating(uploaded_bytes),
+            u64_to_i64_saturating(downloaded_bytes),
+            now,
+        ])?;
         tx.commit()?;
         Ok(())
     }
