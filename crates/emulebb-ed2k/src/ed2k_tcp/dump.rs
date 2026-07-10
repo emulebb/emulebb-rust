@@ -369,7 +369,7 @@ fn dump_ed2k_tcp_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,
     phase: &str,
-    note: impl Into<String>,
+    note: impl FnOnce() -> String,
 ) {
     let record = Ed2kTcpDumpRecord {
         schema: "ed2k_packet_v1",
@@ -393,7 +393,7 @@ fn dump_ed2k_tcp_meta(
         payload_len: None,
         payload_hex: None,
         payload_hex_truncated: None,
-        note: Some(note.into()),
+        note: Some(note()),
     };
     dump_ed2k_tcp_record(&record);
 }
@@ -507,7 +507,7 @@ fn dump_ed2k_tcp_meta(
     _remote_addr: SocketAddr,
     _transport_mode: Option<Ed2kTransportMode>,
     _phase: &str,
-    _note: impl Into<String>,
+    _note: impl FnOnce() -> String,
 ) {
 }
 
@@ -535,7 +535,7 @@ pub(super) fn dump_ed2k_tcp_helper_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,
     phase: &str,
-    note: impl Into<String>,
+    note: impl FnOnce() -> String,
 ) {
     dump_ed2k_tcp_meta(
         "udp_firewall_check",
@@ -580,7 +580,7 @@ pub(super) fn dump_ed2k_tcp_listener_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,
     phase: &str,
-    note: impl Into<String>,
+    note: impl FnOnce() -> String,
 ) {
     dump_ed2k_tcp_meta("listener", remote_addr, transport_mode, phase, note);
 }
@@ -623,7 +623,7 @@ pub(crate) fn dump_ed2k_tcp_download_meta(
     remote_addr: SocketAddr,
     transport_mode: Option<Ed2kTransportMode>,
     phase: &str,
-    note: impl Into<String>,
+    note: impl FnOnce() -> String,
 ) {
     dump_ed2k_tcp_meta("native_download", remote_addr, transport_mode, phase, note);
 }
@@ -675,7 +675,7 @@ mod tests {
         unsafe {
             std::env::remove_var("EMULEBB_RUST_LOG_DIR");
         }
-        super::dump_ed2k_tcp_download_meta(addr, None, "session", "pre-env");
+        super::dump_ed2k_tcp_download_meta(addr, None, "session", || ("pre-env").into());
         // The log dir now becomes available (mirrors the daemon making it visible
         // after an early first-access): the next record must create + write.
         let dir = std::env::temp_dir().join(format!("ed2k-dump-probe-{}", std::process::id()));
@@ -683,7 +683,7 @@ mod tests {
         unsafe {
             std::env::set_var("EMULEBB_RUST_LOG_DIR", &dir);
         }
-        super::dump_ed2k_tcp_download_meta(addr, None, "session", "post-env");
+        super::dump_ed2k_tcp_download_meta(addr, None, "session", || ("post-env").into());
         let created = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()

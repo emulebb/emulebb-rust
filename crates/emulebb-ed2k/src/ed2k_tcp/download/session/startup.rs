@@ -251,7 +251,7 @@ pub(super) async fn advance_download_startup(step: DownloadStartupStep<'_>) -> R
                 peer_addr,
                 Some(transport.mode),
                 "upload_request_hashset_fallback",
-                format!("file_hash={file_hash_hex}"),
+                || (format!("file_hash={file_hash_hex}")).into(),
             );
         }
         let start_upload = encode_start_upload_req(file_hash);

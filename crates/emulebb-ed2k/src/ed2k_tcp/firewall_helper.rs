@@ -70,7 +70,7 @@ async fn drive_firewall_helper_hello_exchange(
                     context.helper_addr,
                     Some(transport.mode),
                     "hello_exchange_closed",
-                    "connection closed before helper hello exchange completed",
+                    || ("connection closed before helper hello exchange completed").into(),
                 );
                 break;
             }
@@ -80,7 +80,7 @@ async fn drive_firewall_helper_hello_exchange(
                     context.helper_addr,
                     Some(transport.mode),
                     "hello_exchange_error",
-                    error.to_string(),
+                    || (error.to_string()).into(),
                 );
                 return Err(error).with_context(|| {
                     format!("failed to read eD2k packet from {}", context.helper_addr)
@@ -257,12 +257,12 @@ async fn handle_firewall_helper_packet(
                     context.helper_addr,
                     Some(transport.mode),
                     "peer_fwcheck_request",
-                    format!(
+                    || (format!(
                         "internal_udp_port={} external_udp_port={} sender_udp_key={}",
                         request.internal_udp_port,
                         request.external_udp_port,
                         request.sender_udp_key
-                    ),
+                    )).into(),
                 );
                 reply_with_firewall_udp(dht, context.helper_addr.ip(), request).await?;
                 return Ok(true);
@@ -297,7 +297,7 @@ pub async fn request_udp_firewall_check(
     {
         Ok(transport) => transport,
         Err(error) => {
-            dump_ed2k_tcp_helper_meta(helper_addr, None, "connect_error", error.to_string());
+            dump_ed2k_tcp_helper_meta(helper_addr, None, "connect_error", || (error.to_string()).into());
             return Err(error);
         }
     };
@@ -305,13 +305,13 @@ pub async fn request_udp_firewall_check(
         helper_addr,
         Some(transport.mode),
         "connect_ok",
-        format!(
+        || (format!(
             "client_id={} server_ip={} server_port={} direct_udp_callback={}",
             hello_identity.client_id,
             Ipv4Addr::from(hello_identity.server_ip.to_le_bytes()),
             hello_identity.server_port,
             hello_identity.direct_udp_callback
-        ),
+        )).into(),
     );
     let helper_context = FirewallHelperContext {
         helper_addr,
@@ -333,7 +333,7 @@ pub async fn request_udp_firewall_check(
             helper_addr,
             Some(transport.mode),
             "hello_exchange_incomplete",
-            "helper never completed HELLO before firewall request",
+            || ("helper never completed HELLO before firewall request").into(),
         );
         anyhow::bail!("helper {helper_addr} did not complete HELLO before OP_FWCHECKUDPREQ");
     }
@@ -361,7 +361,7 @@ pub async fn request_udp_firewall_check(
                     helper_addr,
                     Some(transport.mode),
                     "post_fwcheck_closed",
-                    "connection closed after firewall request",
+                    || ("connection closed after firewall request").into(),
                 );
                 break;
             }
@@ -371,7 +371,7 @@ pub async fn request_udp_firewall_check(
                     helper_addr,
                     Some(transport.mode),
                     "post_fwcheck_error",
-                    error.to_string(),
+                    || (error.to_string()).into(),
                 );
                 break;
             }

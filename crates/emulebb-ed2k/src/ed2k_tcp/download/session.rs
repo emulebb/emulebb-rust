@@ -228,7 +228,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "no_needed_parts_request_window",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                     }
@@ -264,7 +264,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "peer_closed_incomplete",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
@@ -282,7 +282,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "peer_shutdown_incomplete",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(incomplete_or_detached_queued_source(
                             &reask_register,
@@ -315,7 +315,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "peer_timeout_incomplete",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         // Parity with MFC CUpDownClient::CheckDownloadTimeout: a
                         // requested source that stalled past the part-response
@@ -637,7 +637,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "no_needed_parts_filestatus",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                     }
@@ -729,7 +729,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "aich_root_mismatch_fnf",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
                     }
@@ -748,7 +748,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "no_needed_parts_multipacket",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                     }
@@ -824,7 +824,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "no_needed_parts_multipacket_ext2",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::NoNeededParts);
                     }
@@ -854,7 +854,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                             peer_addr,
                             Some(transport.mode),
                             "aich_root_mismatch_fnf",
-                            format!("file_hash={file_hash_hex}"),
+                            || (format!("file_hash={file_hash_hex}")).into(),
                         );
                         return Ok(Ed2kPeerDownloadOutcome::FileNotFound);
                     }
@@ -891,7 +891,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "answer_sources_sx1_ignored",
-                        format!("file_hash={file_hash_hex} sources={source_count} (SX1 ignored)"),
+                        || (format!("file_hash={file_hash_hex} sources={source_count} (SX1 ignored)")).into(),
                     );
                 }
                 (OP_EDONKEYPROT, OP_QUEUERANK) => {
@@ -902,7 +902,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "queue_ranking",
-                        format!("file_hash={file_hash_hex} rank={rank} protocol=edonkey"),
+                        || (format!("file_hash={file_hash_hex} rank={rank} protocol=edonkey")).into(),
                     );
                 }
                 (OP_EMULEPROT, OP_QUEUERANKING) => {
@@ -917,7 +917,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "queue_ranking",
-                        format!("file_hash={file_hash_hex} rank={rank} protocol=emule"),
+                        || (format!("file_hash={file_hash_hex} rank={rank} protocol=emule")).into(),
                     );
                 }
                 (OP_EDONKEYPROT, OP_END_OF_DOWNLOAD) => {
@@ -926,11 +926,11 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "end_of_download",
-                        format!(
+                        || (format!(
                             "file_hash={} payload_len={}",
                             ended_hash.map_or_else(|| "none".to_string(), |hash| hash.to_string()),
                             packet.payload.len()
-                        ),
+                        )).into(),
                     );
                     if ended_hash == Some(file_hash) {
                         return Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete);
@@ -941,7 +941,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "out_of_part_requests",
-                        format!("file_hash={file_hash_hex}"),
+                        || (format!("file_hash={file_hash_hex}")).into(),
                     );
                     diag_bad_peer::download_out_of_part_reqs(
                         &peer_addr.to_string(),
@@ -959,10 +959,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "change_client_id",
-                        format!(
+                        || (format!(
                             "new_user_id={} new_server_ip={} trailing_len={}",
                             change.new_user_id, change.new_server_ip, change.trailing_len
-                        ),
+                        )).into(),
                     );
                 }
                 (OP_EDONKEYPROT, OP_CHANGE_SLOT) => {
@@ -971,12 +971,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "change_slot",
-                        format!(
+                        || (format!(
                             "file_hash={} payload_len={}",
                             changed_file
                                 .map_or_else(|| "none".to_string(), |hash| hash.to_string()),
                             packet.payload.len()
-                        ),
+                        )).into(),
                     );
                 }
                 (OP_EDONKEYPROT, OP_MESSAGE) => {
@@ -985,10 +985,10 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "client_message",
-                        format!(
+                        || (format!(
                             "message_len={} accepted_len={}",
                             message.message_len, message.accepted_len
-                        ),
+                        )).into(),
                     );
                 }
                 (OP_EDONKEYPROT, OP_ASKSHAREDFILES) => {
@@ -1038,12 +1038,12 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "aich_recovery_request",
-                        format!(
+                        || (format!(
                             "file_hash={} part={} master_hash={}",
                             request.file_hash,
                             request.part,
                             hex::encode(request.master_hash)
-                        ),
+                        )).into(),
                     );
                     let recovery = transfer_runtime
                         .create_aich_recovery_data(
@@ -1079,7 +1079,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "aich_recovery_answer",
-                        format!(
+                        || (format!(
                             "file_hash={} part={:?} master_hash={} recovery_payload_len={}",
                             answer.file_hash,
                             answer.part,
@@ -1088,7 +1088,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                                 .map(hex::encode)
                                 .unwrap_or_else(|| "none".to_string()),
                             answer.recovery_payload_len
-                        ),
+                        )).into(),
                     );
                     // Clear the in-flight marker so this part can be re-requested
                     // later if the salvage still leaves it corrupt.
@@ -1120,7 +1120,7 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                         peer_addr,
                         Some(transport.mode),
                         "file_req_ans_nofil",
-                        format!("file_hash={file_hash_hex}"),
+                        || (format!("file_hash={file_hash_hex}")).into(),
                     );
                     // Oracle OP_FILEREQANSNOFIL handling (ListenSocket.cpp:645-661):
                     // the source is dead-listed on the part file and removed. The

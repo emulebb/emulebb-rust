@@ -73,7 +73,7 @@ pub(in crate::ed2k_tcp) async fn pump_aich_recovery_requests(
             peer_addr,
             Some(transport.mode),
             "aich_request_skipped_no_root",
-            format!("file_hash={file_hash_hex} parts={pending:?}"),
+            || (format!("file_hash={file_hash_hex} parts={pending:?}")).into(),
         );
         return Ok(());
     };
@@ -82,7 +82,7 @@ pub(in crate::ed2k_tcp) async fn pump_aich_recovery_requests(
             peer_addr,
             Some(transport.mode),
             "aich_request_skipped_peer_unsupported",
-            format!("file_hash={file_hash_hex} parts={pending:?}"),
+            || (format!("file_hash={file_hash_hex} parts={pending:?}")).into(),
         );
         return Ok(());
     }

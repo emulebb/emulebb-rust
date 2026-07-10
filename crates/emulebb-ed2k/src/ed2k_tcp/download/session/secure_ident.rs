@@ -138,14 +138,14 @@ pub(super) fn handle_signature(
                 } else {
                     "secure_ident_signature_unverified"
                 },
-                format!(
+                || (format!(
                     "signature_len={} challenge_ip_kind={} verified={verified}",
                     signature.signature_len,
                     signature
                         .challenge_ip_kind
                         .map(|kind| kind.to_string())
                         .unwrap_or_else(|| "none".to_string())
-                ),
+                )).into(),
             );
         }
         Err(error) => {
@@ -153,7 +153,7 @@ pub(super) fn handle_signature(
                 peer_addr,
                 Some(transport.mode),
                 "secure_ident_signature_invalid",
-                format!("error={error:#}"),
+                || (format!("error={error:#}")).into(),
             );
         }
     }

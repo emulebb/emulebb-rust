@@ -125,10 +125,10 @@ pub(in crate::ed2k_tcp) async fn flush_ready_download_blocks(
             peer_addr,
             Some(transport_mode),
             "piece_block_flushed",
-            format!(
+            || (format!(
                 "file_hash={file_hash_hex} piece_index={} start={} end={} completed={}",
                 request.piece_index, request.start, request.end, manifest.completed
-            ),
+            )).into(),
         );
         *completed_block_count = completed_block_count.saturating_add(1);
         let downloaded_bytes = request.end.saturating_sub(request.start);
@@ -233,9 +233,9 @@ fn note_ich_outcome(
                 peer_addr,
                 Some(transport_mode),
                 "ich_salvage_success",
-                format!(
+                || (format!(
                     "file_hash={file_hash_hex} part={part_index} bytes_salvaged={salvaged_bytes}"
-                ),
+                )).into(),
             );
         }
         PieceWriteOutcome::IchRehashFailed { part_index } => {
@@ -243,7 +243,7 @@ fn note_ich_outcome(
                 peer_addr,
                 Some(transport_mode),
                 "ich_rehash_attempt",
-                format!("file_hash={file_hash_hex} part={part_index}"),
+                || (format!("file_hash={file_hash_hex} part={part_index}")).into(),
             );
         }
         _ => {}
@@ -346,10 +346,10 @@ pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
             peer_addr,
             Some(transport_mode),
             "piece_prefix_flushed",
-            format!(
+            || (format!(
                 "file_hash={file_hash_hex} piece_index={piece_index} start={start} end={end} completed={}",
                 manifest.completed
-            ),
+            )).into(),
         );
 
         if request_complete {

@@ -25,7 +25,7 @@ pub(super) fn handle_out_of_part_requests(transport: &Ed2kTransport, peer_addr: 
         peer_addr,
         Some(transport.mode),
         "out_of_part_requests",
-        "received=true",
+        || ("received=true").into(),
     );
 }
 
@@ -40,10 +40,10 @@ pub(super) fn handle_change_client_id(
         peer_addr,
         Some(transport.mode),
         "change_client_id",
-        format!(
+        || (format!(
             "new_user_id={} new_server_ip={} trailing_len={}",
             change.new_user_id, change.new_server_ip, change.trailing_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -55,11 +55,11 @@ pub(super) fn handle_change_slot(transport: &Ed2kTransport, peer_addr: SocketAdd
         peer_addr,
         Some(transport.mode),
         "change_slot",
-        format!(
+        || (format!(
             "file_hash={} payload_len={}",
             changed_file.map_or_else(|| "none".to_string(), |hash| hash.to_string()),
             payload.len()
-        ),
+        )).into(),
     );
 }
 
@@ -74,10 +74,10 @@ pub(super) fn handle_client_message(
         peer_addr,
         Some(transport.mode),
         "client_message",
-        format!(
+        || (format!(
             "message_len={} accepted_len={}",
             message.message_len, message.accepted_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -93,7 +93,7 @@ pub(super) fn handle_edonkey_queue_rank(
         peer_addr,
         Some(transport.mode),
         "queue_ranking",
-        format!("rank={rank} protocol=edonkey"),
+        || (format!("rank={rank} protocol=edonkey")).into(),
     );
     Ok(())
 }
@@ -109,7 +109,7 @@ pub(super) fn handle_emule_queue_ranking(
         peer_addr,
         Some(transport.mode),
         "queue_ranking",
-        format!("rank={rank} protocol=emule"),
+        || (format!("rank={rank} protocol=emule")).into(),
     );
     Ok(())
 }
@@ -125,7 +125,7 @@ pub(super) fn handle_public_ip_answer(
         peer_addr,
         Some(transport.mode),
         "public_ip_answer",
-        format!("public_ip={public_ip}"),
+        || (format!("public_ip={public_ip}")).into(),
     );
     Ok(())
 }
@@ -141,10 +141,10 @@ pub(super) fn handle_reask_callback_tcp(
         peer_addr,
         Some(transport.mode),
         "reask_callback_tcp",
-        format!(
+        || (format!(
             "file_hash={} dest={}:{} extended_info_len={}",
             reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -160,10 +160,10 @@ pub(super) fn handle_chat_captcha_request(
         peer_addr,
         Some(transport.mode),
         "chat_captcha_request",
-        format!(
+        || (format!(
             "tag_count={} data_len={}",
             request.tag_count, request.data_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -179,7 +179,7 @@ pub(super) fn handle_chat_captcha_result(
         peer_addr,
         Some(transport.mode),
         "chat_captcha_result",
-        format!("status={status}"),
+        || (format!("status={status}")).into(),
     );
     Ok(())
 }
@@ -195,11 +195,11 @@ pub(super) fn handle_file_desc(
         peer_addr,
         Some(transport.mode),
         "file_desc",
-        format!(
+        || (format!(
             "rating={} comment_len={}",
             file_desc.rating,
             file_desc.comment.len()
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -215,10 +215,10 @@ pub(super) fn handle_preview_request(
         peer_addr,
         Some(transport.mode),
         "preview_request",
-        format!(
+        || (format!(
             "file_hash={} trailing_len={}",
             preview_request.file_hash, preview_request.trailing_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -234,13 +234,13 @@ pub(super) fn handle_preview_answer(
         peer_addr,
         Some(transport.mode),
         "preview_answer",
-        format!(
+        || (format!(
             "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
             preview_answer.file_hash,
             preview_answer.frame_count,
             preview_answer.frame_payload_bytes,
             preview_answer.trailing_len
-        ),
+        )).into(),
     );
     Ok(())
 }
@@ -255,6 +255,6 @@ pub(super) fn handle_buddy_pong(
         peer_addr,
         Some(transport.mode),
         "kad_buddy_pong",
-        format!("held_buddy={held_buddy}"),
+        || (format!("held_buddy={held_buddy}")).into(),
     );
 }
