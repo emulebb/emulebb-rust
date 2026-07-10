@@ -62,64 +62,77 @@ export struct SpeedSample {
     up: float,
 }
 
-component Metric inherits Rectangle {
+component HeaderCell inherits Text {
     in property <string> label;
-    in property <string> value;
-    in property <color> accent;
+    in property <length> cell-width;
 
-    background: #ffffff;
-    border-color: #d7dee8;
-    border-width: 1px;
-    border-radius: 6px;
-    height: 58px;
-
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 4px;
-        height: parent.height;
-        background: accent;
-        border-radius: 2px;
-    }
-
-    VerticalLayout {
-        padding-left: 14px;
-        padding-right: 10px;
-        padding-top: 7px;
-        spacing: 2px;
-
-        Text {
-            text: label;
-            color: #64748b;
-            font-size: 11px;
-        }
-        Text {
-            text: value;
-            color: #111827;
-            font-size: 14px;
-            font-weight: 700;
-            overflow: elide;
-        }
-    }
+    text: label;
+    width: cell-width;
+    height: 26px;
+    color: #334155;
+    font-size: 11px;
+    font-weight: 700;
+    vertical-alignment: center;
+    overflow: elide;
 }
 
-component Badge inherits Rectangle {
+component DataCell inherits Text {
+    in property <string> value;
+    in property <length> cell-width;
+
+    text: value;
+    width: cell-width;
+    height: 28px;
+    color: #111827;
+    font-size: 12px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component MutedCell inherits Text {
+    in property <string> value;
+    in property <length> cell-width;
+
+    text: value;
+    width: cell-width;
+    height: 28px;
+    color: #64748b;
+    font-size: 12px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component NumberCell inherits Text {
+    in property <string> value;
+    in property <length> cell-width;
+
+    text: value;
+    width: cell-width;
+    height: 28px;
+    color: #334155;
+    font-size: 12px;
+    horizontal-alignment: right;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component RowBadge inherits Rectangle {
     in property <string> text;
     in property <color> fill;
     in property <color> ink;
 
-    height: 24px;
-    width: max(72px, label.preferred-width + 18px);
+    height: 18px;
+    width: max(58px, label.preferred-width + 14px);
     background: fill;
-    border-radius: 4px;
+    border-radius: 3px;
 
     label := Text {
-        x: 9px;
+        x: 7px;
         y: 0px;
         height: parent.height;
         text: root.text;
         color: root.ink;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 700;
         vertical-alignment: center;
     }
@@ -129,144 +142,143 @@ component ProgressBar inherits Rectangle {
     in property <float> value;
     in property <color> fill;
 
-    height: 8px;
+    height: 6px;
     background: #e5e7eb;
-    border-radius: 4px;
+    border-radius: 3px;
 
     Rectangle {
         width: parent.width * root.value;
         height: parent.height;
         background: root.fill;
-        border-radius: 4px;
+        border-radius: 3px;
     }
 }
 
 component SparkBars inherits Rectangle {
     in property <[SpeedSample]> samples;
 
-    background: #ffffff;
-    border-color: #d7dee8;
+    background: transparent;
+    height: 28px;
+
+    HorizontalLayout {
+        height: 28px;
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 2px;
+        alignment: end;
+
+        for sample in root.samples : Rectangle {
+            width: 6px;
+            height: 22px;
+            background: transparent;
+
+            Rectangle {
+                x: 0px;
+                y: 22px - self.height;
+                width: 2px;
+                height: 22px * sample.down;
+                background: #2563eb;
+                border-radius: 1px;
+            }
+            Rectangle {
+                x: 3px;
+                y: 22px - self.height;
+                width: 2px;
+                height: 22px * sample.up;
+                background: #16a34a;
+                border-radius: 1px;
+            }
+        }
+    }
+}
+
+component TabButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+
+    height: 30px;
+    width: max(92px, label.preferred-width + 24px);
+    background: selected ? #1f2937 : #ffffff;
+    border-color: selected ? #1f2937 : #cbd5e1;
     border-width: 1px;
-    border-radius: 6px;
-    height: 112px;
+    border-radius: 4px;
 
-    VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
+    label := Text {
+        x: 12px;
+        y: 0px;
+        height: parent.height;
+        text: root.text;
+        color: root.selected ? #ffffff : #334155;
+        font-size: 12px;
+        font-weight: root.selected ? 700 : 500;
+        vertical-alignment: center;
+    }
 
-        HorizontalLayout {
-            height: 18px;
-            Text {
-                text: "Throughput";
-                color: #111827;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            Text {
-                text: "download / upload";
-                color: #64748b;
-                font-size: 12px;
-                horizontal-alignment: right;
-            }
-        }
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
 
-        Rectangle {
-            height: 64px;
-            background: #f8fafc;
-            border-color: #e5e7eb;
-            border-width: 1px;
-            border-radius: 4px;
+component TransferHeader inherits Rectangle {
+    height: 26px;
+    background: #eef2f7;
+    border-color: #cbd5e1;
+    border-width: 1px;
 
-            HorizontalLayout {
-                height: 64px;
-                padding: 8px;
-                spacing: 3px;
-                alignment: end;
-
-                for sample in root.samples : Rectangle {
-                    width: 8px;
-                    height: 48px;
-                    background: transparent;
-
-                    Rectangle {
-                        x: 0px;
-                        y: 48px - self.height;
-                        width: 3px;
-                        height: 48px * sample.down;
-                        background: #2563eb;
-                        border-radius: 2px;
-                    }
-                    Rectangle {
-                        x: 5px;
-                        y: 48px - self.height;
-                        width: 3px;
-                        height: 48px * sample.up;
-                        background: #16a34a;
-                        border-radius: 2px;
-                    }
-                }
-            }
-        }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        HeaderCell { label: "Name"; cell-width: 330px; }
+        HeaderCell { label: "State"; cell-width: 82px; }
+        HeaderCell { label: "Progress"; cell-width: 124px; }
+        HeaderCell { label: "Size"; cell-width: 138px; }
+        HeaderCell { label: "Down"; cell-width: 82px; }
+        HeaderCell { label: "Sources"; cell-width: 126px; }
+        HeaderCell { label: "Category"; cell-width: 130px; }
     }
 }
 
 component TransferRow inherits Rectangle {
     in property <TransferItem> item;
+    in property <bool> selected-row;
     callback selected;
 
-    height: 74px;
-    background: #ffffff;
-    border-color: #e5e7eb;
+    height: 28px;
+    background: selected-row ? #dbeafe : #ffffff;
+    border-color: selected-row ? #93c5fd : #e5e7eb;
     border-width: 1px;
-    border-radius: 5px;
 
-    VerticalLayout {
-        padding: 10px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
         spacing: 6px;
-
-        HorizontalLayout {
-            height: 24px;
-            spacing: 8px;
-            Badge {
+        DataCell { value: item.name; cell-width: 330px; }
+        Rectangle {
+            width: 82px;
+            height: 28px;
+            background: transparent;
+            RowBadge {
+                y: 5px;
                 text: item.state;
                 fill: item.state == "downloading" ? #dcfce7 : item.state == "error" ? #fee2e2 : #f1f5f9;
                 ink: item.state == "downloading" ? #166534 : item.state == "error" ? #991b1b : #334155;
             }
-            Text {
-                text: item.name;
-                color: #111827;
-                font-size: 13px;
-                font-weight: 700;
-                overflow: elide;
-            }
-            Text {
-                text: item.speed-text;
-                color: #2563eb;
-                font-size: 12px;
-                horizontal-alignment: right;
-            }
         }
-
-        HorizontalLayout {
-            spacing: 10px;
-            ProgressBar {
-                value: item.progress;
-                fill: #2563eb;
-            }
-            Text {
-                text: item.progress-text;
-                color: #475569;
-                font-size: 12px;
-                width: 56px;
-            }
+        Rectangle {
+            width: 124px;
+            height: 28px;
+            background: transparent;
+            ProgressBar { x: 0px; y: 11px; width: 72px; value: item.progress; fill: #2563eb; }
+            DataCell { x: 80px; value: item.progress-text; cell-width: 44px; }
         }
-
-        Text {
-            text: item.size-text + " | " + item.sources-text + " | " + item.category;
-            color: #64748b;
-            font-size: 12px;
-            overflow: elide;
-        }
+        NumberCell { value: item.size-text; cell-width: 138px; }
+        NumberCell { value: item.speed-text; cell-width: 82px; }
+        MutedCell { value: item.sources-text; cell-width: 126px; }
+        MutedCell { value: item.category; cell-width: 130px; }
     }
 
     TouchArea {
@@ -276,82 +288,59 @@ component TransferRow inherits Rectangle {
     }
 }
 
-component UploadRow inherits Rectangle {
-    in property <UploadItem> item;
-    callback selected;
-
-    height: 62px;
-    background: #ffffff;
-    border-color: #e5e7eb;
+component ServerHeader inherits Rectangle {
+    height: 26px;
+    background: #eef2f7;
+    border-color: #cbd5e1;
     border-width: 1px;
-    border-radius: 5px;
 
-    VerticalLayout {
-        padding: 10px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
         spacing: 6px;
-        HorizontalLayout {
-            spacing: 8px;
-            Badge { text: item.state; fill: #ecfdf5; ink: #047857; }
-            Text {
-                text: item.user + " -> " + item.file;
-                color: #111827;
-                font-size: 13px;
-                font-weight: 700;
-                overflow: elide;
-            }
-            Text {
-                text: item.speed-text;
-                color: #16a34a;
-                font-size: 12px;
-                horizontal-alignment: right;
-            }
-        }
-        HorizontalLayout {
-            spacing: 10px;
-            ProgressBar { value: item.ratio; fill: #16a34a; }
-            Text {
-                text: item.uploaded-text;
-                color: #64748b;
-                font-size: 12px;
-                width: 84px;
-            }
-        }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.selected(); }
+        HeaderCell { label: "Name"; cell-width: 220px; }
+        HeaderCell { label: "Endpoint"; cell-width: 178px; }
+        HeaderCell { label: "Status"; cell-width: 86px; }
+        HeaderCell { label: "Users"; cell-width: 92px; }
+        HeaderCell { label: "Files"; cell-width: 92px; }
+        HeaderCell { label: "Ping"; cell-width: 72px; }
+        HeaderCell { label: "Priority"; cell-width: 86px; }
+        HeaderCell { label: "Fails"; cell-width: 82px; }
     }
 }
 
 component ServerRow inherits Rectangle {
     in property <ServerItem> item;
+    in property <bool> selected-row;
     callback selected;
 
-    height: 58px;
-    background: item.current ? #eff6ff : #ffffff;
-    border-color: item.current ? #93c5fd : #e5e7eb;
+    height: 28px;
+    background: selected-row ? #dbeafe : item.current ? #eff6ff : #ffffff;
+    border-color: selected-row || item.current ? #93c5fd : #e5e7eb;
     border-width: 1px;
-    border-radius: 5px;
 
     HorizontalLayout {
-        padding: 10px;
-        spacing: 10px;
-        Badge {
-            text: item.status;
-            fill: item.status == "connected" ? #dbeafe : item.status == "connecting" ? #fef3c7 : #f1f5f9;
-            ink: item.status == "connected" ? #1d4ed8 : item.status == "connecting" ? #92400e : #334155;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        DataCell { value: item.name; cell-width: 220px; }
+        MutedCell { value: item.endpoint; cell-width: 178px; }
+        Rectangle {
+            width: 86px;
+            height: 28px;
+            background: transparent;
+            RowBadge {
+                y: 5px;
+                text: item.status;
+                fill: item.status == "connected" ? #dbeafe : item.status == "connecting" ? #fef3c7 : #f1f5f9;
+                ink: item.status == "connected" ? #1d4ed8 : item.status == "connecting" ? #92400e : #334155;
+            }
         }
-        VerticalLayout {
-            spacing: 2px;
-            Text { text: item.name; color: #111827; font-size: 13px; font-weight: 700; overflow: elide; }
-            Text { text: item.endpoint; color: #64748b; font-size: 12px; overflow: elide; }
-        }
-        Text { text: item.users-text; color: #334155; font-size: 12px; width: 84px; horizontal-alignment: right; }
-        Text { text: item.files-text; color: #334155; font-size: 12px; width: 84px; horizontal-alignment: right; }
-        Text { text: item.ping-text; color: #334155; font-size: 12px; width: 64px; horizontal-alignment: right; }
-        Text { text: item.priority + " | " + item.failed-text; color: #64748b; font-size: 12px; width: 110px; horizontal-alignment: right; }
+        NumberCell { value: item.users-text; cell-width: 92px; }
+        NumberCell { value: item.files-text; cell-width: 92px; }
+        NumberCell { value: item.ping-text; cell-width: 72px; }
+        MutedCell { value: item.priority; cell-width: 86px; }
+        NumberCell { value: item.failed-text; cell-width: 82px; }
     }
 
     TouchArea {
@@ -361,63 +350,146 @@ component ServerRow inherits Rectangle {
     }
 }
 
+component SharedFileHeader inherits Rectangle {
+    height: 26px;
+    background: #eef2f7;
+    border-color: #cbd5e1;
+    border-width: 1px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        HeaderCell { label: "Name"; cell-width: 320px; }
+        HeaderCell { label: "Size"; cell-width: 90px; }
+        HeaderCell { label: "Priority"; cell-width: 76px; }
+        HeaderCell { label: "Rating"; cell-width: 76px; }
+        HeaderCell { label: "Requests"; cell-width: 126px; }
+        HeaderCell { label: "Transferred"; cell-width: 112px; }
+        HeaderCell { label: "Directory"; cell-width: 260px; }
+    }
+}
+
 component SharedFileRow inherits Rectangle {
     in property <SharedFileItem> item;
+    in property <bool> selected-row;
     callback selected;
 
-    height: 70px;
-    background: #ffffff;
-    border-color: #e5e7eb;
+    height: 28px;
+    background: selected-row ? #dbeafe : #ffffff;
+    border-color: selected-row ? #93c5fd : #e5e7eb;
     border-width: 1px;
-    border-radius: 5px;
 
-    VerticalLayout {
-        padding: 10px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
         spacing: 6px;
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: item.name; color: #111827; font-size: 13px; font-weight: 700; overflow: elide; }
-            Text { text: item.size-text; color: #334155; font-size: 12px; width: 90px; horizontal-alignment: right; }
-            Text { text: item.priority; color: #334155; font-size: 12px; width: 70px; horizontal-alignment: right; }
-            Text { text: item.rating-text; color: #92400e; font-size: 12px; width: 64px; horizontal-alignment: right; }
-        }
-        HorizontalLayout {
-            spacing: 10px;
-            ProgressBar { value: item.demand-ratio; fill: #f97316; }
-            Text { text: item.requests-text; color: #64748b; font-size: 12px; width: 112px; }
-            Text { text: item.transferred-text; color: #64748b; font-size: 12px; width: 110px; }
-        }
-        Text { text: item.directory; color: #64748b; font-size: 11px; overflow: elide; }
+        DataCell { value: item.name; cell-width: 320px; }
+        NumberCell { value: item.size-text; cell-width: 90px; }
+        MutedCell { value: item.priority; cell-width: 76px; }
+        NumberCell { value: item.rating-text; cell-width: 76px; }
+        MutedCell { value: item.requests-text; cell-width: 126px; }
+        NumberCell { value: item.transferred-text; cell-width: 112px; }
+        MutedCell { value: item.directory; cell-width: 260px; }
     }
 
     TouchArea {
         width: parent.width;
         height: parent.height;
         clicked => { root.selected(); }
+    }
+}
+
+component UploadHeader inherits Rectangle {
+    height: 26px;
+    background: #eef2f7;
+    border-color: #cbd5e1;
+    border-width: 1px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        HeaderCell { label: "User"; cell-width: 210px; }
+        HeaderCell { label: "File"; cell-width: 360px; }
+        HeaderCell { label: "State"; cell-width: 96px; }
+        HeaderCell { label: "Up"; cell-width: 86px; }
+        HeaderCell { label: "Uploaded"; cell-width: 100px; }
+        HeaderCell { label: "Ratio"; cell-width: 124px; }
+    }
+}
+
+component UploadRow inherits Rectangle {
+    in property <UploadItem> item;
+    in property <bool> selected-row;
+    callback selected;
+
+    height: 28px;
+    background: selected-row ? #dbeafe : #ffffff;
+    border-color: selected-row ? #93c5fd : #e5e7eb;
+    border-width: 1px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        DataCell { value: item.user; cell-width: 210px; }
+        MutedCell { value: item.file; cell-width: 360px; }
+        Rectangle {
+            width: 96px;
+            height: 28px;
+            background: transparent;
+            RowBadge { y: 5px; text: item.state; fill: #ecfdf5; ink: #047857; }
+        }
+        NumberCell { value: item.speed-text; cell-width: 86px; }
+        NumberCell { value: item.uploaded-text; cell-width: 100px; }
+        Rectangle {
+            width: 124px;
+            height: 28px;
+            background: transparent;
+            ProgressBar { x: 0px; y: 11px; width: 112px; value: item.ratio; fill: #16a34a; }
+        }
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.selected(); }
+    }
+}
+
+component LogHeader inherits Rectangle {
+    height: 26px;
+    background: #eef2f7;
+    border-color: #cbd5e1;
+    border-width: 1px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+        HeaderCell { label: "Time"; cell-width: 176px; }
+        HeaderCell { label: "Level"; cell-width: 76px; }
+        HeaderCell { label: "Message"; cell-width: 780px; }
     }
 }
 
 component LogRow inherits Rectangle {
     in property <LogItem> item;
 
-    height: 34px;
+    height: 28px;
     background: item.level == "error" ? #fef2f2 : item.level == "warning" ? #fffbeb : #ffffff;
     border-color: #e5e7eb;
     border-width: 1px;
-    border-radius: 4px;
 
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
-        spacing: 8px;
-        Text { text: item.timestamp; color: #64748b; font-size: 11px; width: 170px; overflow: elide; }
-        Text { text: item.level; color: #334155; font-size: 11px; font-weight: 700; width: 64px; }
-        Text { text: item.message; color: #111827; font-size: 12px; overflow: elide; }
+        spacing: 6px;
+        MutedCell { value: item.timestamp; cell-width: 176px; }
+        DataCell { value: item.level; cell-width: 76px; }
+        DataCell { value: item.message; cell-width: 780px; }
     }
-}
-
-component TabButton inherits Button {
-    in property <bool> selected;
 }
 
 export component MainWindow inherits Window {
@@ -459,43 +531,46 @@ export component MainWindow inherits Window {
     background: #f5f7fb;
 
     VerticalLayout {
-        padding: 14px;
-        spacing: 10px;
+        padding: 8px;
+        spacing: 6px;
 
         Rectangle {
-            height: 68px;
+            height: 46px;
             background: #ffffff;
-            border-color: #d7dee8;
+            border-color: #cbd5e1;
             border-width: 1px;
-            border-radius: 6px;
+            border-radius: 4px;
 
             HorizontalLayout {
-                padding: 10px;
-                spacing: 10px;
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 8px;
 
                 Text {
                     text: "eMuleBB Rust";
-                    font-size: 20px;
+                    font-size: 17px;
                     font-weight: 700;
                     color: #111827;
                     vertical-alignment: center;
-                    min-width: 150px;
+                    min-width: 128px;
                 }
 
                 LineEdit {
                     text <=> root.base-url;
                     placeholder-text: "REST base URL";
-                    min-width: 360px;
+                    min-width: 330px;
                 }
 
                 LineEdit {
                     text <=> root.api-key;
                     placeholder-text: "API key";
-                    min-width: 170px;
+                    min-width: 150px;
                 }
 
                 Button {
-                    text: root.is-refreshing ? "Refreshing" : "Connect";
+                    text: root.is-refreshing ? "Working" : "Connect";
                     enabled: !root.is-refreshing;
                     clicked => { root.connect-requested(root.base-url, root.api-key); }
                 }
@@ -505,197 +580,210 @@ export component MainWindow inherits Window {
                     enabled: !root.is-refreshing;
                     clicked => { root.refresh-requested(); }
                 }
-            }
-        }
 
-        if root.error-message != "" : Rectangle {
-            height: 40px;
-            background: #fff7ed;
-            border-color: #fdba74;
-            border-width: 1px;
-            border-radius: 6px;
-
-            Text {
-                x: 12px;
-                width: parent.width - 24px;
-                height: parent.height;
-                text: root.error-message;
-                color: #9a3412;
-                font-size: 13px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 10px;
-
-            Rectangle {
-                width: 178px;
-                background: #ffffff;
-                border-color: #d7dee8;
-                border-width: 1px;
-                border-radius: 6px;
-
-                VerticalLayout {
-                    padding: 10px;
-                    spacing: 8px;
-                    Text { text: "Workbench"; color: #111827; font-size: 15px; font-weight: 700; }
-                    TabButton { text: "Transfers"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
-                    Text { text: root.transfer-summary; color: #64748b; font-size: 11px; }
-                    TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.selected-tab = 1; } }
-                    Text { text: root.server-summary; color: #64748b; font-size: 11px; }
-                    TabButton { text: "Shared Files"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
-                    Text { text: root.shared-summary; color: #64748b; font-size: 11px; }
-                    TabButton { text: "Uploads"; selected: root.selected-tab == 3; clicked => { root.selected-tab = 3; } }
-                    Text { text: root.upload-summary; color: #64748b; font-size: 11px; }
-                    TabButton { text: "Logs"; selected: root.selected-tab == 4; clicked => { root.selected-tab = 4; } }
-                    Rectangle { height: 1px; background: #e5e7eb; }
-                    Text { text: root.connection-state; color: #334155; font-size: 11px; wrap: word-wrap; }
-                    Text { text: root.network-line; color: #334155; font-size: 11px; wrap: word-wrap; }
-                    Text { text: root.speed-line; color: #166534; font-size: 11px; font-weight: 700; }
+                Text {
+                    text: root.connection-state;
+                    color: root.connection-state == "Connected" ? #047857 : #9a3412;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
                 }
             }
+        }
+
+        Rectangle {
+            height: 34px;
+            background: #ffffff;
+            border-color: #d7dee8;
+            border-width: 1px;
+            border-radius: 4px;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                TabButton { text: "Transfers"; selected: root.selected-tab == 0; clicked => { root.selected-tab = 0; } }
+                TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.selected-tab = 1; } }
+                TabButton { text: "Shared Files"; selected: root.selected-tab == 2; clicked => { root.selected-tab = 2; } }
+                TabButton { text: "Uploads"; selected: root.selected-tab == 3; clicked => { root.selected-tab = 3; } }
+                TabButton { text: "Logs"; selected: root.selected-tab == 4; clicked => { root.selected-tab = 4; } }
+                Text {
+                    text: root.speed-line;
+                    color: #166534;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+                SparkBars { samples: root.speed-samples; width: 220px; }
+            }
+        }
+
+        Rectangle {
+            height: 28px;
+            background: root.error-message == "" ? #f8fafc : #fff7ed;
+            border-color: root.error-message == "" ? #d7dee8 : #fdba74;
+            border-width: 1px;
+            border-radius: 4px;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 12px;
+                Text { text: root.lifecycle-line; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 160px; overflow: elide; }
+                Text { text: root.transfer-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 146px; overflow: elide; }
+                Text { text: root.server-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 104px; overflow: elide; }
+                Text { text: root.shared-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 104px; overflow: elide; }
+                Text { text: root.upload-summary; color: #334155; font-size: 12px; vertical-alignment: center; min-width: 126px; overflow: elide; }
+                Text {
+                    text: root.error-message == "" ? root.network-line : root.error-message;
+                    color: root.error-message == "" ? #64748b : #9a3412;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        Rectangle {
+            background: #ffffff;
+            border-color: #cbd5e1;
+            border-width: 1px;
+            border-radius: 4px;
+
+            if root.selected-tab == 0 : VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                TransferHeader {}
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for item in root.transfers : TransferRow {
+                            item: item;
+                            selected-row: root.selected-kind == "transfer" && root.selected-id == item.hash;
+                            selected => {
+                                root.selected-kind = "transfer";
+                                root.selected-id = item.hash;
+                                root.inspector-title = item.name;
+                                root.inspector-detail = item.detail;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.selected-tab == 1 : VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                ServerHeader {}
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for item in root.servers : ServerRow {
+                            item: item;
+                            selected-row: root.selected-kind == "server" && root.selected-id == item.endpoint-id;
+                            selected => {
+                                root.selected-kind = "server";
+                                root.selected-id = item.endpoint-id;
+                                root.inspector-title = item.name;
+                                root.inspector-detail = item.detail;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.selected-tab == 2 : VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                SharedFileHeader {}
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for item in root.shared-files : SharedFileRow {
+                            item: item;
+                            selected-row: root.selected-kind == "shared" && root.selected-id == item.hash;
+                            selected => {
+                                root.selected-kind = "shared";
+                                root.selected-id = item.hash;
+                                root.inspector-title = item.name;
+                                root.inspector-detail = item.detail;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.selected-tab == 3 : VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                UploadHeader {}
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for item in root.uploads : UploadRow {
+                            item: item;
+                            selected-row: root.selected-kind == "upload" && root.selected-id == item.client-id;
+                            selected => {
+                                root.selected-kind = "upload";
+                                root.selected-id = item.client-id;
+                                root.inspector-title = item.user;
+                                root.inspector-detail = item.detail;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.selected-tab == 4 : VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                LogHeader {}
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 0px;
+                        for item in root.logs : LogRow { item: item; }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 94px;
+            background: #ffffff;
+            border-color: #cbd5e1;
+            border-width: 1px;
+            border-radius: 4px;
 
             VerticalLayout {
-                spacing: 10px;
-
-                GridLayout {
-                    height: 62px;
-                    spacing: 8px;
-                    Row {
-                        Metric { col: 0; label: "Lifecycle"; value: root.lifecycle-line; accent: #64748b; }
-                        Metric { col: 1; label: "Transfers"; value: root.transfer-summary; accent: #0ea5e9; }
-                        Metric { col: 2; label: "Servers"; value: root.server-summary; accent: #f97316; }
-                        Metric { col: 3; label: "Shared"; value: root.shared-summary; accent: #a855f7; }
+                padding: 8px;
+                spacing: 6px;
+                HorizontalLayout {
+                    height: 28px;
+                    spacing: 6px;
+                    Text {
+                        text: root.inspector-title == "" ? "Inspector" : root.inspector-title;
+                        color: #111827;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
+                    if root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
+                    if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
+                    if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
+                    if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
+                    if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
+                    if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect"); } }
+                    if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect"); } }
                 }
-
-                SparkBars { samples: root.speed-samples; height: 92px; }
-
-                Rectangle {
-                    background: #ffffff;
-                    border-color: #d7dee8;
-                    border-width: 1px;
-                    border-radius: 6px;
-
-                    if root.selected-tab == 0 : ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 8px;
-                            for item in root.transfers : TransferRow {
-                                item: item;
-                                selected => {
-                                    root.selected-kind = "transfer";
-                                    root.selected-id = item.hash;
-                                    root.inspector-title = item.name;
-                                    root.inspector-detail = item.detail;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.selected-tab == 1 : ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 8px;
-                            for item in root.servers : ServerRow {
-                                item: item;
-                                selected => {
-                                    root.selected-kind = "server";
-                                    root.selected-id = item.endpoint-id;
-                                    root.inspector-title = item.name;
-                                    root.inspector-detail = item.detail;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.selected-tab == 2 : ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 8px;
-                            for item in root.shared-files : SharedFileRow {
-                                item: item;
-                                selected => {
-                                    root.selected-kind = "shared";
-                                    root.selected-id = item.hash;
-                                    root.inspector-title = item.name;
-                                    root.inspector-detail = item.detail;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.selected-tab == 3 : ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 8px;
-                            for item in root.uploads : UploadRow {
-                                item: item;
-                                selected => {
-                                    root.selected-kind = "upload";
-                                    root.selected-id = item.client-id;
-                                    root.inspector-title = item.user;
-                                    root.inspector-detail = item.detail;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.selected-tab == 4 : ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 6px;
-                            for item in root.logs : LogRow { item: item; }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    height: 132px;
-                    background: #ffffff;
-                    border-color: #d7dee8;
-                    border-width: 1px;
-                    border-radius: 6px;
-
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 8px;
-                        HorizontalLayout {
-                            height: 30px;
-                            Text {
-                                text: root.inspector-title == "" ? "Inspector" : root.inspector-title;
-                                color: #111827;
-                                font-size: 14px;
-                                font-weight: 700;
-                                overflow: elide;
-                            }
-                            if root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
-                            if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
-                            if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
-                            if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
-                            if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
-                            if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect"); } }
-                            if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect"); } }
-                        }
-                        Text {
-                            text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
-                            color: #334155;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
+                Text {
+                    text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
+                    color: #334155;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    overflow: elide;
                 }
             }
         }
