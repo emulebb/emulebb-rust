@@ -143,6 +143,32 @@ component StatusText inherits Text {
     overflow: elide;
 }
 
+component EmptyState inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+
+    background: #ffffff;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: root.title;
+            color: #111827;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        Text {
+            text: root.detail;
+            color: #64748b;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     in-out property <string> base-url;
     in-out property <string> api-key;
@@ -318,7 +344,7 @@ export component MainWindow inherits Window {
             border-width: 1px;
             border-radius: 3px;
 
-            if root.selected-tab == 0 : StandardTableView {
+            if root.selected-tab == 0 && root.transfer-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.transfer-columns;
@@ -333,7 +359,14 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.selected-tab == 1 : StandardTableView {
+            if root.selected-tab == 0 && root.transfer-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No transfers";
+                detail: "The REST snapshot currently reports zero download transfers. Servers, uploads, shared files, and logs may still have live data.";
+            }
+
+            if root.selected-tab == 1 && root.server-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.server-columns;
@@ -348,7 +381,14 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.selected-tab == 2 : StandardTableView {
+            if root.selected-tab == 1 && root.server-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No servers";
+                detail: "The REST snapshot did not return any known servers.";
+            }
+
+            if root.selected-tab == 2 && root.shared-file-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.shared-file-columns;
@@ -363,7 +403,14 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.selected-tab == 3 : StandardTableView {
+            if root.selected-tab == 2 && root.shared-file-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No shared files";
+                detail: "The REST snapshot did not return shared files.";
+            }
+
+            if root.selected-tab == 3 && root.upload-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.upload-columns;
@@ -378,11 +425,25 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.selected-tab == 4 : StandardTableView {
+            if root.selected-tab == 3 && root.upload-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No uploads";
+                detail: "The REST snapshot currently reports no active or queued uploads.";
+            }
+
+            if root.selected-tab == 4 && root.log-rows.length > 0 : StandardTableView {
                 width: parent.width;
                 height: parent.height;
                 columns <=> root.log-columns;
                 rows: root.log-rows;
+            }
+
+            if root.selected-tab == 4 && root.log-rows.length == 0 : EmptyState {
+                width: parent.width;
+                height: parent.height;
+                title: "No logs";
+                detail: "The REST snapshot did not return log entries.";
             }
         }
 
