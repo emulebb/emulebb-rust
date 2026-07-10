@@ -412,6 +412,23 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
     ) -> Result<PieceWriteOutcome> {
+        let (outcome, _manifest) = self
+            .append_piece_block_inner(file_hash, piece_index, start, end, data)
+            .await?;
+        Ok(outcome)
+    }
+
+    /// [`Self::append_piece_block`] returning the post-append manifest it
+    /// already holds, so orchestration callers do not re-lock and re-clone the
+    /// manifest for every accepted block.
+    async fn append_piece_block_inner(
+        &self,
+        file_hash: &str,
+        piece_index: u32,
+        start: u64,
+        end: u64,
+        data: &[u8],
+    ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let block_received_at = Instant::now();
@@ -439,7 +456,7 @@ impl Ed2kTransferRuntime {
             // before the current prefix. MFC accepts any received range covered
             // by a pending request and writes it at the absolute file offset, so
             // preserve that data instead of dropping the session on ordering.
-            return self
+            let outcome = self
                 .append_requested_block_by_bitmap_unlocked(
                     &mut manifest,
                     file_hash,
@@ -451,7 +468,8 @@ impl Ed2kTransferRuntime {
                     data,
                     block_received_at,
                 )
-                .await;
+                .await?;
+            return Ok((outcome, manifest));
         }
 
         let mut file = self.take_payload_handle(file_hash).await?;
@@ -590,7 +608,7 @@ impl Ed2kTransferRuntime {
                     should_checkpoint,
                     checkpoint_reason,
                 });
-                return Ok(outcome);
+                return Ok((outcome, manifest));
             }
 
             self.store_payload_handle(file_hash, file);
@@ -605,7 +623,7 @@ impl Ed2kTransferRuntime {
                 should_checkpoint,
                 checkpoint_reason,
             });
-            return Ok(outcome);
+            return Ok((outcome, manifest));
         }
 
         let should_checkpoint = true;
@@ -619,11 +637,13 @@ impl Ed2kTransferRuntime {
             should_checkpoint,
             checkpoint_reason,
         });
-        Ok(outcome)
+        Ok((outcome, manifest))
     }
 
     /// Append a block and return the refreshed manifest snapshot used by
-    /// downloader orchestration after a persistence boundary.
+    /// downloader orchestration after a persistence boundary. Returns the
+    /// manifest the append already holds instead of re-locking and re-cloning
+    /// it from the cache per block.
     pub(crate) async fn append_piece_block_with_manifest(
         &self,
         file_hash: &str,
@@ -632,11 +652,8 @@ impl Ed2kTransferRuntime {
         end: u64,
         data: &[u8],
     ) -> Result<(PieceWriteOutcome, Ed2kResumeManifest)> {
-        let outcome = self
-            .append_piece_block(file_hash, piece_index, start, end, data)
-            .await?;
-        let manifest = self.manifest(file_hash).await?;
-        Ok((outcome, manifest))
+        self.append_piece_block_inner(file_hash, piece_index, start, end, data)
+            .await
     }
 
     /// Read a fully verified range for upload serving.

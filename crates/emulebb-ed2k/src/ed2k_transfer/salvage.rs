@@ -341,13 +341,17 @@ impl Ed2kTransferRuntime {
     ) -> Result<(PieceWriteOutcome, super::Ed2kResumeManifest)> {
         let is_salvage = {
             let _guard = self.lock_manifest(file_hash).await;
-            let manifest = self.load_manifest_unlocked(file_hash).await?;
-            manifest
-                .pieces
-                .iter()
-                .find(|piece| piece.piece_index == piece_index)
-                .map(|piece| piece.has_block_bitmap())
-                .unwrap_or(false)
+            // Cache-hit probe: checking one piece's bitmap flag must not clone
+            // the whole manifest on every accepted block.
+            self.probe_manifest_unlocked(file_hash, |manifest| {
+                manifest
+                    .pieces
+                    .iter()
+                    .find(|piece| piece.piece_index == piece_index)
+                    .map(|piece| piece.has_block_bitmap())
+                    .unwrap_or(false)
+            })
+            .await?
         };
         if is_salvage {
             let part = u16::try_from(piece_index)

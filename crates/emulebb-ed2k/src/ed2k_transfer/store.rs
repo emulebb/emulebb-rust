@@ -88,6 +88,24 @@ impl Ed2kTransferRuntime {
             .with_context(|| format!("missing ED2K transfer metadata for {file_hash}"))
     }
 
+    /// Run a read-only probe against the manifest WITHOUT cloning it on the
+    /// (hot) cache-hit path; only a cache miss pays the full load. For
+    /// per-block predicates like the salvage-mode check.
+    pub(super) async fn probe_manifest_unlocked<R>(
+        &self,
+        file_hash: &str,
+        probe: impl FnOnce(&Ed2kResumeManifest) -> R,
+    ) -> Result<R> {
+        {
+            let cache = self.manifest_cache.lock().await;
+            if let Some(manifest) = cache.get(file_hash) {
+                return Ok(probe(manifest));
+            }
+        }
+        let manifest = self.load_manifest_unlocked(file_hash).await?;
+        Ok(probe(&manifest))
+    }
+
     pub(super) async fn store_manifest_unlocked(
         &self,
         manifest: &Ed2kResumeManifest,
