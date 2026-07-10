@@ -155,7 +155,11 @@ fn server_callback_requires_self_high_id_and_same_server() {
         Some(connected)
     ));
     // No connected server at all -> unavailable.
-    assert!(!ed2k_server_callback_permitted(false, Some(connected), None));
+    assert!(!ed2k_server_callback_permitted(
+        false,
+        Some(connected),
+        None
+    ));
 }
 
 fn direct_source(file_hash: Ed2kHash, ip: Ipv4Addr, tcp_port: u16) -> Ed2kFoundSource {

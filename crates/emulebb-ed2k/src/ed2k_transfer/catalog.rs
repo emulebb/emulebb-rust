@@ -482,8 +482,11 @@ mod indexed_catalog_tests {
 
     #[test]
     fn add_then_lookup_each_entry_resolves() {
-        let catalog =
-            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2), verified_entry(3)]);
+        let catalog = IndexedSharedCatalog::from_entries(vec![
+            verified_entry(1),
+            verified_entry(2),
+            verified_entry(3),
+        ]);
         catalog.assert_index_consistent();
         for n in 1..=3u8 {
             let idx = catalog.index_by_hash(&key(n)).expect("entry present");
@@ -496,8 +499,11 @@ mod indexed_catalog_tests {
     fn remove_shifts_indices_without_leaving_stale_entry() {
         // remove the MIDDLE entry so every later Vec index shifts down by one; a
         // stale index would now resolve C to the wrong slot.
-        let mut catalog =
-            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2), verified_entry(3)]);
+        let mut catalog = IndexedSharedCatalog::from_entries(vec![
+            verified_entry(1),
+            verified_entry(2),
+            verified_entry(3),
+        ]);
         catalog.retain(|entry| entry.file_hash != hex_hash(2));
         catalog.assert_index_consistent();
         assert_eq!(catalog.len(), 2);
@@ -510,18 +516,22 @@ mod indexed_catalog_tests {
 
     #[test]
     fn remove_then_readd_reindexes() {
-        let mut catalog = IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
+        let mut catalog =
+            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
         catalog.retain(|entry| entry.file_hash != hex_hash(1));
         assert!(catalog.index_by_hash(&key(1)).is_none());
         catalog.push(verified_entry(1));
         catalog.assert_index_consistent();
-        let idx = catalog.index_by_hash(&key(1)).expect("re-added entry present");
+        let idx = catalog
+            .index_by_hash(&key(1))
+            .expect("re-added entry present");
         assert_eq!(catalog[idx].file_hash, hex_hash(1));
     }
 
     #[test]
     fn bulk_replace_rebuilds_index() {
-        let mut catalog = IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
+        let mut catalog =
+            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
         catalog.replace_with(vec![verified_entry(3), verified_entry(4)]);
         catalog.assert_index_consistent();
         assert!(catalog.index_by_hash(&key(1)).is_none());
@@ -534,17 +544,23 @@ mod indexed_catalog_tests {
         // A hint sharing a hash with a verified entry must not shadow it, and a
         // hint-only hash must not resolve (hot-path lookups target the verified
         // entry, never a hint).
-        let catalog =
-            IndexedSharedCatalog::from_entries(vec![hint_entry(1), verified_entry(1), hint_entry(2)]);
+        let catalog = IndexedSharedCatalog::from_entries(vec![
+            hint_entry(1),
+            verified_entry(1),
+            hint_entry(2),
+        ]);
         catalog.assert_index_consistent();
-        let idx = catalog.index_by_hash(&key(1)).expect("verified entry present");
+        let idx = catalog
+            .index_by_hash(&key(1))
+            .expect("verified entry present");
         assert!(!catalog[idx].compatibility_hint);
         assert!(catalog.index_by_hash(&key(2)).is_none());
     }
 
     #[test]
     fn update_by_hash_targets_only_matching_verified_entry() {
-        let mut catalog = IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
+        let mut catalog =
+            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2)]);
         assert!(catalog.update_by_hash(&key(1), |entry| {
             entry.all_time_uploaded_bytes = 42;
         }));
@@ -564,22 +580,35 @@ mod indexed_catalog_tests {
         const FRAGMENTS: u64 = 55;
         for _ in 0..FRAGMENTS {
             catalog.update_by_hash(&key(1), |entry| {
-                entry.all_time_uploaded_bytes = entry.all_time_uploaded_bytes.saturating_add(FRAGMENT);
-                entry.publish.session_uploaded_bytes =
-                    entry.publish.session_uploaded_bytes.saturating_add(FRAGMENT);
+                entry.all_time_uploaded_bytes =
+                    entry.all_time_uploaded_bytes.saturating_add(FRAGMENT);
+                entry.publish.session_uploaded_bytes = entry
+                    .publish
+                    .session_uploaded_bytes
+                    .saturating_add(FRAGMENT);
             });
         }
         let idx = catalog.index_by_hash(&key(1)).unwrap();
         assert_eq!(catalog[idx].all_time_uploaded_bytes, FRAGMENT * FRAGMENTS);
-        assert_eq!(catalog[idx].publish.session_uploaded_bytes, FRAGMENT * FRAGMENTS);
+        assert_eq!(
+            catalog[idx].publish.session_uploaded_bytes,
+            FRAGMENT * FRAGMENTS
+        );
     }
 
     #[test]
     fn mutate_all_keeps_index_consistent() {
-        let mut catalog =
-            IndexedSharedCatalog::from_entries(vec![verified_entry(1), verified_entry(2), hint_entry(3)]);
+        let mut catalog = IndexedSharedCatalog::from_entries(vec![
+            verified_entry(1),
+            verified_entry(2),
+            hint_entry(3),
+        ]);
         catalog.mutate_all(|entry| entry.publish.last_ed2k_publish_unix_ms = 7);
         catalog.assert_index_consistent();
-        assert!(catalog.iter().all(|entry| entry.publish.last_ed2k_publish_unix_ms == 7));
+        assert!(
+            catalog
+                .iter()
+                .all(|entry| entry.publish.last_ed2k_publish_unix_ms == 7)
+        );
     }
 }

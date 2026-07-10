@@ -565,7 +565,8 @@ impl Ed2kTransferRuntime {
             && amount > 0
         {
             catalog.update_by_hash(file_hash, |entry| {
-                entry.all_time_uploaded_bytes = entry.all_time_uploaded_bytes.saturating_add(amount);
+                entry.all_time_uploaded_bytes =
+                    entry.all_time_uploaded_bytes.saturating_add(amount);
                 entry.publish.session_uploaded_bytes =
                     entry.publish.session_uploaded_bytes.saturating_add(amount);
             });

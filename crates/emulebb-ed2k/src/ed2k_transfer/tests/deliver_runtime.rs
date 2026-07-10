@@ -139,8 +139,7 @@ async fn materialize_records_delivered_mtime_for_reload_reuse() {
         .expect("the delivered file's mtime baseline must be recorded");
     // It equals exactly what the reload stats for the same file (the mtime is
     // stable across delivery), so the (size, mtime) reuse identity matches.
-    let (_, _, scanned_mtime) =
-        Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
+    let (_, _, scanned_mtime) = Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
     assert_eq!(
         Some(recorded),
         scanned_mtime,

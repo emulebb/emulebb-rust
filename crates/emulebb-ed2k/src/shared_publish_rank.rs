@@ -95,7 +95,11 @@ pub fn resolve_auto_up_priority_tier(queued_count: u64) -> &'static str {
 /// PR_VERYLOW=4). An auto file is resolved to its dynamic tier first
 /// (`UpdateAutoUpPriority`), so `GetUpPriority()` already yields LOW/NORMAL/HIGH;
 /// with an empty/short queue that is HIGH -> realprio 3 (near the FRONT), never 0.
-pub fn mfc_real_upload_priority(priority: &str, auto_upload_priority: bool, queued_count: u64) -> i32 {
+pub fn mfc_real_upload_priority(
+    priority: &str,
+    auto_upload_priority: bool,
+    queued_count: u64,
+) -> i32 {
     let effective = if auto_upload_priority || priority == "auto" {
         resolve_auto_up_priority_tier(queued_count)
     } else {

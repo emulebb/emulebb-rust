@@ -468,7 +468,11 @@ mod tests {
         state.accept_incoming_buddy(false, buddy).unwrap();
 
         // Not yet stale: still held.
-        assert!(!state.reconcile_incoming_buddy(false, t0 + timeout - ChronoDuration::seconds(1), timeout));
+        assert!(!state.reconcile_incoming_buddy(
+            false,
+            t0 + timeout - ChronoDuration::seconds(1),
+            timeout
+        ));
         assert!(state.has_incoming_buddy());
 
         // At the window: released.
@@ -502,7 +506,11 @@ mod tests {
 
         // Session still alive shortly after: not expired even though registration
         // is now ancient (watermark tracks the last attached observation).
-        assert!(!state.reconcile_incoming_buddy(false, attached_at + ChronoDuration::seconds(30), timeout));
+        assert!(!state.reconcile_incoming_buddy(
+            false,
+            attached_at + ChronoDuration::seconds(30),
+            timeout
+        ));
         assert!(state.has_incoming_buddy());
 
         // Session gone for a full window without re-attaching: released.

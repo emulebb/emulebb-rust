@@ -593,11 +593,21 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&entry),
+                publisher_ip(),
+                ts(0)
+            ),
             1
         );
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(5)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&entry),
+                publisher_ip(),
+                ts(5)
+            ),
             0
         );
         assert_eq!(store.keyword_entry_count(), 1);
@@ -686,11 +696,21 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&first), publisher_ip(), ts(0)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&first),
+                publisher_ip(),
+                ts(0)
+            ),
             1
         );
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&replacement), publisher_ip(), ts(5)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&replacement),
+                publisher_ip(),
+                ts(5)
+            ),
             0
         );
         assert_eq!(store.keyword_entry_count(), 1);
@@ -731,7 +751,12 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&entry),
+                publisher_ip(),
+                ts(0)
+            ),
             1
         );
         let response = store
@@ -769,7 +794,12 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&entry),
+                publisher_ip(),
+                ts(0)
+            ),
             1
         );
         let response = store
@@ -805,7 +835,12 @@ mod tests {
             ],
         };
 
-        store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0));
+        store.record_keyword_publish_batch(
+            target,
+            std::slice::from_ref(&entry),
+            publisher_ip(),
+            ts(0),
+        );
         let response = store
             .keyword_search_response(
                 NodeId::from_bytes([9; 16]),
@@ -848,7 +883,12 @@ mod tests {
         };
 
         assert_eq!(
-            store.record_keyword_publish_batch(target, std::slice::from_ref(&entry), publisher_ip(), ts(0)),
+            store.record_keyword_publish_batch(
+                target,
+                std::slice::from_ref(&entry),
+                publisher_ip(),
+                ts(0)
+            ),
             1
         );
         let response = store

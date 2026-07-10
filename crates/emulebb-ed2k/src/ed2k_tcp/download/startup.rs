@@ -82,18 +82,15 @@ pub async fn download_file_from_peer(
         .obfuscation_options
         .map(|options| format!("0x{options:02x}"))
         .unwrap_or_else(|| "none".to_string());
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        None,
-        "connect_start",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, None, "connect_start", || {
+        (format!(
             "file_hash={file_hash_hex} file_size={file_size} client_id={} obfuscated={} crypt_options={} has_user_hash={}",
             peer.client_id,
             peer.obfuscated,
             crypt_options,
             peer.user_hash.is_some()
-        )).into(),
-    );
+        )).into()
+    });
     async {
         let mut transport = Ed2kTransport::connect_outgoing(
             bind_ip,
@@ -104,12 +101,9 @@ pub async fn download_file_from_peer(
             timeout,
         )
         .await?;
-        dump_ed2k_tcp_download_meta(
-            peer_addr,
-            Some(transport.mode),
-            "connect_ready",
-            || (format!("file_hash={file_hash_hex}")).into(),
-        );
+        dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "connect_ready", || {
+            (format!("file_hash={file_hash_hex}")).into()
+        });
         // The outbound TCP connect + hello handshake has completed, so the global
         // connection-budget slot acquired for this source transitions from
         // half-open to established (eMule `m_nHalfOpen` decrement on OnConnect),
@@ -149,12 +143,11 @@ pub async fn download_file_from_peer(
         })
         .await;
         match &session_result {
-            Ok(Ed2kPeerDownloadOutcome::Completed) => dump_ed2k_tcp_download_meta(
-                peer_addr,
-                Some(transport.mode),
-                "complete",
-                || (format!("file_hash={file_hash_hex}")).into(),
-            ),
+            Ok(Ed2kPeerDownloadOutcome::Completed) => {
+                dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "complete", || {
+                    (format!("file_hash={file_hash_hex}")).into()
+                })
+            }
             Ok(Ed2kPeerDownloadOutcome::AcceptedButIncomplete) => dump_ed2k_tcp_download_meta(
                 peer_addr,
                 Some(transport.mode),
@@ -179,12 +172,11 @@ pub async fn download_file_from_peer(
                 "file_not_found",
                 || (format!("file_hash={file_hash_hex}")).into(),
             ),
-            Err(error) => dump_ed2k_tcp_download_meta(
-                peer_addr,
-                Some(transport.mode),
-                "error",
-                || (format!("file_hash={file_hash_hex} error={error}")).into(),
-            ),
+            Err(error) => {
+                dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "error", || {
+                    (format!("file_hash={file_hash_hex} error={error}")).into()
+                })
+            }
         }
         session_result
     }

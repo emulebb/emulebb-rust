@@ -147,7 +147,9 @@ impl ReaskSourceHandle {
     /// full/closed channel or an unknown endpoint silently no-ops (the source
     /// keeps its normal cadence).
     pub fn mark_no_needed_parts(&self, endpoint: (Ipv4Addr, u16)) {
-        let _ = self.0.try_send(ReaskCommand::MarkNoNeededParts { endpoint });
+        let _ = self
+            .0
+            .try_send(ReaskCommand::MarkNoNeededParts { endpoint });
     }
 
     /// Answer a buddy-relayed `OP_REASKCALLBACKTCP` over UDP (we are the source).
@@ -555,11 +557,7 @@ fn apply_reask_command(
 /// are a downloader asking a firewalled type-6 source to connect back). Mirrors
 /// the oracle `CCS_DIRECTCALLBACK` send: our TCP port + userhash + connect
 /// options, obfuscated toward the source when its crypt key is known.
-async fn send_direct_callback_req(
-    dht: &DhtNode,
-    our_public_ip: [u8; 4],
-    args: DirectCallbackArgs,
-) {
+async fn send_direct_callback_req(dht: &DhtNode, our_public_ip: [u8; 4], args: DirectCallbackArgs) {
     let target = super::outbound::OutboundReaskTarget {
         dest_user_hash: args.dest_user_hash.unwrap_or([0u8; 16]),
         our_public_ip,

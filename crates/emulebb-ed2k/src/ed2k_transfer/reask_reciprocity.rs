@@ -23,8 +23,8 @@ use crate::ed2k_client_udp::reciprocity::{
 use crate::ed2k_client_udp::service::TransferReaskInfo;
 
 use super::model::Ed2kTransferState;
-use super::{Ed2kSharedEntry, Ed2kTransferRuntime};
 use super::upload_queue::Ed2kUploadSessionPhaseSnapshot;
+use super::{Ed2kSharedEntry, Ed2kTransferRuntime};
 
 impl Ed2kTransferRuntime {
     /// Build the uploader's reply to an inbound `OP_REASKFILEPING` (or `None` for

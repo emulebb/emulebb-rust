@@ -550,7 +550,9 @@ impl ListenerUploadQueue {
         transfer_runtime: &Ed2kTransferRuntime,
         peer: &Ed2kUploadPeerIdentity,
     ) -> bool {
-        transfer_runtime.note_queued_upload_block_request(peer).await
+        transfer_runtime
+            .note_queued_upload_block_request(peer)
+            .await
     }
 
     pub(in crate::ed2k_tcp) async fn note_range_request(
@@ -914,7 +916,10 @@ mod tests {
             .start_upload_reply(&runtime, identity, &file_hash)
             .await;
         assert_eq!(reply, None, "a banned peer's admission must stay silent");
-        assert!(queue.session.is_none(), "no session is retained for a banned peer");
+        assert!(
+            queue.session.is_none(),
+            "no session is retained for a banned peer"
+        );
         assert!(
             runtime.upload_queue_snapshot().await.is_empty(),
             "a banned peer must not create a queue entry"

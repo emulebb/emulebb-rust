@@ -1098,32 +1098,42 @@ async fn waiter_for_an_unshared_file_is_purged_on_maintenance() {
     let (_shared_waiter, shared_waiter_status) = runtime
         .begin_upload_session(upload_peer(2, 0x32, 0x0A00_0032), &shared_file)
         .await;
-    assert_eq!(shared_waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+    assert_eq!(
+        shared_waiter_status,
+        Ed2kUploadSessionStatus::Waiting { rank: 1 }
+    );
 
     // A second waiter requested a file we do not (or no longer) serve.
     let (_unshared_waiter, unshared_waiter_status) = runtime
         .begin_upload_session(upload_peer(3, 0x33, 0x0A00_0033), &unshared_file)
         .await;
-    assert_eq!(unshared_waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 2 });
+    assert_eq!(
+        unshared_waiter_status,
+        Ed2kUploadSessionStatus::Waiting { rank: 2 }
+    );
 
     // Only the shared file is servable in the catalog.
-    runtime.shared_catalog().write().await.push(Ed2kSharedEntry {
-        file_hash: shared_file.to_string(),
-        canonical_name: "shared.bin".to_string(),
-        file_size: 1_000_000,
-        verified_complete: true,
-        verified_ranges: Vec::new(),
-        compatibility_hint: false,
-        source_count_hint: None,
-        aich_root: None,
-        upload_priority: "normal".to_string(),
-        auto_upload_priority: false,
-        comment: String::new(),
-        rating: 0,
-        all_time_uploaded_bytes: 0,
-        complete_parts: Vec::new(),
-        publish: Default::default(),
-    });
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(Ed2kSharedEntry {
+            file_hash: shared_file.to_string(),
+            canonical_name: "shared.bin".to_string(),
+            file_size: 1_000_000,
+            verified_complete: true,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            all_time_uploaded_bytes: 0,
+            complete_parts: Vec::new(),
+            publish: Default::default(),
+        });
 
     assert_eq!(runtime.purge_unshared_upload_waiters().await, 1);
 
@@ -1131,9 +1141,9 @@ async fn waiter_for_an_unshared_file_is_purged_on_maintenance() {
     let snapshot = runtime.upload_queue_snapshot().await;
     assert_eq!(snapshot.len(), 2, "only the unshared waiter must be purged");
     assert!(
-        snapshot
-            .iter()
-            .all(|entry| entry.file_hash.eq_ignore_ascii_case(&shared_file.to_string())),
+        snapshot.iter().all(|entry| entry
+            .file_hash
+            .eq_ignore_ascii_case(&shared_file.to_string())),
         "no entry for the unshared file may remain"
     );
 }

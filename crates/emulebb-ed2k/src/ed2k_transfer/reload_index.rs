@@ -66,9 +66,7 @@ impl Ed2kTransferRuntime {
     /// (SharedFileList.cpp:2138). It is consulted for reuse ONLY: unlike the
     /// share-in-place index it never drives pruning, so a completed download
     /// whose Incoming dir is not shared is never dropped from serving.
-    pub async fn delivered_reuse_index(
-        &self,
-    ) -> Result<HashMap<String, Ed2kReloadIndexEntry>> {
+    pub async fn delivered_reuse_index(&self) -> Result<HashMap<String, Ed2kReloadIndexEntry>> {
         let metadata = self.metadata.clone();
         let entries =
             tokio::task::spawn_blocking(move || metadata.completed_delivered_reuse_entries())

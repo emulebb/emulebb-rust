@@ -61,11 +61,13 @@ pub(super) async fn handle_aich_recovery_answer(
                 peer_addr,
                 Some(transport_mode),
                 "aich_salvage_started",
-                || (format!(
+                || {
+                    (format!(
                     "file_hash={file_hash_hex} part={part} recovered_blocks={} needed_blocks={}",
                     outcome.recovered_ranges.len(),
                     outcome.needed_ranges.len()
-                )).into(),
+                )).into()
+                },
             );
         }
         Ok(None) => {

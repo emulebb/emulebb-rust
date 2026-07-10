@@ -22,12 +22,9 @@ pub(super) fn handle_public_ip_answer(
     payload: &[u8],
 ) -> Result<()> {
     let public_ip = decode_public_ip_answer_payload(payload)?;
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "public_ip_answer",
-        || (format!("public_ip={public_ip}")).into(),
-    );
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "public_ip_answer", || {
+        (format!("public_ip={public_ip}")).into()
+    });
     Ok(())
 }
 
@@ -38,19 +35,17 @@ pub(super) fn handle_kad_callback(
     payload: &[u8],
 ) -> Result<()> {
     let callback = decode_kad_callback_payload(payload)?;
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "kad_callback",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "kad_callback", || {
+        (format!(
             "file_hash={} callback_peer={}:{} buddy_check={} trailing_len={}",
             callback.file_hash,
             callback.peer_ip,
             callback.peer_tcp_port,
             hex::encode(callback.buddy_check),
             callback.trailing_len
-        )).into(),
-    );
+        ))
+        .into()
+    });
     Ok(())
 }
 
@@ -65,10 +60,13 @@ pub(super) fn handle_reask_callback_tcp(
         peer_addr,
         Some(transport.mode),
         "reask_callback_tcp",
-        || (format!(
-            "file_hash={} dest={}:{} extended_info_len={}",
-            reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
-        )).into(),
+        || {
+            (format!(
+                "file_hash={} dest={}:{} extended_info_len={}",
+                reask.file_hash, reask.dest_ip, reask.dest_port, reask.extended_info_len
+            ))
+            .into()
+        },
     );
     Ok(())
 }
@@ -84,10 +82,13 @@ pub(super) fn handle_chat_captcha_request(
         peer_addr,
         Some(transport.mode),
         "chat_captcha_request",
-        || (format!(
-            "tag_count={} data_len={}",
-            request.tag_count, request.data_len
-        )).into(),
+        || {
+            (format!(
+                "tag_count={} data_len={}",
+                request.tag_count, request.data_len
+            ))
+            .into()
+        },
     );
     Ok(())
 }
@@ -136,16 +137,14 @@ pub(super) fn handle_file_desc(
     payload: &[u8],
 ) -> Result<()> {
     let file_desc = decode_file_description_payload(payload)?;
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "file_desc",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "file_desc", || {
+        (format!(
             "file_hash={file_hash_hex} rating={} comment_len={}",
             file_desc.rating,
             file_desc.comment.len()
-        )).into(),
-    );
+        ))
+        .into()
+    });
     Ok(())
 }
 
@@ -156,15 +155,13 @@ pub(super) fn handle_preview_request(
     payload: &[u8],
 ) -> Result<()> {
     let preview_request = decode_preview_request_payload(payload)?;
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "preview_request",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "preview_request", || {
+        (format!(
             "file_hash={} trailing_len={}",
             preview_request.file_hash, preview_request.trailing_len
-        )).into(),
-    );
+        ))
+        .into()
+    });
     Ok(())
 }
 
@@ -175,17 +172,15 @@ pub(super) fn handle_preview_answer(
     payload: &[u8],
 ) -> Result<()> {
     let preview_answer = decode_preview_answer_payload(payload)?;
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "preview_answer",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "preview_answer", || {
+        (format!(
             "file_hash={} frame_count={} frame_payload_bytes={} trailing_len={}",
             preview_answer.file_hash,
             preview_answer.frame_count,
             preview_answer.frame_payload_bytes,
             preview_answer.trailing_len
-        )).into(),
-    );
+        ))
+        .into()
+    });
     Ok(())
 }

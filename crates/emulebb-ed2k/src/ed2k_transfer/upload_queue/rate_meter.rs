@@ -195,7 +195,10 @@ mod tests {
         let mut meter = WindowedRateMeter::new(AGGREGATE_RATE_WINDOW);
         let t0 = Instant::now();
         meter.record(500_000, t0);
-        assert_eq!(meter.rate_bytes_per_sec(t0 + Duration::from_secs(2)), 250_000);
+        assert_eq!(
+            meter.rate_bytes_per_sec(t0 + Duration::from_secs(2)),
+            250_000
+        );
     }
 
     #[test]

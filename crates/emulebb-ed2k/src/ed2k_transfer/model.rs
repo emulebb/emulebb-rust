@@ -48,7 +48,10 @@ pub(crate) enum PieceWriteOutcome {
     /// branch success, PartFile.cpp:5214-5232). `salvaged_bytes` is the gap
     /// size recovered without re-download (`GetTotalGapSizeInPart`,
     /// PartFile.cpp:5220).
-    IchSalvaged { part_index: u32, salvaged_bytes: u64 },
+    IchSalvaged {
+        part_index: u32,
+        salvaged_bytes: u64,
+    },
     /// A mid-part flush into an ICH-corrupted part re-ran the part MD4 check
     /// and it still fails: the part stays gapped and re-download continues
     /// (oracle `HashSinglePart` returning false in the ICH branch). Otherwise

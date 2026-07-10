@@ -544,9 +544,7 @@ impl Ed2kTransferRuntime {
                     .pieces
                     .iter_mut()
                     .find(|piece| piece.piece_index == piece_index)
-                    .with_context(|| {
-                        format!("missing piece index {piece_index} in {file_hash}")
-                    })?;
+                    .with_context(|| format!("missing piece index {piece_index} in {file_hash}"))?;
                 piece.bytes_written = next_piece_bytes_written;
                 piece.state = Ed2kTransferState::Requested;
                 piece.ich_corrupted

@@ -262,15 +262,11 @@ impl DownloadSourceRegistry {
         file_hash: &str,
     ) -> bool {
         let peer_key = DownloadPeerKey::from_source(source);
-        let Some(candidate) = self
-            .peers
-            .get_mut(&peer_key)
-            .and_then(|candidates| {
-                candidates
-                    .iter_mut()
-                    .find(|candidate| candidate.file_hash == file_hash)
-            })
-        else {
+        let Some(candidate) = self.peers.get_mut(&peer_key).and_then(|candidates| {
+            candidates
+                .iter_mut()
+                .find(|candidate| candidate.file_hash == file_hash)
+        }) else {
             return false;
         };
         candidate.last_seen = now;

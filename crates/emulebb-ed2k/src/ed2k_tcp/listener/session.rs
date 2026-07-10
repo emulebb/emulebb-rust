@@ -34,6 +34,7 @@ use super::super::download::{
 use super::super::dump::{
     dump_ed2k_tcp_listener_meta, dump_ed2k_tcp_listener_recv, dump_ed2k_tcp_listener_send,
 };
+use super::super::firewall_helper::complete_authorized_kad_callback;
 use super::super::hello::{
     DecodedHelloProfile, build_hello_responses, decode_emule_info_profile, decode_hello_profile,
     encode_emule_info_answer, encode_hello_request,
@@ -54,7 +55,6 @@ use super::super::{
     OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
     OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, handle_aich_recovery_answer,
 };
-use super::super::firewall_helper::complete_authorized_kad_callback;
 
 mod browse;
 mod notify;
@@ -135,12 +135,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             let local_addr = stream.local_addr().with_context(|| {
                 format!("failed to resolve local eD2k listener address for {peer_addr}")
             })?;
-            dump_ed2k_tcp_listener_meta(
-                peer_addr,
-                None,
-                "tcp_accept",
-                || (format!("local_addr={local_addr}")).into(),
-            );
+            dump_ed2k_tcp_listener_meta(peer_addr, None, "tcp_accept", || {
+                (format!("local_addr={local_addr}")).into()
+            });
             let transport = match tokio::time::timeout(
                 ED2K_CONNECTION_IDLE_TIMEOUT,
                 Ed2kTransport::accept(stream, hello_identity.user_hash),
@@ -149,26 +146,21 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
             {
                 Ok(Ok(transport)) => transport,
                 Ok(Err(error)) => {
-                    dump_ed2k_tcp_listener_meta(
-                        peer_addr,
-                        None,
-                        "accept_failed",
-                        || (format!("local_addr={local_addr} error={error:#}")).into(),
-                    );
+                    dump_ed2k_tcp_listener_meta(peer_addr, None, "accept_failed", || {
+                        (format!("local_addr={local_addr} error={error:#}")).into()
+                    });
                     return Err(error).with_context(|| {
                         format!("failed to accept inbound eD2k peer transport from {peer_addr}")
                     });
                 }
                 Err(_) => {
-                    dump_ed2k_tcp_listener_meta(
-                        peer_addr,
-                        None,
-                        "accept_timeout",
-                        || (format!(
+                    dump_ed2k_tcp_listener_meta(peer_addr, None, "accept_timeout", || {
+                        (format!(
                             "local_addr={local_addr} idle_timeout_secs={}",
                             ED2K_CONNECTION_IDLE_TIMEOUT.as_secs()
-                        )).into(),
-                    );
+                        ))
+                        .into()
+                    });
                     anyhow::bail!("timed out waiting for initial eD2k peer bytes");
                 }
             };
@@ -178,12 +170,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         // dialed (master AddUpNextClient US_CONNECTING connect-out); the
         // transport handshake already happened in the promote driver.
         Ed2kSessionSource::PromotedUpload { transport, grant } => {
-            dump_ed2k_tcp_listener_meta(
-                peer_addr,
-                Some(transport.mode),
-                "promote_connect",
-                || (format!("file_hash={}", grant.file_hash)).into(),
-            );
+            dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "promote_connect", || {
+                (format!("file_hash={}", grant.file_hash)).into()
+            });
             (*transport, Some(*grant))
         }
     };
@@ -200,12 +189,9 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         transport.mode.as_str()
     );
     if promoted_grant.is_none() {
-        dump_ed2k_tcp_listener_meta(
-            peer_addr,
-            Some(transport.mode),
-            "accept",
-            || (format!("udp_port={kad_udp_port}")).into(),
-        );
+        dump_ed2k_tcp_listener_meta(peer_addr, Some(transport.mode), "accept", || {
+            (format!("udp_port={kad_udp_port}")).into()
+        });
     }
     let mut peer_secure_ident = Ed2kPeerSecureIdentState::default();
     let mut requested_file_hash: Option<Ed2kHash> = None;
@@ -1288,7 +1274,10 @@ mod tests {
         let created = Instant::now();
         let ping_interval = Duration::from_secs(10 * 60);
         // First ping ~10 min after creation: within the 13-min gate -> suppressed.
-        assert!(!allow_buddy_pingpong_at(Some(created), created + ping_interval));
+        assert!(!allow_buddy_pingpong_at(
+            Some(created),
+            created + ping_interval
+        ));
 
         // Simulate answering a pong at t (arms the marker to t), then the next
         // ping 10 min later is suppressed and the one after (20 min) is answered.
@@ -1301,6 +1290,9 @@ mod tests {
             Some(t),
             t + BUDDY_PINGPONG_MIN_INTERVAL - Duration::from_secs(1)
         ));
-        assert!(allow_buddy_pingpong_at(Some(t), t + BUDDY_PINGPONG_MIN_INTERVAL));
+        assert!(allow_buddy_pingpong_at(
+            Some(t),
+            t + BUDDY_PINGPONG_MIN_INTERVAL
+        ));
     }
 }

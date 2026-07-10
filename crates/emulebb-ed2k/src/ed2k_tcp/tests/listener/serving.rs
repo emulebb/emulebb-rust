@@ -62,8 +62,8 @@ fn upload_part_packets_select_sending_opcode_per_fragment() {
 
     // ".mp4" is in the incompressible exclusion set, so the standard path is used
     // deterministically (no compression attempt).
-    let packets = super::build_upload_part_packets(&file_hash, "movie.mp4", start, end, &payload)
-        .unwrap();
+    let packets =
+        super::build_upload_part_packets(&file_hash, "movie.mp4", start, end, &payload).unwrap();
     assert_eq!(packets.len(), 3, "25000 bytes split into 10240+10240+4520");
 
     let expected_i64 = [false, true, true];
@@ -86,7 +86,10 @@ fn upload_part_packets_select_sending_opcode_per_fragment() {
         // Confirm the on-wire offset field WIDTH matches the chosen opcode:
         // header = proto(1)+len(4)+opcode(1) + hash(16) + 2 offsets (8 or 16).
         let offset_field_bytes = if want_i64 { 16 } else { 8 };
-        assert_eq!(packet.packet.len(), 6 + 16 + offset_field_bytes + bytes.len());
+        assert_eq!(
+            packet.packet.len(),
+            6 + 16 + offset_field_bytes + bytes.len()
+        );
         // The boundary-straddling fragment must be the I64 one.
         assert_eq!(frag_end > BOUNDARY, want_i64);
         expected_start = frag_end;

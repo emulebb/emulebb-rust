@@ -193,18 +193,16 @@ pub(in crate::ed2k_tcp) async fn pump_download_request_window(
     for index in request_indices {
         pending_part_requests[index].queued = true;
     }
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "request_window",
-        || (format!(
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "request_window", || {
+        (format!(
             "file_hash={file_hash_hex} queued={} total_pending={} max_pending={} min_pending={}",
             requested_ranges.len(),
             pending_part_requests.len(),
             window.max_pending_blocks,
             window.min_pending_blocks
-        )).into(),
-    );
+        ))
+        .into()
+    });
     Ok(DownloadRequestWindowOutcome::RequestSent(
         tokio::time::Instant::now() + part_response_grace,
     ))

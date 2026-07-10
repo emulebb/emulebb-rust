@@ -21,12 +21,9 @@ pub(super) async fn handle_ask_shared_files(
     peer_addr: SocketAddr,
     payload_len: usize,
 ) -> Result<()> {
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "ask_shared_files",
-        || (format!("payload_len={payload_len}")).into(),
-    );
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "ask_shared_files", || {
+        (format!("payload_len={payload_len}")).into()
+    });
     let reply = encode_empty_shared_files_answer();
     dump_ed2k_tcp_download_send(peer_addr, transport.mode, "shared_files_answer", &reply);
     transport
@@ -41,12 +38,9 @@ pub(super) async fn handle_ask_shared_dirs(
     peer_addr: SocketAddr,
     payload_len: usize,
 ) -> Result<()> {
-    dump_ed2k_tcp_download_meta(
-        peer_addr,
-        Some(transport.mode),
-        "ask_shared_dirs",
-        || (format!("payload_len={payload_len}")).into(),
-    );
+    dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "ask_shared_dirs", || {
+        (format!("payload_len={payload_len}")).into()
+    });
     let reply = encode_shared_browse_denied_answer();
     dump_ed2k_tcp_download_send(peer_addr, transport.mode, "shared_browse_denied", &reply);
     transport
@@ -87,10 +81,13 @@ pub(super) fn handle_ask_shared_files_answer(
         peer_addr,
         Some(transport.mode),
         "shared_files_answer",
-        || (format!(
-            "file_count={} entry_bytes={}",
-            answer.file_count, answer.entry_bytes
-        )).into(),
+        || {
+            (format!(
+                "file_count={} entry_bytes={}",
+                answer.file_count, answer.entry_bytes
+            ))
+            .into()
+        },
     );
     Ok(())
 }
@@ -122,10 +119,13 @@ pub(super) fn handle_ask_shared_files_dir_answer(
         peer_addr,
         Some(transport.mode),
         "shared_files_dir_answer",
-        || (format!(
-            "dir={} file_count={} entry_bytes={}",
-            answer.dir, answer.file_count, answer.entry_bytes
-        )).into(),
+        || {
+            (format!(
+                "dir={} file_count={} entry_bytes={}",
+                answer.dir, answer.file_count, answer.entry_bytes
+            ))
+            .into()
+        },
     );
     Ok(())
 }

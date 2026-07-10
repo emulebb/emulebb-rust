@@ -1225,8 +1225,7 @@ mod tests {
         let core =
             EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap())
                 .unwrap();
-        let (_, size, mtime_ms) =
-            Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
+        let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&delivered).unwrap();
         let file_hash = "aabbccddeeff00112233445566778899".to_string();
         // A completed download: delivered_path set, source_path NONE, and the
         // delivered mtime baseline recorded (as deliver.rs does at delivery).

@@ -178,7 +178,12 @@ impl ReaskSourceSet {
     /// present. The flag is not cleared here: a fresh registration (the source
     /// re-queued us with needed parts) starts un-flagged, mirroring the oracle
     /// reset to `DS_ONQUEUE` at reask time (PartFile.cpp:3067-3068).
-    pub(crate) fn mark_no_needed_parts(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+    pub(crate) fn mark_no_needed_parts(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+        now: Instant,
+    ) -> bool {
         let Some(source) = self.sources.get_mut(&(ip, udp_port)) else {
             return false;
         };

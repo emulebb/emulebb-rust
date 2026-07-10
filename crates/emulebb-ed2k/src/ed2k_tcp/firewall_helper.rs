@@ -257,12 +257,15 @@ async fn handle_firewall_helper_packet(
                     context.helper_addr,
                     Some(transport.mode),
                     "peer_fwcheck_request",
-                    || (format!(
-                        "internal_udp_port={} external_udp_port={} sender_udp_key={}",
-                        request.internal_udp_port,
-                        request.external_udp_port,
-                        request.sender_udp_key
-                    )).into(),
+                    || {
+                        (format!(
+                            "internal_udp_port={} external_udp_port={} sender_udp_key={}",
+                            request.internal_udp_port,
+                            request.external_udp_port,
+                            request.sender_udp_key
+                        ))
+                        .into()
+                    },
                 );
                 reply_with_firewall_udp(dht, context.helper_addr.ip(), request).await?;
                 return Ok(true);
@@ -297,22 +300,22 @@ pub async fn request_udp_firewall_check(
     {
         Ok(transport) => transport,
         Err(error) => {
-            dump_ed2k_tcp_helper_meta(helper_addr, None, "connect_error", || (error.to_string()).into());
+            dump_ed2k_tcp_helper_meta(helper_addr, None, "connect_error", || {
+                (error.to_string()).into()
+            });
             return Err(error);
         }
     };
-    dump_ed2k_tcp_helper_meta(
-        helper_addr,
-        Some(transport.mode),
-        "connect_ok",
-        || (format!(
+    dump_ed2k_tcp_helper_meta(helper_addr, Some(transport.mode), "connect_ok", || {
+        (format!(
             "client_id={} server_ip={} server_port={} direct_udp_callback={}",
             hello_identity.client_id,
             Ipv4Addr::from(hello_identity.server_ip.to_le_bytes()),
             hello_identity.server_port,
             hello_identity.direct_udp_callback
-        )).into(),
-    );
+        ))
+        .into()
+    });
     let helper_context = FirewallHelperContext {
         helper_addr,
         hello_identity,

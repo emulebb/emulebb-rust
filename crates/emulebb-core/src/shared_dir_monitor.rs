@@ -400,7 +400,9 @@ async fn auto_share_monitored_path(core: &EmulebbCore, path: &Path) {
 async fn auto_unshare_monitored_path(core: &EmulebbCore, path: &Path) {
     let hash = {
         let mut state = core.state.lock().await;
-        state.monitor_shared_hashes.remove(&monitor_shared_key(path))
+        state
+            .monitor_shared_hashes
+            .remove(&monitor_shared_key(path))
     };
     let Some(hash) = hash else {
         return;

@@ -404,10 +404,7 @@ fn build_keyword_publish_packets_splits_cap_into_three_full_packets() {
         let request = unpack_key_req(packet);
         assert_eq!(request.target, target);
         assert_eq!(request.entries.len(), 50);
-        assert_eq!(
-            request.entries[0].hash,
-            entries[chunk_index * 50].file_hash
-        );
+        assert_eq!(request.entries[0].hash, entries[chunk_index * 50].file_hash);
         assert_eq!(
             request.entries[49].hash,
             entries[chunk_index * 50 + 49].file_hash
@@ -478,11 +475,19 @@ fn record_keyword_publish_results_normalizes_acks_by_chunk_count() {
     let results = vec![
         (
             chunk_attempt(1, 2),
-            vec![Ok(publish_res(10)), Ok(publish_res(20)), Ok(publish_res(30))],
+            vec![
+                Ok(publish_res(10)),
+                Ok(publish_res(20)),
+                Ok(publish_res(30)),
+            ],
         ),
         (
             chunk_attempt(2, 2),
-            vec![Ok(publish_res(40)), Ok(publish_res(50)), Ok(publish_res(60))],
+            vec![
+                Ok(publish_res(40)),
+                Ok(publish_res(50)),
+                Ok(publish_res(60)),
+            ],
         ),
     ];
     record_keyword_publish_results(&mut stats, 3, results);

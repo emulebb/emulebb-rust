@@ -201,14 +201,13 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
     // secure-ident support (IS_NOTAVAILABLE), but skip a crypto-capable peer
     // that has not verified yet -- the credit store is keyed on the user hash
     // and feeds the upload score, so such a hash is spoofable.
-    let peer_user_hash = if crate::ed2k_tcp::credit_accrual_allowed(
-        peer_ident_verified,
-        peer_supports_secure_ident,
-    ) {
-        peer_upload_identity.user_hash
-    } else {
-        None
-    };
+    let peer_user_hash =
+        if crate::ed2k_tcp::credit_accrual_allowed(peer_ident_verified, peer_supports_secure_ident)
+        {
+            peer_upload_identity.user_hash
+        } else {
+            None
+        };
     // Serve a fully verified file or an in-progress partfile holding at least one
     // complete part; a range inside a not-yet-complete part is skipped below by
     // read_verified_range returning None (master serves only complete parts).

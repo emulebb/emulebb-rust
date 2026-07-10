@@ -608,7 +608,10 @@ mod tests {
             .await
             .unwrap();
         let header = read_wire_header(&mut peer).await;
-        assert_eq!(header[0], OP_PACKEDPROT, "compressible OP_OFFERFILES must pack");
+        assert_eq!(
+            header[0], OP_PACKEDPROT,
+            "compressible OP_OFFERFILES must pack"
+        );
         assert_eq!(header[5], OP_OFFERFILES);
     }
 

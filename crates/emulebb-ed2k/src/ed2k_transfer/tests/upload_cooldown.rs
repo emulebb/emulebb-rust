@@ -11,8 +11,8 @@ use std::{
 
 use crate::ban_store::BanStore;
 use crate::ed2k_transfer::{
-    Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
-    upload_queue::Ed2kUploadQueueState,
+    Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle,
+    Ed2kUploadSessionStatus, upload_queue::Ed2kUploadQueueState,
 };
 
 use super::upload_queue_support::upload_peer;
@@ -81,7 +81,10 @@ fn no_request_recycle_cools_ip_and_skips_it_until_expiry() {
     // and promotes B into the freed slot. A's IP is now on a cooldown.
     let t3 = t0 + Duration::from_secs(3);
     assert!(is_waiting(state.poll_session(&a, t3, false)));
-    assert_eq!(state.poll_session(&b, t3, false), Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        state.poll_session(&b, t3, false),
+        Ed2kUploadSessionStatus::Granted
+    );
 
     // A fresh, non-cooled waiter C behind the full slot.
     let (c, c_status) = begin(&mut state, upload_peer(3, 3, 0x0A00_0003), 3, t3);
@@ -90,13 +93,19 @@ fn no_request_recycle_cools_ip_and_skips_it_until_expiry() {
     // Free the slot: the non-cooled C is promoted, the cooled A is skipped.
     let t3b = t3 + Duration::from_millis(500);
     state.release_session(&b, t3b);
-    assert_eq!(state.poll_session(&c, t3b, false), Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        state.poll_session(&c, t3b, false),
+        Ed2kUploadSessionStatus::Granted
+    );
     assert!(is_waiting(state.poll_session(&a, t3b, false)));
 
     // Past A's 30 s standard cooldown (seeded at +3 s), A is promotable again.
     let t34 = t0 + Duration::from_secs(34);
     state.release_session(&c, t34);
-    assert_eq!(state.poll_session(&a, t34, false), Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        state.poll_session(&a, t34, false),
+        Ed2kUploadSessionStatus::Granted
+    );
 }
 
 /// Eight no-request recycles of the same peer within the 4 h window ban it by
@@ -161,13 +170,19 @@ fn cooldown_probe_repromotes_when_all_cooled_and_slot_idle() {
     // +3 s: A recycled + cooled, B promoted.
     let t3 = t0 + Duration::from_secs(3);
     assert!(is_waiting(state.poll_session(&a, t3, false)));
-    assert_eq!(state.poll_session(&b, t3, false), Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        state.poll_session(&b, t3, false),
+        Ed2kUploadSessionStatus::Granted
+    );
 
     // +6 s: B recycled + cooled too. Now both waiters are cooled and the slot is
     // idle -- the probe re-promotes A (the lower-remaining cooldown).
     let t6 = t0 + Duration::from_secs(6);
     assert!(is_waiting(state.poll_session(&b, t6, false)));
-    assert_eq!(state.poll_session(&a, t6, false), Ed2kUploadSessionStatus::Granted);
+    assert_eq!(
+        state.poll_session(&a, t6, false),
+        Ed2kUploadSessionStatus::Granted
+    );
 }
 
 /// A failed promote-connect seeds the churn cooldown for that peer, so a
@@ -185,7 +200,10 @@ fn failed_promotion_cools_the_peer_and_gates_inline_grant() {
     // A fresh admission for the cooled peer is queued, not granted, even with a
     // free slot (the cooldown gate applies to the inline grant too).
     let (handle, status) = begin(&mut state, peer, 1, t0 + Duration::from_secs(1));
-    assert!(is_waiting(status), "a cooled peer must not be granted inline");
+    assert!(
+        is_waiting(status),
+        "a cooled peer must not be granted inline"
+    );
 
     // A different, non-cooled peer would take the free slot.
     let (other, other_status) = begin(&mut state, upload_peer(2, 2, 0x0A00_0002), 2, t0);
@@ -336,11 +354,18 @@ fn queued_block_request_clears_a_waiting_peers_cooldown() {
 
     // Free the slot: B stays queued because its churn cooldown gates promotion.
     state.release_session(&a, t0 + Duration::from_secs(1));
-    assert!(is_waiting(state.poll_session(&b, t0 + Duration::from_secs(1), false)));
+    assert!(is_waiting(state.poll_session(
+        &b,
+        t0 + Duration::from_secs(1),
+        false
+    )));
 
     // B sends a valid queued block request: its cooldown clears and it promotes.
     let cleared = state.note_queued_block_request(&peer_b, t0 + Duration::from_secs(2));
-    assert!(cleared, "a valid queued block request must clear the cooldown");
+    assert!(
+        cleared,
+        "a valid queued block request must clear the cooldown"
+    );
     assert_eq!(
         state.poll_session(&b, t0 + Duration::from_secs(2), false),
         Ed2kUploadSessionStatus::Granted
@@ -371,8 +396,14 @@ mod tracker {
         let mut tracker = UploadCooldownTracker::new();
         let t0 = Instant::now();
         let peer = ip(1);
-        let outcome =
-            tracker.register_no_request_recycle(peer, Some([1u8; 16]), false, STANDARD_BUDGET, t0, false);
+        let outcome = tracker.register_no_request_recycle(
+            peer,
+            Some([1u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
         assert_eq!(outcome.strikes, 1);
         assert_eq!(outcome.ban, CooldownBan::None);
         // Strike 1 standard cooldown = base 30s.
@@ -389,13 +420,29 @@ mod tracker {
         let peer = ip(2);
         let hash = [7u8; 16];
         for strike in 1..8u32 {
-            let outcome =
-                tracker.register_no_request_recycle(peer, Some(hash), false, STANDARD_BUDGET, t0, false);
+            let outcome = tracker.register_no_request_recycle(
+                peer,
+                Some(hash),
+                false,
+                STANDARD_BUDGET,
+                t0,
+                false,
+            );
             assert_eq!(outcome.strikes, strike);
-            assert_eq!(outcome.ban, CooldownBan::None, "strike {strike} must not ban");
+            assert_eq!(
+                outcome.ban,
+                CooldownBan::None,
+                "strike {strike} must not ban"
+            );
         }
-        let outcome =
-            tracker.register_no_request_recycle(peer, Some(hash), false, STANDARD_BUDGET, t0, false);
+        let outcome = tracker.register_no_request_recycle(
+            peer,
+            Some(hash),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
         assert_eq!(outcome.strikes, 8);
         assert_eq!(outcome.ban, CooldownBan::ByHash);
     }
@@ -407,12 +454,28 @@ mod tracker {
         let peer = ip(3);
         let hash = [9u8; 16];
         for strike in 1..16u32 {
-            let outcome =
-                tracker.register_no_request_recycle(peer, Some(hash), false, BROADBAND_BUDGET, t0, false);
-            assert_eq!(outcome.ban, CooldownBan::None, "strike {strike} must not ban");
+            let outcome = tracker.register_no_request_recycle(
+                peer,
+                Some(hash),
+                false,
+                BROADBAND_BUDGET,
+                t0,
+                false,
+            );
+            assert_eq!(
+                outcome.ban,
+                CooldownBan::None,
+                "strike {strike} must not ban"
+            );
         }
-        let outcome =
-            tracker.register_no_request_recycle(peer, Some(hash), false, BROADBAND_BUDGET, t0, false);
+        let outcome = tracker.register_no_request_recycle(
+            peer,
+            Some(hash),
+            false,
+            BROADBAND_BUDGET,
+            t0,
+            false,
+        );
         assert_eq!(outcome.strikes, 16);
         assert_eq!(outcome.ban, CooldownBan::ByHash);
     }
@@ -428,10 +491,20 @@ mod tracker {
         let hashes = [[1u8; 16], [2u8; 16], [3u8; 16], [1u8; 16], [2u8; 16]];
         let mut banned = CooldownBan::None;
         for (index, hash) in hashes.into_iter().enumerate() {
-            let outcome =
-                tracker.register_no_request_recycle(peer, Some(hash), false, STANDARD_BUDGET, t0, false);
+            let outcome = tracker.register_no_request_recycle(
+                peer,
+                Some(hash),
+                false,
+                STANDARD_BUDGET,
+                t0,
+                false,
+            );
             if index < 4 {
-                assert_eq!(outcome.ban, CooldownBan::None, "recycle {index} must not ban");
+                assert_eq!(
+                    outcome.ban,
+                    CooldownBan::None,
+                    "recycle {index} must not ban"
+                );
             } else {
                 banned = outcome.ban;
             }
@@ -447,7 +520,8 @@ mod tracker {
         for _ in 1..8u32 {
             tracker.register_no_request_recycle(peer, None, false, STANDARD_BUDGET, t0, false);
         }
-        let outcome = tracker.register_no_request_recycle(peer, None, false, STANDARD_BUDGET, t0, false);
+        let outcome =
+            tracker.register_no_request_recycle(peer, None, false, STANDARD_BUDGET, t0, false);
         assert_eq!(outcome.strikes, 8);
         assert_eq!(outcome.ban, CooldownBan::ByIp);
     }
@@ -458,13 +532,25 @@ mod tracker {
         let t0 = Instant::now();
         let peer = ip(6);
         let hash = [4u8; 16];
-        let first =
-            tracker.register_no_request_recycle(peer, Some(hash), false, STANDARD_BUDGET, t0, false);
+        let first = tracker.register_no_request_recycle(
+            peer,
+            Some(hash),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
         assert_eq!(first.strikes, 1);
         // Past the 4h window the counter resets to a fresh strike 1.
         let later = t0 + STRIKE_WINDOW + Duration::from_secs(1);
-        let reset =
-            tracker.register_no_request_recycle(peer, Some(hash), false, STANDARD_BUDGET, later, false);
+        let reset = tracker.register_no_request_recycle(
+            peer,
+            Some(hash),
+            false,
+            STANDARD_BUDGET,
+            later,
+            false,
+        );
         assert_eq!(reset.strikes, 1);
     }
 
@@ -473,8 +559,14 @@ mod tracker {
         let mut tracker = UploadCooldownTracker::new();
         let t0 = Instant::now();
         let peer = ip(7);
-        let outcome =
-            tracker.register_no_request_recycle(peer, Some([5u8; 16]), false, STANDARD_BUDGET, t0, true);
+        let outcome = tracker.register_no_request_recycle(
+            peer,
+            Some([5u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            true,
+        );
         assert_eq!(outcome.strikes, 0);
         assert_eq!(outcome.ban, CooldownBan::None);
         // Productive standard cap is 10s, shorter than the base 30s.
@@ -498,7 +590,14 @@ mod tracker {
         let mut tracker = UploadCooldownTracker::new();
         let t0 = Instant::now();
         let peer = ip(9);
-        tracker.register_no_request_recycle(peer, Some([6u8; 16]), false, STANDARD_BUDGET, t0, false);
+        tracker.register_no_request_recycle(
+            peer,
+            Some([6u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
         let probe_at = t0 + Duration::from_secs(1);
         assert!(!tracker.can_probe(peer, probe_at, false));
         assert!(tracker.can_probe(peer, probe_at, true));
@@ -531,7 +630,11 @@ mod tracker {
         let peer = ip(11);
         tracker.set_churn_cooldown(peer, false, STANDARD_BUDGET, t0);
         assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
-        assert!(tracker.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(tracker.clear_retry_cooldown_on_queued_request(
+            peer,
+            false,
+            t0 + Duration::from_secs(1)
+        ));
         assert!(!tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
     }
 
@@ -544,12 +647,27 @@ mod tracker {
         let mut tracker = UploadCooldownTracker::new();
         let t0 = Instant::now();
         let peer = ip(12);
-        tracker.register_no_request_recycle(peer, Some([1u8; 16]), false, STANDARD_BUDGET, t0, false);
+        tracker.register_no_request_recycle(
+            peer,
+            Some([1u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
         // No open base slot: the unproductive no-request cooldown blocks the clear.
-        assert!(!tracker.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(!tracker.clear_retry_cooldown_on_queued_request(
+            peer,
+            false,
+            t0 + Duration::from_secs(1)
+        ));
         assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(1)));
         // The window is consumed: even with an open slot now, the clear is refused.
-        assert!(!tracker.clear_retry_cooldown_on_queued_request(peer, true, t0 + Duration::from_secs(2)));
+        assert!(!tracker.clear_retry_cooldown_on_queued_request(
+            peer,
+            true,
+            t0 + Duration::from_secs(2)
+        ));
         assert!(tracker.is_cooled(peer, false, t0 + Duration::from_secs(2)));
     }
 
@@ -562,15 +680,37 @@ mod tracker {
 
         let mut open_slot = UploadCooldownTracker::new();
         let peer = ip(13);
-        open_slot.register_no_request_recycle(peer, Some([2u8; 16]), false, STANDARD_BUDGET, t0, false);
-        assert!(open_slot.clear_retry_cooldown_on_queued_request(peer, true, t0 + Duration::from_secs(1)));
+        open_slot.register_no_request_recycle(
+            peer,
+            Some([2u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            false,
+        );
+        assert!(open_slot.clear_retry_cooldown_on_queued_request(
+            peer,
+            true,
+            t0 + Duration::from_secs(1)
+        ));
         assert!(!open_slot.is_cooled(peer, false, t0 + Duration::from_secs(1)));
 
         let mut productive = UploadCooldownTracker::new();
         let peer = ip(14);
-        productive.register_no_request_recycle(peer, Some([3u8; 16]), false, STANDARD_BUDGET, t0, true);
+        productive.register_no_request_recycle(
+            peer,
+            Some([3u8; 16]),
+            false,
+            STANDARD_BUDGET,
+            t0,
+            true,
+        );
         // Productive clears even with no open base slot.
-        assert!(productive.clear_retry_cooldown_on_queued_request(peer, false, t0 + Duration::from_secs(1)));
+        assert!(productive.clear_retry_cooldown_on_queued_request(
+            peer,
+            false,
+            t0 + Duration::from_secs(1)
+        ));
         assert!(!productive.is_cooled(peer, false, t0 + Duration::from_secs(1)));
     }
 }

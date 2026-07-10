@@ -297,7 +297,10 @@ mod tests {
             config.keepalive_secs >= 60 && config.keepalive_secs % 60 == 0,
             "keepalive must be a whole-minutes value, not sub-minute"
         );
-        assert!(config.keepalive_secs <= 1440 * 60, "within stock 1440-min cap");
+        assert!(
+            config.keepalive_secs <= 1440 * 60,
+            "within stock 1440-min cap"
+        );
         assert_eq!(
             config.keepalive_interval(),
             Some(std::time::Duration::from_secs(20 * 60))

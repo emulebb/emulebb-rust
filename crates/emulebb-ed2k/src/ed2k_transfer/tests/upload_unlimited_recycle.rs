@@ -17,8 +17,8 @@ use std::{
 
 use crate::ban_store::BanStore;
 use crate::ed2k_transfer::{
-    Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle, Ed2kUploadSessionStatus,
-    upload_queue::Ed2kUploadQueueState,
+    Ed2kUploadPeerIdentity, Ed2kUploadQueueConfig, Ed2kUploadSessionHandle,
+    Ed2kUploadSessionStatus, upload_queue::Ed2kUploadQueueState,
 };
 
 use super::upload_queue_support::upload_peer;

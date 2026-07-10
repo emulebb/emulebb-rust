@@ -31,11 +31,11 @@ use super::{
     OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ,
     OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry,
     SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES, SERVER_TCP_FLAG_TCPOBFUSCATION,
-    SERVER_TCP_FLAG_TYPETAGINTEGER,
-    SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2,
-    SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT,
-    SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE,
-    SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
+    SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
+    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
+    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
+    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
+    is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -880,7 +880,10 @@ mod tests {
         send_server_list_request(&mut session, true).await.unwrap();
         let idle_again =
             tokio::time::timeout(Duration::from_millis(150), peer.read(&mut probe)).await;
-        assert!(idle_again.is_err(), "server list must be requested at most once");
+        assert!(
+            idle_again.is_err(),
+            "server list must be requested at most once"
+        );
         drop(peer);
     }
 
@@ -1026,7 +1029,10 @@ mod tests {
             4662,
             None,
         );
-        assert_eq!(u32::from_le_bytes(no_largefiles[0..4].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(no_largefiles[0..4].try_into().unwrap()),
+            1
+        );
         let with_largefiles = encode_offer_files_payload(
             &catalog,
             Some(u32::from_le_bytes([192, 168, 1, 5])),

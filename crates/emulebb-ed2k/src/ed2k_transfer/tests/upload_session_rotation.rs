@@ -233,7 +233,8 @@ fn banned_peer_is_refused_at_admission_before_any_slot() {
 
     // The banned peer created no queue entry, so the free slot goes straight to
     // the next (clean) waiter at admission.
-    let (_waiter, waiter_status) = begin(&mut state, 2, 0x62, 2, 1_000, t0 + Duration::from_secs(2));
+    let (_waiter, waiter_status) =
+        begin(&mut state, 2, 0x62, 2, 1_000, t0 + Duration::from_secs(2));
     assert_eq!(waiter_status, Ed2kUploadSessionStatus::Granted);
 }
 

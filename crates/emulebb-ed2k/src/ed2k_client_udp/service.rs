@@ -167,11 +167,7 @@ impl ReaskService {
     /// caller releases exactly the lease the loop really owned — and addresses
     /// it by the key core's bookkeeping uses, not the UDP routing endpoint
     /// (RUST-PAR-017 DL-11). `None` for an unknown endpoint.
-    pub(crate) fn remove_source(
-        &mut self,
-        ip: Ipv4Addr,
-        udp_port: u16,
-    ) -> Option<(Ipv4Addr, u16)> {
+    pub(crate) fn remove_source(&mut self, ip: Ipv4Addr, udp_port: u16) -> Option<(Ipv4Addr, u16)> {
         let file_hash = self.endpoint_index.remove(&(ip, udp_port))?;
         let removed = self
             .per_file
@@ -188,7 +184,12 @@ impl ReaskService {
     /// cadence doubles to `FILEREASKTIME * 2` (oracle `DS_NONEEDEDPARTS` +
     /// `GetTimeUntilReask`, DownloadClient.cpp:2425-2431). Returns whether a
     /// source was present at that endpoint.
-    pub(crate) fn mark_no_needed_parts(&mut self, ip: Ipv4Addr, udp_port: u16, now: Instant) -> bool {
+    pub(crate) fn mark_no_needed_parts(
+        &mut self,
+        ip: Ipv4Addr,
+        udp_port: u16,
+        now: Instant,
+    ) -> bool {
         let Some(file_hash) = self.endpoint_index.get(&(ip, udp_port)) else {
             return false;
         };

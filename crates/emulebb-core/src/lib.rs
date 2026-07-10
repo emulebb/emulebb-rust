@@ -17,8 +17,6 @@ use chrono::Utc;
 use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
-#[cfg(test)]
-use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_ed2k::{
     DirectCallbackArgs, NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
@@ -49,10 +47,11 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
-        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
-        shared_publish_rank,
+        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
     },
 };
+#[cfg(test)]
+use emulebb_ed2k::{MappingExposure, TransportProtocol};
 use emulebb_index::{
     FileIndex, IndexedFile, KadLocalStore, SnoopEntry, SnoopQueue, metadata_from_publish_snapshot,
     publish_snapshot_from_metadata,
@@ -154,14 +153,13 @@ use ed2k_sources::{
     claim_ed2k_server_callback_request, collect_kad_ed2k_metadata, collect_kad_ed2k_sources,
     configured_server_attempts, direct_download_candidate_sources, drop_self_sources,
     ed2k_server_callback_permitted, ed2k_server_callback_route, found_source_from_hint,
-    global_udp_source_batch_server_attempts,
-    global_udp_source_search_excluded_endpoint, hash_only_ed2k_search_query,
-    kad_source_result_to_ed2k_found_source, keyword_target, manifest_has_ed2k_transfer_progress,
-    merge_download_sources, new_direct_ed2k_source_count, select_ed2k_keyword_metadata,
-    should_adopt_hash_only_metadata_name, should_query_kad_source_supplement,
-    should_query_server_udp_source_supplement, should_refresh_ed2k_server_sources,
-    should_skip_no_progress_source_requery, significant_keyword_words_unique,
-    sort_download_sources, source_endpoint_key, source_key,
+    global_udp_source_batch_server_attempts, global_udp_source_search_excluded_endpoint,
+    hash_only_ed2k_search_query, kad_source_result_to_ed2k_found_source, keyword_target,
+    manifest_has_ed2k_transfer_progress, merge_download_sources, new_direct_ed2k_source_count,
+    select_ed2k_keyword_metadata, should_adopt_hash_only_metadata_name,
+    should_query_kad_source_supplement, should_query_server_udp_source_supplement,
+    should_refresh_ed2k_server_sources, should_skip_no_progress_source_requery,
+    significant_keyword_words_unique, sort_download_sources, source_endpoint_key, source_key,
 };
 #[cfg(test)]
 use ed2k_sources::{
@@ -176,14 +174,14 @@ use kad_callback_initiator::{
     KAD_CALLBACK_INITIATOR_COOLDOWN, build_kad_callback_req, is_direct_kad_callback_candidate,
     kad_callback_key, should_send_kad_callback,
 };
+#[cfg(test)]
+use kad_hello::{
+    build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
+};
 use kad_hello::{
     build_kad_hello_response, kad_publish_within_tolerance, kad_req_masked_count,
     should_request_hello_res_ack, spawn_kad_firewalled_response,
     spawn_modern_kad_firewalled_response,
-};
-#[cfg(test)]
-use kad_hello::{
-    build_kad_hello_request_tags, build_kad_hello_response_tags, firewalled_response_ip_for_sender,
 };
 #[cfg(test)]
 use kad_passive_replay::{
@@ -3116,8 +3114,9 @@ impl EmulebbCore {
             ),
         }
         if matches!(network_method, Some(SearchNetworkMethod::Ed2kGlobal)) {
-            let dead_server_endpoints =
-                self.ed2k_dead_server_endpoints(config.dead_server_retries).await;
+            let dead_server_endpoints = self
+                .ed2k_dead_server_endpoints(config.dead_server_retries)
+                .await;
             match search_keyword_udp_servers(Ed2kUdpKeywordSearchOptions {
                 bind_ip: network.bind_ip,
                 config: &config,
@@ -3864,11 +3863,7 @@ impl EmulebbCore {
     /// `m_DeadSourceList.AddDeadSource` then swap-or-`RemoveSource`) and the
     /// identical AICH-mismatch path (`DownloadClient.cpp:2971-3004`); rust's
     /// swap-or-remove is a plain drop because A4AF is intentionally parked.
-    async fn dead_list_file_not_found_sources(
-        &self,
-        file_hash: &str,
-        sources: &[Ed2kFoundSource],
-    ) {
+    async fn dead_list_file_not_found_sources(&self, file_hash: &str, sources: &[Ed2kFoundSource]) {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         for source in sources {
@@ -4359,8 +4354,9 @@ impl EmulebbCore {
                 )
             };
             if !claimed_batch.targets.is_empty() {
-                let dead_server_endpoints =
-                    self.ed2k_dead_server_endpoints(config.dead_server_retries).await;
+                let dead_server_endpoints = self
+                    .ed2k_dead_server_endpoints(config.dead_server_retries)
+                    .await;
                 match search_source_udp_server_batches(Ed2kUdpSourceBatchSearchOptions {
                     bind_ip: network.bind_ip,
                     config: &config,
@@ -4406,10 +4402,7 @@ impl EmulebbCore {
             }
         }
         if file_size != 0
-            && should_query_kad_source_supplement(
-                sources.len(),
-                config.max_source_per_file_udp(),
-            )
+            && should_query_kad_source_supplement(sources.len(), config.max_source_per_file_udp())
             && {
                 let mut state = self.state.lock().await;
                 claim_kad_source_refresh(&mut state, &transfer.hash, Instant::now())
@@ -4646,7 +4639,10 @@ impl EmulebbCore {
         transfer: &Transfer,
         sources: &[Ed2kFoundSource],
     ) {
-        if !sources.iter().any(Ed2kFoundSource::is_direct_callback_source) {
+        if !sources
+            .iter()
+            .any(Ed2kFoundSource::is_direct_callback_source)
+        {
             return;
         }
         if self.ed2k_self_tcp_firewalled().await {
@@ -5917,10 +5913,12 @@ async fn publish_kad_due_shared_files(
             .lock()
             .await
             .outgoing_buddy_udp_endpoint()
-            .map(|(buddy_ip, buddy_kad_port)| SourcePublishReachability::BuddyRelay {
-                buddy_ip,
-                buddy_kad_port,
-            })
+            .map(
+                |(buddy_ip, buddy_kad_port)| SourcePublishReachability::BuddyRelay {
+                    buddy_ip,
+                    buddy_kad_port,
+                },
+            )
     };
     let source_publish_buddy_ip = match source_publish_reachability {
         Some(SourcePublishReachability::BuddyRelay { buddy_ip, .. }) => Some(buddy_ip),
@@ -6172,10 +6170,7 @@ async fn publish_kad_due_shared_files(
                 // The keyword batch is drawn from the completed-only keyword set,
                 // starting at the triggering file's position within it and
                 // wrapping (matching the >150-file cap rotation).
-                let keyword_start = keyword_index
-                    .get(&entry.file_hash)
-                    .copied()
-                    .unwrap_or(0);
+                let keyword_start = keyword_index.get(&entry.file_hash).copied().unwrap_or(0);
                 let keyword_entries = kad_keyword_publish_entries_for_keyword(
                     &keyword_files,
                     &keyword,
@@ -9797,7 +9792,10 @@ mod tests {
     fn kad_hello_response_tags_gate_both_tags_like_request_and_oracle() {
         // Oracle SendMyDetails gates HELLO_RES tags as HELLO_REQ: SOURCEUPORT
         // only when advertising the intern port; KADMISCOPTIONS only on ACK/fw.
-        assert!(build_kad_hello_response_tags(41000, false, false, false, false, KAD_VERSION).is_empty());
+        assert!(
+            build_kad_hello_response_tags(41000, false, false, false, false, KAD_VERSION)
+                .is_empty()
+        );
         assert_eq!(
             build_kad_hello_response_tags(41000, true, false, false, false, KAD_VERSION),
             vec![Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(41000))]
@@ -9914,7 +9912,10 @@ mod tests {
         );
 
         assert_eq!(
-            ordered.iter().map(|e| e.file_hash.clone()).collect::<Vec<_>>(),
+            ordered
+                .iter()
+                .map(|e| e.file_hash.clone())
+                .collect::<Vec<_>>(),
             vec![
                 never.file_hash.clone(),
                 stale.file_hash.clone(),
@@ -9974,15 +9975,18 @@ mod tests {
         // notes candidate. SOURCE clock is deliberately the opposite so a bug that
         // read the source clock would pick `recent_notes` instead.
         schedule.mark_notes_published(&recent_notes.file_hash, now - Duration::from_secs(3_600));
-        schedule.mark_notes_published(&stale_notes.file_hash, now - Duration::from_secs(30 * 3_600));
-        schedule.mark_source_published(
+        schedule.mark_notes_published(
             &stale_notes.file_hash,
-            now - Duration::from_secs(60),
-            None,
+            now - Duration::from_secs(30 * 3_600),
         );
+        schedule.mark_source_published(&stale_notes.file_hash, now - Duration::from_secs(60), None);
 
         let best = select_best_notes_publish_candidate(
-            &[recent_notes.clone(), stale_notes.clone(), un_annotated.clone()],
+            &[
+                recent_notes.clone(),
+                stale_notes.clone(),
+                un_annotated.clone(),
+            ],
             &schedule,
             now,
             now_unix_ms,
@@ -10097,8 +10101,11 @@ mod tests {
             now_unix_ms,
             |_| 0,
         ));
-        let keyword_again =
-            hashes(kad_publishable_shared_file_entries(entries, now_unix_ms, |_| 0));
+        let keyword_again = hashes(kad_publishable_shared_file_entries(
+            entries,
+            now_unix_ms,
+            |_| 0,
+        ));
         assert_eq!(keyword_first, keyword_again);
     }
 
@@ -10212,7 +10219,10 @@ mod tests {
         // Only the servable files (complete + servable partfile) are in the set.
         assert_eq!(
             cheap,
-            HashSet::from([complete.file_hash.clone(), servable_partfile.file_hash.clone()])
+            HashSet::from([
+                complete.file_hash.clone(),
+                servable_partfile.file_hash.clone()
+            ])
         );
 
         // The prune still runs on a gate-blocked tick from the cheap read alone: a
@@ -10269,13 +10279,67 @@ mod tests {
         // ranks), two annotated (notes) files, a servable partfile (source-only,
         // never keyword), an empty partfile + a hint (excluded from both lanes).
         let catalog = vec![
-            mk(0x11, "alpha-release.iso", "release", true, Vec::new(), "note a", 3, 0),
-            mk(0x22, "bravo-normal.iso", "normal", true, Vec::new(), "", 0, 5000),
-            mk(0x33, "charlie-high.iso", "high", true, Vec::new(), "note c", 5, 100),
+            mk(
+                0x11,
+                "alpha-release.iso",
+                "release",
+                true,
+                Vec::new(),
+                "note a",
+                3,
+                0,
+            ),
+            mk(
+                0x22,
+                "bravo-normal.iso",
+                "normal",
+                true,
+                Vec::new(),
+                "",
+                0,
+                5000,
+            ),
+            mk(
+                0x33,
+                "charlie-high.iso",
+                "high",
+                true,
+                Vec::new(),
+                "note c",
+                5,
+                100,
+            ),
             mk(0x44, "delta-low.iso", "low", true, Vec::new(), "", 0, 0),
-            mk(0x55, "echo-normal.iso", "normal", true, Vec::new(), "", 0, 0),
-            mk(0x66, "foxtrot-part.iso", "normal", false, vec![true, false], "", 0, 0),
-            mk(0x77, "golf-empty.iso", "normal", false, vec![false, false], "", 0, 0),
+            mk(
+                0x55,
+                "echo-normal.iso",
+                "normal",
+                true,
+                Vec::new(),
+                "",
+                0,
+                0,
+            ),
+            mk(
+                0x66,
+                "foxtrot-part.iso",
+                "normal",
+                false,
+                vec![true, false],
+                "",
+                0,
+                0,
+            ),
+            mk(
+                0x77,
+                "golf-empty.iso",
+                "normal",
+                false,
+                vec![false, false],
+                "",
+                0,
+                0,
+            ),
             Ed2kSharedEntry {
                 compatibility_hint: true,
                 ..mk(0x88, "hotel-hint.iso", "normal", true, Vec::new(), "", 0, 0)
@@ -10305,8 +10369,9 @@ mod tests {
             now_instant - Duration::from_secs(48 * 3_600),
         );
 
-        let source_clock =
-            |file_hash: &str| schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms);
+        let source_clock = |file_hash: &str| {
+            schedule.source_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
+        };
 
         // OLD reference: full clone + rank + sort of BOTH lanes (the pre-OPP-2 path).
         let old_source_full = kad_publishable_shared_file_entries(
@@ -10343,9 +10408,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         let n = old_source_full.len();
-        assert_eq!(n, 6, "5 completed + 1 servable partfile are source-eligible");
+        assert_eq!(
+            n, 6,
+            "5 completed + 1 servable partfile are source-eligible"
+        );
         let scan_budget = 3usize;
-        assert!(scan_budget < n, "budget must be a strict subset to exercise wrap");
+        assert!(
+            scan_budget < n,
+            "budget must be a strict subset to exercise wrap"
+        );
 
         // Walk more than a full rotation, advancing the cursor each tick so the
         // window wraps and every ranked position is materialized at some point.
@@ -10373,9 +10444,15 @@ mod tests {
 
             assert_eq!(cand.source_item_count, n);
             assert_eq!(cand.source_cursor_start, start);
-            assert_eq!(cand.source_scan, old_window, "window differs at cursor {start}");
+            assert_eq!(
+                cand.source_scan, old_window,
+                "window differs at cursor {start}"
+            );
             assert_eq!(cand.best_notes_hash, old_best_notes);
-            assert_eq!(cand.best_notes_hash.as_deref(), Some(catalog[2].file_hash.as_str()));
+            assert_eq!(
+                cand.best_notes_hash.as_deref(),
+                Some(catalog[2].file_hash.as_str())
+            );
             assert_eq!(cand.keyword_files, old_keyword_candidates);
             assert_eq!(cand.keyword_index, old_keyword_index);
 
@@ -11198,7 +11275,10 @@ mod tests {
     #[test]
     fn kad_keyword_lowercase_matches_oracle_frozen_table() {
         // ASCII A-Z lower-cases exactly as before (the common case).
-        assert_eq!(kad_keyword_lowercase("Ubuntu ISO"), "ubuntu iso".to_string());
+        assert_eq!(
+            kad_keyword_lowercase("Ubuntu ISO"),
+            "ubuntu iso".to_string()
+        );
         // Latin-1 / Greek / Cyrillic uppercase letters that the oracle's
         // `LANG_ENGLISH` map lowers are still lowered (À->à, Β->β, А->а).
         assert_eq!(kad_keyword_lowercase("À"), "à".to_string());
@@ -11351,13 +11431,7 @@ mod tests {
         );
 
         assert_eq!(entries.len(), 1);
-        assert!(
-            entries[0]
-                .1
-                .tags
-                .iter()
-                .any(|tag| tag == &Tag::sources(1))
-        );
+        assert!(entries[0].1.tags.iter().any(|tag| tag == &Tag::sources(1)));
     }
 
     #[test]
@@ -11939,10 +12013,7 @@ mod tests {
         assert_eq!(updated.comment, "synthetic note");
         assert_eq!(updated.rating, 4);
         // ...but no eD2k re-offer session was queued (net-nil delta before G3).
-        assert_eq!(
-            core.ed2k_publish_diagnostics().queued_count,
-            queued_before
-        );
+        assert_eq!(core.ed2k_publish_diagnostics().queued_count, queued_before);
     }
 
     #[tokio::test]
@@ -13390,8 +13461,7 @@ mod tests {
             state
                 .download_source_registry
                 .lease_best_for_file(
-                    now + crate::download_source_registry::NNP_REASK_HOLD
-                        + Duration::from_secs(1),
+                    now + crate::download_source_registry::NNP_REASK_HOLD + Duration::from_secs(1),
                     Duration::ZERO,
                     &source,
                     &file

@@ -68,7 +68,9 @@ impl PublishAttemptStats {
     /// `CSearch::GetNodeLoad`): 0 when no node returned a load byte.
     #[must_use]
     pub fn node_load(self) -> u32 {
-        self.total_load.checked_div(self.load_responses).unwrap_or(0)
+        self.total_load
+            .checked_div(self.load_responses)
+            .unwrap_or(0)
     }
 }
 

@@ -589,7 +589,9 @@ impl Ed2kUploadQueueState {
         // cooldown by racing a free slot. It joins the queue and is gated by the
         // same cooldown (or re-promoted via the cooldown probe) until it expires.
         let slot_free = self.active_session_count() < self.effective_active_slot_limit(now);
-        let cooled = self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now);
+        let cooled = self
+            .cooldown
+            .is_cooled(key.peer.ip, key.peer.friend_slot, now);
         // RUST-PAR-021 GAP1 (corrects the round-20 U-GAP1 residual): the inline
         // grant to a just-connecting peer must respect BOTH the 1/sec slot-open
         // pace AND the ranked waiting queue, exactly like the oracle's paced+ranked
@@ -923,7 +925,8 @@ impl Ed2kUploadQueueState {
             return;
         }
         let budget = self.config.upload_limit_bytes_per_sec;
-        self.cooldown.set_churn_cooldown(peer.ip, false, budget, now);
+        self.cooldown
+            .set_churn_cooldown(peer.ip, false, budget, now);
     }
 
     pub(super) fn release_client(
@@ -1516,7 +1519,9 @@ impl Ed2kUploadQueueState {
             return false;
         }
         self.ranked_waiting_keys(now).into_iter().any(|key| {
-            !self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now)
+            !self
+                .cooldown
+                .is_cooled(key.peer.ip, key.peer.friend_slot, now)
                 || self.cooldown.can_probe(key.peer.ip, now, true)
         })
     }
@@ -1595,13 +1600,7 @@ impl Ed2kUploadQueueState {
         if percent == 0 || session.file_size == 0 {
             return None;
         }
-        Some(
-            session
-                .file_size
-                .saturating_mul(percent)
-                .saturating_add(99)
-                / 100,
-        )
+        Some(session.file_size.saturating_mul(percent).saturating_add(99) / 100)
     }
 
     /// Productive-rate bar a capped session must beat to be retained while the
@@ -1763,7 +1762,10 @@ impl Ed2kUploadQueueState {
     fn best_admissible_waiting_key(&self, now: Instant) -> Option<Ed2kUploadSessionKey> {
         let ranked = self.ranked_waiting_keys(now);
         for key in &ranked {
-            if !self.cooldown.is_cooled(key.peer.ip, key.peer.friend_slot, now) {
+            if !self
+                .cooldown
+                .is_cooled(key.peer.ip, key.peer.friend_slot, now)
+            {
                 return Some((*key).clone());
             }
         }
@@ -2105,7 +2107,10 @@ mod tests {
         let hash_x = "aa".repeat(16);
         let hash_y = "bb".repeat(16);
         queue.begin_session(
-            Ed2kUploadSessionKey { peer: peer_a, file_hash: hash_x.clone() },
+            Ed2kUploadSessionKey {
+                peer: peer_a,
+                file_hash: hash_x.clone(),
+            },
             1,
             now,
             7,
@@ -2114,7 +2119,10 @@ mod tests {
             1_000,
         );
         queue.begin_session(
-            Ed2kUploadSessionKey { peer: peer_b, file_hash: hash_x.clone() },
+            Ed2kUploadSessionKey {
+                peer: peer_b,
+                file_hash: hash_x.clone(),
+            },
             2,
             now,
             7,

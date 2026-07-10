@@ -154,7 +154,8 @@ pub(super) fn encode_search_request_with_criteria(
     let keyword_operators = keyword_expression
         .as_ref()
         .map_or(0, count_search_operators);
-    let constraints_present = !keyword.is_empty() && !criteria.is_empty() && !constraints.is_empty();
+    let constraints_present =
+        !keyword.is_empty() && !criteria.is_empty() && !constraints.is_empty();
     if keyword_operators > MAX_SEARCH_OPERATORS {
         anyhow::bail!(
             "ED2K search expression too complex: {keyword_operators} keyword boolean operators exceed the {MAX_SEARCH_OPERATORS}-operator limit"
@@ -562,7 +563,10 @@ mod criteria_tests {
         assert!(encode_search_request(&at_limit).is_ok());
 
         // Implicit-AND keyword terms count too: 12 words => 11 implicit ANDs > 10.
-        let too_many_words = (0..12).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let too_many_words = (0..12)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(encode_search_request(&too_many_words).is_err());
     }
 
@@ -573,7 +577,10 @@ mod criteria_tests {
         // before the metatag constraints are appended (SearchResultsWnd.cpp
         // :1098-1135). An 8-word keyword (7 implicit-AND operators) plus 4
         // constraints must ENCODE, not error: 7 <= 10 keyword operators.
-        let eight_words = (0..8).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let eight_words = (0..8)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let criteria = SearchCriteria {
             file_type: Some("Video".to_string()),
             min_size: Some(1000),
@@ -587,7 +594,10 @@ mod criteria_tests {
 
         // Even at the keyword cap (11 words => 10 implicit ANDs) with a full set
         // of constraints the query still encodes: constraints are excluded.
-        let eleven_words = (0..11).map(|i| format!("k{i}")).collect::<Vec<_>>().join(" ");
+        let eleven_words = (0..11)
+            .map(|i| format!("k{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let full = SearchCriteria {
             file_type: Some("Pro".to_string()),
             extension: Some("iso".to_string()),
@@ -600,7 +610,10 @@ mod criteria_tests {
 
         // But a genuinely over-complex KEYWORD expression still refuses even with
         // no constraints (12 words => 11 implicit ANDs > 10).
-        let twelve_words = (0..12).map(|i| format!("k{i}")).collect::<Vec<_>>().join(" ");
+        let twelve_words = (0..12)
+            .map(|i| format!("k{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(encode_search_request_with_criteria(&twelve_words, &full).is_err());
     }
 

@@ -96,8 +96,9 @@ impl Ed2kTransferRuntime {
             // reload (a hard-link preserves the source mtime; a copy+rename sets
             // it once at delivery and it is stable thereafter).
             if manifest.source_path.is_none() {
-                manifest.source_mtime_ms = Ed2kTransferRuntime::scanned_source_identity(&final_path)
-                    .and_then(|(_key, _size, mtime_ms)| mtime_ms);
+                manifest.source_mtime_ms =
+                    Ed2kTransferRuntime::scanned_source_identity(&final_path)
+                        .and_then(|(_key, _size, mtime_ms)| mtime_ms);
             }
             self.store_manifest_unlocked(&manifest).await?;
         }

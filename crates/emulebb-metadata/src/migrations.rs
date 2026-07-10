@@ -543,7 +543,10 @@ mod tests {
             .unwrap();
         // The migrated peer carries prior unsecured credit (downloaded 654321),
         // so the first secure-ident verify wipes it (anti-theft, CREDIT-1).
-        assert!(wiped, "first secure-ident verify wipes prior unsecured credit");
+        assert!(
+            wiped,
+            "first secure-ident verify wipes prior unsecured credit"
+        );
         drop(store);
         let _ = std::fs::remove_file(&path);
     }

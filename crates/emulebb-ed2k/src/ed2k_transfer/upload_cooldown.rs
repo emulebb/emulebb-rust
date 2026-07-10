@@ -177,7 +177,12 @@ impl UploadCooldownTracker {
     /// only an IP under an ACTIVE no-request cooldown is probeable, and only
     /// while `open_base_slot_underfill` (spare room below the base slot target).
     /// A pure retry/slow/churn cooldown is a hard gate and is never probed.
-    pub(super) fn can_probe(&self, ip: IpAddr, now: Instant, open_base_slot_underfill: bool) -> bool {
+    pub(super) fn can_probe(
+        &self,
+        ip: IpAddr,
+        now: Instant,
+        open_base_slot_underfill: bool,
+    ) -> bool {
         if self.cooldown_until(ip, false, now).is_none() {
             return false;
         }
@@ -254,14 +259,26 @@ impl UploadCooldownTracker {
     /// Seed the short churn cooldown used by the failed-admission, no-socket,
     /// and short-failed / remote-cancelled paths
     /// (`GetUploadChurnRetryCooldownSecondsForBudget`, `UploadQueue.cpp:335,855,2188`).
-    pub(super) fn set_churn_cooldown(&mut self, ip: IpAddr, friend: bool, budget: u64, now: Instant) {
+    pub(super) fn set_churn_cooldown(
+        &mut self,
+        ip: IpAddr,
+        friend: bool,
+        budget: u64,
+        now: Instant,
+    ) {
         let secs = self.churn_retry_cooldown_secs(budget);
         self.apply_retry_cooldown(ip, friend, secs, now);
     }
 
     /// Seed the slow-upload recycle cooldown
     /// (`GetSlowUploadRetryCooldownSecondsForBudget`, `UploadQueue.cpp:2358`).
-    pub(super) fn set_slow_cooldown(&mut self, ip: IpAddr, friend: bool, budget: u64, now: Instant) {
+    pub(super) fn set_slow_cooldown(
+        &mut self,
+        ip: IpAddr,
+        friend: bool,
+        budget: u64,
+        now: Instant,
+    ) {
         let secs = self.slow_retry_cooldown_secs(budget);
         self.apply_retry_cooldown(ip, friend, secs, now);
     }
@@ -295,10 +312,10 @@ impl UploadCooldownTracker {
         let valid_hash = hash.filter(|h| h != &[0u8; 16]);
         let mut should_ip_ban = false;
         let strikes = if let Some(h) = valid_hash {
-            let state = self
-                .strikes_by_hash
-                .entry(h)
-                .or_insert(StrikeState { strikes: 0, window_until });
+            let state = self.strikes_by_hash.entry(h).or_insert(StrikeState {
+                strikes: 0,
+                window_until,
+            });
             if state.window_until <= now {
                 state.strikes = 0;
             }
@@ -306,14 +323,14 @@ impl UploadCooldownTracker {
             state.strikes += 1;
             let strikes = state.strikes;
 
-            let rotation = self
-                .hash_rotation_by_ip
-                .entry(ip)
-                .or_insert_with(|| IpHashRotationState {
-                    hash_keys: HashSet::new(),
-                    total_strikes: 0,
-                    window_until,
-                });
+            let rotation =
+                self.hash_rotation_by_ip
+                    .entry(ip)
+                    .or_insert_with(|| IpHashRotationState {
+                        hash_keys: HashSet::new(),
+                        total_strikes: 0,
+                        window_until,
+                    });
             if rotation.window_until <= now {
                 rotation.hash_keys.clear();
                 rotation.total_strikes = 0;
@@ -325,10 +342,10 @@ impl UploadCooldownTracker {
                 && rotation.total_strikes >= HASH_ROTATION_STRIKE_THRESHOLD;
             strikes
         } else {
-            let state = self
-                .strikes_by_ip
-                .entry(ip)
-                .or_insert(StrikeState { strikes: 0, window_until });
+            let state = self.strikes_by_ip.entry(ip).or_insert(StrikeState {
+                strikes: 0,
+                window_until,
+            });
             if state.window_until <= now {
                 state.strikes = 0;
             }
@@ -365,7 +382,8 @@ impl UploadCooldownTracker {
     /// `until` as not-cooled, so this is a memory reclaim.
     pub(super) fn purge_expired(&mut self, now: Instant) {
         self.retry_by_ip.retain(|_, state| state.track_until > now);
-        self.no_request_by_ip.retain(|_, state| state.track_until > now);
+        self.no_request_by_ip
+            .retain(|_, state| state.track_until > now);
         if self
             .last_cleanup
             .is_some_and(|last| now < last + CLEANUP_INTERVAL)
@@ -373,8 +391,10 @@ impl UploadCooldownTracker {
             return;
         }
         self.last_cleanup = Some(now);
-        self.strikes_by_hash.retain(|_, state| state.window_until > now);
-        self.strikes_by_ip.retain(|_, state| state.window_until > now);
+        self.strikes_by_hash
+            .retain(|_, state| state.window_until > now);
+        self.strikes_by_ip
+            .retain(|_, state| state.window_until > now);
         self.hash_rotation_by_ip
             .retain(|_, state| state.window_until > now);
     }

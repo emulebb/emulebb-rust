@@ -402,13 +402,20 @@ mod tests {
             let mut id = [0u8; 16];
             id[0] = if i % 2 == 0 { 0x10 } else { 0xF0 };
             id[1] = (i as u8).wrapping_mul(17).wrapping_add(1);
-            if table.add_contact(make_contact(id, &unique_ip(added + 1))).is_ok() {
+            if table
+                .add_contact(make_contact(id, &unique_ip(added + 1)))
+                .is_ok()
+            {
                 added += 1;
             }
         }
         let mut rng = || true;
         let contacts = table.bootstrap_contacts(20, &mut rng);
-        assert_eq!(contacts.len(), added, "root-leaf sample returns every contact");
+        assert_eq!(
+            contacts.len(),
+            added,
+            "root-leaf sample returns every contact"
+        );
         // Spans both keyspace halves (the leaf holds both), unlike a
         // closest-to-own-id selection which would cluster on one side.
         assert!(contacts.iter().any(|c| c.id.0[0] & 0x80 == 0));
@@ -427,19 +434,28 @@ mod tests {
             id[0] = (i.wrapping_mul(37) & 0xFF) as u8;
             id[1] = (i.wrapping_mul(101) & 0xFF) as u8;
             id[2] = i as u8;
-            if id != [0u8; 16] && table.add_contact(make_contact(id, &unique_ip(added + 1))).is_ok()
+            if id != [0u8; 16]
+                && table
+                    .add_contact(make_contact(id, &unique_ip(added + 1)))
+                    .is_ok()
             {
                 added += 1;
             }
         }
-        assert!(added > 20, "need a table larger than the cap, added={added}");
+        assert!(
+            added > 20,
+            "need a table larger than the cap, added={added}"
+        );
         let mut flip = false;
         let mut rng = || {
             flip = !flip;
             flip
         };
         let contacts = table.bootstrap_contacts(20, &mut rng);
-        assert!(contacts.len() <= 20, "bootstrap sample exceeded the cap of 20");
+        assert!(
+            contacts.len() <= 20,
+            "bootstrap sample exceeded the cap of 20"
+        );
         // Every returned entry is a real, distinct table contact.
         let ids: std::collections::HashSet<_> = contacts.iter().map(|c| c.id).collect();
         assert_eq!(ids.len(), contacts.len(), "bootstrap sample has duplicates");

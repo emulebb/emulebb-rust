@@ -414,8 +414,8 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::sync::CancellationToken;
 
-    use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
     use super::super::Ed2kHelloIdentity;
+    use super::super::transport::{Ed2kTransport, Ed2kTransportMode};
     use super::drive_buddy_link;
     use crate::ed2k_transfer::Ed2kTransferRuntime;
 

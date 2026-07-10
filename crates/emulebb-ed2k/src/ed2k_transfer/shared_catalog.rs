@@ -83,8 +83,8 @@ mod upsert_collapse_tests {
     //! to the previous `retain` -> `to_vec` (whole-catalog deep clone) -> `dedupe`
     //! -> `replace_with` chain, for every mutation shape the upsert can take.
 
-    use super::dedupe_entries;
     use super::super::IndexedSharedCatalog;
+    use super::dedupe_entries;
     use crate::ed2k_transfer::Ed2kSharedEntry;
     use emulebb_kad_proto::Ed2kHash;
     use std::str::FromStr;
@@ -203,7 +203,11 @@ mod upsert_collapse_tests {
         // A pre-existing duplicate (no upsert append) must collapse exactly as the
         // reverse-scan dedupe did: the LAST occurrence survives, order preserved.
         let result = assert_upsert_identical(
-            vec![entry(1, false, 10), entry(1, false, 20), entry(2, false, 30)],
+            vec![
+                entry(1, false, 10),
+                entry(1, false, 20),
+                entry(2, false, 30),
+            ],
             &hex_hash(5),
             None,
         );

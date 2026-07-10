@@ -31,10 +31,10 @@ use std::{
 
 #[cfg(feature = "packet-diagnostics")]
 use chrono::SecondsFormat;
-#[cfg(feature = "packet-diagnostics")]
-use std::io::Write;
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(feature = "packet-diagnostics")]
+use std::io::Write;
 
 const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
 

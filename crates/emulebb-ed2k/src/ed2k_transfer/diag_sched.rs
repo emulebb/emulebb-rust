@@ -328,7 +328,10 @@ mod tests {
         // the shared `rejected` class (MFC's reject-not-uploading-* family).
         assert_eq!(upload_outcome_class("noPayload"), "rejected");
         assert_eq!(upload_outcome_class("noServableEntry"), "rejected");
-        assert_eq!(upload_outcome_class("queueWaitingBeforeRequest"), "rejected");
+        assert_eq!(
+            upload_outcome_class("queueWaitingBeforeRequest"),
+            "rejected"
+        );
         assert_eq!(upload_outcome_class("queueStaleAfterRequest"), "rejected");
     }
 }

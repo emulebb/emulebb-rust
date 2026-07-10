@@ -519,8 +519,9 @@ fn decode_hello_profile_from_type_payload(type_payload: &[u8]) -> Result<Decoded
         if tag.tag_name == Some(CT_EMULE_VERSION) {
             is_mule_hello = true;
             if let Some(version_tag) = decode_hello_tag_u32(&tag) {
-                client_software =
-                    Some(super::client_software::client_software_from_emule_version(version_tag));
+                client_software = Some(super::client_software::client_software_from_emule_version(
+                    version_tag,
+                ));
             }
         }
         if tag.tag_name == Some(CT_MOD_VERSION)
