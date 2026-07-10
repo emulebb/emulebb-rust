@@ -335,7 +335,7 @@ pub(super) async fn handle_download_part_packet(
                 })
                 .await;
             }
-            pending_part_requests[pending_index].buffer_response_bytes(start, end, &bytes)?;
+            pending_part_requests[pending_index].buffer_response_bytes(start, end, bytes)?;
             session_state.stale_block_guard.reset();
         } else if let Some(pending_index) = pending_part_requests.iter().position(|request| {
             request.queued

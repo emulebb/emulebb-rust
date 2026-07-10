@@ -634,7 +634,7 @@ pub(super) async fn read_upload_bytes(
                     expected_start + u64::try_from(reconstructed.len()).unwrap()
                 );
                 assert_eq!(end, start + u64::try_from(bytes.len()).unwrap());
-                reconstructed.extend_from_slice(&bytes);
+                reconstructed.extend_from_slice(bytes);
             }
             _ => {}
         }
@@ -701,7 +701,7 @@ pub(super) async fn read_transport_upload_bytes(
                     expected_start + u64::try_from(reconstructed.len()).unwrap()
                 );
                 assert_eq!(end, start + u64::try_from(bytes.len()).unwrap());
-                reconstructed.extend_from_slice(&bytes);
+                reconstructed.extend_from_slice(bytes);
             }
             _ => {}
         }

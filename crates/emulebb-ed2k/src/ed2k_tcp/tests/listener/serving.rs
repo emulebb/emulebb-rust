@@ -30,7 +30,7 @@ fn upload_part_packets_split_large_uncompressed_ranges() {
         assert_eq!(decoded_hash, file_hash);
         assert_eq!(start, expected_start);
         expected_start = end;
-        reconstructed.extend_from_slice(&bytes);
+        reconstructed.extend_from_slice(bytes);
     }
 
     assert_eq!(reconstructed, payload);
@@ -90,7 +90,7 @@ fn upload_part_packets_select_sending_opcode_per_fragment() {
         // The boundary-straddling fragment must be the I64 one.
         assert_eq!(frag_end > BOUNDARY, want_i64);
         expected_start = frag_end;
-        reconstructed.extend_from_slice(&bytes);
+        reconstructed.extend_from_slice(bytes);
     }
     assert_eq!(expected_start, end);
     assert_eq!(reconstructed, payload);
@@ -265,7 +265,7 @@ async fn listener_upload_session_serves_verified_file_via_compressed_parts() {
                 (OP_EDONKEYPROT, super::OP_SENDINGPART) => {
                     let (_, _, _, bytes) =
                         super::decode_sending_part_payload(&packet[6..], false).unwrap();
-                    reconstructed.extend_from_slice(&bytes);
+                    reconstructed.extend_from_slice(bytes);
                 }
                 _ => {}
             }

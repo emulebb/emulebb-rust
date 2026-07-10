@@ -56,13 +56,13 @@ async fn callback_session_with_completed_hello_starts_upload_flow() {
     });
 
     let (stream, remote_addr) = listener.accept().await.unwrap();
-    let mut transport = Ed2kTransport {
+    let mut transport = Ed2kTransport::from_parts(
         stream,
-        prefetched: VecDeque::new(),
-        receive_cipher: None,
-        send_cipher: None,
-        mode: Ed2kTransportMode::Plaintext,
-    };
+        VecDeque::new(),
+        None,
+        None,
+        Ed2kTransportMode::Plaintext,
+    );
     let secure_ident = Arc::new(
         Ed2kSecureIdent::from_private_key(RsaPrivateKey::new(&mut OsRng, 384).unwrap()).unwrap(),
     );

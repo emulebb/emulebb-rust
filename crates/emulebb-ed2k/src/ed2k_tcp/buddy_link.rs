@@ -454,13 +454,13 @@ mod tests {
         });
 
         let client = TcpStream::connect(addr).await.unwrap();
-        let mut transport = Ed2kTransport {
-            stream: client,
-            prefetched: VecDeque::new(),
-            receive_cipher: None,
-            send_cipher: None,
-            mode: Ed2kTransportMode::Plaintext,
-        };
+        let mut transport = Ed2kTransport::from_parts(
+            client,
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        );
         // First tick a full interval out (LOWID-G9a), so no ping fires during the test.
         let mut ping_timer = tokio::time::interval_at(
             tokio::time::Instant::now() + super::BUDDY_PING_INTERVAL,

@@ -110,7 +110,7 @@ pub(in crate::ed2k_tcp) fn encode_request_parts_batch(
 pub(in crate::ed2k_tcp) fn decode_sending_part_payload(
     payload: &[u8],
     use_i64: bool,
-) -> Result<(Ed2kHash, u64, u64, Vec<u8>)> {
+) -> Result<(Ed2kHash, u64, u64, &[u8])> {
     let header_len = 16 + if use_i64 { 16 } else { 8 };
     if payload.len() < header_len {
         anyhow::bail!("short OP_SENDINGPART payload {}", payload.len());
@@ -133,7 +133,9 @@ pub(in crate::ed2k_tcp) fn decode_sending_part_payload(
     if end < start {
         anyhow::bail!("invalid OP_SENDINGPART range {start}..{end}");
     }
-    let bytes = payload[header_len..].to_vec();
+    // Borrow the body out of the packet payload: the receive path buffers it
+    // into the pending request itself, so an owned copy here was pure churn.
+    let bytes = &payload[header_len..];
     if usize::try_from(end - start).unwrap_or(usize::MAX) != bytes.len() {
         anyhow::bail!(
             "OP_SENDINGPART body length {} does not match range {}..{}",

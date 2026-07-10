@@ -29,6 +29,12 @@ pub struct EmuleTcpPacket {
     pub payload: Vec<u8>,
 }
 
+/// One socket-read granularity for the buffered receive path. Headers are 6
+/// bytes and control packets tens of bytes, so one recv typically batches many
+/// packets (plus a data packet's tail); the old unbuffered path paid two
+/// syscalls per packet for the 1-byte marker + 5-byte header alone.
+const READ_BUFFER_CHUNK: usize = 32 * 1024;
+
 #[derive(Debug)]
 pub(super) struct Ed2kTransport {
     pub(super) stream: TcpStream,
@@ -36,6 +42,14 @@ pub(super) struct Ed2kTransport {
     pub(super) receive_cipher: Option<Rc4KeyStream>,
     pub(super) send_cipher: Option<Rc4KeyStream>,
     pub(super) mode: Ed2kTransportMode,
+    /// Buffered inbound bytes, already decrypted (RC4 is a stream cipher, so
+    /// the keystream is applied once, in arrival order, at fill time).
+    /// `read_pos` marks how far the buffer has been consumed.
+    read_buf: Vec<u8>,
+    read_pos: usize,
+    /// Reusable ciphertext scratch for obfuscated sends, so every write does
+    /// not allocate a fresh copy of the packet.
+    write_buf: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +74,25 @@ impl Ed2kTransportMode {
 }
 
 impl Ed2kTransport {
+    pub(super) fn from_parts(
+        stream: TcpStream,
+        prefetched: VecDeque<u8>,
+        receive_cipher: Option<Rc4KeyStream>,
+        send_cipher: Option<Rc4KeyStream>,
+        mode: Ed2kTransportMode,
+    ) -> Self {
+        Self {
+            stream,
+            prefetched,
+            receive_cipher,
+            send_cipher,
+            mode,
+            read_buf: Vec::new(),
+            read_pos: 0,
+            write_buf: Vec::new(),
+        }
+    }
+
     pub(super) async fn connect_outgoing(
         bind_ip: Ipv4Addr,
         peer_addr: SocketAddr,
@@ -111,22 +144,22 @@ impl Ed2kTransport {
             .with_context(|| {
                 format!("timed out negotiating eD2k obfuscation with peer {peer_addr}")
             })??;
-            return Ok(Self {
+            return Ok(Self::from_parts(
                 stream,
-                prefetched: VecDeque::new(),
-                receive_cipher: Some(receive_cipher),
-                send_cipher: Some(send_cipher),
-                mode: Ed2kTransportMode::Obfuscated,
-            });
+                VecDeque::new(),
+                Some(receive_cipher),
+                Some(send_cipher),
+                Ed2kTransportMode::Obfuscated,
+            ));
         }
 
-        Ok(Self {
+        Ok(Self::from_parts(
             stream,
-            prefetched: VecDeque::new(),
-            receive_cipher: None,
-            send_cipher: None,
-            mode: Ed2kTransportMode::Plaintext,
-        })
+            VecDeque::new(),
+            None,
+            None,
+            Ed2kTransportMode::Plaintext,
+        ))
     }
 
     pub(super) async fn accept(mut stream: TcpStream, local_user_hash: [u8; 16]) -> Result<Self> {
@@ -134,13 +167,13 @@ impl Ed2kTransport {
         match stream.read_exact(&mut first_byte).await {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(Self {
+                return Ok(Self::from_parts(
                     stream,
-                    prefetched: VecDeque::new(),
-                    receive_cipher: None,
-                    send_cipher: None,
-                    mode: Ed2kTransportMode::Plaintext,
-                });
+                    VecDeque::new(),
+                    None,
+                    None,
+                    Ed2kTransportMode::Plaintext,
+                ));
             }
             Err(error) => return Err(error.into()),
         }
@@ -148,25 +181,25 @@ impl Ed2kTransport {
         if is_plain_ed2k_protocol_marker(first_byte[0]) {
             let mut prefetched = VecDeque::with_capacity(1);
             prefetched.push_back(first_byte[0]);
-            return Ok(Self {
+            return Ok(Self::from_parts(
                 stream,
                 prefetched,
-                receive_cipher: None,
-                send_cipher: None,
-                mode: Ed2kTransportMode::Plaintext,
-            });
+                None,
+                None,
+                Ed2kTransportMode::Plaintext,
+            ));
         }
 
         let (receive_cipher, send_cipher) =
             accept_incoming_obfuscation_handshake(&mut stream, local_user_hash, first_byte[0])
                 .await?;
-        Ok(Self {
+        Ok(Self::from_parts(
             stream,
-            prefetched: VecDeque::new(),
-            receive_cipher: Some(receive_cipher),
-            send_cipher: Some(send_cipher),
-            mode: Ed2kTransportMode::Obfuscated,
-        })
+            VecDeque::new(),
+            Some(receive_cipher),
+            Some(send_cipher),
+            Ed2kTransportMode::Obfuscated,
+        ))
     }
 
     pub(super) async fn read_packet(&mut self) -> Result<Option<EmuleTcpPacket>> {
@@ -208,30 +241,53 @@ impl Ed2kTransport {
 
     pub(super) async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         if let Some(cipher) = self.send_cipher.as_mut() {
-            let mut encrypted = bytes.to_vec();
-            cipher.apply(&mut encrypted);
-            self.stream.write_all(&encrypted).await?;
+            self.write_buf.clear();
+            self.write_buf.extend_from_slice(bytes);
+            cipher.apply(&mut self.write_buf);
+            self.stream.write_all(&self.write_buf).await?;
         } else {
             self.stream.write_all(bytes).await?;
         }
         Ok(())
     }
 
+    /// Pull the next chunk off the socket into the (fully consumed) read
+    /// buffer, decrypting it in place. Returns the byte count; 0 means EOF.
+    ///
+    /// Cancellation-safe: sessions wrap `read_packet` in timeouts and keep
+    /// reading the same transport afterwards, so the buffer must never hold
+    /// uninitialized "valid" bytes across a cancelled await. `read_buf`
+    /// appends into spare capacity and only advances the length when the read
+    /// completes; a cancelled fill leaves the (empty) buffer untouched.
+    async fn fill_read_buf(&mut self) -> io::Result<usize> {
+        debug_assert_eq!(self.read_pos, self.read_buf.len());
+        self.read_buf.clear();
+        self.read_pos = 0;
+        self.read_buf.reserve(READ_BUFFER_CHUNK);
+        let received = self.stream.read_buf(&mut self.read_buf).await?;
+        if received > 0
+            && let Some(cipher) = self.receive_cipher.as_mut()
+        {
+            cipher.apply(&mut self.read_buf);
+        }
+        Ok(received)
+    }
+
     async fn read_u8(&mut self) -> Result<Option<u8>> {
         if let Some(byte) = self.prefetched.pop_front() {
             return Ok(Some(byte));
         }
-        let mut byte = [0u8; 1];
-        match self.stream.read_exact(&mut byte).await {
-            Ok(_) => {
-                if let Some(cipher) = self.receive_cipher.as_mut() {
-                    cipher.apply(&mut byte);
-                }
-                Ok(Some(byte[0]))
+        if self.read_pos == self.read_buf.len() {
+            match self.fill_read_buf().await {
+                // EOF on a packet boundary is a clean close.
+                Ok(0) => return Ok(None),
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(error) => Err(error.into()),
         }
+        let byte = self.read_buf[self.read_pos];
+        self.read_pos += 1;
+        Ok(Some(byte))
     }
 
     async fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
@@ -244,11 +300,34 @@ impl Ed2kTransport {
                 break;
             }
         }
-        if offset < bytes.len() {
-            self.stream.read_exact(&mut bytes[offset..]).await?;
-            if let Some(cipher) = self.receive_cipher.as_mut() {
-                cipher.apply(&mut bytes[offset..]);
+        while offset < bytes.len() {
+            let buffered = self.read_buf.len() - self.read_pos;
+            if buffered == 0 {
+                // A large remainder (payload body) skips the copy through the
+                // buffer: read it directly and decrypt in place.
+                if bytes.len() - offset >= READ_BUFFER_CHUNK {
+                    self.stream.read_exact(&mut bytes[offset..]).await?;
+                    if let Some(cipher) = self.receive_cipher.as_mut() {
+                        cipher.apply(&mut bytes[offset..]);
+                    }
+                    return Ok(());
+                }
+                if self.fill_read_buf().await? == 0 {
+                    // Mid-frame EOF: same error shape the unbuffered
+                    // `read_exact` produced.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "eD2k stream closed mid-frame",
+                    )
+                    .into());
+                }
+                continue;
             }
+            let take = buffered.min(bytes.len() - offset);
+            bytes[offset..offset + take]
+                .copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+            self.read_pos += take;
+            offset += take;
         }
         Ok(())
     }
@@ -271,13 +350,13 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let stream = connect.await.unwrap();
         (
-            Ed2kTransport {
+            Ed2kTransport::from_parts(
                 stream,
-                prefetched: prefetched.into(),
-                receive_cipher: None,
-                send_cipher: None,
-                mode: Ed2kTransportMode::Plaintext,
-            },
+                prefetched.into(),
+                None,
+                None,
+                Ed2kTransportMode::Plaintext,
+            ),
             // Returned so the caller controls the peer side (e.g. drop it to
             // force EOF on a payload read).
             server,
@@ -290,6 +369,52 @@ mod tests {
         bytes.extend_from_slice(&packet_length.to_le_bytes());
         bytes.push(opcode);
         bytes
+    }
+
+    #[tokio::test]
+    async fn buffered_reads_frame_multiple_packets_from_one_burst() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        // Two packets sent as one burst: the buffered reader must frame both
+        // (the second packet's bytes arrive inside the first fill).
+        let mut burst = header(OP_EDONKEYPROT, 4, OP_HELLO);
+        burst.extend_from_slice(&[1, 2, 3]);
+        burst.extend(header(OP_EMULEPROT, 3, 0x42));
+        burst.extend_from_slice(&[9, 8]);
+        server.write_all(&burst).await.unwrap();
+
+        let first = transport.read_packet().await.unwrap().unwrap();
+        assert_eq!((first.protocol, first.opcode), (OP_EDONKEYPROT, OP_HELLO));
+        assert_eq!(first.payload, vec![1, 2, 3]);
+        let second = transport.read_packet().await.unwrap().unwrap();
+        assert_eq!((second.protocol, second.opcode), (OP_EMULEPROT, 0x42));
+        assert_eq!(second.payload, vec![9, 8]);
+
+        // Clean EOF at a packet boundary stays a clean close.
+        drop(server);
+        assert!(transport.read_packet().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_idle_read_keeps_the_transport_usable() {
+        use tokio::io::AsyncWriteExt as _;
+        // Sessions wrap read_packet in timeouts and keep reading afterwards
+        // (queue-waiting peers). A cancelled idle wait must not corrupt the
+        // read buffer: the next read still frames the next packet exactly.
+        let (mut transport, mut server) = transport_with_prefetched(Vec::new()).await;
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            transport.read_packet(),
+        )
+        .await;
+        assert!(timed_out.is_err(), "idle read must time out");
+
+        let mut packet = header(OP_EDONKEYPROT, 2, OP_HELLO);
+        packet.push(0x7F);
+        server.write_all(&packet).await.unwrap();
+        let read = transport.read_packet().await.unwrap().unwrap();
+        assert_eq!((read.protocol, read.opcode), (OP_EDONKEYPROT, OP_HELLO));
+        assert_eq!(read.payload, vec![0x7F]);
     }
 
     #[tokio::test]
