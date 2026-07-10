@@ -71,10 +71,14 @@ impl Transport for UdpTransport {
     }
 
     async fn recv_raw(&self) -> Result<(Vec<u8>, SocketAddr), NetError> {
-        let mut buf = vec![0u8; 8192];
+        // Receive into a stack scratch and return an exact-size Vec: the old
+        // `vec![0u8; 8192]` + truncate kept the full 8 KB capacity alive for
+        // every (typically well under 1 KB) datagram queued through the
+        // unsolicited channel — a fresh heap alloc plus ~10x memory
+        // amplification per packet.
+        let mut buf = [0u8; 8192];
         let (len, addr) = self.socket.recv_from(&mut buf).await?;
-        buf.truncate(len);
-        Ok((buf, addr))
+        Ok((buf[..len].to_vec(), addr))
     }
 
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
