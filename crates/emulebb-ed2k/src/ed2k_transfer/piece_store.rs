@@ -112,6 +112,42 @@ impl Ed2kVerifiedRangeReader {
 }
 
 impl Ed2kTransferRuntime {
+    /// Take (or open) the cached read+write payload handle for one transfer.
+    /// Callers run under the transfer's manifest IO lock, so at most one user
+    /// holds the handle at a time; hand it back with
+    /// [`Self::store_payload_handle`] after use. On an IO error, drop it
+    /// instead (the next take re-opens a fresh handle).
+    pub(super) async fn take_payload_handle(&self, file_hash: &str) -> Result<tokio::fs::File> {
+        if let Some(file) = self.payload_handles.lock().unwrap().remove(file_hash) {
+            return Ok(file);
+        }
+        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&payload_path)
+            .await
+            .with_context(|| format!("failed to open piece store {}", payload_path.display()))
+    }
+
+    /// Return a payload handle taken with [`Self::take_payload_handle`] so the
+    /// next block append reuses it instead of re-opening the piece store.
+    pub(super) fn store_payload_handle(&self, file_hash: &str, file: tokio::fs::File) {
+        self.payload_handles
+            .lock()
+            .unwrap()
+            .insert(file_hash.to_string(), file);
+    }
+
+    /// Drop the cached payload handle. Must run before the payload file is
+    /// deleted: on Windows a pending handle leaves the file delete-pending and
+    /// the transfer directory undeletable.
+    pub(super) fn invalidate_payload_handle(&self, file_hash: &str) {
+        self.payload_handles.lock().unwrap().remove(file_hash);
+    }
+
     /// Mark a specific missing piece as requested.
     #[cfg(test)]
     pub async fn mark_piece_requested(&self, file_hash: &str, piece_index: u32) -> Result<bool> {
@@ -418,14 +454,7 @@ impl Ed2kTransferRuntime {
                 .await;
         }
 
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&payload_path)
-            .await
-            .with_context(|| format!("failed to open piece store {}", payload_path.display()))?;
+        let mut file = self.take_payload_handle(file_hash).await?;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
@@ -442,18 +471,9 @@ impl Ed2kTransferRuntime {
             // per-piece fsync; mid-piece blocks stay flush()-only for speed.
             file.sync_all().await?;
             let mut piece_bytes = vec![0u8; usize::try_from(expected_piece_len).unwrap_or(0)];
-            drop(file);
-            let mut read_file = tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(&payload_path)
-                .await
-                .with_context(|| {
-                    format!("failed to reopen piece store {}", payload_path.display())
-                })?;
-            read_file
-                .seek(std::io::SeekFrom::Start(piece_start))
-                .await?;
-            read_file.read_exact(&mut piece_bytes).await?;
+            file.seek(std::io::SeekFrom::Start(piece_start)).await?;
+            file.read_exact(&mut piece_bytes).await?;
+            self.store_payload_handle(file_hash, file);
             let verified = verify_piece_against_manifest(&manifest, piece_index, &piece_bytes)?;
             let piece = manifest
                 .pieces
@@ -493,6 +513,9 @@ impl Ed2kTransferRuntime {
                     &self.transfer_dir(manifest.file_hash.as_str()),
                     &mut manifest,
                 )?;
+                // No further appends will come: release the cached write
+                // handle so a completed payload holds no open handle.
+                self.invalidate_payload_handle(file_hash);
             }
             if outcome.is_completed() {
                 self.upsert_verified_catalog_entry(&manifest).await;
@@ -551,7 +574,7 @@ impl Ed2kTransferRuntime {
                     checkpoint_reason = Some("periodic_progress");
                 }
                 file.flush().await?;
-                drop(file);
+                self.store_payload_handle(file_hash, file);
                 if progress_only {
                     self.store_manifest_piece_progress_unlocked(&manifest, piece_index)
                         .await?;
@@ -570,7 +593,7 @@ impl Ed2kTransferRuntime {
                 return Ok(outcome);
             }
 
-            drop(file);
+            self.store_payload_handle(file_hash, file);
             self.note_dirty_piece_unlocked(&manifest, piece_index).await;
             self.cache_manifest_unlocked(&manifest).await;
             log_append_piece_block(AppendPieceBlockLog {

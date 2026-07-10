@@ -8,10 +8,7 @@ use super::hashset::refresh_completed_manifest_aich_hashset;
 use super::ich_salvage::IchRehashResult;
 use super::manifest::{rebuild_verified_ranges, verify_piece_against_manifest};
 use super::piece_store::{AppendPieceBlockLog, log_append_piece_block};
-use super::{
-    Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, PAYLOAD_FILE_NAME,
-    PieceWriteOutcome,
-};
+use super::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, PieceWriteOutcome};
 
 impl Ed2kTransferRuntime {
     #[expect(clippy::too_many_arguments)]
@@ -73,15 +70,7 @@ impl Ed2kTransferRuntime {
             return Ok(PieceWriteOutcome::Incomplete);
         }
 
-        let payload_path = self.transfer_dir(file_hash).join(PAYLOAD_FILE_NAME);
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&payload_path)
-            .await
-            .with_context(|| format!("failed to open piece store {}", payload_path.display()))?;
+        let mut file = self.take_payload_handle(file_hash).await?;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
@@ -96,25 +85,16 @@ impl Ed2kTransferRuntime {
         } else {
             file.flush().await?;
         }
-        drop(file);
 
         bitmap.set_present(block_idx);
         let mut verified = false;
         if bitmap.all_present() {
             let mut piece_bytes = vec![0u8; usize::try_from(expected_piece_len).unwrap_or(0)];
-            let mut read_file = tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(&payload_path)
-                .await
-                .with_context(|| {
-                    format!("failed to reopen piece store {}", payload_path.display())
-                })?;
-            read_file
-                .seek(std::io::SeekFrom::Start(piece_start))
-                .await?;
-            read_file.read_exact(&mut piece_bytes).await?;
+            file.seek(std::io::SeekFrom::Start(piece_start)).await?;
+            file.read_exact(&mut piece_bytes).await?;
             verified = verify_piece_against_manifest(manifest, piece_index, &piece_bytes)?;
         }
+        self.store_payload_handle(file_hash, file);
 
         let piece = manifest
             .pieces
@@ -183,6 +163,9 @@ impl Ed2kTransferRuntime {
                 &self.transfer_dir(manifest.file_hash.as_str()),
                 manifest,
             )?;
+            // No further appends will come: release the cached write handle
+            // so a completed payload holds no open handle.
+            self.invalidate_payload_handle(file_hash);
         }
         if outcome.is_completed() {
             self.upsert_verified_catalog_entry(manifest).await;

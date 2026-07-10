@@ -169,6 +169,15 @@ pub struct Ed2kTransferRuntime {
     manifest_io: Arc<Mutex<()>>,
     manifest_cache: Arc<Mutex<HashMap<String, Ed2kResumeManifest>>>,
     manifest_checkpoint_state: Arc<Mutex<HashMap<String, Ed2kManifestCheckpointState>>>,
+    /// Cached read+write payload handles, one per transfer with active piece
+    /// writes, so the per-block download path does not re-open the piece
+    /// store (a CreateFileW + blocking-pool hop) for every received block.
+    /// Take/store runs under the transfer's manifest IO lock, so a handle
+    /// never has two concurrent users; the entry is dropped before payload
+    /// deletion so a pending handle cannot leave the transfer directory
+    /// undeletable on Windows. A `std` Mutex held only for instant map ops,
+    /// never across an `.await`.
+    payload_handles: Arc<StdMutex<HashMap<String, tokio::fs::File>>>,
     source_exchange: SourceExchangeState,
     /// Per-file accumulator of network-proposed AICH roots and their distinct
     /// proposing IPs. A network-learned root is only promoted to the
@@ -359,6 +368,7 @@ impl Ed2kTransferRuntime {
             manifest_io: Arc::new(Mutex::new(())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
             manifest_checkpoint_state: Arc::new(Mutex::new(HashMap::new())),
+            payload_handles: Arc::new(StdMutex::new(HashMap::new())),
             source_exchange: SourceExchangeState::default(),
             aich_root_corroboration: Arc::new(StdMutex::new(HashMap::new())),
             download_activity: Arc::new(StdMutex::new(HashMap::new())),

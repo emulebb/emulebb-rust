@@ -447,6 +447,10 @@ impl Ed2kTransferRuntime {
         {
             return Ok(false);
         }
+        // Drop the cached payload handle FIRST: on Windows a pending handle
+        // would leave pieces.bin delete-pending and the directory removal
+        // below would fail with "directory not empty".
+        self.invalidate_payload_handle(&file_hash);
         if tokio::fs::try_exists(&transfer_dir).await? {
             tokio::fs::remove_dir_all(&transfer_dir)
                 .await
