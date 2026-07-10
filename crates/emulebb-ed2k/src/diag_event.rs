@@ -14,24 +14,25 @@
 //! per-module monotonic counter, which the harness treats as client-specific
 //! intra-side ordering only (schema §2), so a per-module counter is sufficient.
 //!
-//! Gating (schema §5): the writer is runtime-gated by `EMULEBB_RUST_LOG_DIR`.
-//! Packet families are ADDITIONALLY behind the `packet-diagnostics` Cargo
-//! feature at their call sites (the eD2k TCP dump). Kad/sched families are gated
-//! by the env var alone. When `EMULEBB_RUST_LOG_DIR` is unset, [`writer`] caches
-//! `None` once and every [`emit`] is a cheap no-op.
+//! Gating (schema §5): the writer is compiled only with the
+//! `packet-diagnostics` Cargo feature, then runtime-gated by
+//! `EMULEBB_RUST_LOG_DIR` for output placement. Regular builds compile [`emit`]
+//! to a no-op, so the environment variable alone cannot enable diagnostics.
 
 #![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code))]
 
 use std::{
     fs,
-    io::Write,
     sync::{
         Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 
+#[cfg(feature = "packet-diagnostics")]
 use chrono::SecondsFormat;
+#[cfg(feature = "packet-diagnostics")]
+use std::io::Write;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -82,7 +83,9 @@ fn writer() -> &'static StdMutex<Option<fs::File>> {
 
 /// Append one `diag_event_v1` record. `keys` / `body` are pre-built JSON values
 /// (use [`serde_json::json!`]); omit optional fields rather than emitting fake
-/// data. No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+/// data. Compiled to a no-op without `packet-diagnostics`; otherwise still
+/// no-ops when `EMULEBB_RUST_LOG_DIR` is unset.
+#[cfg(feature = "packet-diagnostics")]
 pub fn emit(
     family: &'static str,
     event: &'static str,
@@ -115,6 +118,16 @@ pub fn emit(
     };
     let _ = file.write_all(&line);
     let _ = file.flush();
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn emit(
+    _family: &'static str,
+    _event: &'static str,
+    _severity: &'static str,
+    _keys: Value,
+    _body: Value,
+) {
 }
 
 fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {

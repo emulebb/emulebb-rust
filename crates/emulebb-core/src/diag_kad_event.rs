@@ -5,8 +5,9 @@
 //! (`emulebb_ed2k::diag_event::emit`). They live in `emulebb-core` because the
 //! Kad drivers they observe (the firewall self-check verdict, the buddy
 //! acquisition/loss, the periodic buddy/maintenance tick, and the keyword/source
-//! lookup completion) run here. Emit is a cheap no-op when `EMULEBB_RUST_LOG_DIR`
-//! is unset, so the call sites need no extra gating.
+//! lookup completion) run here. Emit is compiled to a no-op unless
+//! `packet-diagnostics` is enabled and then remains runtime-gated by
+//! `EMULEBB_RUST_LOG_DIR`.
 //!
 //! The `event` value is the coarse milestone bucket the harness aligns on
 //! (`bootstrap`/`lookup`/`firewall`/`buddy`/`routing_summary`), matching the

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Local emulebb-rust application state and orchestration"
 
 [features]
-# Forwards the ed2k_packet_v1 packet-dump compile gate down to emulebb-ed2k.
+# Forwards the packet-diagnostics compile gate down to eD2K and Kad diagnostics.
 packet-diagnostics = ["emulebb-ed2k/packet-diagnostics"]
 # Test-only: forwards the egress-audit seam down so the RUST-FEAT-005 leak test
 # (tests/vpn_leak_egress.rs) can observe P2P socket bind/pin. Never enabled in the

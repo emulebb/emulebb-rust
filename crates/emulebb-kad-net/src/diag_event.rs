@@ -8,22 +8,28 @@
 //! crate emits interleave with the ed2k_tcp/sched records the ed2k+core shim
 //! emits. See `crates/emulebb-ed2k/src/diag_event.rs` for the full rationale.
 //!
-//! Gating (schema §5): runtime-gated by `EMULEBB_RUST_LOG_DIR` presence; the Kad
-//! UDP packet family carries no Cargo feature gate (kad/sched families are env-
-//! gated only). When the env var is unset, [`emit`] is a cheap no-op.
+//! Gating (schema §5): compiled only with the `packet-diagnostics` Cargo feature,
+//! then runtime-gated by `EMULEBB_RUST_LOG_DIR` for output placement. Regular
+//! builds compile the emitters to no-ops, so the environment variable alone
+//! cannot enable diagnostics.
+
+#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code))]
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(feature = "packet-diagnostics")]
 use chrono::SecondsFormat;
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(feature = "packet-diagnostics")]
+use std::io::Write;
 use tracing::warn;
 
 const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
@@ -60,7 +66,10 @@ fn next_seq() -> u64 {
     NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Append one `diag_event_v1` record. No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+/// Append one `diag_event_v1` record. Compiled to a no-op without
+/// `packet-diagnostics`; otherwise still no-ops when `EMULEBB_RUST_LOG_DIR` is
+/// unset.
+#[cfg(feature = "packet-diagnostics")]
 pub fn emit(
     family: &'static str,
     event: &'static str,
@@ -112,6 +121,16 @@ pub fn emit(
     }
 }
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn emit(
+    _family: &'static str,
+    _event: &'static str,
+    _severity: &'static str,
+    _keys: Value,
+    _body: Value,
+) {
+}
+
 fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
     let mut line = serde_json::to_vec(record).ok()?;
     line.push(b'\n');
@@ -122,7 +141,9 @@ fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
 /// (uniform-diagnostics-v2 §3.3): a contact was added to the routing table from a
 /// bootstrap response. `peer` is the contact's `ip:port` (Kad UDP endpoint).
 /// Typed wrapper so `emulebb-kad-dht` need not depend on `serde_json` directly.
-/// No-op when `EMULEBB_RUST_LOG_DIR` is unset.
+/// Compiled to a no-op without `packet-diagnostics`; otherwise still no-ops when
+/// `EMULEBB_RUST_LOG_DIR` is unset.
+#[cfg(feature = "packet-diagnostics")]
 pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
     emit(
         "kad_event",
@@ -133,6 +154,9 @@ pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
     );
 }
 
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn kad_event_bootstrap_contact_added(_peer: std::net::SocketAddr) {}
+
 /// `family:"bad_peer"` abuse event (uniform-diagnostics-v2 §3.4): a Kad UDP peer
 /// was dropped or banned by the public-network anti-flood guard. `behavior` is
 /// the abuse classification (e.g. `anti_flood_ban`, `anti_flood_drop`), `reason`
@@ -141,8 +165,10 @@ pub fn kad_event_bootstrap_contact_added(peer: std::net::SocketAddr) {
 /// carried separately in the body `action` field.
 /// `repeat_count` is the observed packet count in the tracker window;
 /// `window_seconds` the window. Only `peer` is known at the Kad UDP layer, so
-/// `peerHash`/`fileHash`/`searchId` are omitted (not faked). No-op when
+/// `peerHash`/`fileHash`/`searchId` are omitted (not faked). Compiled to a no-op
+/// without `packet-diagnostics`; otherwise still no-ops when
 /// `EMULEBB_RUST_LOG_DIR` is unset.
+#[cfg(feature = "packet-diagnostics")]
 pub fn bad_peer_kad_drop(
     event: &'static str,
     severity: &'static str,
@@ -165,6 +191,18 @@ pub fn bad_peer_kad_drop(
             "windowSeconds": window_seconds,
         }),
     );
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn bad_peer_kad_drop(
+    _event: &'static str,
+    _severity: &'static str,
+    _behavior: &'static str,
+    _reason: &str,
+    _peer: std::net::SocketAddr,
+    _repeat_count: u32,
+    _window_seconds: u64,
+) {
 }
 
 fn bad_peer_action_for_behavior(behavior: &str) -> &'static str {
@@ -290,8 +328,9 @@ mod tests {
     #[test]
     fn typed_helpers_emit_without_panicking() {
         // Exercises the bad_peer + kad_event(bootstrap) builder paths. Writes a
-        // real record only when EMULEBB_RUST_LOG_DIR is set (used by the lane-E
-        // trace-capture run); otherwise a cheap no-op.
+        // real record only when packet-diagnostics is enabled and
+        // EMULEBB_RUST_LOG_DIR is set (used by the lane-E trace-capture run);
+        // otherwise a cheap no-op.
         kad_event_bootstrap_contact_added("1.2.3.4:4672".parse().unwrap());
         bad_peer_kad_drop(
             "anti_flood_ban",

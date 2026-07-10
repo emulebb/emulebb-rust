@@ -6,10 +6,10 @@
 //! capacity snapshot. See `docs/diagnostics/diag-event-v1-schema.md` §3.5.
 //!
 //! They build the `keys` + `body` from real call-site data and forward to the
-//! shared writer (`crate::diag_event::emit`), which is a cheap no-op unless
-//! `EMULEBB_RUST_LOG_DIR` is set, so the call sites need no extra gating. No
-//! field is ever faked: an optional key (`peerHash`) is omitted when the call
-//! site does not have the peer user hash.
+//! shared writer (`crate::diag_event::emit`), which is compiled to a no-op
+//! unless `packet-diagnostics` is enabled and then remains runtime-gated by
+//! `EMULEBB_RUST_LOG_DIR`. No field is ever faked: an optional key (`peerHash`)
+//! is omitted when the call site does not have the peer user hash.
 
 use std::net::IpAddr;
 

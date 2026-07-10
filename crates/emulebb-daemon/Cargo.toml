@@ -24,8 +24,8 @@ path = "src/bin/emulebb-rust-diagnostics.rs"
 required-features = ["packet-diagnostics"]
 
 [features]
-# Build the daemon with `--features packet-diagnostics` to compile in the
-# ed2k_packet_v1 packet dump (diagnostic/live-wire builds); off by default.
+# Build the daemon with `--features packet-diagnostics` to compile in packet
+# dumps and diag_event_v1 logs (diagnostic/live-wire builds); off by default.
 packet-diagnostics = ["emulebb-core/packet-diagnostics", "emulebb-ed2k/packet-diagnostics"]
 
 [dependencies]

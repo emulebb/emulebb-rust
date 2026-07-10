@@ -1,5 +1,7 @@
 //! Oracle-shaped UDP JSONL dump for Kad parity work.
 
+#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+
 use chrono::Local;
 use serde::Serialize;
 use std::env;
@@ -196,6 +198,7 @@ fn udp_state_id(direction: &str, summary: &KadUdpDumpSummary) -> String {
 }
 
 /// Append one oracle-shaped Kad UDP packet record to the current eMuleBB Rust dump file.
+#[cfg(feature = "packet-diagnostics")]
 pub fn dump_kad_udp_packet(
     direction: &'static str,
     peer: SocketAddr,
@@ -268,6 +271,16 @@ pub fn dump_kad_udp_packet(
     // keeps its legacy local-time `ts` during migration). Hex stays UPPER for
     // Kad parity. Optional fields are omitted when not known rather than faked.
     emit_kad_udp_diag_event(direction, peer, wire_payload, decoded_payload, &summary);
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn dump_kad_udp_packet(
+    _direction: &'static str,
+    _peer: SocketAddr,
+    _wire_payload: &[u8],
+    _decoded_payload: &[u8],
+    _summary: KadUdpDumpSummary,
+) {
 }
 
 fn emit_kad_udp_diag_event(

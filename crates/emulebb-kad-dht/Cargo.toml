@@ -6,6 +6,8 @@ license.workspace = true
 description = "Kad2 DHT operations — bootstrap, lookup, search, publish"
 
 [features]
+# Forwards the diagnostics compile-time gate down to the Kad UDP network layer.
+packet-diagnostics = ["emulebb-kad-net/packet-diagnostics"]
 # Forwards the test-only egress-audit seam down to emulebb-kad-net. Never enabled
 # in a release/daemon build (see tools/check_rust_client_policy.py).
 egress-audit = ["emulebb-kad-net/egress-audit"]
