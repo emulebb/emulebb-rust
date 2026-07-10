@@ -53,6 +53,7 @@ pub const DEFAULT_MAX_CONNECTIONS_PER_WINDOW: usize = 50;
 pub const DEFAULT_MAX_HALF_OPEN_CONNECTIONS: usize = 50;
 /// Master `m_OpenSocketsInterval` window length for the new-connection rate.
 pub const DEFAULT_CONNECTION_WINDOW: Duration = Duration::from_secs(5);
+const CONNECTION_AVERAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Master `CPreferences::GetDefaultMaxSourcesPerFile()`: 600 sources/file.
 pub const DEFAULT_MAX_SOURCES_PER_FILE: usize = 600;
 /// Master `MAX_SOURCES_FILE_SOFT` clamp on the soft per-file source cap.
@@ -150,6 +151,11 @@ pub struct Ed2kDownloadCoordinator {
     /// Timestamps of new connections admitted within the current window, oldest
     /// first (master `m_OpenSocketsInterval` accumulator over a 5s window).
     recent_connection_grants: VecDeque<Instant>,
+    /// One-second sampled moving average used by MFC's connection-spike
+    /// suppressor (`CListenSocket::UpdateConnectionsStatus`).
+    average_connections: f64,
+    connection_average_samples: u64,
+    last_connection_average_sample_at: Option<Instant>,
     /// Round-robin cursor into the file list for fair reask selection
     /// (master `m_lastfile` / `m_udcounter` rotation).
     reask_cursor: usize,
@@ -164,6 +170,9 @@ impl Ed2kDownloadCoordinator {
             half_open_connections: 0,
             established_connections: 0,
             recent_connection_grants: VecDeque::new(),
+            average_connections: 0.0,
+            connection_average_samples: 0,
+            last_connection_average_sample_at: None,
             reask_cursor: 0,
             last_reask_at: None,
         }
@@ -207,15 +216,20 @@ impl Ed2kDownloadCoordinator {
     /// [`mark_connection_established`] is called once its handshake completes.
     pub fn try_acquire_connection(&mut self, now: Instant) -> bool {
         self.expire_connection_window(now);
+        self.sample_connection_average(now);
         if self.config.max_connections != 0
             && self.active_connections() >= self.config.max_connections
         {
             return false;
         }
-        if self.config.max_connections_per_window != 0
-            && self.recent_connection_grants.len() >= self.config.max_connections_per_window
-        {
-            return false;
+        if self.config.max_connections_per_window != 0 {
+            let effective_limit = self.effective_connection_window_limit();
+            // MFC compares the already-opened interval count with `>` before
+            // opening the next socket. Preserve that boundary instead of
+            // rounding the fractional effective limit.
+            if self.recent_connection_grants.len() as f64 > effective_limit {
+                return false;
+            }
         }
         // Half-open cap (master TooManySockets third term): refuse a new
         // outgoing connect while too many handshakes are already in flight.
@@ -316,6 +330,33 @@ impl Ed2kDownloadCoordinator {
                 break;
             }
         }
+    }
+
+    fn sample_connection_average(&mut self, now: Instant) {
+        if self.last_connection_average_sample_at.is_some_and(|last| {
+            now.saturating_duration_since(last) < CONNECTION_AVERAGE_SAMPLE_INTERVAL
+        }) {
+            return;
+        }
+        self.connection_average_samples = self.connection_average_samples.saturating_add(1);
+        let samples = self.connection_average_samples as f64;
+        let weight = ((samples - 1.0) / samples).min(0.99);
+        self.average_connections = (self.average_connections * weight
+            + self.active_connections() as f64 * (1.0 - weight))
+            .max(0.001);
+        self.last_connection_average_sample_at = Some(now);
+    }
+
+    fn effective_connection_window_limit(&self) -> f64 {
+        let configured = self.config.max_connections_per_window as f64;
+        let spike_size = (self.active_connections() as f64 - self.average_connections).max(1.0);
+        let spike_tolerance = 25.0 * configured / 10.0;
+        let modifier = if spike_size > spike_tolerance {
+            0.0
+        } else {
+            1.0 - spike_size / spike_tolerance
+        };
+        configured * modifier
     }
 }
 
@@ -418,6 +459,39 @@ mod tests {
         // After the window elapses the rate budget refills.
         let after_window = start + Duration::from_secs(5) + Duration::from_millis(1);
         assert!(coordinator.try_acquire_connection(after_window));
+    }
+
+    #[test]
+    fn connection_spike_modifier_suppresses_a_same_tick_burst() {
+        let mut config = test_config();
+        config.max_connections = 0;
+        config.max_half_open_connections = 0;
+        config.max_connections_per_window = 10;
+        let mut coordinator = Ed2kDownloadCoordinator::new(config);
+        let now = Instant::now();
+
+        let admitted = (0..10)
+            .take_while(|_| coordinator.try_acquire_connection(now))
+            .count();
+
+        assert_eq!(admitted, 8, "MFC spike modifier must reduce the flat cap");
+    }
+
+    #[test]
+    fn zero_spike_modifier_preserves_mfc_first_connection_boundary() {
+        let mut config = test_config();
+        config.max_connections = 0;
+        config.max_half_open_connections = 0;
+        config.max_connections_per_window = 10;
+        let mut coordinator = Ed2kDownloadCoordinator::new(config);
+        coordinator.half_open_connections = 26;
+        coordinator.average_connections = 0.001;
+        coordinator.connection_average_samples = 1;
+        let now = Instant::now();
+        coordinator.last_connection_average_sample_at = Some(now);
+
+        assert!(coordinator.try_acquire_connection(now));
+        assert!(!coordinator.try_acquire_connection(now));
     }
 
     #[test]
