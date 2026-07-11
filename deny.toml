@@ -29,7 +29,7 @@ unknown-registry = "warn"
 unknown-git = "warn"
 
 [licenses]
-# Permissive + GPL-compatible allow-list (emulebb-rust is GPL-2.0). Tighten and
+# Permissive + GPL-compatible allow-list (emulebb-rust is GPL-2.0-only). Tighten and
 # complete this list during the license audit before enforcing in CI.
 confidence-threshold = 0.8
 allow = [
@@ -44,6 +44,7 @@ allow = [
   "Unicode-DFS-2016",
   "Unicode-3.0",
   "CC0-1.0",
+  "GPL-2.0-only",
   "GPL-2.0",
   "GPL-3.0",
 ]
