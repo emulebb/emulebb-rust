@@ -1527,6 +1527,7 @@ dependencies = [
  "chrono",
  "emulebb-kad-proto",
  "md5",
+ "parking_lot",
  "rand 0.8.6",
  "serde",
  "serde_json",

@@ -32,6 +32,7 @@ sha2.workspace = true
 async-trait.workspace = true
 socket2 = { workspace = true, features = ["all"] }
 md5.workspace = true
+parking_lot.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }

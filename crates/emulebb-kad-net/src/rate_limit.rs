@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -30,7 +30,7 @@ impl RateLimiter {
         if self.max_pps == 0 {
             return true;
         }
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         let now = Instant::now();
         let elapsed = now.duration_since(s.last_refill).as_secs_f64();
         s.tokens = (s.tokens + elapsed * self.max_pps as f64).min(self.max_pps as f64);
