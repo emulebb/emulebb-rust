@@ -32,23 +32,37 @@ binrw = "0.14"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+cc = "1"
 embed-manifest = "1.5"
+encoding_rs = "0.8"
+flate2 = "1"
+fs4 = "0.13"
 futures-util = "0.3"
+hex = "0.4"
 if-addrs = "0.13"
+ipnet = "2"
 ipconfig = "0.3"
+md4 = "0.10"
+md5 = "0.7"
 notify = "6"
 notify-debouncer-full = "0.3"
+num-bigint = "0.4"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = "0.10"
 slint = "1.17.1"
 slint-build = "1.17.1"
 socket2 = "0.6"
 thiserror = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 tokio-util = "0.7"
 toml = "0.9"
 tower = { version = "0.5", features = ["util"] }
@@ -57,3 +71,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2"
+windows-sys = "0.59"

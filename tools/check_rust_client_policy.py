@@ -37,6 +37,7 @@ def main() -> int:
     errors.extend(check_review_reporting(policy, omissions))
     errors.extend(check_toolchain_pin())
     errors.extend(check_package_metadata())
+    errors.extend(check_workspace_dependencies())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
@@ -161,6 +162,34 @@ def check_package_metadata() -> list[str]:
             errors.append(f"{rel} must inherit package.license from the workspace")
         if package.get("publish", {}).get("workspace") is not True:
             errors.append(f"{rel} must inherit package.publish from the workspace")
+    return errors
+
+
+def check_workspace_dependencies() -> list[str]:
+    """Require registry dependency versions to have one workspace authority."""
+    errors = []
+    section_names = ("dependencies", "dev-dependencies", "build-dependencies")
+    for manifest_path in sorted(ROOT.glob("crates/*/Cargo.toml")):
+        manifest = read_toml(manifest_path)
+        rel = manifest_path.relative_to(ROOT).as_posix()
+        dependency_tables = [
+            (section, manifest.get(section, {})) for section in section_names
+        ]
+        for target, target_config in manifest.get("target", {}).items():
+            dependency_tables.extend(
+                (f"target.{target}.{section}", target_config.get(section, {}))
+                for section in section_names
+            )
+        for section, dependencies in dependency_tables:
+            for name, declaration in dependencies.items():
+                directly_versioned = isinstance(declaration, str) or (
+                    isinstance(declaration, dict) and "version" in declaration
+                )
+                if directly_versioned:
+                    errors.append(
+                        f"{rel} {section}.{name} must inherit its registry version "
+                        "from [workspace.dependencies]"
+                    )
     return errors
 
 

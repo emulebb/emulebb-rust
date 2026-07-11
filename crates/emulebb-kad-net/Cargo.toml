@@ -28,13 +28,13 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
-async-trait = "0.1"
+sha2.workspace = true
+async-trait.workspace = true
 socket2 = { workspace = true, features = ["all"] }
-md5 = "0.7"
+md5.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }

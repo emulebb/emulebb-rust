@@ -10,8 +10,8 @@ description = "Kad2 wire codec — packet types, tag system, NodeId"
 [dependencies]
 binrw = { workspace = true }
 thiserror = { workspace = true }
-flate2 = "1"
-encoding_rs = "0.8"
+flate2.workspace = true
+encoding_rs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Globalization"] }
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }

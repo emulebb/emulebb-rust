@@ -25,20 +25,20 @@ emulebb-miniupnpc = { path = "../emulebb-miniupnpc" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
-flate2 = "1"
-fs4 = "0.13"
-hex = "0.4"
+flate2.workspace = true
+fs4.workspace = true
+hex.workspace = true
 if-addrs.workspace = true
-md4 = "0.10"
-md5 = "0.7"
-num-bigint = "0.4"
+md4.workspace = true
+md5.workspace = true
+num-bigint.workspace = true
 rand.workspace = true
-rsa = "0.9"
+rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha1 = { version = "0.10", features = ["oid"] }
+sha1.workspace = true
 socket2.workspace = true
-tokio-stream = "0.1"
+tokio-stream.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -47,4 +47,4 @@ tracing.workspace = true
 ipconfig.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

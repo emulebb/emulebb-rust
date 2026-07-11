@@ -23,17 +23,17 @@ emulebb-index = { path = "../emulebb-index" }
 emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-metadata = { path = "../emulebb-metadata" }
-hex = "0.4"
-ipnet = "2"
-md4 = "0.10"
+hex.workspace = true
+ipnet.workspace = true
+md4.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 socket2.workspace = true
 tokio.workspace = true
-tokio-stream = "0.1"
+tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -43,7 +43,7 @@ walkdir.workspace = true
 # Resolve a path's volume to its physical disk number (per-disk hashing pool) via
 # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS. Same windows-sys 0.59 as the rest of the
 # workspace; raw FFI mirrors crates/emulebb-kad-net/src/socket_opts.rs.
-windows-sys = { version = "0.59", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",

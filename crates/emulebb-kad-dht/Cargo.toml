@@ -20,11 +20,11 @@ emulebb-kad-routing = { path = "../emulebb-kad-routing" }
 emulebb-kad-net = { path = "../emulebb-kad-net" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream.workspace = true
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 binrw = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
