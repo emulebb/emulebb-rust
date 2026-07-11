@@ -20,7 +20,7 @@ egress-audit = []
 
 [dependencies]
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
@@ -37,4 +37,4 @@ md5.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "test-util"] }

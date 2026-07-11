@@ -18,7 +18,7 @@ egress-audit = ["emulebb-kad-net/egress-audit"]
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 emulebb-kad-routing = { path = "../emulebb-kad-routing" }
 emulebb-kad-net = { path = "../emulebb-kad-net" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tokio-stream.workspace = true
 thiserror = { workspace = true }

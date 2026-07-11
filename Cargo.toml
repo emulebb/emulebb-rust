@@ -61,7 +61,7 @@ slint-build = "1.17.1"
 socket2 = "0.6"
 thiserror = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+tokio = "1"
 tokio-stream = "0.1"
 tokio-util = "0.7"
 toml = "0.9"

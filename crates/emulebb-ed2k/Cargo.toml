@@ -39,7 +39,7 @@ serde_json.workspace = true
 sha1.workspace = true
 socket2.workspace = true
 tokio-stream.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 

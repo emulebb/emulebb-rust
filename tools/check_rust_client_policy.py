@@ -38,6 +38,7 @@ def main() -> int:
     errors.extend(check_toolchain_pin())
     errors.extend(check_package_metadata())
     errors.extend(check_workspace_dependencies())
+    errors.extend(check_tokio_features())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
@@ -190,6 +191,29 @@ def check_workspace_dependencies() -> list[str]:
                         f"{rel} {section}.{name} must inherit its registry version "
                         "from [workspace.dependencies]"
                     )
+    return errors
+
+
+def check_tokio_features() -> list[str]:
+    """Prevent a broad Tokio feature set from silently returning."""
+    errors = []
+    manifests = [ROOT / "Cargo.toml", *sorted(ROOT.glob("crates/*/Cargo.toml"))]
+    section_names = ("dependencies", "dev-dependencies", "build-dependencies")
+    for manifest_path in manifests:
+        manifest = read_toml(manifest_path)
+        tables = [manifest.get("workspace", {}).get("dependencies", {})]
+        tables.extend(manifest.get(section, {}) for section in section_names)
+        tables.extend(
+            target_config.get(section, {})
+            for target_config in manifest.get("target", {}).values()
+            for section in section_names
+        )
+        for dependencies in tables:
+            declaration = dependencies.get("tokio", {})
+            features = declaration.get("features", []) if isinstance(declaration, dict) else []
+            if "full" in features:
+                rel = manifest_path.relative_to(ROOT).as_posix()
+                errors.append(f"{rel} must declare only the Tokio features it uses, not 'full'")
     return errors
 
 
