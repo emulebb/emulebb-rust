@@ -1,4 +1,3 @@
-
 use super::*;
 use emulebb_kad_proto::{K, NodeId};
 use std::net::Ipv4Addr;

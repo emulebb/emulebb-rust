@@ -1,4 +1,3 @@
-
 use std::net::Ipv4Addr;
 
 use super::super::tag_codec::{DecodedTagValue, decode_tag_value};
