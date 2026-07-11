@@ -130,7 +130,7 @@ publishEmuleRustIdentity = true
 [nat]
 enabled = true
 requireInitialMapping = false
-backendOrder = ["upnp_miniupnpc", "upnp_rupnp"]
+backendOrder = ["upnp_miniupnpc"]
 bindIp = "192.0.2.11"
 igdIp = "192.0.2.1"
 minissdpdSocket = "/var/run/minissdpd.sock"
@@ -191,10 +191,7 @@ externalIpOverride = "203.0.113.10"
     assert!(config.ed2k.publish_emule_rust_identity);
     assert!(config.nat.enabled);
     assert!(!config.nat.require_initial_mapping);
-    assert_eq!(
-        config.nat.backend_order,
-        ["upnp_miniupnpc".to_string(), "upnp_rupnp".to_string()]
-    );
+    assert_eq!(config.nat.backend_order, ["upnp_miniupnpc".to_string()]);
     assert_eq!(config.nat.bind_ip.as_deref(), Some("192.0.2.11"));
     assert_eq!(config.nat.igd_ip.as_deref(), Some("192.0.2.1"));
     assert_eq!(
@@ -208,6 +205,30 @@ externalIpOverride = "203.0.113.10"
     assert_eq!(
         config.nat.external_ip_override.as_deref(),
         Some("203.0.113.10")
+    );
+}
+
+#[test]
+fn load_rejects_retired_nat_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("retired-nat-backend.toml");
+    fs::write(
+        &config_path,
+        r#"
+[nat]
+backendOrder = ["upnp_rupnp"]
+"#,
+    )
+    .unwrap();
+
+    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    assert!(
+        error.to_string().contains("invalid NAT config"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("remove retired backend \"upnp_rupnp\""),
+        "unexpected error: {error:#}"
     );
 }
 

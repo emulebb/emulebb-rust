@@ -6,12 +6,11 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use emulebb_ed2k::{
-    MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, NatStatusSnapshot,
-    PortMappingProvider, TransportProtocol, UPNP_MINIUPNPC_BACKEND,
-    built_in_upnp_port_mapping_providers, default_upnp_backend_order,
+    MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatConfig,
+    NatStatus, NatStatusSnapshot, PortMappingProvider, TransportProtocol, UPNP_MINIUPNPC_BACKEND,
 };
 use tokio::{sync::RwLock, time::sleep};
 use tracing::info;
@@ -34,8 +33,6 @@ enum Command {
 
 #[derive(Debug, Args, Clone)]
 struct SharedArgs {
-    #[arg(long, default_value_t = default_backend_arg())]
-    backend: String,
     #[arg(long)]
     bind_ip: Option<String>,
     #[arg(long)]
@@ -56,8 +53,6 @@ struct SharedArgs {
     udp_port: u16,
     #[arg(long, default_value_t = 41_001)]
     tcp_port: u16,
-    #[arg(long)]
-    ssdp_bind_ip: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -100,9 +95,7 @@ fn init_tracing() {
 
 #[allow(clippy::cognitive_complexity)]
 async fn run_map(args: MapArgs) -> Result<()> {
-    apply_ssdp_bind_override(args.shared.ssdp_bind_ip.as_deref());
-
-    let provider = resolve_provider(&args.shared.backend)?;
+    let provider: Arc<dyn PortMappingProvider> = Arc::new(MiniupnpcPortMappingProvider);
     let config = build_config(&args.shared);
     let mappings = build_mappings(args.shared.udp_port, args.shared.tcp_port);
     let status = Arc::new(RwLock::new(NatStatus::default()));
@@ -120,8 +113,8 @@ async fn run_map(args: MapArgs) -> Result<()> {
     }
 
     info!(
-        "reconciling backend={} bind_ip={:?} igd_ip={:?} ssdp_bind_ip={:?}",
-        args.shared.backend, args.shared.bind_ip, args.shared.igd_ip, args.shared.ssdp_bind_ip
+        "reconciling backend={} bind_ip={:?} igd_ip={:?}",
+        UPNP_MINIUPNPC_BACKEND, args.shared.bind_ip, args.shared.igd_ip
     );
     provider
         .reconcile(&config, &mappings, Arc::clone(&status))
@@ -148,9 +141,7 @@ async fn run_map(args: MapArgs) -> Result<()> {
 }
 
 async fn run_cleanup(args: CleanupArgs) -> Result<()> {
-    apply_ssdp_bind_override(args.shared.ssdp_bind_ip.as_deref());
-
-    let provider = resolve_provider(&args.shared.backend)?;
+    let provider: Arc<dyn PortMappingProvider> = Arc::new(MiniupnpcPortMappingProvider);
     let config = build_config(&args.shared);
     let status = Arc::new(RwLock::new(NatStatus::default()));
 
@@ -166,37 +157,11 @@ async fn run_cleanup(args: CleanupArgs) -> Result<()> {
     Ok(())
 }
 
-fn default_backend_arg() -> String {
-    default_upnp_backend_order()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| UPNP_MINIUPNPC_BACKEND.to_string())
-}
-
-fn apply_ssdp_bind_override(ssdp_bind_ip: Option<&str>) {
-    if let Some(ip) = ssdp_bind_ip {
-        let ssdp_bind_addr = format!("{ip}:0");
-        // SAFETY: This CLI mutates process environment during startup before
-        // spawning any worker tasks that read SSDP_CLIENT_BIND_ADDR.
-        unsafe {
-            std::env::set_var("SSDP_CLIENT_BIND_ADDR", &ssdp_bind_addr);
-        }
-        info!("set SSDP_CLIENT_BIND_ADDR={ssdp_bind_addr}");
-    }
-}
-
-fn resolve_provider(backend: &str) -> Result<Arc<dyn PortMappingProvider>> {
-    built_in_upnp_port_mapping_providers()
-        .into_iter()
-        .find(|provider| provider.name() == backend)
-        .ok_or_else(|| anyhow!("unknown backend {backend}"))
-}
-
 fn build_config(args: &SharedArgs) -> NatConfig {
     NatConfig {
         enabled: true,
         require_initial_mapping: true,
-        backend_order: vec![args.backend.clone()],
+        backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
         bind_ip: args.bind_ip.clone(),
         igd_ip: args.igd_ip.clone(),
         minissdpd_socket: args.minissdpd_socket.clone(),
@@ -267,18 +232,12 @@ fn print_snapshot(label: &str, snapshot: &NatStatusSnapshot) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedArgs, build_config, build_mappings, default_backend_arg, dummy_mapping};
-    use emulebb_ed2k::{TransportProtocol, UPNP_MINIUPNPC_BACKEND};
-
-    #[test]
-    fn default_backend_uses_emulebb_nat_default() {
-        assert_eq!(default_backend_arg(), UPNP_MINIUPNPC_BACKEND);
-    }
+    use super::{SharedArgs, build_config, build_mappings, dummy_mapping};
+    use emulebb_ed2k::TransportProtocol;
 
     #[test]
     fn build_config_maps_cli_fields_to_nat_config() {
         let config = build_config(&SharedArgs {
-            backend: "upnp_miniupnpc".to_string(),
             bind_ip: Some("192.0.2.10".to_string()),
             igd_ip: Some("192.0.2.1".to_string()),
             minissdpd_socket: Some("minissdpd.sock".to_string()),
@@ -289,7 +248,6 @@ mod tests {
             renew_margin_secs: 120,
             udp_port: 41000,
             tcp_port: 41001,
-            ssdp_bind_ip: None,
         });
 
         assert!(config.enabled);

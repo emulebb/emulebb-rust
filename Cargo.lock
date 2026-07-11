@@ -1423,7 +1423,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "socket2 0.6.4",
+ "socket2",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -1469,7 +1469,6 @@ dependencies = [
  "emulebb-miniupnpc",
  "flate2",
  "fs4",
- "futures-util",
  "hex",
  "if-addrs",
  "ipconfig",
@@ -1478,11 +1477,10 @@ dependencies = [
  "num-bigint",
  "rand 0.8.6",
  "rsa",
- "rupnp",
  "serde",
  "serde_json",
  "sha1",
- "socket2 0.6.4",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1532,7 +1530,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "socket2 0.6.4",
+ "socket2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1922,7 +1920,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parlance",
  "read-fonts",
- "roxmltree 0.21.1",
+ "roxmltree",
  "smallvec",
  "windows",
  "windows-core",
@@ -2106,22 +2104,6 @@ checksum = "c13a5f2acc785d8fb6bf6b7ab6bfb0ef5dad4f4d97e8e70bb8e470722312f76f"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "genawaiter"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c86bd0361bcbde39b13475e6e36cb24c329964aa2611be285289d1e4b751c1a0"
-dependencies = [
- "futures-core",
- "genawaiter-macro",
-]
-
-[[package]]
-name = "genawaiter-macro"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b32dfe1fdfc0bbde1f22a5da25355514b5e450c33a6af6770884c8750aedfbc"
 
 [[package]]
 name = "generic-array"
@@ -2502,7 +2484,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -3165,7 +3147,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
 dependencies = [
- "socket2 0.6.4",
+ "socket2",
  "widestring",
  "windows-registry",
  "windows-result",
@@ -4782,7 +4764,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.4",
+ "socket2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4819,7 +4801,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5165,12 +5147,6 @@ dependencies = [
 
 [[package]]
 name = "roxmltree"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
-
-[[package]]
-name = "roxmltree"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
@@ -5209,26 +5185,6 @@ dependencies = [
  "snafu",
  "unicode-linebreak",
  "unicode-width",
-]
-
-[[package]]
-name = "rupnp"
-version = "3.0.0"
-source = "git+https://github.com/Threepwood-7/rupnp?tag=v3.0.0-overlord.1#acee58162c3e2b50cf58f66d9d6a18d3bcd5f05d"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-util",
- "genawaiter",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "if-addrs",
- "roxmltree 0.20.0",
- "ssdp-client",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5808,16 +5764,6 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
@@ -5880,19 +5826,6 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "ssdp-client"
-version = "2.1.0"
-source = "git+https://github.com/Threepwood-7/ssdp-client?tag=v2.1.0-overlord.1#73e423262ab6e0fc36dc0ea17bdb93e345199e73"
-dependencies = [
- "futures-core",
- "genawaiter",
- "log",
- "socket2 0.5.10",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -6231,7 +6164,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.4",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -6638,7 +6571,7 @@ dependencies = [
  "kurbo",
  "log",
  "pico-args",
- "roxmltree 0.21.1",
+ "roxmltree",
  "rustybuzz",
  "simplecss",
  "siphasher",

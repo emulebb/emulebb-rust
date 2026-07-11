@@ -81,7 +81,6 @@ allowed_ipv6_mentions = [
     "crates/emulebb-ed2k/src/ed2k_tcp/buddy_link.rs",
     "crates/emulebb-ed2k/src/ed2k_tcp/listener/session.rs",
     "crates/emulebb-ed2k/src/stun.rs",
-    "crates/emulebb-ed2k/src/nat/rupnp.rs",
     "crates/emulebb-ed2k/src/nat/miniupnpc.rs",
     "crates/emulebb-kad-dht/src/publish.rs",
     "crates/emulebb-kad-dht/src/traversal.rs",

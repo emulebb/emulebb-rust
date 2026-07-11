@@ -26,14 +26,11 @@ pub mod reachability;
 pub mod shared_publish_rank;
 pub mod stun;
 
-#[allow(deprecated)]
-pub use nat::RupnpPortMappingProvider;
 pub use nat::{
-    IgdPortMappingProvider, MappedEndpoint, MappingExposure, MappingSpec,
-    MiniupnpcPortMappingProvider, NatCapableAgent, NatConfig, NatManager, NatManagerBuilder,
-    NatStatus, NatStatusSnapshot, NoopReachabilityStrategy, PortMappingProvider,
-    ReachabilityStrategy, SelectedGateway, TransportProtocol, UPNP_IGD_BACKEND,
-    UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
+    MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatCapableAgent,
+    NatConfig, NatManager, NatManagerBuilder, NatStatus, NatStatusSnapshot,
+    NoopReachabilityStrategy, PortMappingProvider, ReachabilityStrategy, SelectedGateway,
+    TransportProtocol, UPNP_MINIUPNPC_BACKEND, built_in_upnp_port_mapping_providers,
     default_upnp_backend_order,
 };
 pub use networking::{

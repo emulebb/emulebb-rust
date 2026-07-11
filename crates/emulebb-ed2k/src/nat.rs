@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -17,17 +17,10 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-#[path = "nat/igd.rs"]
-mod igd;
 #[path = "nat/miniupnpc.rs"]
 mod miniupnpc;
-#[path = "nat/rupnp.rs"]
-mod rupnp;
 
-pub use igd::IgdPortMappingProvider;
 pub use miniupnpc::MiniupnpcPortMappingProvider;
-#[allow(deprecated)]
-pub use rupnp::RupnpPortMappingProvider;
 
 mod types {
     use std::net::SocketAddr;
@@ -162,11 +155,6 @@ pub use types::{
 
 /// MiniUPnPc backend identifier inherited from the original Rust agent.
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
-/// Deprecated `rupnp` backend identifier kept for explicit fallback compatibility.
-pub const UPNP_RUPNP_BACKEND: &str = "upnp_rupnp";
-/// Reserved backend identifier for a future pure Rust IGD implementation.
-pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
-
 /// NAT traversal configuration loaded from the daemon config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -198,6 +186,34 @@ impl Default for NatConfig {
             lease_duration_secs: 3_600,
             renew_margin_secs: 300,
             external_ip_override: None,
+        }
+    }
+}
+
+impl NatConfig {
+    /// Validate the bounded migration form of `nat.backendOrder`.
+    ///
+    /// MiniUPnPc is the only supported provider. An explicitly empty list keeps
+    /// the default, while retired or unknown provider names fail with a concrete
+    /// migration message instead of being ignored or silently falling back.
+    pub fn validate(&self) -> Result<()> {
+        for backend in &self.backend_order {
+            if backend != UPNP_MINIUPNPC_BACKEND {
+                bail!(
+                    "nat.backendOrder supports only {}; remove retired backend {:?} from the configuration",
+                    UPNP_MINIUPNPC_BACKEND,
+                    backend
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn effective_backend_order(&self) -> Vec<String> {
+        if self.backend_order.is_empty() {
+            default_upnp_backend_order()
+        } else {
+            self.backend_order.clone()
         }
     }
 }
@@ -242,7 +258,7 @@ pub struct NoopReachabilityStrategy;
 #[async_trait]
 impl ReachabilityStrategy for NoopReachabilityStrategy {}
 
-/// Returns the default UPnP backend order used by the old Rust agent.
+/// Returns the sole supported UPnP backend.
 #[must_use]
 pub fn default_upnp_backend_order() -> Vec<String> {
     vec![UPNP_MINIUPNPC_BACKEND.to_string()]
@@ -250,13 +266,8 @@ pub fn default_upnp_backend_order() -> Vec<String> {
 
 /// Returns compiled-in port mapping providers.
 #[must_use]
-#[allow(deprecated)]
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
-    vec![
-        Arc::new(MiniupnpcPortMappingProvider),
-        Arc::new(RupnpPortMappingProvider),
-        Arc::new(IgdPortMappingProvider),
-    ]
+    vec![Arc::new(MiniupnpcPortMappingProvider)]
 }
 
 /// Builder for one NAT manager instance.
@@ -342,6 +353,7 @@ impl Default for NatManager {
 impl NatManager {
     /// Starts NAT reconciliation when enabled by config.
     pub async fn start(&self) -> Result<()> {
+        self.config.validate()?;
         if !self.config.enabled || self.mappings.is_empty() {
             self.write_config_status(None).await;
             return Ok(());
@@ -381,6 +393,7 @@ impl NatManager {
     /// every backend failed, so the caller can proceed to connect anyway (best
     /// effort) after logging the reason.
     pub async fn reconcile_now(&self) -> Result<()> {
+        self.config.validate()?;
         if !self.config.enabled || self.mappings.is_empty() {
             return Ok(());
         }
@@ -410,7 +423,8 @@ impl NatManager {
             return Ok(());
         }
 
-        for backend_name in release_backend_order(&status.backend, &self.config.backend_order) {
+        let configured_order = self.config.effective_backend_order();
+        for backend_name in release_backend_order(&status.backend, &configured_order) {
             if let Some(provider) = self
                 .providers
                 .iter()
@@ -472,7 +486,7 @@ async fn run_manager_loop(
             "UPnP reconcile starting: bind_ip={} igd_ip={} backends={} mappings={}",
             option_display(config.bind_ip.as_deref(), "auto"),
             option_display(config.igd_ip.as_deref(), "auto"),
-            backend_order_display(&config.backend_order),
+            backend_order_display(&config.effective_backend_order()),
             requested_mappings_display(&mappings)
         );
         match reconcile_once(&config, &mappings, &providers, Arc::clone(&status)).await {
@@ -527,8 +541,10 @@ async fn reconcile_once(
     providers: &[Arc<dyn PortMappingProvider>],
     status: Arc<RwLock<NatStatus>>,
 ) -> Result<()> {
+    config.validate()?;
+    let backend_order = config.effective_backend_order();
     let mut backend_errors = Vec::new();
-    for backend_name in &config.backend_order {
+    for backend_name in &backend_order {
         let Some(provider) = providers
             .iter()
             .find(|provider| provider.name() == backend_name.as_str())
@@ -548,7 +564,7 @@ async fn reconcile_once(
         }
     }
 
-    let count = config.backend_order.len();
+    let count = backend_order.len();
     let noun = if count == 1 { "backend" } else { "backends" };
     Err(anyhow!(
         "UPnP reconcile failed after {count} {noun}: {}",

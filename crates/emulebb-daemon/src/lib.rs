@@ -229,7 +229,13 @@ impl DaemonConfig {
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("failed to parse config {}", path.display()))
+        let config: Self = toml::from_str(&text)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        config
+            .nat
+            .validate()
+            .with_context(|| format!("invalid NAT config in {}", path.display()))?;
+        Ok(config)
     }
 
     pub fn metadata_path(&self) -> PathBuf {

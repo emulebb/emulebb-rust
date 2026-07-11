@@ -90,14 +90,7 @@ fn built_in_providers_use_explicit_backend_ids() {
         .map(|provider| provider.name().to_string())
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        provider_names,
-        [
-            UPNP_MINIUPNPC_BACKEND.to_string(),
-            UPNP_RUPNP_BACKEND.to_string(),
-            UPNP_IGD_BACKEND.to_string(),
-        ]
-    );
+    assert_eq!(provider_names, [UPNP_MINIUPNPC_BACKEND.to_string()]);
 }
 
 #[tokio::test]
@@ -120,9 +113,9 @@ async fn disabled_start_records_config_status_without_task() {
 }
 
 #[tokio::test]
-async fn reconcile_once_uses_matching_backend() {
+async fn reconcile_once_empty_backend_order_uses_miniupnpc() {
     let provider = Arc::new(FakeProvider {
-        name: UPNP_RUPNP_BACKEND,
+        name: UPNP_MINIUPNPC_BACKEND,
         failures_before_success: AtomicUsize::new(0),
         reconcile_calls: AtomicUsize::new(0),
         release_calls: AtomicUsize::new(0),
@@ -130,7 +123,7 @@ async fn reconcile_once_uses_matching_backend() {
     let status = Arc::new(RwLock::new(NatStatus::default()));
     let config = NatConfig {
         enabled: true,
-        backend_order: vec![UPNP_RUPNP_BACKEND.to_string()],
+        backend_order: Vec::new(),
         bind_ip: Some("192.0.2.10".to_string()),
         igd_ip: Some("192.0.2.1".to_string()),
         external_ip_override: Some("203.0.113.10".to_string()),
@@ -147,7 +140,7 @@ async fn reconcile_once_uses_matching_backend() {
     .unwrap();
 
     let status = status.read().await.clone();
-    assert_eq!(status.backend.as_deref(), Some(UPNP_RUPNP_BACKEND));
+    assert_eq!(status.backend.as_deref(), Some(UPNP_MINIUPNPC_BACKEND));
     assert_eq!(status.bind_ip.as_deref(), Some("192.0.2.10"));
     assert_eq!(status.igd_ip.as_deref(), Some("192.0.2.1"));
     assert_eq!(status.observed_external_addresses, ["203.0.113.10"]);
@@ -155,11 +148,11 @@ async fn reconcile_once_uses_matching_backend() {
 }
 
 #[tokio::test]
-async fn reconcile_once_reports_unavailable_backend() {
+async fn reconcile_once_rejects_retired_backend() {
     let status = Arc::new(RwLock::new(NatStatus::default()));
     let config = NatConfig {
         enabled: true,
-        backend_order: vec!["unknown_backend".to_string()],
+        backend_order: vec!["upnp_rupnp".to_string()],
         ..NatConfig::default()
     };
 
@@ -169,19 +162,13 @@ async fn reconcile_once_reports_unavailable_backend() {
 
     assert_eq!(
         error.to_string(),
-        "UPnP reconcile failed after 1 backend: unknown_backend: backend not available in this build"
+        "nat.backendOrder supports only upnp_miniupnpc; remove retired backend \"upnp_rupnp\" from the configuration"
     );
 }
 
 #[tokio::test]
-async fn stop_releases_selected_backend_before_fallback_backends() {
+async fn stop_releases_selected_miniupnpc_backend() {
     let selected_provider = Arc::new(FakeProvider {
-        name: UPNP_RUPNP_BACKEND,
-        failures_before_success: AtomicUsize::new(0),
-        reconcile_calls: AtomicUsize::new(0),
-        release_calls: AtomicUsize::new(0),
-    });
-    let fallback_provider = Arc::new(FakeProvider {
         name: UPNP_MINIUPNPC_BACKEND,
         failures_before_success: AtomicUsize::new(0),
         reconcile_calls: AtomicUsize::new(0),
@@ -189,34 +176,29 @@ async fn stop_releases_selected_backend_before_fallback_backends() {
     });
     let manager = NatManagerBuilder::new(NatConfig {
         enabled: true,
-        backend_order: vec![
-            UPNP_MINIUPNPC_BACKEND.to_string(),
-            UPNP_RUPNP_BACKEND.to_string(),
-        ],
+        backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
         ..NatConfig::default()
     })
     .with_mappings(vec![sample_mapping()])
     .with_provider(selected_provider.clone())
-    .with_provider(fallback_provider.clone())
     .build();
 
     {
         let mut status = manager.status.write().await;
-        status.backend = Some(UPNP_RUPNP_BACKEND.to_string());
+        status.backend = Some(UPNP_MINIUPNPC_BACKEND.to_string());
         status.mappings = vec![MappedEndpoint {
             name: "kad".to_string(),
             protocol: TransportProtocol::Udp,
             local_addr: "192.0.2.10:41000".parse().unwrap(),
             external_addr: "203.0.113.10:41000".parse().unwrap(),
             lease_expires_in_secs: 300,
-            backend: UPNP_RUPNP_BACKEND.to_string(),
+            backend: UPNP_MINIUPNPC_BACKEND.to_string(),
         }];
     }
 
     manager.stop().await.unwrap();
 
     assert_eq!(selected_provider.release_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fallback_provider.release_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

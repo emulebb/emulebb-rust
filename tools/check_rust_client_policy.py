@@ -67,7 +67,10 @@ def tracked_files(pattern: str) -> list[str]:
         text=True,
         stdout=subprocess.PIPE,
     )
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    # `git ls-files` retains paths deleted in the working tree until the deletion
+    # is staged. Policy checks must support validating an intentional removal.
+    return [rel for rel in files if (ROOT / rel).is_file()]
 
 
 def count_lines(path: Path) -> int:
