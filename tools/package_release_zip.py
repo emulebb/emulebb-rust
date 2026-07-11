@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 import tomllib
@@ -40,22 +41,55 @@ def workspace_version() -> str:
     return version
 
 
+def external_path(value: str | Path, label: str, workspace_root: Path | None = None) -> Path:
+    """Resolve a required absolute output path outside every source checkout."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise SystemExit(f"{label} must be an absolute path outside the source checkout: {path}")
+    resolved = path.resolve()
+    roots = [ROOT.resolve()]
+    if workspace_root is None:
+        configured_root = os.environ.get("EMULEBB_WORKSPACE_ROOT")
+        workspace_root = Path(configured_root) if configured_root else None
+    if workspace_root is not None:
+        roots.append(workspace_root.expanduser().resolve())
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        raise SystemExit(f"{label} must be outside the source checkout: {resolved}")
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--target-dir",
-        default="target/release",
+        required=True,
         help="cargo release output dir containing the built binary",
     )
-    parser.add_argument("--out", default="dist", help="output directory for the zip + SHA256SUMS")
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="output directory for the zip + SHA256SUMS",
+    )
     args = parser.parse_args()
 
     version = workspace_version()
-    binary = ROOT / args.target_dir / BIN_NAME
+    target_dir = external_path(args.target_dir, "--target-dir")
+    out_dir = external_path(args.out, "--out")
+    binary = target_dir / BIN_NAME
     if not binary.is_file():
         raise SystemExit(f"release binary not found: {binary} (run cargo build --release first)")
 
-    out_dir = ROOT / args.out
+    release_files = []
+    for rel in DOC_FILES:
+        source = ROOT / rel
+        if not source.is_file():
+            raise SystemExit(f"required release file missing: {rel}")
+        release_files.append((rel, source))
+
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_name = f"emulebb-rust-v{version}-windows-x64.zip"
     zip_path = out_dir / zip_name
@@ -64,10 +98,7 @@ def main() -> int:
     root_in_zip = f"emulebb-rust-v{version}"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(binary, f"{root_in_zip}/{BIN_NAME}")
-        for rel in DOC_FILES:
-            source = ROOT / rel
-            if not source.is_file():
-                raise SystemExit(f"required release file missing: {rel}")
+        for rel, source in release_files:
             archive.write(source, f"{root_in_zip}/{Path(rel).name}")
 
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()

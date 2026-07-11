@@ -48,5 +48,22 @@ mod tests {
         self.assertIn("src/file_9.rs (9 lines)", advisories[0])
 
 
+class TestReleaseOutputPaths(unittest.TestCase):
+    def test_accepts_external_release_paths(self) -> None:
+        workflow = """
+CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target
+RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
+--target-dir "$CARGO_TARGET_DIR/release"
+--out "$RELEASE_OUT_DIR"
+"""
+        self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
+
+    def test_reports_in_checkout_release_paths(self) -> None:
+        errors = CHECKER.check_release_output_paths(
+            "python tools/package_release_zip.py --target-dir target/release --out dist"
+        )
+        self.assertEqual(len(errors), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

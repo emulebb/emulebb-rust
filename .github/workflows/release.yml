@@ -18,6 +18,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target
+  RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
   MINIUPNP_REF: bced81fb0b73ae78c9b911c89e881fbc6d4a5c7c
 
 jobs:
@@ -58,12 +60,15 @@ jobs:
 
       - name: Package unsigned Windows x64 zip
         shell: bash
-        run: python tools/package_release_zip.py --target-dir target/release --out dist
+        run: >-
+          python tools/package_release_zip.py
+          --target-dir "$CARGO_TARGET_DIR/release"
+          --out "$RELEASE_OUT_DIR"
 
       - name: Publish to the GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.zip
-            dist/SHA256SUMS
+            ${{ env.RELEASE_OUT_DIR }}/*.zip
+            ${{ env.RELEASE_OUT_DIR }}/SHA256SUMS
           fail_on_unmatched_files: true

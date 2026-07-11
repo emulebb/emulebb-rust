@@ -36,6 +36,7 @@ def main() -> int:
     errors.extend(check_omission_registry(policy, omissions))
     errors.extend(check_review_reporting(policy, omissions))
     errors.extend(check_toolchain_pin())
+    errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_no_loopback_binds())
@@ -154,6 +155,23 @@ def toolchain_versions_match(channel: str, rust_version: str) -> bool:
         and channel_parts[:2] == version_parts
         and all(part.isdigit() for part in channel_parts + version_parts)
     )
+
+
+def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
+    """Keep release build products and archives outside the source workspace."""
+    workflow = ROOT / ".github" / "workflows" / "release.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target": "external Cargo target",
+        "RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist": "external release archive",
+        '--target-dir "$CARGO_TARGET_DIR/release"': "explicit external package target",
+        '--out "$RELEASE_OUT_DIR"': "explicit external package output",
+    }
+    return [
+        f".github/workflows/release.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
 
 
 def maintainability_advisories(files: list[str] | None = None) -> list[str]:
