@@ -45,20 +45,20 @@ Kad behavior. Historic or niche behavior may be omitted only when it is recorded
 in `policy/rust-client-omissions.toml`, is not advertised on the wire, and does
 not change the semantics of supported stock interactions.
 
-Rust source should stay split by subsystem and responsibility. The guardrail in
-`policy/rust-client.toml` sets file-size budgets, names current legacy oversized
-files as refactor debt, and prevents new oversized modules from appearing
-without an explicit rationale. During the parity push, source caps are
-engineering guardrails rather than refactor triggers; raise an allowlist cap
-when the touched behavior is one cohesive function or protocol decision surface
-and the policy rationale explains why splitting it would make the code harder to
-reason about.
+Rust source is split by subsystem and responsibility, not by a mechanical line
+limit. Substantial tests stay outside production modules; small white-box tests
+may remain beside private helpers when proximity improves understanding. The
+authoritative rules live in
+`EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
+The policy checker reports maintainability signals as advisories while retaining
+hard failures for objective protocol, omission, binding, and release-safety
+violations.
 
 Run the local policy guard before policy-sensitive protocol or architecture
 changes:
 
 ```powershell
-python tools\check_rust_client_policy.py
+python tools\rust_quality_gate.py policy
 ```
 
 Compatibility proof for this line is local and deterministic first: Rust to

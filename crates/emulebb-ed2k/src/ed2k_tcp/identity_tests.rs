@@ -1,6 +1,6 @@
 //! Unit tests for the eD2k secure-ident signing/verification in
-//! [`super`][`crate::ed2k_tcp::identity`]. Split into a sibling file to keep
-//! `identity.rs` within the 600-line module budget.
+//! [`super`][`crate::ed2k_tcp::identity`]. Kept in a sibling file so the
+//! production module remains focused on the secure-ident implementation.
 
 use super::*;
 

@@ -2,10 +2,11 @@
 //!
 //! Re-shapes an [`Ed2kTcpDumpRecord`] (the legacy `ed2k_packet_v1` record) into
 //! the converged `ed2k_tcp` `diag_event_v1` envelope (schema §3.1) and forwards
-//! it to the shared writer. Kept in its own module so `dump.rs` stays within the
-//! 600-line budget. Both writes are behind the `packet-diagnostics` feature: the
-//! only caller (`dump.rs::dump_ed2k_tcp_record`) is invoked solely from the
-//! feature-gated send/recv/meta builders.
+//! it to the shared writer. Kept in its own module because diagnostics-envelope
+//! mapping is a separate responsibility from packet capture. Both writes are
+//! behind the `packet-diagnostics` feature: the only caller
+//! (`dump.rs::dump_ed2k_tcp_record`) is invoked solely from the feature-gated
+//! send/recv/meta builders.
 
 #![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code))]
 

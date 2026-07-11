@@ -13,6 +13,10 @@ Everything below is this repo's local deltas only:
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\api`;
   do not treat the frozen emulebb-mfc contract as a forward compatibility
   constraint.
+- Follow the responsibility-based source-structure and test-placement policy in
+  `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
+  Source length is advisory; split by responsibility, keep substantial tests
+  outside production modules, and do not add line-count allowlists.
 - BUILD OUTPUT: every `cargo build`/`test`/`run` (debug AND release, orchestrated
   or ad-hoc) MUST set
   `CARGO_TARGET_DIR=%EMULEBB_WORKSPACE_OUTPUT_ROOT%\builds\rust\target`.

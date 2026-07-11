@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,9 @@ P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-ed2k/src/ed2k_server/udp_runtime.rs",
     "crates/emulebb-ed2k/src/stun.rs",
 )
+LARGEST_FILES_REPORTED_PER_KIND = 5
+INLINE_TEST_MODULES_REPORTED = 10
+INLINE_TEST_ADVISORY_LINES = 200
 
 
 def main() -> int:
@@ -31,7 +34,6 @@ def main() -> int:
     errors: list[str] = []
     errors.extend(check_omission_registry(policy, omissions))
     errors.extend(check_review_reporting(policy, omissions))
-    errors.extend(check_rust_file_sizes(policy))
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_no_loopback_binds())
@@ -42,6 +44,11 @@ def main() -> int:
             print(f"- {error}", file=sys.stderr)
         return 1
     print("rust client policy check passed")
+    advisories = maintainability_advisories()
+    if advisories:
+        print("maintainability advisories (non-failing):")
+        for advisory in advisories:
+            print(f"- {advisory}")
     return 0
 
 
@@ -101,31 +108,77 @@ def check_review_reporting(policy: dict, omissions: dict) -> list[str]:
     return errors
 
 
-def check_rust_file_sizes(policy: dict) -> list[str]:
-    structure = policy["structure"]
-    max_rs_lines = int(structure["max_rs_lines"])
-    max_test_rs_lines = int(structure["max_test_rs_lines"])
-    allowlist = {
-        entry["path"].replace("\\", "/"): int(entry["hard_limit_lines"])
-        for entry in structure.get("large_file_allowlist", [])
-    }
-    errors = []
-    for rel in tracked_files("*.rs"):
+def maintainability_advisories(files: list[str] | None = None) -> list[str]:
+    """Report review signals without turning source length into a policy limit."""
+    rust_files = tracked_files("*.rs") if files is None else files
+    production: list[tuple[str, int]] = []
+    tests: list[tuple[str, int]] = []
+    inline_tests: list[tuple[str, int]] = []
+    for rel in rust_files:
         normalized = rel.replace("\\", "/")
-        lines = count_lines(ROOT / rel)
-        budget = max_test_rs_lines if is_test_path(normalized) else max_rs_lines
-        if normalized in allowlist:
-            hard_limit = allowlist[normalized]
-            if lines > hard_limit:
-                errors.append(f"{normalized} has {lines} lines over hard allowlist cap {hard_limit}")
-            continue
-        if lines > budget:
-            errors.append(f"{normalized} has {lines} lines over budget {budget}")
-    return errors
+        path = ROOT / rel
+        lines = count_lines(path)
+        target = tests if is_test_path(normalized) else production
+        target.append((normalized, lines))
+        if target is production:
+            text = path.read_text(encoding="utf-8")
+            largest_inline = max(inline_test_module_line_counts(text), default=0)
+            if largest_inline >= INLINE_TEST_ADVISORY_LINES:
+                inline_tests.append((normalized, largest_inline))
+
+    advisories = ranked_file_advisories("production", production)
+    advisories.extend(ranked_file_advisories("test", tests))
+    largest_inline_tests = sorted(inline_tests, key=lambda item: (-item[1], item[0]))[
+        :INLINE_TEST_MODULES_REPORTED
+    ]
+    for path, lines in largest_inline_tests:
+        advisories.append(
+            f"{path} contains an inline test module of about {lines} lines; "
+            "review whether it belongs in a sibling test module"
+        )
+    return advisories
+
+
+def ranked_file_advisories(kind: str, files: list[tuple[str, int]]) -> list[str]:
+    largest = sorted(files, key=lambda item: (-item[1], item[0]))[
+        :LARGEST_FILES_REPORTED_PER_KIND
+    ]
+    return [
+        f"large {kind} file: {path} ({lines} lines); review responsibility boundaries when touched"
+        for path, lines in largest
+    ]
+
+
+def inline_test_module_line_counts(text: str) -> list[int]:
+    """Estimate braced inline #[cfg(test)] module sizes for advisory output."""
+    module = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{",
+        re.MULTILINE,
+    )
+    counts = []
+    for match in module.finditer(text):
+        open_brace = text.find("{", match.start(), match.end())
+        depth = 0
+        for cursor in range(open_brace, len(text)):
+            if text[cursor] == "{":
+                depth += 1
+            elif text[cursor] == "}":
+                depth -= 1
+                if depth == 0:
+                    counts.append(text.count("\n", match.start(), cursor + 1) + 1)
+                    break
+    return counts
 
 
 def is_test_path(path: str) -> bool:
-    return "/tests/" in path or path.endswith("/tests.rs")
+    normalized = path.replace("\\", "/")
+    pure_path = PurePosixPath(normalized)
+    return (
+        "/tests/" in f"/{normalized}"
+        or pure_path.name == "tests.rs"
+        or pure_path.stem.endswith("_tests")
+    )
 
 
 def check_ipv4_only(policy: dict) -> list[str]:

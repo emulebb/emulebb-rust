@@ -90,14 +90,14 @@ def assert_outside_repo(path: Path, label: str) -> None:
 
 def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
     steps = {
-        "policy": [policy_step()],
+        "policy": [policy_step(), policy_tests_step()],
         "fmt": [fmt_step()],
         "clippy": [clippy_step()],
         "build": [build_step()],
         "test-workspace": [test_workspace_step()],
         "test-kad-swarm": [test_kad_swarm_step()],
         "test-vpn-leak": [test_vpn_leak_step()],
-        "quick": [policy_step(), fmt_step(), clippy_step()],
+        "quick": [policy_step(), policy_tests_step(), fmt_step(), clippy_step()],
         "ci-test": [
             build_step(),
             test_workspace_step(),
@@ -108,6 +108,7 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
     if gate == "ci":
         return [
             policy_step(),
+            policy_tests_step(),
             fmt_step(),
             clippy_step(),
             build_step(),
@@ -120,6 +121,23 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
 
 def policy_step() -> tuple[str, list[str]]:
     return ("Rust client policy", [sys.executable, "tools/check_rust_client_policy.py"])
+
+
+def policy_tests_step() -> tuple[str, list[str]]:
+    return (
+        "Rust client policy tests",
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/tests",
+            "-p",
+            "test_*.py",
+        ],
+    )
 
 
 def fmt_step() -> tuple[str, list[str]]:
