@@ -14,10 +14,10 @@ mod peer_state;
 mod tests;
 
 use emulebb_kad_proto::NodeId;
+use parking_lot::Mutex;
 use peer_state::{PeerCryptoState, VerifyKeyEntry};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Mutex;
 
 /// Kad UDP obfuscation sync constant used by the oracle `EncryptedDatagramSocket`.
 const MAGICVALUE_UDP_SYNC_CLIENT: u32 = 0x395F_2EC1;

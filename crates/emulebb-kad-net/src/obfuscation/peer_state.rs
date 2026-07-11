@@ -66,7 +66,7 @@ pub(super) struct ResolvedPeerCryptoState {
 impl ObfuscationLayer {
     /// Register a peer node ID so outbound requests can use NodeID-based Kad obfuscation.
     pub fn register_peer_identity(&self, addr: SocketAddr, node_id: NodeId) {
-        let mut guard = self.peers.lock().unwrap();
+        let mut guard = self.peers.lock();
         let entry = guard.entry(addr).or_default();
         entry.node_id = Some(node_id);
         entry.last_seen = Some(Instant::now());
@@ -78,7 +78,7 @@ impl ObfuscationLayer {
     /// Register the peer Kad version so outbound obfuscation can follow the
     /// same version gates as the oracle UDP sender.
     pub fn register_peer_version(&self, addr: SocketAddr, kad_version: u8) {
-        let mut guard = self.peers.lock().unwrap();
+        let mut guard = self.peers.lock();
         let entry = guard.entry(addr).or_default();
         entry.kad_version = Some(kad_version);
         entry.last_seen = Some(Instant::now());
@@ -92,7 +92,7 @@ impl ObfuscationLayer {
     /// The oracle stores this as the peer's `CKadUDPKey` value bound to our own
     /// public IP and reuses it for reply packets.
     pub fn register_peer_key(&self, addr: SocketAddr, key: u32) {
-        let mut guard = self.receiver_verify_keys.lock().unwrap();
+        let mut guard = self.receiver_verify_keys.lock();
         guard.insert(
             addr.ip(),
             VerifyKeyEntry {
@@ -108,23 +108,15 @@ impl ObfuscationLayer {
     pub fn receiver_verify_key_for_addr(&self, addr: SocketAddr) -> Option<u32> {
         self.receiver_verify_keys
             .lock()
-            .unwrap()
             .get(&addr.ip())
             .map(|entry| entry.key)
     }
 
     pub(super) fn peer_state_for_addr(&self, addr: SocketAddr) -> ResolvedPeerCryptoState {
-        let peer = self
-            .peers
-            .lock()
-            .unwrap()
-            .get(&addr)
-            .cloned()
-            .unwrap_or_default();
+        let peer = self.peers.lock().get(&addr).cloned().unwrap_or_default();
         let receiver_verify_key = self
             .receiver_verify_keys
             .lock()
-            .unwrap()
             .get(&addr.ip())
             .map(|entry| entry.key);
         ResolvedPeerCryptoState {
@@ -181,7 +173,7 @@ mod tests {
             layer.register_peer_key(SocketAddr::new(ip, 4000), i as u32);
         }
         assert_eq!(
-            layer.receiver_verify_keys.lock().unwrap().len(),
+            layer.receiver_verify_keys.lock().len(),
             PEER_MAP_CAP,
             "receiver verify key map must stay at the cap"
         );
