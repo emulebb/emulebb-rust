@@ -827,7 +827,10 @@ impl EmulebbCore {
         ))
     }
 
-    #[allow(clippy::cognitive_complexity)]
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "linear protocol orchestration flow"
+    )]
     async fn run_ed2k_download_attempt(
         &self,
         transfer: &Transfer,
@@ -1886,7 +1889,10 @@ impl EmulebbCore {
         core.queue_ed2k_download_attempt(transfer);
     }
 
-    #[allow(clippy::cognitive_complexity)]
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "linear protocol orchestration flow"
+    )]
     async fn resolve_hash_only_ed2k_metadata(
         &self,
         network: &Ed2kNetworkConfig,
@@ -1946,7 +1952,10 @@ impl EmulebbCore {
         Ok((!learned.is_empty()).then_some(learned))
     }
 
-    #[allow(clippy::cognitive_complexity)]
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "linear protocol orchestration flow"
+    )]
     async fn acquire_ed2k_sources(
         &self,
         network: &Ed2kNetworkConfig,
@@ -3348,7 +3357,10 @@ async fn kad_publish_gate_input(
 /// One publish cycle: republish only the shared files whose per-file, per-kind
 /// master interval is due (keyword 24h / source 5h), and only while the master
 /// `CSharedFileList::Publish` firewall/buddy gate permits publishing.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 async fn publish_kad_due_shared_files(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
@@ -3983,7 +3995,10 @@ async fn publish_kad_due_shared_files(
     Ok(item_count)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn drain_completed_kad_publish_tasks(
     runtime: &KadPublishLoopRuntime,
     schedule: &mut kad_publish_schedule::KadPublishSchedule,
@@ -4909,7 +4924,10 @@ const LEGACY_VERIFY_VERSION_THRESHOLD: u8 = 8;
 /// challenge, and it is not challenged at all on the HELLO_RES leg.
 const KAD_VERSION_7: u8 = 7;
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 async fn handle_kad_local_store_packet(
     runtime: &KadLocalStoreRuntime,
     received: ReceivedKadPacket,
@@ -5504,7 +5522,10 @@ fn find_buddy_res_connect_options(
     requester_has_udp_key.then(|| emule_connect_options(obfuscation_enabled))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn handle_kad_find_buddy_req(
     dht: &DhtNode,
     ed2k_listener: &TcpListener,
@@ -5623,7 +5644,10 @@ async fn handle_kad_find_buddy_req(
 /// Mirrors `Process_KADEMLIA_FINDBUDDY_RES`: verify the echoed `buddy_id`
 /// against our own Kad id, then record the buddy (oracle `RequestBuddy`). The
 /// buddy-management task keeps the TCP connection.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn handle_kad_find_buddy_res(
     dht: &DhtNode,
     kad_buddy: &Arc<Mutex<KadBuddyState>>,

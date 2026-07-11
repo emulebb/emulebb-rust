@@ -99,7 +99,6 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     pub(in crate::ed2k_tcp) buddy_registry: &'a BuddySocketRegistry,
 }
 
-#[allow(clippy::cognitive_complexity)]
 pub(in crate::ed2k_tcp) async fn handle_connection(
     source: Ed2kSessionSource,
     peer_addr: SocketAddr,

@@ -76,7 +76,10 @@ pub(crate) fn upload_slot_closed(
 /// `upload_slot_recycled` (schema §3.5): an idle/timed-out active slot is
 /// reclaimed by the queue (master `activeNoRequestRecycle*`), distinct from a
 /// peer-initiated close.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn upload_slot_recycled(
     peer: &str,
     peer_hash: Option<[u8; 16]>,
@@ -165,7 +168,10 @@ fn upload_outcome_class(outcome: &str) -> &'static str {
 /// `upload_request_outcome` (schema extension): one OP_REQUESTPARTS admission and
 /// payload-serving result. This fills the parity gap between "request accepted"
 /// and "payload packet left the socket", without logging file names or payload.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn upload_request_outcome(
     peer: &str,
     peer_hash: Option<[u8; 16]>,
@@ -236,7 +242,10 @@ pub(crate) fn upload_payload_accounting(
 /// Rust has no periodic upload-queue tick (its slot scheduling is driven per
 /// connection), so this is emitted whenever the capacity is inspected rather
 /// than on a fixed timer — a cadence difference the structural harness tolerates.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn capacity_snapshot(
     base_slots: usize,
     elastic_slots: usize,
@@ -282,7 +291,10 @@ pub(crate) fn capacity_snapshot(
 /// Hash samples are enough to align Rust/MFC batch selection without leaking
 /// private filenames or paths.
 #[cfg(feature = "packet-diagnostics")]
-#[allow(clippy::too_many_arguments)] // a flat diagnostics record builder; each field is a distinct dump column
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)] // a flat diagnostics record builder; each field is a distinct dump column
 pub(crate) fn shared_publish_offer_batch(
     server: &str,
     entries_sent: usize,

@@ -134,8 +134,7 @@ pub(crate) struct SharedDirMonitor {
     /// Held purely for its RAII `Drop`: dropping the debouncer stops/joins the
     /// OS watcher thread. Never read after construction (the watch set is fixed
     /// at start), hence the allow.
-    #[allow(dead_code)]
-    debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, FileIdMap>,
+    _debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, FileIdMap>,
     consumer: tokio::task::JoinHandle<()>,
 }
 
@@ -255,7 +254,7 @@ where
 
     let consumer = tokio::spawn(run_consumer(action_rx, apply));
     Some(SharedDirMonitor {
-        debouncer,
+        _debouncer: debouncer,
         consumer,
     })
 }

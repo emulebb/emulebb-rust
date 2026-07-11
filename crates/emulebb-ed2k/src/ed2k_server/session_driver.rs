@@ -36,7 +36,10 @@ pub(super) enum ServerSessionExit {
     RestartPreferredOrder,
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub(super) async fn run_one_server_session(
     server: &ResolvedServerEntry,
     context: &ServerSessionContext,

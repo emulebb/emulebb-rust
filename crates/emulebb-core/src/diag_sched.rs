@@ -77,7 +77,10 @@ pub(crate) fn source_conn_budget(
 /// a soak see, per attempt, whether the transfer engaged/queued at any source and
 /// why it ended in `state`, so the persistent-reask behaviour can be judged from
 /// evidence rather than inferred. `keys.fileHash` only (whole-file decision).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn download_attempt_outcome(
     file_hash_hex: &str,
     state: &str,

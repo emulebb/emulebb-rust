@@ -16,7 +16,10 @@ use super::{
     is_low_id, log_search_result_page, send_connected_server_startup, wait_for_offer_files_settle,
 };
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub(super) async fn handle_server_packet(
     session: &mut ServerSession,
     packet: Ed2kPacket,

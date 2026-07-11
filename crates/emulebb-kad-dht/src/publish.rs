@@ -220,7 +220,10 @@ async fn execute_keyword_publish_fanout(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn resolve_publish_contacts(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
@@ -614,7 +617,10 @@ fn build_keyword_publish_packet(
 }
 
 /// Publish source availability for a file.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub async fn publish_source(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,
@@ -693,7 +699,10 @@ fn build_source_publish_packet(
 /// `KADEMLIA2_PUBLISH_NOTES_REQ`. The wire width matches a file hash, but the
 /// semantic meaning is publisher identity and must stay aligned across local
 /// store, notes search results, and wire dumps.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub async fn publish_notes(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<emulebb_kad_routing::RoutingTable>,

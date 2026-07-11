@@ -1448,7 +1448,10 @@ pub(crate) async fn collect_kad_ed2k_metadata(
     (!learned.is_empty()).then_some(learned)
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub(crate) async fn collect_kad_ed2k_sources(
     dht: &DhtNode,
     file_hash: Ed2kHash,

@@ -109,7 +109,10 @@ pub(super) fn encode_offer_files_payload(
     .payload
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 fn encode_offer_files_payload_at_cursor(
     shared_catalog: &[Ed2kSharedEntry],
     cursor: usize,

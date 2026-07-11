@@ -128,7 +128,10 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
     }
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 fn reconcile_blocking(
     backend_name: &str,
     config: &NatConfig,

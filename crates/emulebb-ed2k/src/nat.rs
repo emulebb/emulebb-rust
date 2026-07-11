@@ -455,7 +455,10 @@ impl NatManager {
     }
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 async fn run_manager_loop(
     config: NatConfig,
     mappings: Vec<MappingSpec>,

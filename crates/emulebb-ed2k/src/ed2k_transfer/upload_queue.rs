@@ -531,7 +531,10 @@ impl Ed2kUploadQueueState {
         snapshot
     }
 
-    #[allow(clippy::too_many_arguments)] // flat per-admission inputs, mirroring the oracle call
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat protocol or runtime boundary"
+    )] // flat per-admission inputs, mirroring the oracle call
     pub(super) fn begin_session(
         &mut self,
         key: Ed2kUploadSessionKey,

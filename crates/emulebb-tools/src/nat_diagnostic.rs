@@ -93,7 +93,10 @@ fn init_tracing() {
         .try_init();
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 async fn run_map(args: MapArgs) -> Result<()> {
     let provider: Arc<dyn PortMappingProvider> = Arc::new(MiniupnpcPortMappingProvider);
     let config = build_config(&args.shared);

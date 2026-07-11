@@ -204,7 +204,6 @@ pub(crate) fn publish_failure(
 /// stored at least one file. Surfaces how many files' keywords/sources/notes were
 /// published this round (vs the total publishable item count), so a live run has
 /// a single line summarizing outbound Kad publish reach.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish_round(
     item_count: usize,
     keyword_published: usize,

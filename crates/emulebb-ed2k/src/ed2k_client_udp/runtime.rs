@@ -266,7 +266,10 @@ fn hex_preview(bytes: &[u8]) -> String {
 /// Run the UDP source-reask loop until `shutdown` is set. Spawned by core only
 /// when `enable_udp_reask` is on (the default); the flag exists so the transport
 /// can be disabled to fall back to the held-TCP path if needed.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub async fn run_ed2k_udp_reask_loop(
     dht: DhtNode,
     transfer_runtime: Arc<Ed2kTransferRuntime>,
@@ -393,7 +396,10 @@ fn udp_reask_sent_body() -> serde_json::Value {
 }
 
 /// Route one inbound datagram through the service and act on the outcome.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn handle_inbound_datagram(
     service: &mut ReaskService,
     dht: &DhtNode,

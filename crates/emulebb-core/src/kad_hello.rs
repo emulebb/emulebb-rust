@@ -425,7 +425,10 @@ async fn kad_firewall_ack_hello_identity(
     Ok(enrich_hello_identity(identity, server_state, kad_firewall).await)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn spawn_modern_kad_firewalled_response(
     dht: DhtNode,
     listener_addr: SocketAddr,

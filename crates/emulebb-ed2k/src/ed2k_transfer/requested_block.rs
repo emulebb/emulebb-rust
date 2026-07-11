@@ -11,7 +11,10 @@ use super::piece_store::{AppendPieceBlockLog, log_append_piece_block};
 use super::{Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState, PieceWriteOutcome};
 
 impl Ed2kTransferRuntime {
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat protocol or runtime boundary"
+    )]
     pub(super) async fn append_requested_block_by_bitmap_unlocked(
         &self,
         manifest: &mut Ed2kResumeManifest,

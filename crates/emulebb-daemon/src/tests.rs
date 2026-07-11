@@ -77,7 +77,10 @@ fn load_requires_existing_config_path() {
 }
 
 #[test]
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 fn load_parses_camel_case_ed2k_config() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("emulebb-rust.toml");

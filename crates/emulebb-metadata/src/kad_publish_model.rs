@@ -36,7 +36,10 @@ impl MetadataKadOutboundPublishKind {
 
     // Inherent token parser returning Option, deliberately not the Result-based
     // `std::str::FromStr` trait (the trait shape does not fit this enum mapping).
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "domain conversion has custom semantics"
+    )]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "keyword" => Some(Self::Keyword),

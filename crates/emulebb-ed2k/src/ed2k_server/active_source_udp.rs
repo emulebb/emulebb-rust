@@ -81,7 +81,10 @@ pub struct Ed2kUdpSourceBatchSearchOptions<'a> {
 /// fresh TCP source-search login reaches `OP_IDCHANGE`. eMule can still use the
 /// server UDP `GlobGetSources` family, so keep that path available as a
 /// first-class source acquisition fallback.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub async fn search_source_udp_servers(
     options: Ed2kUdpSourceSearchOptions<'_>,
 ) -> Result<Vec<Ed2kFoundSource>> {
@@ -337,7 +340,10 @@ async fn drain_source_udp_responses(
 /// pacing one server per ~1s tick. This API preserves that packet shape *and*
 /// cadence for callers that can coalesce scarce active transfers before issuing
 /// the UDP walk.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub async fn search_source_udp_server_batches(
     options: Ed2kUdpSourceBatchSearchOptions<'_>,
 ) -> Result<HashMap<Ed2kHash, Vec<Ed2kFoundSource>>> {

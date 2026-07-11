@@ -254,7 +254,10 @@ fn note_ich_outcome(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(in crate::ed2k_tcp) async fn flush_buffered_download_prefixes(
     transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,

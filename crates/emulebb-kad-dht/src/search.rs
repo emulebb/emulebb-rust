@@ -70,7 +70,10 @@ fn map_source_search_result(
 }
 
 /// Run a keyword search using a prebuilt Kad keyword request shape.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn search_keywords_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -188,7 +191,10 @@ pub(crate) fn search_keywords_by_request(
 }
 
 /// Run a source search using a prebuilt Kad source request shape.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn search_sources_by_request(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,
@@ -264,7 +270,10 @@ pub(crate) fn search_sources_by_request(
 }
 
 /// Run a notes search.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 pub(crate) fn search_notes(
     rpc: RpcManager,
     initial: Vec<TraversalContact>,

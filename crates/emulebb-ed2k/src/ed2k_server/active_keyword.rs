@@ -58,7 +58,10 @@ pub struct Ed2kUdpKeywordSearchOptions<'a> {
 /// session and sends `OP_GLOBSEARCHREQ*` over UDP only to other servers. This
 /// helper implements that global UDP part without opening any extra TCP server
 /// login sessions.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub async fn search_keyword_udp_servers(
     options: Ed2kUdpKeywordSearchOptions<'_>,
 ) -> Result<Vec<Ed2kSearchFile>> {
@@ -220,7 +223,10 @@ fn queried_udp_response_server(
 /// server connection pool exists. The function prefers the currently connected
 /// background server when one is available, caps how many configured servers it
 /// will probe, and returns the first non-empty result page it receives.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub async fn search_keyword_servers(
     options: Ed2kKeywordSearchOptions<'_>,
 ) -> Result<Vec<Ed2kSearchFile>> {

@@ -25,7 +25,10 @@ const ESTABLISHED_SESSION_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const PARALLEL_ATTEMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Runs the minimal oracle-shaped ED2K server session loop for the configured endpoints.
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
     let Ed2kServerLoopOptions {
         bind_ip,

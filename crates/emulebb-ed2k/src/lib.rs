@@ -10,11 +10,20 @@ pub use ed2k_client_udp::{
     ReaskEventReceiver, ReaskEventSender, ReaskSourceHandle, reask_command_channel,
     reask_event_channel, run_ed2k_udp_reask_loop,
 };
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "public parity module retains staged and test-only server protocol seams"
+)]
 pub mod ed2k_server;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "public parity module retains staged and test-only peer protocol seams"
+)]
 pub mod ed2k_tcp;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "public parity module retains staged and cross-crate test transfer seams"
+)]
 pub mod ed2k_transfer;
 pub mod ipfilter;
 pub mod kad_firewall;

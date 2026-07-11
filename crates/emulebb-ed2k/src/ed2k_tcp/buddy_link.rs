@@ -176,7 +176,10 @@ pub async fn run_outbound_buddy_link(options: OutboundBuddyLinkOptions) -> Resul
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn drive_buddy_link(
     transport: &mut Ed2kTransport,
     ping_timer: &mut tokio::time::Interval,
@@ -237,7 +240,10 @@ async fn drive_buddy_link(
 }
 
 /// Handle one inbound packet on the held buddy socket. Returns `false` to close.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
 async fn handle_buddy_packet(
     transport: &mut Ed2kTransport,
     bind_ip: Ipv4Addr,

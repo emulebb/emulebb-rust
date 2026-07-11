@@ -23,7 +23,10 @@ fn is_retryable_direct_download_error(error: &anyhow::Error) -> bool {
     })
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "linear protocol orchestration flow"
+)]
 pub(crate) async fn run_ed2k_direct_downloads<DownloadFn, DownloadFuture>(
     options: DirectDownloadOptions,
     download_peer: DownloadFn,

@@ -80,7 +80,10 @@ pub use buddy_link::{OutboundBuddyLinkOptions, run_outbound_buddy_link};
 #[cfg(test)]
 pub(in crate::ed2k_tcp) use codec::decode_file_status_payload;
 #[cfg(test)]
-#[allow(unused_imports)]
+#[expect(
+    unused_imports,
+    reason = "codec tests import selected helpers through super"
+)]
 use codec::{
     build_upload_part_packets, decode_file_hash_payload, decode_hashset_request2,
     decode_request_parts_payload, decode_request_sources_payload, encode_accept_upload_req,
@@ -113,7 +116,10 @@ pub(in crate::ed2k_tcp) use hello::{
     encode_hello_request,
 };
 #[cfg(test)]
-#[allow(unused_imports)]
+#[expect(
+    unused_imports,
+    reason = "hello tests import selected helpers through super"
+)]
 use hello::{DecodedHelloIdentity, encode_hello_answer, is_mule_hello};
 #[cfg(test)]
 use hello::{

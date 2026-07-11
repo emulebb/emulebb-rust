@@ -334,7 +334,6 @@ impl Ed2kTransferRuntime {
     }
 
     /// Persist one downloaded piece into the local piece store.
-    #[allow(dead_code)]
     pub async fn store_piece_data(
         &self,
         file_hash: &str,
