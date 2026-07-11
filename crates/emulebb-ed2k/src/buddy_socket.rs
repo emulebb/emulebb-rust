@@ -32,9 +32,10 @@
 //!   `Process_KADEMLIA_CALLBACK_REQ` (`pBuddy->socket->SendPacket`).
 
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use emulebb_kad_proto::NodeId;
+use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Identity of the inbound buddy we expect to connect to us (we are its buddy).
@@ -87,8 +88,8 @@ impl BuddySocketRegistry {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
-        self.inner.lock().expect("buddy socket registry poisoned")
+    fn lock(&self) -> MutexGuard<'_, RegistryInner> {
+        self.inner.lock()
     }
 
     /// Record the inbound buddy we expect to connect to us after we replied
