@@ -7,10 +7,9 @@
 //! matching `CIPFilter::IsFiltered` (`range.level < level`). Ranges parsed
 //! without an explicit level default to 100, so they are filtered by default.
 
-use std::{
-    net::Ipv4Addr,
-    sync::{Arc, RwLock},
-};
+use std::{net::Ipv4Addr, sync::Arc};
+
+use parking_lot::RwLock;
 
 /// eMule default level for ranges parsed without an explicit level token.
 pub const DEFAULT_RANGE_LEVEL: u32 = 100;
@@ -60,33 +59,25 @@ impl IpFilter {
     /// backing, so every clone observes the new ranges (`CIPFilter::Reload`).
     pub fn reload_from(&self, body: &str, filter_level: u32) {
         let inner = parse_inner(body, filter_level);
-        *self.inner.write().expect("ip filter lock poisoned") = inner;
+        *self.inner.write() = inner;
     }
 
     /// Number of loaded ranges.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner
-            .read()
-            .expect("ip filter lock poisoned")
-            .ranges
-            .len()
+        self.inner.read().ranges.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .read()
-            .expect("ip filter lock poisoned")
-            .ranges
-            .is_empty()
+        self.inner.read().ranges.is_empty()
     }
 
     /// Whether `ip` is filtered: it is contained in a range whose level is below
     /// the configured filter level. An empty filter never filters.
     #[must_use]
     pub fn is_filtered(&self, ip: Ipv4Addr) -> bool {
-        let inner = self.inner.read().expect("ip filter lock poisoned");
+        let inner = self.inner.read();
         if inner.ranges.is_empty() {
             return false;
         }
