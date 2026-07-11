@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Kad2 routing table — zone tree, k-buckets, contacts"
 
+[lints]
+workspace = true
+
 [dependencies]
 emulebb-kad-proto = { path = "../emulebb-kad-proto" }
 thiserror = { workspace = true }

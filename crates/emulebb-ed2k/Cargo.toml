@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "ED2K transfer runtime extracted for emulebb-rust"
 
+[lints]
+workspace = true
+
 [features]
 # Compile-time gate for the ed2k_packet_v1 packet dump (the Cargo equivalent of
 # eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). Off by default so release

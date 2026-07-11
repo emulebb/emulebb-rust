@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "eMuleBB-compatible REST API for emulebb-rust"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true

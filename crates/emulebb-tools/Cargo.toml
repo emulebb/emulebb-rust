@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Developer and live-diagnostic tooling for eMuleBB Rust"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

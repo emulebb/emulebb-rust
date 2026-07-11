@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Kad2 wire codec — packet types, tag system, NodeId"
 
+[lints]
+workspace = true
+
 [dependencies]
 binrw = { workspace = true }
 thiserror = { workspace = true }

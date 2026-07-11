@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Kad2 network layer — UDP transport, RPC manager, obfuscation"
 
+[lints]
+workspace = true
+
 [features]
 # Compile-time gate for Kad packet dumps and diag_event_v1 diagnostics. Runtime
 # EMULEBB_RUST_LOG_DIR only selects the output directory after this feature is

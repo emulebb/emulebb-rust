@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Native Slint UI for the emulebb-rust REST API"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "emulebb-rust-ui"
 path = "src/main.rs"

@@ -17,6 +17,12 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 [workspace.package]
 edition = "2024"
 license = "GPL-2.0-only"

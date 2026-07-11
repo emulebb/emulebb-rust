@@ -203,6 +203,8 @@ impl std::fmt::Debug for Gateway {
 
 impl Drop for Gateway {
     fn drop(&mut self) {
+        // SAFETY: `urls` is owned by this Gateway and was initialized by
+        // MiniUPnPc; this is its single matching release call.
         unsafe {
             sys::FreeUPNPUrls(&mut self.urls);
         }
@@ -280,6 +282,8 @@ impl Gateway {
         let lease_duration =
             lease_duration_secs.map(|secs| CString::new(secs.to_string()).unwrap());
 
+        // SAFETY: every non-null argument is a live NUL-terminated CString for
+        // the duration of the call; optional arguments use the documented null.
         let status = unsafe {
             sys::UPNP_AddPortMapping(
                 control_url.as_ptr(),
@@ -309,6 +313,8 @@ impl Gateway {
         let protocol = c_string(protocol, "protocol")?;
         let remote_host = CString::new("").unwrap();
 
+        // SAFETY: all arguments are live NUL-terminated CStrings and MiniUPnPc
+        // retains none of their pointers after this synchronous call.
         let status = unsafe {
             sys::UPNP_DeletePortMapping(
                 control_url.as_ptr(),
@@ -339,6 +345,8 @@ impl Gateway {
         let mut enabled = [0 as c_char; MAPPING_ENABLED_CAPACITY];
         let mut lease_duration = [0 as c_char; MAPPING_LEASE_CAPACITY];
 
+        // SAFETY: input CStrings remain live and every mutable output buffer is
+        // writable for the fixed capacity required by MiniUPnPc's API.
         let status = unsafe {
             sys::UPNP_GetSpecificPortMappingEntry(
                 control_url.as_ptr(),
@@ -430,6 +438,8 @@ pub fn discover(options: &DiscoveryOptions) -> Result<(DiscoveryResult, Option<G
             .collect::<Vec<_>>()
     );
 
+    // SAFETY: the pointer array is null-terminated, each CString backing it and
+    // every optional CString remain live, and `error` is a valid output pointer.
     let raw_devlist = unsafe {
         sys::upnpDiscoverDevices(
             device_types.pointers.as_ptr(),
@@ -471,6 +481,8 @@ pub fn gateway_from_url(root_description_url: &str) -> Result<Option<Gateway>> {
     let mut data = zeroed_data();
     let mut local_ip = [0 as c_char; LANADDR_CAPACITY];
 
+    // SAFETY: the URL CString and all mutable C structs/buffers remain valid and
+    // writable for the duration of this synchronous MiniUPnPc call.
     let status = unsafe {
         sys::UPNP_GetIGDFromUrl(
             root_description_url.as_ptr(),
@@ -484,6 +496,7 @@ pub fn gateway_from_url(root_description_url: &str) -> Result<Option<Gateway>> {
         return Ok(None);
     }
 
+    // SAFETY: `urls` and `data` were initialized by UPNP_GetIGDFromUrl above.
     let connected = unsafe { sys::UPNPIGD_IsConnected(&mut urls, &mut data) == 1 };
     let external_ip = external_ip_from_raw(&urls, &data)?;
     let gateway_status = match external_ip.as_deref().and_then(parse_ip_addr) {
@@ -511,6 +524,8 @@ fn build_gateway_from_devlist(devlist: *mut sys::UPNPDev) -> Result<Option<Gatew
     let mut data = zeroed_data();
     let mut local_ip = [0 as c_char; LANADDR_CAPACITY];
     let mut external_ip = [0 as c_char; WANADDR_CAPACITY];
+    // SAFETY: `devlist` is a live MiniUPnPc list and the output structs and
+    // buffers are valid and writable for the duration of the call.
     let status = unsafe {
         sys::UPNP_GetValidIGD(
             devlist,
@@ -573,6 +588,8 @@ fn build_gateway(
 fn collect_devices(mut current: *mut sys::UPNPDev) -> Vec<DiscoveredDevice> {
     let mut devices = Vec::new();
     while !current.is_null() {
+        // SAFETY: `current` is either the list head returned by MiniUPnPc or a
+        // pNext read from that live list, which remains owned until collection ends.
         let device = unsafe { &*current };
         devices.push(DiscoveredDevice {
             description_url: pointer_to_string(device.descURL).unwrap_or_default(),
@@ -595,6 +612,8 @@ fn external_ip_from_raw(urls: &sys::UPNPUrls, data: &sys::IGDdatas) -> Result<Op
         None => return Ok(None),
     };
     let mut buffer = [0 as c_char; EXTERNAL_IP_CAPACITY];
+    // SAFETY: the CStrings are live and `buffer` is writable at the capacity
+    // required by UPNP_GetExternalIPAddress.
     let status = unsafe {
         sys::UPNP_GetExternalIPAddress(
             control_url.as_ptr(),
@@ -685,6 +704,8 @@ fn pointer_to_string(pointer: *const c_char) -> Option<String> {
     if pointer.is_null() {
         return None;
     }
+    // SAFETY: callers pass MiniUPnPc-owned pointers whose API contract guarantees
+    // NUL termination; null was rejected above and the owner remains live.
     let value = unsafe { CStr::from_ptr(pointer) }
         .to_string_lossy()
         .trim()
@@ -730,15 +751,21 @@ fn ensure_command_success(action: &str, status: c_int) -> Result<()> {
 }
 
 fn upnp_error_string(status: c_int) -> String {
+    // SAFETY: MiniUPnPc accepts every status value and returns a static C string
+    // or null; pointer_to_string handles the null case.
     let text = unsafe { sys::strupnperror(status) };
     pointer_to_string(text).unwrap_or_else(|| format!("unknown miniupnpc error {status}"))
 }
 
 fn zeroed_urls() -> sys::UPNPUrls {
+    // SAFETY: MiniUPnPc defines UPNPUrls as a plain C aggregate whose null/zero
+    // representation is its required empty initialization state.
     unsafe { std::mem::zeroed() }
 }
 
 fn zeroed_data() -> sys::IGDdatas {
+    // SAFETY: IGDdatas is a plain C character-buffer aggregate and all-zero is
+    // the required empty state before MiniUPnPc fills it.
     unsafe { std::mem::zeroed() }
 }
 
@@ -758,7 +785,10 @@ struct WinsockGuard;
 impl WinsockGuard {
     #[cfg(windows)]
     fn init() -> Result<Self> {
+        // SAFETY: WSADATA is a Windows C output aggregate for which zeroed is a
+        // valid initial state before WSAStartup writes it.
         let mut data = unsafe { std::mem::zeroed::<WSADATA>() };
+        // SAFETY: `data` is valid and writable; the requested version word is 2.2.
         let status = unsafe { WSAStartup(make_word(2, 2), &mut data) };
         if status != 0 {
             bail!("WSAStartup failed with code {status}");
@@ -775,6 +805,8 @@ impl WinsockGuard {
 impl Drop for WinsockGuard {
     fn drop(&mut self) {
         #[cfg(windows)]
+        // SAFETY: this guard exists only after a successful WSAStartup, and Drop
+        // executes the single matching cleanup call.
         unsafe {
             let _ = WSACleanup();
         }
@@ -789,6 +821,8 @@ const fn make_word(low: u8, high: u8) -> u16 {
 impl Drop for UpnpDevList {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: this wrapper uniquely owns the list returned by MiniUPnPc
+            // and frees it exactly once after all traversal has ended.
             unsafe {
                 sys::freeUPNPDevlist(self.0);
             }

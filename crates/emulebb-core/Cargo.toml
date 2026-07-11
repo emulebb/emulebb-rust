@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Local emulebb-rust application state and orchestration"
 
+[lints]
+workspace = true
+
 [features]
 # Forwards the packet-diagnostics compile gate down to eD2K and Kad diagnostics.
 packet-diagnostics = ["emulebb-ed2k/packet-diagnostics"]

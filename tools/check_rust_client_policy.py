@@ -151,19 +151,30 @@ def check_toolchain_pin() -> list[str]:
 
 
 def check_package_metadata() -> list[str]:
-    workspace_package = read_toml(ROOT / "Cargo.toml").get("workspace", {}).get("package", {})
+    workspace = read_toml(ROOT / "Cargo.toml").get("workspace", {})
+    workspace_package = workspace.get("package", {})
     errors = []
     if workspace_package.get("license") != "GPL-2.0-only":
         errors.append("workspace package license must be GPL-2.0-only")
     if workspace_package.get("publish") is not False:
         errors.append("workspace package publish must be false")
+    if workspace.get("lints", {}).get("rust", {}).get("unsafe_op_in_unsafe_fn") != "deny":
+        errors.append("workspace rust lint unsafe_op_in_unsafe_fn must be deny")
+    if (
+        workspace.get("lints", {}).get("clippy", {}).get("undocumented_unsafe_blocks")
+        != "deny"
+    ):
+        errors.append("workspace Clippy lint undocumented_unsafe_blocks must be deny")
     for manifest_path in sorted(ROOT.glob("crates/*/Cargo.toml")):
-        package = read_toml(manifest_path).get("package", {})
+        manifest = read_toml(manifest_path)
+        package = manifest.get("package", {})
         rel = manifest_path.relative_to(ROOT).as_posix()
         if package.get("license", {}).get("workspace") is not True:
             errors.append(f"{rel} must inherit package.license from the workspace")
         if package.get("publish", {}).get("workspace") is not True:
             errors.append(f"{rel} must inherit package.publish from the workspace")
+        if manifest.get("lints", {}).get("workspace") is not True:
+            errors.append(f"{rel} must inherit workspace lints")
     return errors
 
 

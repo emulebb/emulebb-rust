@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Kad2 DHT operations — bootstrap, lookup, search, publish"
 
+[lints]
+workspace = true
+
 [features]
 # Forwards the diagnostics compile-time gate down to the Kad UDP network layer.
 packet-diagnostics = ["emulebb-kad-net/packet-diagnostics"]

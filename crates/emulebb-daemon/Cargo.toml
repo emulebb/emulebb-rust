@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Headless emulebb-rust daemon"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "emulebb-rust"
 path = "src/bin/emulebb-rust.rs"

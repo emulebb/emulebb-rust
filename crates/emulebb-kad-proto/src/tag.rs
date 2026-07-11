@@ -81,6 +81,8 @@ fn decode_legacy_search_result_string(bytes: &[u8]) -> String {
     }
 
     let src_len = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
+    // SAFETY: `bytes` is valid for `src_len` bytes, and Windows permits a null
+    // output pointer with capacity zero for this required-length query.
     let wide_len =
         unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), src_len, std::ptr::null_mut(), 0) };
     if wide_len <= 0 {
@@ -90,6 +92,8 @@ fn decode_legacy_search_result_string(bytes: &[u8]) -> String {
     let wide_len_i32 = wide_len;
     let wide_len = usize::try_from(wide_len_i32).expect("wide_len is positive");
     let mut wide = vec![0u16; wide_len];
+    // SAFETY: the input slice remains valid, and `wide` was allocated to the
+    // exact positive capacity returned by the length query above.
     let converted = unsafe {
         MultiByteToWideChar(
             CP_ACP,

@@ -41,6 +41,8 @@ pub fn pin_egress_to_interface(sock: SockRef<'_>, if_index: Option<u32>) -> io::
             // IP_UNICAST_IF takes the interface index in network byte order.
             let net_index = index.get().to_be();
             let raw = sock.as_raw_socket() as usize;
+            // SAFETY: `raw` is a live socket borrowed by SockRef, and the option
+            // value points to a properly aligned u32 that remains live for the call.
             let ret = unsafe {
                 setsockopt(
                     raw,
