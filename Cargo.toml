@@ -55,7 +55,7 @@ notify-debouncer-full = "0.7"
 num-bigint = "0.4"
 parking_lot = "0.12"
 rand = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false }
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
