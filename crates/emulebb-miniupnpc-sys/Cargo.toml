@@ -2,6 +2,7 @@
 name = "emulebb-miniupnpc-sys"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Raw FFI bindings to the eMuleBB MiniUPnPc source tree"
 links = "emulebb_miniupnpc"

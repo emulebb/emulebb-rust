@@ -2,6 +2,7 @@
 name = "emulebb-tools"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Developer and live-diagnostic tooling for eMuleBB Rust"
 

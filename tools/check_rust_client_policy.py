@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "policy" / "rust-client.toml"
 OMISSIONS_PATH = ROOT / "policy" / "rust-client-omissions.toml"
+TOOLCHAIN_PATH = ROOT / "rust-toolchain.toml"
 P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-core/src/lib.rs",
     "crates/emulebb-core/src/kad_hello.rs",
@@ -34,6 +35,7 @@ def main() -> int:
     errors: list[str] = []
     errors.extend(check_omission_registry(policy, omissions))
     errors.extend(check_review_reporting(policy, omissions))
+    errors.extend(check_toolchain_pin())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_no_loopback_binds())
@@ -106,6 +108,49 @@ def check_review_reporting(policy: dict, omissions: dict) -> list[str]:
     if reporting.get("intentional_omissions_are_not_gaps") and not excluded:
         errors.append("review_reporting excludes no surfaces while intentional omissions are not gaps")
     return errors
+
+
+def check_toolchain_pin() -> list[str]:
+    toolchain = read_toml(TOOLCHAIN_PATH).get("toolchain", {})
+    channel = str(toolchain.get("channel", ""))
+    components = set(toolchain.get("components", []))
+    workspace = read_toml(ROOT / "Cargo.toml").get("workspace", {})
+    rust_version = str(workspace.get("package", {}).get("rust-version", ""))
+    errors = []
+    if not toolchain_versions_match(channel, rust_version):
+        errors.append(
+            f"rust-toolchain channel {channel!r} does not match workspace rust-version "
+            f"{rust_version!r}"
+        )
+    missing_components = sorted({"clippy", "rustfmt"}.difference(components))
+    if missing_components:
+        errors.append(
+            "rust-toolchain is missing required components: " + ", ".join(missing_components)
+        )
+    for manifest_path in sorted(ROOT.glob("crates/*/Cargo.toml")):
+        package = read_toml(manifest_path).get("package", {})
+        if package.get("rust-version", {}).get("workspace") is not True:
+            rel = manifest_path.relative_to(ROOT).as_posix()
+            errors.append(f"{rel} must inherit package.rust-version from the workspace")
+    expected_action = f"dtolnay/rust-toolchain@{channel}"
+    for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = workflow.read_text(encoding="utf-8")
+        for action in re.findall(r"dtolnay/rust-toolchain@[^\s]+", text):
+            if action != expected_action:
+                rel = workflow.relative_to(ROOT).as_posix()
+                errors.append(f"{rel} uses {action}, expected {expected_action}")
+    return errors
+
+
+def toolchain_versions_match(channel: str, rust_version: str) -> bool:
+    channel_parts = channel.split(".")
+    version_parts = rust_version.split(".")
+    return (
+        len(channel_parts) == 3
+        and len(version_parts) == 2
+        and channel_parts[:2] == version_parts
+        and all(part.isdigit() for part in channel_parts + version_parts)
+    )
 
 
 def maintainability_advisories(files: list[str] | None = None) -> list[str]:

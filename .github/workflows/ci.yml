@@ -35,8 +35,8 @@ jobs:
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@1.97.0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,8 +79,8 @@ jobs:
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
-      - name: Install Rust (stable + rustfmt, clippy)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust with rustfmt and Clippy
+        uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
 

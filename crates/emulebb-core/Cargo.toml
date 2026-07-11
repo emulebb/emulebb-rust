@@ -2,6 +2,7 @@
 name = "emulebb-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Local emulebb-rust application state and orchestration"
 

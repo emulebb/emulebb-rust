@@ -8,6 +8,11 @@ state plus indexing data in SQLite.
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The 0.0.x line does not expose a coordinator API.
 
+Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
+Update that pin, the workspace `rust-version`, and CI together in a dedicated
+toolchain commit after each stable Rust release has passed the full quality
+gate; normal development must not float independently on `stable`.
+
 The 0.0.3 scope is core eMule client parity: configured binding, ED2K/Kad
 interoperability, search, sharing, transfers, uploads, queues, persistence,
 local SQLite/FTS indexing, and REST controller visibility. It is not legacy

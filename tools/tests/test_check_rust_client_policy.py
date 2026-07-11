@@ -13,6 +13,11 @@ SPEC.loader.exec_module(CHECKER)
 
 
 class TestMaintainabilityAdvisories(unittest.TestCase):
+    def test_toolchain_version_matches_workspace_minor(self) -> None:
+        self.assertTrue(CHECKER.toolchain_versions_match("1.97.0", "1.97"))
+        self.assertFalse(CHECKER.toolchain_versions_match("stable", "1.97"))
+        self.assertFalse(CHECKER.toolchain_versions_match("1.96.1", "1.97"))
+
     def test_test_path_classification_covers_supported_layouts(self) -> None:
         self.assertTrue(CHECKER.is_test_path("crates/example/tests/scenario.rs"))
         self.assertTrue(CHECKER.is_test_path("crates/example/src/tests.rs"))

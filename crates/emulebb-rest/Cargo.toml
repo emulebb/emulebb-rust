@@ -2,6 +2,7 @@
 name = "emulebb-rest"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "eMuleBB-compatible REST API for emulebb-rust"
 
