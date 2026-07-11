@@ -422,7 +422,7 @@ pub struct EmulebbCore {
     /// design: guards are held for short sync sections only — never across an
     /// `.await` and never while acquiring the `state` lock — so the create
     /// path (state → queue) cannot deadlock against the drain path.
-    search_queue: Arc<std::sync::Mutex<SearchQueue>>,
+    search_queue: Arc<parking_lot::Mutex<SearchQueue>>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -533,7 +533,7 @@ impl EmulebbCore {
             kad_notes_dirty: Arc::new(std::sync::Mutex::new(HashSet::new())),
             ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
-            search_queue: Arc::new(std::sync::Mutex::new(SearchQueue::new())),
+            search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
             state: Arc::new(Mutex::new(core_state)),
         })
     }

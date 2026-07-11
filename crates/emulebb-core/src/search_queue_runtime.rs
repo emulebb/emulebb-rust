@@ -2,7 +2,7 @@
 //!
 //! Owns the drain task (readiness probing + paced dispatch), the per-dispatch
 //! execution, and the shared search-completion helpers. Locking rule: the
-//! queue's `std::sync::Mutex` guard is NEVER held across an `.await` and never
+//! queue's `parking_lot::Mutex` guard is NEVER held across an `.await` and never
 //! while taking the core `state` lock, so the create path (state lock → brief
 //! queue lock) cannot deadlock against the drain path (brief queue lock →
 //! state lock, disjoint scopes).
@@ -54,11 +54,7 @@ impl EmulebbCore {
                     .await
                     .is_some_and(|dht| dht.is_bootstrapped()),
             };
-            let tick = self
-                .search_queue
-                .lock()
-                .unwrap()
-                .tick(Instant::now(), readiness);
+            let tick = self.search_queue.lock().tick(Instant::now(), readiness);
             for entry in tick.expired {
                 crate::diag_sched::keyword_search_queue(
                     "expired",
@@ -88,12 +84,7 @@ impl EmulebbCore {
                     core.execute_queued_search(dispatch).await;
                 });
             }
-            if self
-                .search_queue
-                .lock()
-                .unwrap()
-                .release_drain_task_if_idle()
-            {
+            if self.search_queue.lock().release_drain_task_if_idle() {
                 return;
             }
             tokio::time::sleep(SEARCH_QUEUE_RECHECK).await;
@@ -108,7 +99,7 @@ impl EmulebbCore {
         // The search may have been deleted while queued: don't put traffic on
         // the wire for a result nobody can read.
         if self.search(&entry.search_id).await.is_none() {
-            self.search_queue.lock().unwrap().finish(lane);
+            self.search_queue.lock().finish(lane);
             return;
         }
         match lane {
@@ -135,7 +126,7 @@ impl EmulebbCore {
             .await;
         match outcome {
             Ok(Ed2kServerSearchOutcome::Completed(results)) => {
-                self.search_queue.lock().unwrap().finish(lane);
+                self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,
                     &entry.request,
@@ -147,7 +138,7 @@ impl EmulebbCore {
             Ok(Ed2kServerSearchOutcome::Unavailable) => {
                 // The eD2k network was torn down while the search waited:
                 // nothing will ever become ready, fail explicitly.
-                self.search_queue.lock().unwrap().finish(lane);
+                self.search_queue.lock().finish(lane);
                 self.fail_search(
                     &entry.search_id,
                     &entry.request,
@@ -178,7 +169,7 @@ impl EmulebbCore {
                     .await;
             }
             Err(error) => {
-                self.search_queue.lock().unwrap().finish(lane);
+                self.search_queue.lock().finish(lane);
                 tracing::warn!(
                     "queued server search failed search_id={}: {error:#}",
                     entry.search_id
@@ -211,7 +202,7 @@ impl EmulebbCore {
                     .await;
             }
             Ok(Some(results)) => {
-                self.search_queue.lock().unwrap().finish(lane);
+                self.search_queue.lock().finish(lane);
                 self.complete_search_with_results(
                     &entry.search_id,
                     &entry.request,
@@ -221,7 +212,7 @@ impl EmulebbCore {
                 .await;
             }
             Err(error) => {
-                self.search_queue.lock().unwrap().finish(lane);
+                self.search_queue.lock().finish(lane);
                 tracing::warn!(
                     "queued kad search failed search_id={}: {error:#}",
                     entry.search_id
@@ -254,7 +245,7 @@ impl EmulebbCore {
         let waiting_reason = entry.lane.waiting_reason();
         let attempts = entry.send_attempts;
         let requeued = {
-            let mut queue = self.search_queue.lock().unwrap();
+            let mut queue = self.search_queue.lock();
             let requeued = queue.requeue_for_retry(entry);
             queue.finish(lane);
             requeued

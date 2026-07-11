@@ -29,7 +29,7 @@ impl EmulebbCore {
             .and_then(|_| SearchQueueLane::for_method(&request.method));
         let mut spawn_drain = false;
         if let Some(lane) = queue_lane {
-            let mut queue = self.search_queue.lock().unwrap();
+            let mut queue = self.search_queue.lock();
             if let Err(error) =
                 queue.enqueue(search_id.clone(), request.clone(), lane, Instant::now())
             {
