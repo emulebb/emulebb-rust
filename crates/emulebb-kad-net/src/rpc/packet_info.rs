@@ -1,8 +1,8 @@
 use crate::obfuscation::{OutboundKadEncryptionInfo, OutboundKadEncryptionMode};
 use crate::tracker::{OutboundRequestTracker, PacketTrackerBucket};
 use emulebb_kad_proto::{KadPacket, NodeId, constants::opcode};
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct InboundKadPacketInfo {
@@ -269,7 +269,7 @@ pub(super) fn tracked_request_opcode_for_response(
     ip: IpAddr,
     response_opcode: u8,
 ) -> Option<u8> {
-    let mut tracker = outbound_tracker.lock().unwrap();
+    let mut tracker = outbound_tracker.lock();
     match response_opcode {
         opcode::BOOTSTRAP_RES => tracker.find_any(ip, &[opcode::BOOTSTRAP_REQ], true),
         opcode::HELLO_RES => tracker.find_any(ip, &[opcode::HELLO_REQ], true),

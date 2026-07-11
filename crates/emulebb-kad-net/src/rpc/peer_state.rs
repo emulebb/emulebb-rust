@@ -23,7 +23,6 @@ impl RpcManager {
         self.inner
             .observability
             .lock()
-            .unwrap()
             .snapshot(self.inner.max_outbound_pps, self.inner.class_budgets)
     }
 

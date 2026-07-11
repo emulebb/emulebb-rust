@@ -54,7 +54,7 @@ impl RpcManager {
                                 {
                                     continue;
                                 }
-                                inner.observability.lock().unwrap().record_decode_failure();
+                                inner.observability.lock().record_decode_failure();
                                 dump_kad_udp_packet(
                                     "recv",
                                     from,
@@ -146,8 +146,8 @@ impl RpcManager {
                         // Drop everything from an IP previously flood-banned
                         // (oracle banned-client check), before any per-bucket
                         // accounting or handler dispatch.
-                        if !flood_exempt && inner.tracker.lock().unwrap().is_banned(from.ip()) {
-                            inner.observability.lock().unwrap().record_tracker_action(
+                        if !flood_exempt && inner.tracker.lock().is_banned(from.ip()) {
+                            inner.observability.lock().record_tracker_action(
                                 inbound
                                     .tracker_bucket
                                     .unwrap_or(PacketTrackerBucket::Default),
@@ -174,18 +174,13 @@ impl RpcManager {
 
                         if let Some(bucket) = inbound.tracker_bucket.filter(|_| !flood_exempt) {
                             let decision =
-                                inner
-                                    .tracker
-                                    .lock()
-                                    .unwrap()
-                                    .record_and_check(PacketTrackerKey {
-                                        ip: from.ip(),
-                                        bucket,
-                                    });
+                                inner.tracker.lock().record_and_check(PacketTrackerKey {
+                                    ip: from.ip(),
+                                    bucket,
+                                });
                             inner
                                 .observability
                                 .lock()
-                                .unwrap()
                                 .record_tracker_action(bucket, decision.action);
                             if !decision.allowed {
                                 let drop_reason = match decision.action {
@@ -268,7 +263,7 @@ impl RpcManager {
                         }
 
                         let matched = {
-                            let mut pending = inner.pending.lock().unwrap();
+                            let mut pending = inner.pending.lock();
                             let exact_match_id = pending
                                 .iter()
                                 .filter(|(_, e)| {
@@ -373,7 +368,6 @@ impl RpcManager {
                                 inner
                                     .observability
                                     .lock()
-                                    .unwrap()
                                     .record_response_dropped_unrequested(response_opcode);
                                 dump_summary.drop_reason = Some("unrequested_response");
                                 dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
@@ -390,13 +384,11 @@ impl RpcManager {
                                 inner
                                     .observability
                                     .lock()
-                                    .unwrap()
                                     .record_response_matched_tracked(response_opcode);
                             } else {
                                 inner
                                     .observability
                                     .lock()
-                                    .unwrap()
                                     .record_response_accepted_unsolicited(response_opcode);
                             }
                             dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
@@ -425,7 +417,6 @@ impl RpcManager {
                             inner
                                 .observability
                                 .lock()
-                                .unwrap()
                                 .record_response_matched_pending(response_opcode);
                             dump_kad_udp_packet("recv", from, &data, &plain, dump_summary);
                         }

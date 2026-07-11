@@ -48,14 +48,14 @@ impl PendingGuard {
             return None;
         }
         self.removed = true;
-        self.inner.pending.lock().unwrap().remove(&self.id)
+        self.inner.pending.lock().remove(&self.id)
     }
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
         if !self.removed {
-            self.inner.pending.lock().unwrap().remove(&self.id);
+            self.inner.pending.lock().remove(&self.id);
         }
     }
 }
@@ -94,7 +94,7 @@ impl RpcManager {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
 
         {
-            let mut pending = self.inner.pending.lock().unwrap();
+            let mut pending = self.inner.pending.lock();
             pending.insert(
                 id,
                 PendingEntry {
@@ -183,7 +183,6 @@ impl RpcManager {
         self.inner
             .observability
             .lock()
-            .unwrap()
             .record_work_class_send(work_class, wait_millis);
         // eMule packs any Kad datagram whose cleartext exceeds 200 bytes
         // (0xE4 -> 0xE5, zlib body); a stock node always does, so pack before
@@ -217,7 +216,6 @@ impl RpcManager {
         self.inner
             .outbound_tracker
             .lock()
-            .unwrap()
             .record(addr.ip(), packet.opcode());
         if is_publish_opcode(packet.opcode()) {
             let crypt_target = outbound

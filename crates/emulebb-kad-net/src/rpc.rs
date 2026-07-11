@@ -24,10 +24,11 @@ use crate::rate_limit::RateLimiter;
 use crate::tracker::{OutboundRequestTracker, PacketTracker};
 use crate::transport::Transport;
 use emulebb_kad_proto::KadPacket;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot};
 
@@ -176,7 +177,7 @@ impl RpcManager {
     /// (IP, bucket) buckets and expired bans accumulate forever without this
     /// sweep. Call periodically from the Kad maintenance loop.
     pub fn prune_packet_tracker(&self) {
-        self.inner.tracker.lock().unwrap().prune();
+        self.inner.tracker.lock().prune();
     }
 
     /// Number of in-flight pending request entries. Test-only window onto the
@@ -184,7 +185,7 @@ impl RpcManager {
     /// aborted (dropped) request future.
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.inner.pending.lock().unwrap().len()
+        self.inner.pending.lock().len()
     }
 }
 
