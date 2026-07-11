@@ -180,6 +180,36 @@ async fn create_transfer_uses_canonical_link_and_paused_state() {
     );
 }
 
+#[tokio::test]
+async fn create_transfer_remembers_ed2k_link_source_hints() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-create-transfer-source-hints");
+    let transfer_root = runtime_dir.join("transfers");
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+
+    let transfer = core
+        .create_transfer(TransferCreate {
+            link: Some(
+                "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662,bad-source,192.0.2.10:4662,192.0.2.11:0|/"
+                    .to_string(),
+            ),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+
+    let sources = core
+        .transfer_sources(&transfer.hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].address, "192.0.2.10");
+    assert_eq!(sources[0].port, 4662);
+}
+
 #[test]
 fn transfer_create_rejects_legacy_ed2k_link_field() {
     let error = serde_json::from_str::<TransferCreate>(

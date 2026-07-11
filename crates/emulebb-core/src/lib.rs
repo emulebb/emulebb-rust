@@ -5910,7 +5910,15 @@ fn ed2k_file_type_search_term(name: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_ed2k_link(link: &str) -> Result<(String, String, u64)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedEd2kLink {
+    file_hash: String,
+    name: String,
+    size_bytes: u64,
+    sources: Vec<Ed2kSourceHint>,
+}
+
+fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
     let parts = link
         .strip_prefix("ed2k://|file|")
         .and_then(|rest| rest.strip_suffix("|/"))
@@ -5918,11 +5926,42 @@ fn parse_ed2k_link(link: &str) -> Result<(String, String, u64)> {
         .split('|')
         .collect::<Vec<_>>();
     anyhow::ensure!(parts.len() >= 3, "invalid ED2K file link");
-    Ok((
-        parts[2].to_ascii_lowercase(),
-        parts[0].to_string(),
-        parts[1].parse()?,
-    ))
+    Ok(ParsedEd2kLink {
+        file_hash: parts[2].to_ascii_lowercase(),
+        name: parts[0].to_string(),
+        size_bytes: parts[1].parse()?,
+        sources: parse_ed2k_link_sources(parts.iter().skip(3).copied()),
+    })
+}
+
+fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<Ed2kSourceHint> {
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    for section in sections {
+        let Some(rest) = section.strip_prefix("sources,") else {
+            continue;
+        };
+        for item in rest.split(',') {
+            let Some((address, port)) = item.rsplit_once(':') else {
+                continue;
+            };
+            let Ok(ip) = address.parse::<Ipv4Addr>() else {
+                continue;
+            };
+            let Ok(tcp_port) = port.parse::<u16>() else {
+                continue;
+            };
+            if ip.is_unspecified() || tcp_port == 0 || !seen.insert((ip, tcp_port)) {
+                continue;
+            }
+            sources.push(Ed2kSourceHint {
+                ip: ip.to_string(),
+                tcp_port,
+                user_hash: None,
+            });
+        }
+    }
+    sources
 }
 
 /// Case-insensitive check that `path` resides within `dir`, tolerating the

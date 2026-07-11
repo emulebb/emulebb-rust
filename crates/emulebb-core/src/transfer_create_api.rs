@@ -58,16 +58,21 @@ impl EmulebbCore {
         let mut transfers = Vec::with_capacity(links.len());
         for link in links {
             let parsed = parse_ed2k_link(&link)?;
-            transfers.push(
-                self.upsert_transfer_from_parts(
-                    parsed.0,
-                    parsed.1,
-                    parsed.2,
+            let transfer = self
+                .upsert_transfer_from_parts(
+                    parsed.file_hash,
+                    parsed.name,
+                    parsed.size_bytes,
                     state_name,
                     Some(category.clone()),
                 )
-                .await?,
-            );
+                .await?;
+            for source in parsed.sources {
+                self.ed2k_transfers
+                    .remember_source(&transfer.hash, source)
+                    .await?;
+            }
+            transfers.push(self.transfer(&transfer.hash).await.unwrap_or(transfer));
         }
         Ok(transfers)
     }
