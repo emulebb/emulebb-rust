@@ -16,9 +16,10 @@
 use std::{
     collections::HashMap,
     net::Ipv4Addr,
-    sync::Mutex,
     time::{Duration, Instant},
 };
+
+use parking_lot::Mutex;
 
 /// eMule `CLIENTBANTIME` -- the ban time-to-live (`Opcodes.h:118`,
 /// `HR2MS(4)` = 4 hours).
@@ -56,16 +57,10 @@ impl BanStore {
     pub fn ban_at(&self, ip: Option<Ipv4Addr>, user_hash: Option<[u8; 16]>, now: Instant) {
         let until = now + CLIENT_BAN_TIME;
         if let Some(ip) = ip.filter(|ip| !ip.is_unspecified()) {
-            self.by_ip
-                .lock()
-                .expect("ban store ip mutex poisoned")
-                .insert(ip, until);
+            self.by_ip.lock().insert(ip, until);
         }
         if let Some(user_hash) = user_hash.filter(|hash| hash != &[0u8; 16]) {
-            self.by_hash
-                .lock()
-                .expect("ban store hash mutex poisoned")
-                .insert(user_hash, until);
+            self.by_hash.lock().insert(user_hash, until);
         }
     }
 
@@ -114,16 +109,10 @@ impl BanStore {
     /// Lift any ban on `ip` and/or `user_hash` (the manual `UnBan` path).
     pub fn unban(&self, ip: Option<Ipv4Addr>, user_hash: Option<&[u8; 16]>) {
         if let Some(ip) = ip {
-            self.by_ip
-                .lock()
-                .expect("ban store ip mutex poisoned")
-                .remove(&ip);
+            self.by_ip.lock().remove(&ip);
         }
         if let Some(user_hash) = user_hash {
-            self.by_hash
-                .lock()
-                .expect("ban store hash mutex poisoned")
-                .remove(user_hash);
+            self.by_hash.lock().remove(user_hash);
         }
     }
 
@@ -131,14 +120,8 @@ impl BanStore {
     /// entries as not-banned (matching the master's tick comparison), so this is
     /// only a memory reclaim; it can be called periodically.
     pub fn prune_expired(&self, now: Instant) {
-        self.by_ip
-            .lock()
-            .expect("ban store ip mutex poisoned")
-            .retain(|_, until| *until > now);
-        self.by_hash
-            .lock()
-            .expect("ban store hash mutex poisoned")
-            .retain(|_, until| *until > now);
+        self.by_ip.lock().retain(|_, until| *until > now);
+        self.by_hash.lock().retain(|_, until| *until > now);
     }
 
     fn lookup_alive<K: std::hash::Hash + Eq>(
@@ -146,10 +129,7 @@ impl BanStore {
         key: &K,
         now: Instant,
     ) -> bool {
-        map.lock()
-            .expect("ban store mutex poisoned")
-            .get(key)
-            .is_some_and(|until| *until > now)
+        map.lock().get(key).is_some_and(|until| *until > now)
     }
 }
 
