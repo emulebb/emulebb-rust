@@ -26,6 +26,14 @@ class TestDiagnosticsGate(unittest.TestCase):
         labels = [label for label, _ in QUALITY_GATE.commands_for_gate("quick")]
         self.assertIn("packet diagnostics binary", labels)
 
+    def test_clippy_uses_the_committed_lockfile(self) -> None:
+        _, command = QUALITY_GATE.clippy_step()
+        self.assertIn("--locked", command)
+
+    def test_vpn_leak_gate_is_individually_addressable(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("test-vpn-leak")]
+        self.assertEqual(labels, ["vpn leak-test (observed egress)"])
+
 
 if __name__ == "__main__":
     unittest.main()

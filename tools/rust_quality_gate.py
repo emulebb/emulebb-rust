@@ -34,10 +34,11 @@ def main(argv: list[str] | None = None) -> int:
             "build",
             "test-workspace",
             "test-kad-swarm",
+            "test-vpn-leak",
         ],
         help=(
             "quick=policy+fmt+clippy+diagnostics; ci=quick+build+tests; "
-            "ci-test=build+workspace tests+isolated kad_swarm"
+            "ci-test=build+workspace tests+isolated kad_swarm+VPN leak test"
         ),
     )
     args = parser.parse_args(argv)
@@ -45,14 +46,19 @@ def main(argv: list[str] | None = None) -> int:
     env = build_env()
     # Socket-binding tests bind X_LOCAL_IP, never loopback (the operator's VPN
     # split tunnel breaks 127.0.0.1). Fail fast for the test gates if it is unset
-    # so a run can never silently bind/connect a broken loopback. CI exports
-    # X_LOCAL_IP=127.0.0.1 on its loopback-only runners.
-    if args.gate in {"ci", "ci-test", "test-workspace", "test-kad-swarm"} and not env.get(
-        "X_LOCAL_IP"
-    ):
+    # so a run can never silently bind/connect a broken loopback. CI resolves
+    # and exports the runner's primary non-loopback IPv4 address.
+    socket_test_gates = {
+        "ci",
+        "ci-test",
+        "test-workspace",
+        "test-kad-swarm",
+        "test-vpn-leak",
+    }
+    if args.gate in socket_test_gates and not env.get("X_LOCAL_IP"):
         raise SystemExit(
             "X_LOCAL_IP must be set for the socket-binding tests (loopback is broken "
-            "under the VPN split tunnel; CI sets X_LOCAL_IP=127.0.0.1)."
+            "under the VPN split tunnel; CI resolves a non-loopback runner address)."
         )
     commands = commands_for_gate(args.gate)
     for label, command in commands:
@@ -154,7 +160,10 @@ def fmt_step() -> tuple[str, list[str]]:
 
 
 def clippy_step() -> tuple[str, list[str]]:
-    return ("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
+    return (
+        "clippy",
+        ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
+    )
 
 
 def diagnostics_step() -> tuple[str, list[str]]:
