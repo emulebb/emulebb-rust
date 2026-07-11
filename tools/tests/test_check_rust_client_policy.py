@@ -47,6 +47,13 @@ mod tests {
         self.assertEqual(len(advisories), CHECKER.LARGEST_FILES_REPORTED_PER_KIND)
         self.assertIn("src/file_9.rs (9 lines)", advisories[0])
 
+    def test_changed_files_are_prioritized_and_limited(self) -> None:
+        files = [(f"src/file_{index}.rs", index) for index in range(25)]
+        changed = {path for path, _ in files}
+        advisories = CHECKER.changed_file_advisories("production", files, changed)
+        self.assertEqual(len(advisories), CHECKER.CHANGED_FILES_REPORTED)
+        self.assertIn("changed production file: src/file_24.rs", advisories[0])
+
 
 class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:

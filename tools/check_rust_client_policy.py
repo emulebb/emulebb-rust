@@ -27,6 +27,7 @@ P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
 LARGEST_FILES_REPORTED_PER_KIND = 5
 INLINE_TEST_MODULES_REPORTED = 10
 INLINE_TEST_ADVISORY_LINES = 200
+CHANGED_FILES_REPORTED = 20
 
 
 def main() -> int:
@@ -40,6 +41,7 @@ def main() -> int:
     errors.extend(check_workspace_dependencies())
     errors.extend(check_tokio_features())
     errors.extend(check_supply_chain_policy())
+    errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
@@ -247,6 +249,22 @@ def check_supply_chain_policy() -> list[str]:
     return errors
 
 
+def check_lint_suppressions() -> list[str]:
+    """Reject permanent broad Rust/Clippy suppression in production and tests."""
+    suppression = re.compile(
+        r"#\s*\[\s*allow\s*\(\s*(?:clippy::|dead_code\b|unused(?:_\w+)?\b)"
+    )
+    errors = []
+    for rel in tracked_files("*.rs"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        if suppression.search(text):
+            errors.append(
+                f"{rel.replace('\\', '/')} uses a permanent broad lint allow; "
+                "use a scoped #[expect(..., reason = ...)] or fix the warning"
+            )
+    return errors
+
+
 def toolchain_versions_match(channel: str, rust_version: str) -> bool:
     channel_parts = channel.split(".")
     version_parts = rust_version.split(".")
@@ -275,9 +293,15 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
     ]
 
 
-def maintainability_advisories(files: list[str] | None = None) -> list[str]:
+def maintainability_advisories(
+    files: list[str] | None = None,
+    changed_files: list[str] | None = None,
+) -> list[str]:
     """Report review signals without turning source length into a policy limit."""
     rust_files = tracked_files("*.rs") if files is None else files
+    if changed_files is None:
+        changed_files = changed_rust_files() if files is None else []
+    changed = {path.replace("\\", "/") for path in changed_files}
     production: list[tuple[str, int]] = []
     tests: list[tuple[str, int]] = []
     inline_tests: list[tuple[str, int]] = []
@@ -293,8 +317,12 @@ def maintainability_advisories(files: list[str] | None = None) -> list[str]:
             if largest_inline >= INLINE_TEST_ADVISORY_LINES:
                 inline_tests.append((normalized, largest_inline))
 
-    advisories = ranked_file_advisories("production", production)
-    advisories.extend(ranked_file_advisories("test", tests))
+    advisories = changed_file_advisories("production", production, changed)
+    advisories.extend(changed_file_advisories("test", tests, changed))
+    advisories.extend(
+        ranked_file_advisories("production", [item for item in production if item[0] not in changed])
+    )
+    advisories.extend(ranked_file_advisories("test", [item for item in tests if item[0] not in changed]))
     largest_inline_tests = sorted(inline_tests, key=lambda item: (-item[1], item[0]))[
         :INLINE_TEST_MODULES_REPORTED
     ]
@@ -304,6 +332,55 @@ def maintainability_advisories(files: list[str] | None = None) -> list[str]:
             "review whether it belongs in a sibling test module"
         )
     return advisories
+
+
+def changed_rust_files() -> list[str]:
+    """Return working-tree Rust changes, or the latest commit when clean."""
+    commands = (
+        ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB"],
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    )
+    changed: set[str] = set()
+    for command in commands:
+        result = subprocess.run(command, cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE)
+        changed.update(result.stdout.splitlines())
+    rust_changes = {
+        normalized
+        for path in changed
+        if (normalized := path.strip().replace("\\", "/")).endswith(".rs")
+        and (ROOT / normalized).is_file()
+    }
+    if not rust_changes:
+        result = subprocess.run(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        rust_changes.update(
+            normalized
+            for path in result.stdout.splitlines()
+            if (normalized := path.strip().replace("\\", "/")).endswith(".rs")
+            and (ROOT / normalized).is_file()
+        )
+    return sorted(rust_changes)
+
+
+def changed_file_advisories(
+    kind: str,
+    files: list[tuple[str, int]],
+    changed: set[str],
+) -> list[str]:
+    selected = sorted(
+        (item for item in files if item[0] in changed),
+        key=lambda item: (-item[1], item[0]),
+    )[:CHANGED_FILES_REPORTED]
+    return [
+        f"changed {kind} file: {path} ({lines} lines); review responsibility boundaries"
+        for path, lines in selected
+    ]
 
 
 def ranked_file_advisories(kind: str, files: list[tuple[str, int]]) -> list[str]:
