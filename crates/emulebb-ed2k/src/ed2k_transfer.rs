@@ -237,9 +237,9 @@ pub struct Ed2kTransferRuntime {
     ///   `GetMaxSourcePerFileSoft`/`GetMaxSourcePerFileUDP`), and global UDP reask
     ///   round-robin pacing (eMule `CDownloadQueue::Process` `m_udcounter`). One
     ///   per runtime, consulted by the per-transfer driver and the reask loop. A
-    ///   `std::sync::Mutex` because every decision is instant (no await held), so
+    ///   `parking_lot::Mutex` because every decision is instant (no await held), so
     ///   the download closure / reask path can consult it without `.await`.
-    download_coordinator: Arc<StdMutex<Ed2kDownloadCoordinator>>,
+    download_coordinator: Arc<parking_lot::Mutex<Ed2kDownloadCoordinator>>,
     /// Live count of inbound (accepted) eD2k peer connections currently being
     /// handled. The listener admits a new inbound connection only while this is
     /// under the concurrent-connection cap (eMule `CListenSocket::OnAccept`
@@ -399,7 +399,7 @@ impl Ed2kTransferRuntime {
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,
             ))),
-            download_coordinator: Arc::new(StdMutex::new(Ed2kDownloadCoordinator::new(
+            download_coordinator: Arc::new(parking_lot::Mutex::new(Ed2kDownloadCoordinator::new(
                 coordinator_config,
             ))),
             inbound_connections: Arc::new(AtomicUsize::new(0)),
@@ -532,10 +532,7 @@ impl Ed2kTransferRuntime {
     /// the `conn_budget` `diag_event_v1` event (schema §3.5) with real
     /// `activeConnections` / `connectionCap` / `denyReason` values.
     pub fn try_acquire_source_connection_detailed(&self) -> Ed2kConnectionBudgetDecision {
-        let mut coordinator = self
-            .download_coordinator
-            .lock()
-            .expect("download coordinator mutex poisoned");
+        let mut coordinator = self.download_coordinator.lock();
         let config = coordinator.config();
         let active_before = coordinator.active_connections();
         let admitted = coordinator.try_acquire_connection(Instant::now());
@@ -564,7 +561,6 @@ impl Ed2kTransferRuntime {
     pub fn mark_connection_established(&self) {
         self.download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
             .mark_connection_established();
     }
 
@@ -573,10 +569,7 @@ impl Ed2kTransferRuntime {
     /// the established bucket first, falling back to the half-open bucket for a
     /// connection that closed before it ever handshaked; both saturate.
     pub fn release_source_connection(&self) {
-        self.download_coordinator
-            .lock()
-            .expect("download coordinator mutex poisoned")
-            .release_connection();
+        self.download_coordinator.lock().release_connection();
     }
 
     /// Whether one more source may be engaged over TCP for a file already
@@ -584,7 +577,6 @@ impl Ed2kTransferRuntime {
     pub fn can_engage_file_source(&self, current_source_count: usize) -> bool {
         self.download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
             .can_engage_source(current_source_count)
     }
 
@@ -593,7 +585,6 @@ impl Ed2kTransferRuntime {
     pub fn can_reask_file_via_udp(&self, current_source_count: usize) -> bool {
         self.download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
             .can_reask_via_udp(current_source_count)
     }
 
@@ -604,7 +595,6 @@ impl Ed2kTransferRuntime {
     pub fn should_purge_nnp_source(&self, current_source_count: usize) -> bool {
         self.download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
             .should_purge_nnp_source(current_source_count)
     }
 
@@ -615,17 +605,13 @@ impl Ed2kTransferRuntime {
     pub fn next_reask_file_slot(&self, file_count: usize) -> Option<usize> {
         self.download_coordinator
             .lock()
-            .expect("download coordinator mutex poisoned")
             .next_reask_slot(file_count, Instant::now())
     }
 
     /// Replace the active download coordinator configuration (live preference
     /// change). Counters are preserved; the new caps apply on the next decision.
     pub fn apply_download_coordinator_config(&self, config: Ed2kDownloadCoordinatorConfig) {
-        self.download_coordinator
-            .lock()
-            .expect("download coordinator mutex poisoned")
-            .set_config(config);
+        self.download_coordinator.lock().set_config(config);
     }
 
     pub(crate) async fn should_request_source_exchange(

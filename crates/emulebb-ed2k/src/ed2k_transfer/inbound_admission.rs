@@ -48,11 +48,7 @@ impl Ed2kTransferRuntime {
     /// live from the shared coordinator config, so a preference update applies to
     /// the inbound-accept admission gate too. 0 means unlimited.
     fn concurrent_connection_cap(&self) -> usize {
-        self.download_coordinator
-            .lock()
-            .expect("download coordinator mutex poisoned")
-            .config()
-            .max_connections
+        self.download_coordinator.lock().config().max_connections
     }
 
     /// Try to admit one inbound (accepted) eD2k peer connection, mirroring the
