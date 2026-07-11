@@ -8,7 +8,13 @@
 //! (`dump.rs::dump_ed2k_tcp_record`) is invoked solely from the feature-gated
 //! send/recv/meta builders.
 
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        reason = "TCP diagnostic event mapping is inert without its feature"
+    )
+)]
 
 use serde_json::{Map, Value, json};
 

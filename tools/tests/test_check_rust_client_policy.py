@@ -55,6 +55,24 @@ mod tests {
         self.assertIn("changed production file: src/file_24.rs", advisories[0])
 
 
+class TestLintSuppressions(unittest.TestCase):
+    def test_rejects_direct_and_conditional_broad_allows(self) -> None:
+        self.assertTrue(CHECKER.contains_permanent_lint_allow("#[allow(dead_code)]"))
+        self.assertTrue(
+            CHECKER.contains_permanent_lint_allow(
+                '#![cfg_attr(not(feature = "trace"), allow(dead_code, unused_imports))]'
+            )
+        )
+
+    def test_accepts_reasoned_expectations_and_unrelated_allows(self) -> None:
+        self.assertFalse(
+            CHECKER.contains_permanent_lint_allow(
+                '#[expect(dead_code, reason = "feature-disabled seam")]'
+            )
+        )
+        self.assertFalse(CHECKER.contains_permanent_lint_allow("#[allow(non_snake_case)]"))
+
+
 class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """

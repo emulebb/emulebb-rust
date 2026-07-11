@@ -1,6 +1,12 @@
 //! Oracle-shaped UDP JSONL dump for Kad parity work.
 
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        reason = "packet-diagnostic machinery is inert without its feature"
+    )
+)]
 
 use chrono::Local;
 use serde::Serialize;

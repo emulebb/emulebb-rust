@@ -2,7 +2,14 @@
 // equivalent of eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS #ifdef). When the
 // feature is off the public dump wrappers below become no-ops and the record
 // machinery is dead-code-eliminated, so release builds carry zero dump cost.
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "TCP diagnostic machinery is inert without its feature"
+    )
+)]
 
 use std::{
     borrow::Cow,

@@ -251,18 +251,24 @@ def check_supply_chain_policy() -> list[str]:
 
 def check_lint_suppressions() -> list[str]:
     """Reject permanent broad Rust/Clippy suppression in production and tests."""
-    suppression = re.compile(
-        r"#\s*\[\s*allow\s*\(\s*(?:clippy::|dead_code\b|unused(?:_\w+)?\b)"
-    )
     errors = []
     for rel in tracked_files("*.rs"):
         text = (ROOT / rel).read_text(encoding="utf-8")
-        if suppression.search(text):
+        if contains_permanent_lint_allow(text):
             errors.append(
                 f"{rel.replace('\\', '/')} uses a permanent broad lint allow; "
                 "use a scoped #[expect(..., reason = ...)] or fix the warning"
             )
     return errors
+
+
+def contains_permanent_lint_allow(text: str) -> bool:
+    """Match direct and conditional broad lint allows inside one attribute."""
+    suppression = re.compile(
+        r"#\s*!?\s*\[[^\]]*\ballow\s*\(\s*"
+        r"(?:clippy::|dead_code\b|unused(?:_\w+)?\b)"
+    )
+    return suppression.search(text) is not None
 
 
 def toolchain_versions_match(channel: str, rust_version: str) -> bool:

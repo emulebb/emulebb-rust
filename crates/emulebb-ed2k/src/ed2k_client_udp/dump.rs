@@ -1,6 +1,13 @@
 // Gated by the `packet-diagnostics` Cargo feature, like the TCP/server packet
 // dumps. Release builds without the feature compile the writers to no-ops.
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "UDP diagnostic machinery is inert without its feature"
+    )
+)]
 
 use std::{
     fs,

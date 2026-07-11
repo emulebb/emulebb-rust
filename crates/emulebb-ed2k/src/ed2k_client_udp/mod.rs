@@ -18,8 +18,12 @@
 //! The re-exports below are the module's full foundation surface. The live
 //! runtime reaches some of it through direct submodule paths and the unit
 //! tests exercise the rest, so parts are unused from the lib's perspective;
-//! keep the allow rather than pruning the parity-shaped API.
-#![allow(dead_code, unused_imports)]
+//! retain the parity-shaped API behind checked, reasoned expectations.
+#![expect(
+    dead_code,
+    unused_imports,
+    reason = "staged parity surface is exercised incrementally and by unit tests"
+)]
 
 pub(crate) mod buddy_relay;
 pub(crate) mod codec;

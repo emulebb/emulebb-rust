@@ -19,7 +19,13 @@
 //! `EMULEBB_RUST_LOG_DIR` for output placement. Regular builds compile [`emit`]
 //! to a no-op, so the environment variable alone cannot enable diagnostics.
 
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        reason = "packet-diagnostic event machinery is inert without its feature"
+    )
+)]
 
 use std::{
     fs,

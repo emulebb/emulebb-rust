@@ -13,9 +13,7 @@
 //! Kad key paths (NodeID / ReceiverVerifyKey) of the same eMule function are
 //! intentionally out of scope here — those belong to the Kad obfuscation layer.
 //!
-//! Kept off the build's dead-code radar until the reask transport wires it in,
-//! mirroring `ed2k_client_udp`.
-#![allow(dead_code)]
+//! The reask transport and its tests exercise the shared codec directly.
 
 use md5::compute as md5_compute;
 
@@ -87,6 +85,13 @@ fn sanitize_ed2k_marker(candidate: u8) -> u8 {
 /// client-to-client deobfuscation first; the Kad NodeID-vs-ReceiverKey ordering
 /// behind `TryKadFirst` is `emulebb-kad-net`'s concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "classification seam is staged for inbound client UDP dispatch"
+    )
+)]
 pub enum InboundUdpDecision {
     /// First byte is a reserved protocol marker — the packet is plaintext and
     /// must never be fed to deobfuscation (eMule's early `switch` pass-through).
@@ -104,6 +109,13 @@ pub enum InboundUdpDecision {
 ///
 /// `kad_active` mirrors eMule's `Kademlia::CKademlia::GetPrefs() != NULL`: when
 /// Kad never started there is no point trying Kad keys, so eD2k is forced first.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "classification seam is staged for inbound client UDP dispatch"
+    )
+)]
 pub fn classify_inbound_client_udp(first_byte: u8, kad_active: bool) -> InboundUdpDecision {
     if is_reserved_protocol_marker(first_byte) {
         return InboundUdpDecision::Plaintext;

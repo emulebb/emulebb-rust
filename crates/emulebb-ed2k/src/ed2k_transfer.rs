@@ -304,7 +304,6 @@ impl Ed2kSharedPublishDemandSignal {
 impl Ed2kTransferRuntime {
     /// Load any persisted transfer manifests and create the runtime root if it
     /// does not exist yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn load_or_create(root_dir: &Path) -> Result<Self> {
         fs::create_dir_all(root_dir).with_context(|| {
             format!("failed to create ED2K transfer root {}", root_dir.display())

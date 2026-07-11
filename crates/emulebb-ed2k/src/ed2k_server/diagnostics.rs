@@ -1,7 +1,14 @@
 // Gated by the `packet-diagnostics` Cargo feature (matches the client dump and
 // eMuleBB's EMULEBB_ENABLE_PACKET_DIAGNOSTICS): off-by-default builds compile the
 // server dump out (emitters become no-ops, record machinery is dead-eliminated).
-#![cfg_attr(not(feature = "packet-diagnostics"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(feature = "packet-diagnostics"),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "server diagnostic machinery is inert without its feature"
+    )
+)]
 
 use std::{
     fs,
