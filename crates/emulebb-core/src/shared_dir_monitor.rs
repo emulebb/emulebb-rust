@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
-use notify_debouncer_full::notify::{EventKind, RecursiveMode, Watcher};
+use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap, new_debouncer,
 };
@@ -221,10 +221,10 @@ where
             RecursiveMode::NonRecursive
         };
         let path = Path::new(&root.path);
-        match debouncer.watcher().watch(path, mode) {
+        match debouncer.watch(path, mode) {
             Ok(()) => {
-                // Keep the file-id cache in sync so rename stitching works.
-                debouncer.cache().add_root(path, mode);
+                // notify-debouncer-full 0.7 manages the file-id cache roots
+                // together with the watcher registration.
                 watched_root_count += 1;
                 tracing::info!(
                     root = %root.path,
