@@ -43,7 +43,7 @@ use std::time::Duration;
 use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap, new_debouncer,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -134,7 +134,7 @@ pub(crate) struct SharedDirMonitor {
     /// Held purely for its RAII `Drop`: dropping the debouncer stops/joins the
     /// OS watcher thread. Never read after construction (the watch set is fixed
     /// at start), hence the allow.
-    _debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, FileIdMap>,
+    _debouncer: Debouncer<notify_debouncer_full::notify::RecommendedWatcher, RecommendedCache>,
     consumer: tokio::task::JoinHandle<()>,
 }
 
