@@ -47,6 +47,7 @@ md5 = "0.7"
 notify = "6"
 notify-debouncer-full = "0.3"
 num-bigint = "0.4"
+parking_lot = "0.12"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rsa = "0.9"

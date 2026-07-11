@@ -219,10 +219,10 @@ pub struct Ed2kTransferRuntime {
     /// in-memory CClientCredits/CKnownFile counters with periodic
     /// clients.met/known.met saves. Queue-scoring reads go read-through over
     /// this ledger, so scores never lag the parking.
-    parked_credit: Arc<StdMutex<credit_ledger::ParkedCreditLedger>>,
+    parked_credit: Arc<parking_lot::Mutex<credit_ledger::ParkedCreditLedger>>,
     /// Serializes ledger drain+commit with credit writes needing a settled
     /// ledger (secure-ident wipe, absolute totals seed) — see `credit_ledger`.
-    credit_flush_gate: Arc<StdMutex<()>>,
+    credit_flush_gate: Arc<parking_lot::Mutex<()>>,
     upload_queue: Arc<Mutex<Ed2kUploadQueueState>>,
     /// Shared cross-transfer download-rate limiter (token bucket). One per
     /// runtime, consulted by every download task before it consumes a received
@@ -391,8 +391,10 @@ impl Ed2kTransferRuntime {
             download_sources: Arc::new(StdMutex::new(HashMap::new())),
             upload_file_churn: Arc::new(StdMutex::new(HashMap::new())),
             pending_catalog_upload: Arc::new(StdMutex::new(HashMap::new())),
-            parked_credit: Arc::new(StdMutex::new(credit_ledger::ParkedCreditLedger::new())),
-            credit_flush_gate: Arc::new(StdMutex::new(())),
+            parked_credit: Arc::new(parking_lot::Mutex::new(
+                credit_ledger::ParkedCreditLedger::new(),
+            )),
+            credit_flush_gate: Arc::new(parking_lot::Mutex::new(())),
             upload_queue: Arc::new(Mutex::new(upload_queue_state)),
             download_throttle: Arc::new(Mutex::new(Ed2kDownloadThrottle::new(
                 download_limit_bytes_per_sec,

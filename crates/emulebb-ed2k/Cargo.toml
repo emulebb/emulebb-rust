@@ -32,6 +32,7 @@ if-addrs.workspace = true
 md4.workspace = true
 md5.workspace = true
 num-bigint.workspace = true
+parking_lot.workspace = true
 rand.workspace = true
 rsa.workspace = true
 serde.workspace = true

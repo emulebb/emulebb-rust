@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::MetadataStore;
+use parking_lot::Mutex;
 
 use super::Ed2kTransferRuntime;
 
@@ -89,9 +90,9 @@ impl ParkedCreditLedger {
 /// held across drain+commit so credit writes that need a settled ledger
 /// (secure-ident wipe, absolute seed) can serialize against it.
 fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
-    let _gate = runtime_parts.flush_gate.lock().unwrap();
+    let _gate = runtime_parts.flush_gate.lock();
     let (peers, files) = {
-        let mut ledger = runtime_parts.ledger.lock().unwrap();
+        let mut ledger = runtime_parts.ledger.lock();
         if ledger.is_empty() {
             return;
         }
@@ -110,14 +111,14 @@ fn flush_parked_credit_blocking(runtime_parts: &ParkedCreditFlushParts) {
         .apply_credit_deltas(&peer_rows, &file_rows)
     {
         tracing::warn!("failed to flush parked credit deltas, re-parking: {error:#}");
-        runtime_parts.ledger.lock().unwrap().restore(peers, files);
+        runtime_parts.ledger.lock().restore(peers, files);
     }
 }
 
 /// The runtime pieces a flush needs, cloneable into blocking-pool tasks.
 struct ParkedCreditFlushParts {
-    ledger: std::sync::Arc<std::sync::Mutex<ParkedCreditLedger>>,
-    flush_gate: std::sync::Arc<std::sync::Mutex<()>>,
+    ledger: std::sync::Arc<Mutex<ParkedCreditLedger>>,
+    flush_gate: std::sync::Arc<Mutex<()>>,
     metadata: MetadataStore,
 }
 
@@ -142,7 +143,7 @@ impl Ed2kTransferRuntime {
             return Ok(());
         }
         let flush_due = {
-            let mut ledger = self.parked_credit.lock().unwrap();
+            let mut ledger = self.parked_credit.lock();
             let slot = ledger.peers.entry(user_hash).or_insert((0, 0));
             slot.0 = slot.0.saturating_add(uploaded_delta);
             slot.1 = slot.1.saturating_add(downloaded_delta);
@@ -166,7 +167,7 @@ impl Ed2kTransferRuntime {
             return Ok(());
         }
         let flush_due = {
-            let mut ledger = self.parked_credit.lock().unwrap();
+            let mut ledger = self.parked_credit.lock();
             let slot = ledger.files.entry(file_hash.to_string()).or_insert(0);
             *slot = slot.saturating_add(delta);
             ledger.last_flush_started.elapsed() >= PARKED_CREDIT_FLUSH_INTERVAL
@@ -182,7 +183,6 @@ impl Ed2kTransferRuntime {
     pub(super) fn parked_peer_credit_delta(&self, user_hash: [u8; 16]) -> (u64, u64) {
         self.parked_credit
             .lock()
-            .unwrap()
             .peers
             .get(&user_hash)
             .copied()
@@ -193,7 +193,6 @@ impl Ed2kTransferRuntime {
     pub(super) fn parked_file_all_time_uploaded(&self, file_hash: &Ed2kHash) -> u64 {
         self.parked_credit
             .lock()
-            .unwrap()
             .files
             .get(&file_hash.to_string())
             .copied()
@@ -205,8 +204,8 @@ impl Ed2kTransferRuntime {
     /// absolute seed observes a settled row (no background flush can re-add
     /// them afterwards). Runs synchronous SQL like the caller it serves.
     pub(super) fn settle_parked_peer_credit(&self, user_hash: [u8; 16]) -> anyhow::Result<()> {
-        let _gate = self.credit_flush_gate.lock().unwrap();
-        let parked = self.parked_credit.lock().unwrap().peers.remove(&user_hash);
+        let _gate = self.credit_flush_gate.lock();
+        let parked = self.parked_credit.lock().peers.remove(&user_hash);
         if let Some((uploaded, downloaded)) = parked {
             self.metadata
                 .apply_credit_deltas(&[(hex::encode(user_hash), uploaded, downloaded)], &[])?;
@@ -218,8 +217,8 @@ impl Ed2kTransferRuntime {
     /// absolute totals seed, which would otherwise double-count them on the
     /// next flush.
     pub(super) fn discard_parked_peer_credit(&self, user_hash: [u8; 16]) {
-        let _gate = self.credit_flush_gate.lock().unwrap();
-        self.parked_credit.lock().unwrap().peers.remove(&user_hash);
+        let _gate = self.credit_flush_gate.lock();
+        self.parked_credit.lock().peers.remove(&user_hash);
     }
 
     /// Fire-and-forget background flush of the whole ledger.
