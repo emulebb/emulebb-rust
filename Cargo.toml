@@ -57,7 +57,7 @@ parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
 rsa = "0.9"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
