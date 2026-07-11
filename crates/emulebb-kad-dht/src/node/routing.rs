@@ -80,12 +80,12 @@ impl DhtNode {
     /// is re-armed. Used by the maintenance loop to keep buckets populated
     /// without hammering one zone or starving the others.
     pub async fn routing_take_due_random_lookup_target(&self) -> Option<NodeId> {
-        use rand::Rng;
+        use rand::RngExt;
         let mut table = self.inner.routing_table.lock().await;
         // Create the (non-Send) RNG only after the await so it is never held
         // across a suspension point.
-        let mut rng = rand::thread_rng();
-        let mut next = || rng.r#gen::<u8>();
+        let mut rng = rand::rng();
+        let mut next = || rng.random::<u8>();
         table.take_due_random_lookup_target(std::time::SystemTime::now(), &mut next)
     }
 
@@ -126,12 +126,12 @@ impl DhtNode {
     /// routing tree so a bootstrapping node receives a keyspace spread rather
     /// than a cluster near our own ID.
     pub async fn bootstrap_contacts(&self, limit: usize) -> Vec<Contact> {
-        use rand::Rng;
+        use rand::RngExt;
         let table = self.inner.routing_table.lock().await;
         // Create the (non-Send) RNG only after the await so it is never held
         // across a suspension point.
-        let mut rng = rand::thread_rng();
-        let mut next_bit = || rng.r#gen::<bool>();
+        let mut rng = rand::rng();
+        let mut next_bit = || rng.random::<bool>();
         table.bootstrap_contacts(limit, &mut next_bit)
     }
 

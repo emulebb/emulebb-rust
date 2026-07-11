@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use rand::RngCore;
+use rand::Rng;
 use tokio::net::UdpSocket;
 
 use crate::networking::require_bind_if_index;
@@ -184,7 +184,7 @@ async fn probe_port_unconnected(
             SocketAddr::V6(_) => None,
         })?;
     let mut txid = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut txid);
+    rand::rng().fill_bytes(&mut txid);
     let request = build_request(&txid);
     tokio::time::timeout(timeout, async {
         socket
@@ -218,7 +218,7 @@ async fn probe_one(host: &'static str, port: u16, bind_ip: Ipv4Addr) -> Result<S
         .with_context(|| format!("no IPv4 address for STUN server {host}:{port}"))?;
 
     let mut txid = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut txid);
+    rand::rng().fill_bytes(&mut txid);
     let request = build_request(&txid);
 
     let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(bind_ip), 0))

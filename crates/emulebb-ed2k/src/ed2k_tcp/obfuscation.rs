@@ -1,6 +1,6 @@
 use anyhow::Result;
 use md5::compute as md5_compute;
-use rand::Rng;
+use rand::RngExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -120,7 +120,7 @@ pub(super) async fn negotiate_outgoing_obfuscation_handshake(
 
     // eMule CryptTCPPaddingLength default profile (Preferences.cpp:3527 = 128,
     // capped 254); EncryptedStreamSocket.cpp:422 pads rand % (len+1) -> 0..=128.
-    let request_padding_len = rand::thread_rng().gen_range(0..=128usize);
+    let request_padding_len = rand::rng().random_range(0..=128usize);
     let mut request = Vec::with_capacity(12 + request_padding_len);
     request.push(random_non_protocol_marker());
     request.extend_from_slice(&random_key_part);
@@ -131,7 +131,7 @@ pub(super) async fn negotiate_outgoing_obfuscation_handshake(
     encrypted_tail.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
     encrypted_tail.push(u8::try_from(request_padding_len).expect("padding length fits in u8"));
     let mut request_padding = vec![0u8; request_padding_len];
-    rand::thread_rng().fill(&mut request_padding[..]);
+    rand::rng().fill(&mut request_padding[..]);
     encrypted_tail.extend_from_slice(&request_padding);
     send_cipher.apply(&mut encrypted_tail);
     request.extend_from_slice(&encrypted_tail);
@@ -229,9 +229,9 @@ pub(super) async fn accept_incoming_obfuscation_handshake(
     }
 
     // Same stock CryptTCPPaddingLength=128 default profile as the request side.
-    let response_padding_len = rand::thread_rng().gen_range(0..=128usize);
+    let response_padding_len = rand::rng().random_range(0..=128usize);
     let mut response_padding = vec![0u8; response_padding_len];
-    rand::thread_rng().fill(&mut response_padding[..]);
+    rand::rng().fill(&mut response_padding[..]);
     let response = encode_incoming_obfuscation_response(&mut send_cipher, &response_padding);
     stream.write_all(&response).await?;
     Ok((receive_cipher, send_cipher))

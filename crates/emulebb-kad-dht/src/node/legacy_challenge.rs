@@ -190,9 +190,9 @@ impl DhtNode {
 /// A random non-zero 128-bit challenge id (oracle `SetValueRandom` with the
 /// zero-value guard).
 fn random_nonzero_node_id() -> NodeId {
-    use rand::Rng;
+    use rand::RngExt;
     loop {
-        let bytes: [u8; 16] = rand::thread_rng().r#gen();
+        let bytes: [u8; 16] = rand::rng().random();
         let id = NodeId::from_bytes(bytes);
         if id != NodeId::ZERO {
             return id;

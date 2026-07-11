@@ -1,7 +1,7 @@
 use anyhow::Result;
 use md5::compute as md5_compute;
 use num_bigint::BigUint;
-use rand::RngCore;
+use rand::Rng;
 
 use super::{
     EMULE_TCP_CRYPT_DISCARD_LEN, OP_EDONKEYPROT, OP_EMULEPROT, OP_PACKEDPROT, ResolvedServerEntry,
@@ -68,7 +68,7 @@ pub(super) fn should_use_server_obfuscation(
 
 pub(super) fn random_nonzero_biguint(byte_len: usize) -> BigUint {
     let mut bytes = vec![0u8; byte_len];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     if bytes.iter().all(|byte| *byte == 0) {
         bytes[byte_len - 1] = 1;
     }
@@ -99,7 +99,7 @@ pub(super) fn derive_server_cipher(shared_secret: &[u8], magic: u8) -> Rc4KeyStr
 pub(super) fn random_non_protocol_marker() -> u8 {
     loop {
         let mut marker = [0u8; 1];
-        rand::thread_rng().fill_bytes(&mut marker);
+        rand::rng().fill_bytes(&mut marker);
         let marker = marker[0];
         if !matches!(marker, OP_EDONKEYPROT | OP_EMULEPROT | OP_PACKEDPROT) {
             return marker;

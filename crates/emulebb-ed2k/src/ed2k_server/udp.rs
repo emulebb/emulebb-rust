@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use md5::compute as md5_compute;
-use rand::Rng;
+use rand::RngExt;
 
 use super::obfuscation::Rc4KeyStream;
 use super::{
@@ -40,7 +40,7 @@ pub(super) fn encode_server_udp_datagram(
         return (server_udp_endpoint(server), plain);
     }
 
-    let random_key_part = rand::thread_rng().r#gen::<u16>();
+    let random_key_part = rand::rng().random::<u16>();
     let mut packet = Vec::with_capacity(EMULE_UDP_CRYPT_HEADER_LEN + plain.len());
     packet.push(random_non_ed2k_udp_marker());
     packet.extend_from_slice(&random_key_part.to_le_bytes());
@@ -108,7 +108,7 @@ fn should_obfuscate_server_udp(server: &ResolvedServerEntry) -> bool {
 
 fn random_non_ed2k_udp_marker() -> u8 {
     loop {
-        let marker = rand::thread_rng().r#gen::<u8>();
+        let marker = rand::rng().random::<u8>();
         if marker != OP_EDONKEYPROT {
             return marker;
         }

@@ -1497,7 +1497,7 @@ dependencies = [
  "md5",
  "num-bigint",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "rsa",
  "serde",
  "serde_json",
@@ -1532,7 +1532,7 @@ dependencies = [
  "emulebb-kad-proto",
  "emulebb-kad-routing",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -1550,7 +1550,7 @@ dependencies = [
  "emulebb-kad-proto",
  "md5",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2",
@@ -4823,7 +4823,6 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
- "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]

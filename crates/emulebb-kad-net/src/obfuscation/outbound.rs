@@ -5,7 +5,7 @@ use crate::obfuscation::{
     OutboundKadEncryptionInfo, OutboundKadEncryptionMode, UDP_PADDING_LEN,
 };
 use emulebb_kad_proto::constants::opcode;
-use rand::Rng;
+use rand::RngExt;
 use std::net::{IpAddr, SocketAddr};
 
 fn can_use_node_id_mode(peer: &ResolvedPeerCryptoState) -> bool {
@@ -31,9 +31,9 @@ fn is_plain_protocol_marker(byte: u8) -> bool {
 }
 
 fn select_marker(mode: KadKeyMode) -> u8 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     loop {
-        let mut marker: u8 = rng.r#gen();
+        let mut marker: u8 = rng.random();
         marker &= !0x03;
         if matches!(mode, KadKeyMode::ReceiverVerifyKey) {
             marker |= KAD_MARKER_RECEIVER_KEY;
@@ -107,7 +107,7 @@ impl ObfuscationLayer {
             return plaintext.to_vec();
         };
 
-        let random_key_part: u16 = rand::thread_rng().r#gen();
+        let random_key_part: u16 = rand::rng().random();
         let rc4_key = match mode {
             KadKeyMode::NodeId => derive_kad_request_key(peer.node_id.unwrap(), random_key_part),
             KadKeyMode::ReceiverVerifyKey => {

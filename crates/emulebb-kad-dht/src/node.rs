@@ -99,17 +99,17 @@ impl DhtNode {
     /// Create a new DhtNode. Does NOT bind the socket or start any tasks.
     /// Call `start()` to begin.
     pub async fn new(mut config: DhtConfig) -> Result<Self, DhtError> {
-        use rand::Rng;
+        use rand::RngExt;
 
         // Generate random node ID if not set
         if config.node_id == NodeId::ZERO {
-            let bytes: [u8; 16] = rand::thread_rng().r#gen();
+            let bytes: [u8; 16] = rand::rng().random();
             config.node_id = NodeId::from_bytes(bytes);
         }
 
         // Generate random UDP key if not set
         if config.udp_key == 0 {
-            config.udp_key = rand::thread_rng().r#gen();
+            config.udp_key = rand::rng().random();
         }
 
         let bind_addr = config.bind_addr.ok_or(DhtError::MissingBindAddr)?;

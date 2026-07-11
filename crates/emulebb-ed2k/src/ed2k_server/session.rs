@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use num_bigint::BigUint;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
@@ -261,11 +261,10 @@ impl ServerSession {
         let mut request = Vec::with_capacity(1 + SERVER_OBFUSCATION_PUBLIC_KEY_LEN + 16);
         request.push(random_non_protocol_marker());
         request.extend_from_slice(&public_bytes);
-        let initial_padding_len =
-            rand::thread_rng().gen_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
+        let initial_padding_len = rand::rng().random_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
         request.push(u8::try_from(initial_padding_len).expect("padding length fits in u8"));
         let mut initial_padding = vec![0u8; initial_padding_len];
-        rand::thread_rng().fill_bytes(&mut initial_padding);
+        rand::rng().fill_bytes(&mut initial_padding);
         request.extend_from_slice(&initial_padding);
         self.stream.write_all(&request).await.with_context(|| {
             format!(
@@ -353,14 +352,13 @@ impl ServerSession {
                 &first_packet[TCP_PACKET_HEADER_LEN..],
             );
         }
-        let response_padding_len =
-            rand::thread_rng().gen_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
+        let response_padding_len = rand::rng().random_range(0..=SERVER_OBFUSCATION_MAX_PADDING_LEN);
         let mut response = Vec::with_capacity(6 + response_padding_len + first_packet.len());
         response.extend_from_slice(&EMULE_TCP_CRYPT_MAGIC_SYNC.to_le_bytes());
         response.push(EMULE_ENCRYPTION_METHOD_OBFUSCATION);
         response.push(u8::try_from(response_padding_len).expect("padding length fits in u8"));
         let mut response_padding = vec![0u8; response_padding_len];
-        rand::thread_rng().fill_bytes(&mut response_padding);
+        rand::rng().fill_bytes(&mut response_padding);
         response.extend_from_slice(&response_padding);
         response.extend_from_slice(first_packet);
         send_cipher.apply(&mut response);
