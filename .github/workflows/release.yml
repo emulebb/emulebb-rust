@@ -24,6 +24,10 @@ jobs:
   windows-x64:
     name: emulebb-rust-windows-x64
     runs-on: windows-latest
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -51,16 +55,14 @@ jobs:
       - name: Assert release build excludes test-only features
         run: python tools/check_rust_client_policy.py
 
-      - name: Build release (default features only)
+      - name: Build fresh debug and release binaries
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
-        run: cargo build --release --locked -p emulebb-daemon
+        run: python tools/rust_quality_gate.py build
 
       - name: Package unsigned Windows x64 zip
         shell: bash
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target
           RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
         run: >-
           python tools/package_release_zip.py

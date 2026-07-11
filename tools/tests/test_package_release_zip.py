@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "package_release_zip.py"
@@ -17,6 +18,11 @@ class TestExternalReleasePaths(unittest.TestCase):
     def test_rejects_relative_path(self) -> None:
         with self.assertRaisesRegex(SystemExit, "must be an absolute path"):
             PACKAGER.external_path("target/release", "--target-dir")
+
+    def test_requires_workspace_root_env(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(SystemExit, "EMULEBB_WORKSPACE_ROOT must be set"):
+                PACKAGER.external_path(Path(tempfile.gettempdir()) / "release", "--out")
 
     def test_rejects_path_inside_repository(self) -> None:
         with self.assertRaisesRegex(SystemExit, "must be outside the source checkout"):

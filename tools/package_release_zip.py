@@ -42,6 +42,22 @@ def workspace_version() -> str:
     return version
 
 
+def required_path_env(name: str) -> Path:
+    value = os.environ.get(name)
+    if not value:
+        raise SystemExit(f"{name} must be set; refusing to derive or override it")
+    raw_path = Path(value).expanduser()
+    if not raw_path.is_absolute():
+        raise SystemExit(f"{name} must be an absolute path: {raw_path}")
+    path = raw_path.resolve()
+    if name == "EMULEBB_WORKSPACE_ROOT":
+        try:
+            ROOT.resolve().relative_to(path)
+        except ValueError as exc:
+            raise SystemExit(f"{name} must contain this checkout: {path}") from exc
+    return path
+
+
 def external_path(value: str | Path, label: str, workspace_root: Path | None = None) -> Path:
     """Resolve a required absolute output path outside every source checkout."""
     path = Path(value).expanduser()
@@ -50,10 +66,8 @@ def external_path(value: str | Path, label: str, workspace_root: Path | None = N
     resolved = path.resolve()
     roots = [ROOT.resolve()]
     if workspace_root is None:
-        configured_root = os.environ.get("EMULEBB_WORKSPACE_ROOT")
-        workspace_root = Path(configured_root) if configured_root else None
-    if workspace_root is not None:
-        roots.append(workspace_root.expanduser().resolve())
+        workspace_root = required_path_env("EMULEBB_WORKSPACE_ROOT")
+    roots.append(workspace_root.expanduser().resolve())
     for root in roots:
         try:
             resolved.relative_to(root)

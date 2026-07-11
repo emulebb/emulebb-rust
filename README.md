@@ -66,6 +66,18 @@ changes:
 python tools\rust_quality_gate.py policy
 ```
 
+Run the build gate after code changes. It runs normal Cargo debug and release
+builds for the daemon and UI, builds the release diagnostics binary, and stages
+freshly copied release executables under
+`%EMULEBB_WORKSPACE_OUTPUT_ROOT%\tools\emulebb-rust\bin`.
+
+```powershell
+python tools\rust_quality_gate.py build
+```
+
+Use `--force-rebuild` only when intentionally clearing Cargo state, for example
+after a toolchain or native dependency investigation.
+
 Compatibility proof for this line is local and deterministic first: Rust to
 Rust, stock-compatible eD2K/Kad interop witnesses, and REST conformance against
 the Rust OpenAPI contract. Public hide.me live-wire proof is a smoke lane layered

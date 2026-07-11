@@ -84,7 +84,9 @@ class TestActionPins(unittest.TestCase):
 class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """
-CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-target
+EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
 --target-dir "$CARGO_TARGET_DIR/release"
 --out "$RELEASE_OUT_DIR"
@@ -95,7 +97,7 @@ RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 4)
+        self.assertEqual(len(errors), 6)
 
 
 if __name__ == "__main__":

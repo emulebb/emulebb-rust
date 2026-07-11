@@ -23,6 +23,10 @@ jobs:
   build-test:
     name: build+test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +76,10 @@ jobs:
   quality:
     name: policy + format + clippy
     runs-on: ubuntu-latest
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
