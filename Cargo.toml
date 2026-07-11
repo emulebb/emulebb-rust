@@ -34,7 +34,7 @@ version = "0.1.0-beta.1"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
-binrw = "0.14"
+binrw = "0.15"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
