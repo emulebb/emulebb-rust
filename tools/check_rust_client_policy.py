@@ -39,6 +39,7 @@ def main() -> int:
     errors.extend(check_package_metadata())
     errors.extend(check_workspace_dependencies())
     errors.extend(check_tokio_features())
+    errors.extend(check_supply_chain_policy())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
@@ -214,6 +215,24 @@ def check_tokio_features() -> list[str]:
             if "full" in features:
                 rel = manifest_path.relative_to(ROOT).as_posix()
                 errors.append(f"{rel} must declare only the Tokio features it uses, not 'full'")
+    return errors
+
+
+def check_supply_chain_policy() -> list[str]:
+    """Keep the audited cargo-deny gates enabled and immutable in CI."""
+    deny = read_toml(ROOT / "deny.toml")
+    errors = []
+    for key in ("unknown-registry", "unknown-git"):
+        if deny.get("sources", {}).get(key) != "deny":
+            errors.append(f"deny.toml sources.{key} must be 'deny'")
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    required = (
+        "EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87",
+        "command: check advisories licenses sources",
+    )
+    for fragment in required:
+        if fragment not in workflow:
+            errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {fragment}")
     return errors
 
 

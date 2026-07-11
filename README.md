@@ -82,3 +82,11 @@ bind to the configured address.
 
 Harnesses may use operator-local inputs to generate that TOML file, but the
 Rust client itself only consumes the configured addresses.
+
+## Licensing
+
+The emulebb-rust workspace is licensed under `GPL-2.0-only`. Third-party
+components retain their own licenses; see `THIRD-PARTY-LICENSES.md` for the
+dependency policy and required notices.
+
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)

@@ -29,6 +29,7 @@ DOC_FILES = (
     "docs/RELEASE-SCOPE.md",
     "LICENSE",
     "README.md",
+    "THIRD-PARTY-LICENSES.md",
 )
 
 

@@ -95,15 +95,13 @@ jobs:
         run: python tools/rust_quality_gate.py quick
 
   supply-chain:
-    name: cargo-deny (advisories)
+    name: cargo-deny (advisories, licenses, sources)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@v4
 
-      - name: cargo-deny — security advisories
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: cargo-deny — advisories, licenses, and sources
+        uses: EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87 # v2
         with:
-          # Advisories (vulnerabilities/yanked) are the hard gate from day one.
-          # bans/licenses tighten after a dependency audit (see deny.toml).
-          command: check advisories
+          command: check advisories licenses sources

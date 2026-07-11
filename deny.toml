@@ -1,10 +1,7 @@
 # cargo-deny configuration for emulebb-rust.
 #
-# Rollout is incremental: security advisories are the hard CI gate from day one
-# (`cargo deny check advisories` in .github/workflows/ci.yml). The bans, sources,
-# and licenses sections below are configured but NOT yet enforced in CI; enable
-# `check bans sources licenses` after a dependency + license audit so the first
-# enforcement does not block on pre-existing dependency facts.
+# Advisories, licenses, and sources are hard CI gates. Bans remain advisory
+# while duplicate-version cleanup is handled incrementally.
 
 [advisories]
 # Deny known vulnerabilities and yanked crates; flag all unmaintained advisories.
@@ -18,6 +15,19 @@ ignore = [
     # timing measurements against an attacker-chosen ciphertext oracle, which our
     # usage does not expose. Revisit and drop this ignore once `rsa` ships a fix.
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2024-0436 — `paste` is unmaintained. It is transitive through the
+    # latest Slint/image graph and is not used by emulebb-rust code directly.
+    # No safe upgrade is available; remove when Slint/image no longer resolves it.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2026-0192 — `ttf-parser` is unmaintained. The latest Slint release
+    # still resolves it through its font/rendering stack, with no safe upgrade.
+    "RUSTSEC-2026-0192",
+    # RUSTSEC-2026-0194/0195 affect quick-xml 0.39 while parsing attacker-controlled
+    # XML. Our only path is the latest wayland-scanner, which uses it at build time
+    # on trusted Wayland protocol files and currently requires quick-xml ^0.39.
+    # Remove both as soon as wayland-scanner accepts quick-xml >=0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [bans]
@@ -25,12 +35,13 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
 
 [licenses]
-# Permissive + GPL-compatible allow-list (emulebb-rust is GPL-2.0-only). Tighten and
-# complete this list during the license audit before enforcing in CI.
+# GPL-2.0-compatible and other approved dependency licenses. Slint is selected
+# under its royalty-free application license (not GPL-3.0-only); its attribution
+# requirements are recorded in THIRD-PARTY-LICENSES.md.
 confidence-threshold = 0.8
 allow = [
   "MIT",
@@ -38,13 +49,14 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
   "ISC",
   "Zlib",
-  "MPL-2.0",
-  "Unicode-DFS-2016",
   "Unicode-3.0",
   "CC0-1.0",
   "GPL-2.0-only",
-  "GPL-2.0",
-  "GPL-3.0",
+  "LicenseRef-Slint-Royalty-free-2.0",
+  "NCSA",
+  "Unlicense",
 ]
