@@ -1420,6 +1420,7 @@ dependencies = [
  "md4",
  "notify",
  "notify-debouncer-full",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
