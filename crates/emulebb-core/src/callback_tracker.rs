@@ -11,8 +11,9 @@
 
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 /// Oracle window: `SEC2MS(180)` (`ClientList.cpp:1093,1102`).
 const DIRECT_CALLBACK_WINDOW: Duration = Duration::from_secs(180);
@@ -46,20 +47,14 @@ impl DirectCallbackRateLimiter {
     }
 
     fn allow_at(&self, ip: Ipv4Addr, now: Instant) -> bool {
-        let entries = self
-            .entries
-            .lock()
-            .expect("direct-callback tracker poisoned");
+        let entries = self.entries.lock();
         !entries.iter().any(|(entry_ip, at)| {
             *entry_ip == ip && now.saturating_duration_since(*at) < DIRECT_CALLBACK_WINDOW
         })
     }
 
     fn track_at(&self, ip: Ipv4Addr, now: Instant) {
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("direct-callback tracker poisoned");
+        let mut entries = self.entries.lock();
         entries.push_front((ip, now));
         // Oracle removes tail entries whose age has reached the window.
         while let Some((_, at)) = entries.back() {
@@ -119,7 +114,7 @@ mod tests {
         // A later insert past the window evicts the stale entry, so the first IP
         // is allowed again.
         limiter.track_at(ip(2), base + Duration::from_secs(181));
-        assert_eq!(limiter.entries.lock().unwrap().len(), 1);
+        assert_eq!(limiter.entries.lock().len(), 1);
         assert!(limiter.allow_at(ip(1), base + Duration::from_secs(181)));
     }
 }

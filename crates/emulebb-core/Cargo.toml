@@ -31,6 +31,7 @@ ipnet.workspace = true
 md4.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
+parking_lot.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
