@@ -30,12 +30,13 @@ def main(argv: list[str] | None = None) -> int:
             "policy",
             "fmt",
             "clippy",
+            "diagnostics",
             "build",
             "test-workspace",
             "test-kad-swarm",
         ],
         help=(
-            "quick=policy+fmt+clippy; ci=quick+build+tests; "
+            "quick=policy+fmt+clippy+diagnostics; ci=quick+build+tests; "
             "ci-test=build+workspace tests+isolated kad_swarm"
         ),
     )
@@ -93,11 +94,18 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
         "policy": [policy_step(), policy_tests_step()],
         "fmt": [fmt_step()],
         "clippy": [clippy_step()],
+        "diagnostics": [diagnostics_step()],
         "build": [build_step()],
         "test-workspace": [test_workspace_step()],
         "test-kad-swarm": [test_kad_swarm_step()],
         "test-vpn-leak": [test_vpn_leak_step()],
-        "quick": [policy_step(), policy_tests_step(), fmt_step(), clippy_step()],
+        "quick": [
+            policy_step(),
+            policy_tests_step(),
+            fmt_step(),
+            clippy_step(),
+            diagnostics_step(),
+        ],
         "ci-test": [
             build_step(),
             test_workspace_step(),
@@ -111,6 +119,7 @@ def commands_for_gate(gate: str) -> list[tuple[str, list[str]]]:
             policy_tests_step(),
             fmt_step(),
             clippy_step(),
+            diagnostics_step(),
             build_step(),
             test_workspace_step(),
             test_kad_swarm_step(),
@@ -146,6 +155,23 @@ def fmt_step() -> tuple[str, list[str]]:
 
 def clippy_step() -> tuple[str, list[str]]:
     return ("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
+
+
+def diagnostics_step() -> tuple[str, list[str]]:
+    return (
+        "packet diagnostics binary",
+        [
+            "cargo",
+            "check",
+            "-p",
+            "emulebb-daemon",
+            "--bin",
+            "emulebb-rust-diagnostics",
+            "--features",
+            "packet-diagnostics",
+            "--locked",
+        ],
+    )
 
 
 def build_step() -> tuple[str, list[str]]:
