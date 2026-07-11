@@ -18,9 +18,10 @@
 //! that unwinds through the held permit) frees the resources.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use emulebb_kad_proto::NodeId;
+use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,7 @@ impl SearchConcurrency {
         };
 
         {
-            let mut in_flight = self.in_flight.lock().expect("in-flight set poisoned");
+            let mut in_flight = self.in_flight.lock();
             if !in_flight.insert(target) {
                 return Err(SearchAcquireError::Duplicate);
             }
@@ -99,9 +100,7 @@ pub(crate) struct SearchPermit {
 
 impl Drop for SearchPermit {
     fn drop(&mut self) {
-        if let Ok(mut in_flight) = self.in_flight.lock() {
-            in_flight.remove(&self.target);
-        }
+        self.in_flight.lock().remove(&self.target);
     }
 }
 

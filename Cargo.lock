@@ -1511,6 +1511,7 @@ dependencies = [
  "emulebb-kad-net",
  "emulebb-kad-proto",
  "emulebb-kad-routing",
+ "parking_lot",
  "rand 0.8.6",
  "thiserror 1.0.69",
  "tokio",
