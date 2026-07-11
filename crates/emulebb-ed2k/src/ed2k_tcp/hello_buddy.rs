@@ -3,7 +3,8 @@
 //! `theApp.clientlist->GetBuddy()` while serializing the hello tag set.
 
 use std::net::Ipv4Addr;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 /// Buddy endpoint a firewalled client advertises in its hello so peers can reach
 /// it through the buddy's UDP callback relay (`buddySnapshot.dwBuddyIP` /
@@ -28,16 +29,12 @@ static HELLO_BUDDY_SNAPSHOT: Mutex<Option<HelloBuddySnapshot>> = Mutex::new(None
 /// hellos. Called by core from the Kad buddy subsystem when the outgoing buddy
 /// is acquired or released.
 pub fn set_hello_buddy_snapshot(snapshot: Option<HelloBuddySnapshot>) {
-    *HELLO_BUDDY_SNAPSHOT
-        .lock()
-        .expect("hello buddy snapshot mutex poisoned") = snapshot;
+    *HELLO_BUDDY_SNAPSHOT.lock() = snapshot;
 }
 
 /// Read the current buddy hello snapshot for the hello tag builder.
 pub(super) fn hello_buddy_snapshot() -> Option<HelloBuddySnapshot> {
-    *HELLO_BUDDY_SNAPSHOT
-        .lock()
-        .expect("hello buddy snapshot mutex poisoned")
+    *HELLO_BUDDY_SNAPSHOT.lock()
 }
 
 /// A peer's buddy endpoint decoded from its eD2k hello tags `CT_EMULE_BUDDYIP`
