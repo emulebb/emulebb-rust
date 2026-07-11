@@ -41,6 +41,7 @@ def main() -> int:
     errors.extend(check_workspace_dependencies())
     errors.extend(check_tokio_features())
     errors.extend(check_supply_chain_policy())
+    errors.extend(check_github_action_pins())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -142,13 +143,18 @@ def check_toolchain_pin() -> list[str]:
         if package.get("rust-version", {}).get("workspace") is not True:
             rel = manifest_path.relative_to(ROOT).as_posix()
             errors.append(f"{rel} must inherit package.rust-version from the workspace")
-    expected_action = f"dtolnay/rust-toolchain@{channel}"
     for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
         text = workflow.read_text(encoding="utf-8")
-        for action in re.findall(r"dtolnay/rust-toolchain@[^\s]+", text):
-            if action != expected_action:
-                rel = workflow.relative_to(ROOT).as_posix()
-                errors.append(f"{rel} uses {action}, expected {expected_action}")
+        rel = workflow.relative_to(ROOT).as_posix()
+        toolchain_lines = [line for line in text.splitlines() if "dtolnay/rust-toolchain@" in line]
+        for line in toolchain_lines:
+            match = re.search(
+                r"dtolnay/rust-toolchain@([0-9a-f]{40})\s+#\s*([^\s]+)", line
+            )
+            if match is None or match.group(2) != channel:
+                errors.append(
+                    f"{rel} must pin dtolnay/rust-toolchain by commit and annotate # {channel}"
+                )
     return errors
 
 
@@ -239,14 +245,30 @@ def check_supply_chain_policy() -> list[str]:
         if deny.get("sources", {}).get(key) != "deny":
             errors.append(f"deny.toml sources.{key} must be 'deny'")
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    required = (
-        "EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87",
-        "command: check advisories licenses sources",
-    )
-    for fragment in required:
-        if fragment not in workflow:
-            errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {fragment}")
+    if not re.search(
+        r"EmbarkStudios/cargo-deny-action@[0-9a-f]{40}\s+#\s*v2\b", workflow
+    ):
+        errors.append(".github/workflows/ci.yml must pin cargo-deny-action v2 by commit")
+    command = "command: check advisories licenses sources"
+    if command not in workflow:
+        errors.append(f".github/workflows/ci.yml is missing cargo-deny guard: {command}")
     return errors
+
+
+def check_github_action_pins() -> list[str]:
+    """Require every external workflow action to use an immutable commit SHA."""
+    errors = []
+    for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = workflow.read_text(encoding="utf-8")
+        rel = workflow.relative_to(ROOT).as_posix()
+        for action, reference in re.findall(r"uses:\s*([^@\s]+)@([^\s#]+)", text):
+            if not action_ref_is_immutable(reference):
+                errors.append(f"{rel} uses mutable action ref {action}@{reference}")
+    return errors
+
+
+def action_ref_is_immutable(reference: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}", reference) is not None
 
 
 def check_lint_suppressions() -> list[str]:

@@ -73,6 +73,14 @@ class TestLintSuppressions(unittest.TestCase):
         self.assertFalse(CHECKER.contains_permanent_lint_allow("#[allow(non_snake_case)]"))
 
 
+class TestActionPins(unittest.TestCase):
+    def test_accepts_only_full_lowercase_commit_ids(self) -> None:
+        self.assertTrue(CHECKER.action_ref_is_immutable("a" * 40))
+        self.assertFalse(CHECKER.action_ref_is_immutable("v4"))
+        self.assertFalse(CHECKER.action_ref_is_immutable("A" * 40))
+        self.assertFalse(CHECKER.action_ref_is_immutable("a" * 39))
+
+
 class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """

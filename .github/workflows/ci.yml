@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -26,25 +29,25 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Checkout emulebb-miniupnp (native C source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
       - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20 # 1.97.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # The local Kad swarm harness refuses loopback by design (node.rs
       # lan_bind_ip): bind through the runner's real primary IPv4 so the
@@ -67,25 +70,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # clippy --workspace builds emulebb-miniupnpc-sys, whose build.rs compiles
       # the vendored MiniUPnP C source; provide it exactly as the build-test job
       # does so the clippy step is not blocked on a native build failure.
       - name: Checkout emulebb-miniupnp (native C source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: emulebb/emulebb-miniupnp
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
       - name: Install pinned Rust with rustfmt and Clippy
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20 # 1.97.0
         with:
           components: rustfmt, clippy
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -99,9 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout emulebb-rust
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: cargo-deny — advisories, licenses, and sources
-        uses: EmbarkStudios/cargo-deny-action@8f84122a46a358a27cb0625d85ad60ab436a1b87 # v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check advisories licenses sources
