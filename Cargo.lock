@@ -1451,7 +1451,7 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1558,7 +1558,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1569,7 +1569,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "thiserror 1.0.69",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1598,7 +1598,7 @@ dependencies = [
  "anyhow",
  "emulebb-miniupnpc-sys",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

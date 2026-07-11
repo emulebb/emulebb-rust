@@ -78,4 +78,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2"
-windows-sys = "0.59"
+windows-sys = "0.61"
