@@ -18,8 +18,10 @@ export struct UploadItem {
     user: string,
     state: string,
     file: string,
+    file-size-text: string,
     speed-text: string,
     uploaded-text: string,
+    progress-text: string,
     ratio: float,
     detail: string,
 }
@@ -670,7 +672,7 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            height: 84px;
+            height: 140px;
             background: #ffffff;
             border-color: #cbd5e1;
             border-width: 1px;
@@ -705,7 +707,6 @@ export component MainWindow inherits Window {
                     color: #334155;
                     font-size: 12px;
                     wrap: word-wrap;
-                    overflow: elide;
                 }
             }
         }

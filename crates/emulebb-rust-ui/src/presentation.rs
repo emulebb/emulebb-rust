@@ -79,14 +79,19 @@ pub(super) fn sorted_uploads(items: &[UploadDto], spec: Option<SortSpec>) -> Vec
                         display_or(&a.user_name, &a.client_id),
                         display_or(&b.user_name, &b.client_id),
                     ),
-                    1 => cmp_text(
+                    1 => cmp_text(&a.client_id, &b.client_id),
+                    2 => cmp_text(
                         a.requested_file_name.as_deref().unwrap_or("-"),
                         b.requested_file_name.as_deref().unwrap_or("-"),
                     ),
-                    2 => cmp_text(&a.upload_state, &b.upload_state),
-                    3 => cmp_f64(a.upload_speed_ki_bps, b.upload_speed_ki_bps),
-                    4 => a.uploaded_bytes.cmp(&b.uploaded_bytes),
-                    5 => cmp_f64(
+                    3 => cmp_text(&a.upload_state, &b.upload_state),
+                    4 => cmp_f64(a.upload_speed_ki_bps, b.upload_speed_ki_bps),
+                    5 => a.uploaded_bytes.cmp(&b.uploaded_bytes),
+                    6 => a
+                        .requested_file_size_bytes
+                        .unwrap_or(0)
+                        .cmp(&b.requested_file_size_bytes.unwrap_or(0)),
+                    7 => cmp_f64(
                         progress_ratio(a.uploaded_bytes, a.requested_file_size_bytes.unwrap_or(0)),
                         progress_ratio(b.uploaded_bytes, b.requested_file_size_bytes.unwrap_or(0)),
                     ),
@@ -312,13 +317,20 @@ pub(super) fn upload_items(items: &[UploadDto]) -> Vec<UploadItem> {
         .map(|item| {
             let requested_size = item.requested_file_size_bytes.unwrap_or(0);
             let file = item.requested_file_name.as_deref().unwrap_or("-");
+            let progress = progress_ratio(item.uploaded_bytes, requested_size);
             let detail = format!(
-                "Client: {}\nUser: {}\nState: {}\nRequested file: {}\nUploaded: {}\nSpeed: {:.1} KiB/s",
+                "Client: {}\nUser: {}\nState: {}\nRequested file: {}\nRequested size: {}\nUploaded: {}\nProgress: {:.1}%\nSpeed: {:.1} KiB/s",
                 item.client_id,
                 display_or(&item.user_name, &item.client_id),
                 item.upload_state,
                 file,
+                if requested_size == 0 {
+                    "-".to_string()
+                } else {
+                    bytes(requested_size)
+                },
                 bytes(item.uploaded_bytes),
+                ratio(progress) * 100.0,
                 item.upload_speed_ki_bps
             );
             UploadItem {
@@ -326,9 +338,15 @@ pub(super) fn upload_items(items: &[UploadDto]) -> Vec<UploadItem> {
                 user: text(display_or(&item.user_name, &item.client_id)),
                 state: text(&item.upload_state),
                 file: text(file),
+                file_size_text: text(if requested_size == 0 {
+                    "-".to_string()
+                } else {
+                    bytes(requested_size)
+                }),
                 speed_text: text(format!("{:.1} KiB/s", item.upload_speed_ki_bps)),
                 uploaded_text: text(bytes(item.uploaded_bytes)),
-                ratio: ratio(progress_ratio(item.uploaded_bytes, requested_size)),
+                progress_text: text(format!("{:.1}%", ratio(progress) * 100.0)),
+                ratio: ratio(progress),
                 detail: text(detail),
             }
         })
@@ -496,12 +514,14 @@ pub(super) fn shared_file_columns() -> Vec<TableColumn> {
 
 pub(super) fn upload_columns() -> Vec<TableColumn> {
     columns(&[
-        ("User", 220.0, 1.0),
-        ("File", 420.0, 2.0),
+        ("User", 190.0, 1.0),
+        ("Client", 180.0, 0.0),
+        ("File", 360.0, 2.0),
         ("State", 110.0, 0.0),
         ("Up", 92.0, 0.0),
         ("Uploaded", 110.0, 0.0),
-        ("Ratio", 90.0, 0.0),
+        ("File Size", 110.0, 0.0),
+        ("Progress", 90.0, 0.0),
     ])
 }
 
@@ -605,11 +625,13 @@ pub(super) fn upload_table_rows(items: &[UploadItem]) -> Vec<Vec<StandardListVie
         .map(|item| {
             row([
                 item.user.clone(),
+                item.client_id.clone(),
                 item.file.clone(),
                 item.state.clone(),
                 item.speed_text.clone(),
                 item.uploaded_text.clone(),
-                format!("{:.0}%", item.ratio * 100.0).into(),
+                item.file_size_text.clone(),
+                item.progress_text.clone(),
             ])
         })
         .collect()

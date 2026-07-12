@@ -317,10 +317,8 @@ fn apply_saved_state(ui: &MainWindow, state: &ui_state::UiState) {
         ));
         ui.window()
             .set_position(PhysicalPosition::new(window.x, window.y));
-        if window.maximized {
-            ui.window().set_maximized(true);
-        }
     }
+    ui.window().set_maximized(true);
 }
 
 fn apply_saved_table_sort(ui: &MainWindow, state: &ui_state::UiState, table: &str) {
@@ -363,7 +361,7 @@ fn reset_layout(ui: &MainWindow) {
     set_table_sort(ui, TABLE_QUEUED_CLIENTS, -1, false);
     set_table_sort(ui, TABLE_LOGS, -1, false);
     ui.window().set_size(PhysicalSize::new(1240, 820));
-    ui.window().set_maximized(false);
+    ui.window().set_maximized(true);
 }
 
 fn save_current_ui_state(ui: &MainWindow) {
