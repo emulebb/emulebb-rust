@@ -1138,6 +1138,15 @@ const KAD_KEYWORD_LOWER_MAP: &[(u16, u16)] = &[
 /// left unchanged, and the map never expands a char (single code unit in, single
 /// code unit out).
 pub(crate) fn kad_keyword_lowercase(word: &str) -> String {
+    if word.is_ascii() {
+        if word.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            let mut lowered = word.to_owned();
+            lowered.make_ascii_lowercase();
+            return lowered;
+        }
+        return word.to_owned();
+    }
+
     word.chars()
         .map(|character| {
             let code = u32::from(character);
