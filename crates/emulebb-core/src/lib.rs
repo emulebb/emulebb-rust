@@ -3586,11 +3586,18 @@ async fn publish_kad_due_shared_files(
 
     for (offset, entry) in shared_files.iter().enumerate() {
         let now = Instant::now();
-        let keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
-        schedule.sync_keyword_terms(&entry.file_hash, &keyword_terms);
+        let keyword_candidate_index = keyword_index.get(&entry.file_hash).copied();
+        let source_only_keyword_terms;
+        let keyword_terms = if let Some(index) = keyword_candidate_index {
+            &keyword_files[index].keyword_terms
+        } else {
+            source_only_keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
+            &source_only_keyword_terms
+        };
+        schedule.sync_keyword_terms(&entry.file_hash, keyword_terms);
         // Only completed files trigger keyword publishes (oracle `!IsPartFile()`
         // gate); an in-progress partfile in the source scan never emits keywords.
-        let due_keyword = if keyword_index.contains_key(&entry.file_hash) {
+        let due_keyword = if keyword_candidate_index.is_some() {
             keyword_terms
                 .iter()
                 .find(|keyword| {
