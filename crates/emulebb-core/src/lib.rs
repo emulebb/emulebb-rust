@@ -4443,12 +4443,8 @@ fn compute_kad_publish_candidates(
     // NOTES lane: single best-ranked notes-due file across the FULL source-eligible
     // set, taken in the SOURCE-sorted order so the sequence tie-break matches the
     // pre-optimization full-scan selection, then re-ranked on the NOTES clock.
-    let notes_candidates = source_order
-        .iter()
-        .map(|&index| source_refs[index])
-        .collect::<Vec<_>>();
     let best_notes_hash = select_best_notes_publish_candidate_from_shared_entries(
-        &notes_candidates,
+        source_order.iter().map(|&index| source_refs[index]),
         schedule,
         now_instant,
         now_unix_ms,
@@ -4604,14 +4600,14 @@ fn select_best_notes_publish_candidate(
         .map(|(_, entry)| entry.file_hash.clone())
 }
 
-fn select_best_notes_publish_candidate_from_shared_entries(
-    shared_files: &[&Ed2kSharedEntry],
+fn select_best_notes_publish_candidate_from_shared_entries<'a>(
+    shared_files: impl IntoIterator<Item = &'a Ed2kSharedEntry>,
     schedule: &kad_publish_schedule::KadPublishSchedule,
     now_instant: Instant,
     now_unix_ms: i64,
 ) -> Option<String> {
     shared_files
-        .iter()
+        .into_iter()
         .filter(|entry| {
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now_instant)
@@ -4624,7 +4620,7 @@ fn select_best_notes_publish_candidate_from_shared_entries(
                 schedule.notes_last_publish_unix_ms(&entry.file_hash, now_instant, now_unix_ms),
                 now_unix_ms,
             );
-            (rank, *entry)
+            (rank, entry)
         })
         .min_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right))
         .map(|(_, entry)| entry.file_hash.clone())
