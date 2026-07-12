@@ -1,6 +1,6 @@
 //! Runtime facade for shared-catalog reads and mutation.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::PopularHash;
 
@@ -35,6 +35,7 @@ impl Ed2kTransferRuntime {
         preserved_verified.extend(hashes.iter().filter_map(Ed2kSharedEntry::from_popular_hash));
         let mut guard = self.shared_catalog.write().await;
         guard.replace_with(dedupe_entries(preserved_verified));
+        self.note_shared_catalog_entries_changed();
     }
 
     pub(super) async fn upsert_verified_catalog_entry(&self, manifest: &Ed2kResumeManifest) {
@@ -52,6 +53,7 @@ impl Ed2kTransferRuntime {
             new_entry,
             dedupe_entries,
         );
+        self.note_shared_catalog_entries_changed();
     }
 
     /// Remove a locally verified file from the live serving/advertisement
@@ -61,6 +63,13 @@ impl Ed2kTransferRuntime {
         entries.retain(|entry| {
             !entry.file_hash.eq_ignore_ascii_case(file_hash) || entry.compatibility_hint
         });
+        self.note_shared_catalog_entries_changed();
+    }
+
+    pub(super) fn note_shared_catalog_entries_changed(&self) {
+        self.shared_catalog_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.servable_shared_hash_cache.lock().unwrap().hashes = None;
     }
 }
 

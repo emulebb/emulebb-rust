@@ -1147,3 +1147,56 @@ async fn waiter_for_an_unshared_file_is_purged_on_maintenance() {
         "no entry for the unshared file may remain"
     );
 }
+
+#[tokio::test]
+async fn unshared_purge_observes_catalog_mutation_after_cached_scan() {
+    use crate::ed2k_transfer::Ed2kSharedEntry;
+
+    let root = unique_test_dir("ed2k-upload-queue-unshared-purge-cache");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    runtime.configure_upload_queue(one_slot_config()).await;
+
+    let file_hash = Ed2kHash::from_bytes([0xC3; 16]);
+
+    let (_active, active_status) = runtime
+        .begin_upload_session(upload_peer(1, 0x41, 0x0A00_0041), &file_hash)
+        .await;
+    assert_eq!(active_status, Ed2kUploadSessionStatus::Granted);
+    let (_waiter, waiter_status) = runtime
+        .begin_upload_session(upload_peer(2, 0x42, 0x0A00_0042), &file_hash)
+        .await;
+    assert_eq!(waiter_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
+
+    runtime
+        .shared_catalog()
+        .write()
+        .await
+        .push(Ed2kSharedEntry {
+            file_hash: file_hash.to_string(),
+            canonical_name: "shared-cache.bin".to_string(),
+            file_size: 1_000_000,
+            verified_complete: true,
+            verified_ranges: Vec::new(),
+            compatibility_hint: false,
+            source_count_hint: None,
+            aich_root: None,
+            upload_priority: "normal".to_string(),
+            auto_upload_priority: false,
+            comment: String::new(),
+            rating: 0,
+            all_time_uploaded_bytes: 0,
+            complete_parts: Vec::new(),
+            publish: Default::default(),
+        });
+
+    assert_eq!(runtime.purge_unshared_upload_waiters().await, 0);
+
+    runtime
+        .remove_verified_catalog_entry(&file_hash.to_string())
+        .await;
+
+    assert_eq!(runtime.purge_unshared_upload_waiters().await, 1);
+    let snapshot = runtime.upload_queue_snapshot().await;
+    assert_eq!(snapshot.len(), 1, "only the active slot holder remains");
+    assert_eq!(snapshot[0].phase, Ed2kUploadSessionPhaseSnapshot::Granted);
+}

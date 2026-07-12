@@ -136,18 +136,54 @@ impl Ed2kTransferRuntime {
     /// consults); a bare compatibility hint is not servable and never keeps a
     /// waiter alive. Returns the number of purged waiters.
     pub(crate) async fn purge_unshared_upload_waiters(&self) -> usize {
-        let shared_file_hashes: std::collections::HashSet<String> = {
-            let catalog = self.shared_catalog.read().await;
-            catalog
-                .iter()
-                .filter(|entry| entry.is_servable())
-                .map(|entry| entry.file_hash.to_ascii_lowercase())
-                .collect()
-        };
+        let shared_file_hashes = self.servable_shared_file_hashes().await;
         self.upload_queue
             .lock()
             .await
             .purge_waiters_for_unshared_files(&shared_file_hashes)
+    }
+
+    async fn servable_shared_file_hashes(
+        &self,
+    ) -> std::sync::Arc<std::collections::HashSet<String>> {
+        loop {
+            let generation = self
+                .shared_catalog_generation
+                .load(std::sync::atomic::Ordering::Acquire);
+            if let Some(hashes) = {
+                let cache = self.servable_shared_hash_cache.lock().unwrap();
+                (cache.generation == generation)
+                    .then(|| cache.hashes.as_ref().map(std::sync::Arc::clone))
+                    .flatten()
+            } {
+                return hashes;
+            }
+
+            let hashes = {
+                let catalog = self.shared_catalog.read().await;
+                catalog
+                    .iter()
+                    .filter(|entry| entry.is_servable())
+                    .map(|entry| entry.file_hash.to_ascii_lowercase())
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let current_generation = self
+                .shared_catalog_generation
+                .load(std::sync::atomic::Ordering::Acquire);
+            if current_generation != generation {
+                continue;
+            }
+            let hashes = std::sync::Arc::new(hashes);
+            let mut cache = self.servable_shared_hash_cache.lock().unwrap();
+            if cache.generation == current_generation {
+                if let Some(cached) = cache.hashes.as_ref() {
+                    return std::sync::Arc::clone(cached);
+                }
+            }
+            cache.generation = current_generation;
+            cache.hashes = Some(std::sync::Arc::clone(&hashes));
+            return hashes;
+        }
     }
 
     /// Poll the current queue-visible state for one upload session.

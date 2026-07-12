@@ -11,7 +11,7 @@
 //! - compatibility catalog hints for server-side `OP_OFFERFILES`
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -159,6 +159,12 @@ const PAYLOAD_FILE_NAME: &str = "pieces.bin";
 /// `repeat_file_request` parity (observe-only).
 type UploadFileChurnLedger = Arc<StdMutex<HashMap<(String, String), (u32, Instant)>>>;
 
+#[derive(Debug, Default)]
+struct ServableSharedHashCache {
+    generation: u64,
+    hashes: Option<Arc<HashSet<String>>>,
+}
+
 /// Runtime owner for ED2K transfer manifests, piece-store payloads, and the
 /// transfer-backed shared catalog.
 #[derive(Debug)]
@@ -166,6 +172,8 @@ pub struct Ed2kTransferRuntime {
     root_dir: PathBuf,
     metadata: MetadataStore,
     shared_catalog: Ed2kSharedCatalog,
+    shared_catalog_generation: AtomicU64,
+    servable_shared_hash_cache: Arc<StdMutex<ServableSharedHashCache>>,
     callback_intents: Arc<RwLock<Vec<Ed2kCallbackIntent>>>,
     /// Per-file-hash manifest IO locks (see [`Self::lock_manifest`]). Manifest
     /// state is keyed by one file hash everywhere, so transfers only serialize
@@ -379,6 +387,8 @@ impl Ed2kTransferRuntime {
             root_dir: root_dir.to_path_buf(),
             metadata,
             shared_catalog,
+            shared_catalog_generation: AtomicU64::new(0),
+            servable_shared_hash_cache: Arc::new(StdMutex::new(ServableSharedHashCache::default())),
             callback_intents: Arc::new(RwLock::new(Vec::new())),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
             manifest_cache: Arc::new(Mutex::new(HashMap::new())),
