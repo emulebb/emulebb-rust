@@ -408,7 +408,7 @@ fn cheap_prune_hash_set_matches_old_source_scan_and_prunes_on_blocked_tick() {
     schedule.mark_source_published(&complete.file_hash, now, None);
     let gone = Ed2kHash::from_bytes([0x09; 16]).to_string();
     schedule.mark_source_published(&gone, now, None);
-    schedule.retain_only(cheap.iter().map(String::as_str));
+    schedule.retain_only_set(&cheap);
     assert!(!schedule.source_due(&complete.file_hash, now, None));
     assert!(schedule.source_due(&gone, now, None));
     // Sanity: after the source interval elapses the retained file is due again.

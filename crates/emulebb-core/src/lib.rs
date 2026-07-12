@@ -3326,7 +3326,7 @@ async fn publish_kad_due_shared_files(
 ) -> Result<usize> {
     let in_flight_budget = kad_shared_file_publish_in_flight_budget(runtime);
     let available_search_permits = runtime.dht.available_search_permits();
-    // Cheap per-tick prune input: read ONLY the source-publishable file hashes
+    // Cheap per-tick prune input: read ONLY the source-publishable file hash set
     // (one small allocation each), not the full ranked clone. The schedule is
     // pruned on EVERY tick — including a gate-blocked / DHT-busy / budget-full one
     // — so a file unshared while the tick cannot publish is still forgotten. The
@@ -3350,7 +3350,7 @@ async fn publish_kad_due_shared_files(
     });
     // Keep the per-file schedule from growing without bound: forget files that
     // are no longer publishable (removed / no longer complete).
-    schedule.retain_only(publishable_hashes.iter().map(String::as_str));
+    schedule.retain_only_set(&publishable_hashes);
     if item_count == 0 {
         kad_publish_diagnostics::record(&runtime.diagnostics, |diagnostics| {
             diagnostics.phase = "idle".to_string();
@@ -4316,7 +4316,7 @@ fn kad_keyword_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
 /// hash set is identical to the SOURCE-scan set built by
 /// `kad_publishable_shared_files` (same `kad_source_publish_eligible` filter), so
 /// the schedule prune is unchanged from the previous build-first ordering.
-async fn kad_source_publishable_hashes(runtime: &Ed2kTransferRuntime) -> Vec<String> {
+async fn kad_source_publishable_hashes(runtime: &Ed2kTransferRuntime) -> HashSet<String> {
     let shared_catalog = runtime.shared_catalog();
     let guard = shared_catalog.read().await;
     guard

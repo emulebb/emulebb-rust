@@ -18,7 +18,7 @@
 //! over-publishes keywords ~48x and sources ~10x versus the master and risks a
 //! live-network ban. This tracker restores the per-file, per-kind due gating.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -314,9 +314,14 @@ impl KadPublishSchedule {
     /// Drop bookkeeping for files no longer shared, so the map cannot grow
     /// without bound as transfers come and go. `keep` is the set of currently
     /// publishable file hashes.
+    #[cfg(test)]
     pub(crate) fn retain_only<'a>(&mut self, keep: impl IntoIterator<Item = &'a str>) {
-        let keep: std::collections::HashSet<&str> = keep.into_iter().collect();
+        let keep: HashSet<&str> = keep.into_iter().collect();
         self.files.retain(|hash, _| keep.contains(hash.as_str()));
+    }
+
+    pub(crate) fn retain_only_set(&mut self, keep: &HashSet<String>) {
+        self.files.retain(|hash, _| keep.contains(hash));
     }
 
     /// Update remembered filename-derived keyword terms for one file, pruning only
