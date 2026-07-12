@@ -31,7 +31,9 @@ pub(super) async fn fetch_search(
     get(
         client,
         config,
-        &format!("searches/{search_id}?limit=200&includeEvidence=false&exactTotal=true"),
+        &format!(
+            "searches/{search_id}?limit={SEARCH_RESULT_LIMIT}&includeEvidence=false&exactTotal=true"
+        ),
     )
     .await
 }

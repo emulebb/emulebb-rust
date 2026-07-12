@@ -137,7 +137,7 @@ pub(super) fn worker_loop(
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((snapshot, search, Some(search_id)))
             }),
-            Some(UiCommand::Refresh) | None => runtime.block_on(async {
+            Some(UiCommand::Refresh) => runtime.block_on(async {
                 let search = match active_search_id_for_poll.as_deref() {
                     Some(search_id) => fetch_search(&client, &config_for_command, search_id)
                         .await
@@ -155,6 +155,16 @@ pub(super) fn worker_loop(
                 });
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((snapshot, search, next_search_id))
+            }),
+            None => runtime.block_on(async {
+                let search = match active_search_id_for_poll.as_deref() {
+                    Some(search_id) => fetch_search(&client, &config_for_command, search_id)
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let snapshot = fetch_snapshot(&client, &config_for_command).await?;
+                Ok((snapshot, search, active_search_id_for_poll))
             }),
             Some(UiCommand::Connect(_)) => unreachable!("connect commands are handled separately"),
         };

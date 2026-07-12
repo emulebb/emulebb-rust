@@ -36,8 +36,9 @@ use worker::*;
 
 slint::include_modules!();
 
-const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
-const SNAPSHOT_LIMIT: usize = 200;
+const DEFAULT_POLL_INTERVAL_MS: u64 = 10_000;
+const SNAPSHOT_LIMIT: usize = 100;
+const SEARCH_RESULT_LIMIT: usize = 100;
 const TABLE_TRANSFERS: &str = "transfers";
 const TABLE_SEARCH_RESULTS: &str = "search-results";
 const TABLE_SERVERS: &str = "servers";
