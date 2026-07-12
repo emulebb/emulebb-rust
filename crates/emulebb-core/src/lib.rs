@@ -4446,14 +4446,13 @@ fn compute_kad_publish_candidates(
     let notes_candidates = source_order
         .iter()
         .map(|&index| source_refs[index])
-        .filter(|entry| {
-            kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
-                && schedule.notes_due(&entry.file_hash, now_instant)
-        })
-        .map(kad_publish_entry_from_shared_entry)
         .collect::<Vec<_>>();
-    let best_notes_hash =
-        select_best_notes_publish_candidate(&notes_candidates, schedule, now_instant, now_unix_ms);
+    let best_notes_hash = select_best_notes_publish_candidate_from_shared_entries(
+        &notes_candidates,
+        schedule,
+        now_instant,
+        now_unix_ms,
+    );
     // KEYWORD lane holds the age term CONSTANT, independent of the source-clock
     // scan sort: the oracle keyword rank passes 0 for `tLastPublish`
     // (SharedFileList.cpp:3316), so keyword selection is priority/demand-ordered,
@@ -4523,6 +4522,7 @@ fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTrans
 /// NOTES Kad clock (or a constant for lanes whose oracle age term is constant),
 /// so the longest-unpublished file wins within its priority tier
 /// (SharedFileList.cpp:3374-3379,3421-3426, `GetPublishAgeScore`).
+#[cfg(test)]
 fn kad_publishable_shared_file_entries(
     entries: Vec<MetadataTransferPublishEntry>,
     now_unix_ms: i64,
@@ -4562,29 +4562,72 @@ fn kad_publishable_shared_file_entries(
 /// best-ranked hash using the NOTES last-publish clock
 /// (`GetLastPublishTimeKadNotes`) so the longest-unpublished note wins within its
 /// priority tier. Returns `None` when no annotated file is notes-due.
+#[cfg(test)]
 fn select_best_notes_publish_candidate(
     shared_files: &[MetadataTransferPublishEntry],
     schedule: &kad_publish_schedule::KadPublishSchedule,
     now_instant: Instant,
     now_unix_ms: i64,
 ) -> Option<String> {
-    let candidates = shared_files
+    shared_files
         .iter()
         .filter(|entry| {
             kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
                 && schedule.notes_due(&entry.file_hash, now_instant)
         })
-        .cloned()
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return None;
-    }
-    kad_publishable_shared_file_entries(candidates, now_unix_ms, |file_hash| {
-        schedule.notes_last_publish_unix_ms(file_hash, now_instant, now_unix_ms)
-    })
-    .into_iter()
-    .next()
-    .map(|entry| entry.file_hash)
+        .enumerate()
+        .map(|(sequence, entry)| {
+            let rank = shared_publish_rank(SharedPublishRankInput {
+                file_hash: &entry.file_hash,
+                file_size: entry.file_size,
+                upload_priority: &entry.upload_priority,
+                auto_upload_priority: entry.auto_upload_priority,
+                queued_count: 0,
+                session_request_count: entry.session_request_count,
+                session_accept_count: entry.session_accept_count,
+                all_time_request_count: entry.all_time_upload_requests,
+                all_time_accept_count: entry.all_time_upload_accepts,
+                all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
+                session_uploaded_bytes: entry.session_uploaded_bytes,
+                last_request_unix_ms: entry.last_upload_request_ms,
+                last_publish_unix_ms: schedule.notes_last_publish_unix_ms(
+                    &entry.file_hash,
+                    now_instant,
+                    now_unix_ms,
+                ),
+                sequence,
+                now_unix_ms,
+            });
+            (rank, entry)
+        })
+        .min_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right))
+        .map(|(_, entry)| entry.file_hash.clone())
+}
+
+fn select_best_notes_publish_candidate_from_shared_entries(
+    shared_files: &[&Ed2kSharedEntry],
+    schedule: &kad_publish_schedule::KadPublishSchedule,
+    now_instant: Instant,
+    now_unix_ms: i64,
+) -> Option<String> {
+    shared_files
+        .iter()
+        .filter(|entry| {
+            kad_publish_schedule::file_has_publishable_note(&entry.comment, entry.rating)
+                && schedule.notes_due(&entry.file_hash, now_instant)
+        })
+        .enumerate()
+        .map(|(sequence, entry)| {
+            let rank = shared_entry_publish_rank(
+                entry,
+                sequence,
+                schedule.notes_last_publish_unix_ms(&entry.file_hash, now_instant, now_unix_ms),
+                now_unix_ms,
+            );
+            (rank, *entry)
+        })
+        .min_by(|(left, _), (right, _)| compare_shared_publish_rank(left, right))
+        .map(|(_, entry)| entry.file_hash.clone())
 }
 
 /// Self-inclusive complete-source count published as the Kad keyword
