@@ -622,16 +622,68 @@ fn windowed_candidate_build_selects_identically_to_full_clone_build() {
         assert_eq!(cand.source_item_count, n);
         assert_eq!(cand.source_cursor_start, start);
         assert_eq!(
-            cand.source_scan, old_window,
+            cand.source_scan
+                .iter()
+                .map(|candidate| candidate.entry.clone())
+                .collect::<Vec<_>>(),
+            old_window,
             "window differs at cursor {start}"
+        );
+        assert!(
+            cand.source_scan
+                .iter()
+                .filter(|candidate| candidate.entry.file_hash != catalog[5].file_hash)
+                .all(|candidate| candidate.keyword_terms.is_some())
+        );
+        assert_eq!(
+            cand.source_scan
+                .iter()
+                .find(|candidate| candidate.entry.file_hash == catalog[5].file_hash)
+                .and_then(|candidate| candidate.keyword_terms.as_ref()),
+            None
         );
         assert_eq!(cand.best_notes_hash, old_best_notes);
         assert_eq!(
             cand.best_notes_hash.as_deref(),
             Some(catalog[2].file_hash.as_str())
         );
-        assert_eq!(cand.keyword_files, old_keyword_candidates);
-        assert_eq!(cand.keyword_index, old_keyword_index);
+        let lazy_keyword_entries = kad_keyword_publish_entries_for_catalog_keyword(
+            &catalog,
+            now_unix_ms,
+            &catalog[0].file_hash,
+            "alpha",
+            KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+        );
+        let old_keyword_start = old_keyword_index
+            .get(&catalog[0].file_hash)
+            .copied()
+            .unwrap_or(0);
+        let expected_keyword_entries = kad_keyword_publish_entries_for_keyword(
+            &old_keyword_candidates,
+            "alpha",
+            KAD_KEYWORD_PUBLISH_FILE_LIMIT,
+            old_keyword_start,
+        );
+        assert_eq!(
+            lazy_keyword_entries
+                .iter()
+                .map(|(file_hash, entry)| (
+                    file_hash,
+                    entry.file_hash,
+                    &entry.tags,
+                    entry.aich_hash
+                ))
+                .collect::<Vec<_>>(),
+            expected_keyword_entries
+                .iter()
+                .map(|(file_hash, entry)| (
+                    file_hash,
+                    entry.file_hash,
+                    &entry.tags,
+                    entry.aich_hash
+                ))
+                .collect::<Vec<_>>()
+        );
 
         schedule.advance_cursor(start, window_len, n);
     }

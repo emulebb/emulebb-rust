@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fmt, fs,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -3552,14 +3552,13 @@ async fn publish_kad_due_shared_files(
     // to publishing (past the gate / DHT-busy / in-flight-budget short-circuits),
     // so a gate-blocked, DHT-busy or in-flight-full tick never pays for the
     // clone+rank+sort — only the cheap hash read above ran on those ticks.
+    let now_unix_ms = Utc::now().timestamp_millis();
     let KadPublishCandidateSets {
-        source_scan: shared_files,
+        source_scan,
         source_item_count,
         source_cursor_start,
         best_notes_hash,
-        keyword_files,
-        keyword_index,
-    } = kad_publishable_shared_files(&runtime.transfer_runtime, schedule).await?;
+    } = kad_publishable_shared_files_at(&runtime.transfer_runtime, schedule, now_unix_ms).await?;
     let mut keyword_due_count = 0usize;
     let mut source_due_count = 0usize;
     let mut notes_due_count = 0usize;
@@ -3584,12 +3583,12 @@ async fn publish_kad_due_shared_files(
     let mut inspected = 0usize;
     let mut attempted_files = 0usize;
 
-    for (offset, entry) in shared_files.iter().enumerate() {
+    for (offset, source_candidate) in source_scan.iter().enumerate() {
+        let entry = &source_candidate.entry;
         let now = Instant::now();
-        let keyword_candidate_index = keyword_index.get(&entry.file_hash).copied();
         let source_only_keyword_terms;
-        let keyword_terms = if let Some(index) = keyword_candidate_index {
-            &keyword_files[index].keyword_terms
+        let keyword_terms = if let Some(keyword_terms) = source_candidate.keyword_terms.as_ref() {
+            keyword_terms
         } else {
             source_only_keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
             &source_only_keyword_terms
@@ -3597,7 +3596,7 @@ async fn publish_kad_due_shared_files(
         schedule.sync_keyword_terms(&entry.file_hash, keyword_terms);
         // Only completed files trigger keyword publishes (oracle `!IsPartFile()`
         // gate); an in-progress partfile in the source scan never emits keywords.
-        let due_keyword = if keyword_candidate_index.is_some() {
+        let due_keyword = if source_candidate.keyword_terms.is_some() {
             keyword_terms
                 .iter()
                 .find(|keyword| {
@@ -3715,13 +3714,14 @@ async fn publish_kad_due_shared_files(
                 // The keyword batch is drawn from the completed-only keyword set,
                 // starting at the triggering file's position within it and
                 // wrapping (matching the >150-file cap rotation).
-                let keyword_start = keyword_index.get(&entry.file_hash).copied().unwrap_or(0);
-                let keyword_entries = kad_keyword_publish_entries_for_keyword(
-                    &keyword_files,
+                let keyword_entries = kad_keyword_publish_entries_for_shared_catalog_keyword(
+                    &runtime.transfer_runtime,
+                    now_unix_ms,
+                    &entry.file_hash,
                     &keyword,
                     KAD_KEYWORD_PUBLISH_FILE_LIMIT,
-                    keyword_start,
-                );
+                )
+                .await?;
                 if keyword_entries.is_empty() {
                     keyword_skipped_by_budget += 1;
                 } else {
@@ -4230,7 +4230,7 @@ struct KadPublishCandidateSets {
     /// entries, in ranked order starting at `source_cursor_start`) — the source
     /// lane is ranked over borrowed catalog entries and only the window the tick
     /// inspects is cloned. `source_item_count` carries the full ranked population.
-    source_scan: Vec<MetadataTransferPublishEntry>,
+    source_scan: Vec<KadSourcePublishCandidate>,
     /// Full count of SOURCE-eligible files (the ranked population the window is
     /// drawn from), used for the cursor rotation math and diagnostics.
     source_item_count: usize,
@@ -4242,19 +4242,12 @@ struct KadPublishCandidateSets {
     /// annotated file is notes-due. Computed here so the notes lane still selects
     /// the global best even though `source_scan` is only the window.
     best_notes_hash: Option<String>,
-    /// KEYWORD-lane candidate list: completed files only, mirroring the oracle
-    /// keyword loop's `!IsPartFile()` gate (SharedFileList.cpp:3313) — "only
-    /// publish complete files as someone else should have the full file."
-    ///
-    /// This is intentionally narrower than `MetadataTransferPublishEntry`: keyword
-    /// STORE packets only need name, size, file hash and AICH root. Keeping the full
-    /// transfer-publish entry here clones upload counters/comments/priority for
-    /// every complete file on every Kad publish tick.
-    keyword_files: Vec<KadKeywordPublishCandidate>,
-    /// Position of each keyword-eligible (completed) file within `keyword_files`,
-    /// so a scanned file can be tested for keyword eligibility and its keyword
-    /// batch can start at the triggering file and wrap.
-    keyword_index: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KadSourcePublishCandidate {
+    entry: MetadataTransferPublishEntry,
+    keyword_terms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4333,12 +4326,12 @@ async fn kad_source_publishable_hashes(runtime: &Ed2kTransferRuntime) -> HashSet
         .collect()
 }
 
-async fn kad_publishable_shared_files(
+async fn kad_publishable_shared_files_at(
     runtime: &Ed2kTransferRuntime,
     schedule: &kad_publish_schedule::KadPublishSchedule,
+    now_unix_ms: i64,
 ) -> Result<KadPublishCandidateSets> {
     let now_instant = Instant::now();
-    let now_unix_ms = Utc::now().timestamp_millis();
     let shared_catalog = runtime.shared_catalog();
     let guard = shared_catalog.read().await;
     Ok(compute_kad_publish_candidates(
@@ -4348,6 +4341,63 @@ async fn kad_publishable_shared_files(
         now_unix_ms,
         KAD_SHARED_FILE_PUBLISH_SCAN_BUDGET,
     ))
+}
+
+async fn kad_keyword_publish_entries_for_shared_catalog_keyword(
+    runtime: &Ed2kTransferRuntime,
+    now_unix_ms: i64,
+    triggering_file_hash: &str,
+    keyword: &str,
+    limit: usize,
+) -> Result<Vec<(String, KeywordPublishEntry)>> {
+    let shared_catalog = runtime.shared_catalog();
+    let guard = shared_catalog.read().await;
+    Ok(kad_keyword_publish_entries_for_catalog_keyword(
+        &guard,
+        now_unix_ms,
+        triggering_file_hash,
+        keyword,
+        limit,
+    ))
+}
+
+fn kad_keyword_publish_entries_for_catalog_keyword(
+    entries: &[Ed2kSharedEntry],
+    now_unix_ms: i64,
+    triggering_file_hash: &str,
+    keyword: &str,
+    limit: usize,
+) -> Vec<(String, KeywordPublishEntry)> {
+    let keyword_refs = entries
+        .iter()
+        .filter(|entry| kad_keyword_publish_eligible(entry))
+        .collect::<Vec<_>>();
+    // KEYWORD lane holds the age term CONSTANT, independent of the source-clock
+    // scan sort: the oracle keyword rank passes 0 for `tLastPublish`
+    // (SharedFileList.cpp:3316), so keyword selection is priority/demand-ordered,
+    // not perturbed by when each file was last SOURCE-published.
+    let keyword_order = ranked_shared_entry_order(&keyword_refs, now_unix_ms, |_| 0);
+    let keyword_files = keyword_order
+        .iter()
+        .filter_map(|&index| {
+            match kad_keyword_publish_candidate_from_shared_entry(keyword_refs[index]) {
+                Ok(candidate) => Some(candidate),
+                Err(error) => {
+                    tracing::warn!(
+                        file_hash = %keyword_refs[index].file_hash,
+                        error = %error,
+                        "skipping invalid shared-file hash during Kad keyword candidate build"
+                    );
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let keyword_start = keyword_files
+        .iter()
+        .position(|entry| entry.file_hash == triggering_file_hash)
+        .unwrap_or(0);
+    kad_keyword_publish_entries_for_keyword(&keyword_files, keyword, limit, keyword_start)
 }
 
 /// Compute the balanced publish rank directly over a borrowed shared-catalog
@@ -4444,7 +4494,12 @@ fn compute_kad_publish_candidates(
     let source_scan = (0..window_len)
         .map(|offset| {
             let ranked_pos = (source_cursor_start + offset) % source_item_count;
-            kad_publish_entry_from_shared_entry(source_refs[source_order[ranked_pos]])
+            let entry = source_refs[source_order[ranked_pos]];
+            KadSourcePublishCandidate {
+                entry: kad_publish_entry_from_shared_entry(entry),
+                keyword_terms: kad_keyword_publish_eligible(entry)
+                    .then(|| significant_keyword_words_unique(&entry.canonical_name)),
+            }
         })
         .collect::<Vec<_>>();
     // NOTES lane: single best-ranked notes-due file across the FULL source-eligible
@@ -4456,46 +4511,11 @@ fn compute_kad_publish_candidates(
         now_instant,
         now_unix_ms,
     );
-    // KEYWORD lane holds the age term CONSTANT, independent of the source-clock
-    // scan sort: the oracle keyword rank passes 0 for `tLastPublish`
-    // (SharedFileList.cpp:3316), so keyword selection is priority/demand-ordered,
-    // not perturbed by when each file was last SOURCE-published. `|_| 0` maps
-    // every file to `publish_age_score`'s flat max (80), matching that constant.
-    // The batch builder walks the whole completed-file set (to fill a >150-file
-    // keyword batch), so this lane is materialized in full in ranked order.
-    let keyword_refs = entries
-        .iter()
-        .filter(|entry| kad_keyword_publish_eligible(entry))
-        .collect::<Vec<_>>();
-    let keyword_order = ranked_shared_entry_order(&keyword_refs, now_unix_ms, |_| 0);
-    let keyword_files = keyword_order
-        .iter()
-        .filter_map(|&index| {
-            match kad_keyword_publish_candidate_from_shared_entry(keyword_refs[index]) {
-                Ok(candidate) => Some(candidate),
-                Err(error) => {
-                    tracing::warn!(
-                        file_hash = %keyword_refs[index].file_hash,
-                        error = %error,
-                        "skipping invalid shared-file hash during Kad keyword candidate build"
-                    );
-                    None
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    let keyword_index = keyword_files
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| (entry.file_hash.clone(), index))
-        .collect();
     KadPublishCandidateSets {
         source_scan,
         source_item_count,
         source_cursor_start,
         best_notes_hash,
-        keyword_files,
-        keyword_index,
     }
 }
 
