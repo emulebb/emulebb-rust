@@ -745,9 +745,17 @@ pub(super) fn search_status_line(search: &SearchDto) -> String {
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(" | {value}"))
         .unwrap_or_default();
+    let search_type = search
+        .file_type
+        .trim()
+        .is_empty()
+        .then(String::new)
+        .unwrap_or_else(|| format!(" | {}", search.file_type));
     format!(
-        "{} | {} | {} results{}",
+        "{} | {}{} | {} | {} results{}",
         search.query,
+        display_or(&search.method, "automatic"),
+        search_type,
         display_or(&search.status, "unknown"),
         total,
         reason

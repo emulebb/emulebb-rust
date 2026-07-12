@@ -30,9 +30,6 @@ pub(super) fn publish_snapshot(weak: &slint::Weak<MainWindow>, snapshot: Snapsho
 
 pub(super) fn publish_search(weak: &slint::Weak<MainWindow>, search: SearchDto) {
     let update = move |ui: MainWindow| {
-        ui.set_search_query(search.query.clone().into());
-        ui.set_search_method(search.method.clone().into());
-        ui.set_search_type(search.file_type.clone().into());
         ui.set_search_status_line(search_status_line(&search).into());
         render_search_table(&ui, &search);
     };
