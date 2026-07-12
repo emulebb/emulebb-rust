@@ -174,15 +174,60 @@ fn publish_recent_request_score(last_request_unix_ms: i64, now_unix_ms: i64) -> 
 fn publish_deterministic_jitter(file_hash: &str, now_unix_ms: i64, sequence: usize) -> f64 {
     let mut hash =
         2_166_136_261u32 ^ ((now_unix_ms / 1000) / KADEMLIA_PUBLISH_JITTER_WINDOW_SECS) as u32;
-    for byte in decode_hash_bytes(file_hash) {
-        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    if let Some(bytes) = decode_hex_hash_bytes(file_hash) {
+        for byte in bytes {
+            hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+        }
+    } else {
+        for &byte in file_hash.as_bytes() {
+            hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+        }
     }
     hash = (hash ^ sequence as u32).wrapping_mul(16_777_619);
     f64::from(hash % 1000) / 1000.0 * 15.0
 }
 
-fn decode_hash_bytes(file_hash: &str) -> Vec<u8> {
+fn decode_hex_hash_bytes(file_hash: &str) -> Option<[u8; 16]> {
+    let input = file_hash.as_bytes();
+    if input.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (index, chunk) in input.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        bytes[index] = (high << 4) | low;
+    }
+    Some(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn legacy_decode_hash_bytes_for_test(file_hash: &str) -> Vec<u8> {
     hex::decode(file_hash).unwrap_or_else(|_| file_hash.as_bytes().to_vec())
+}
+
+#[cfg(test)]
+fn deterministic_jitter_for_bytes(
+    file_hash_bytes: impl IntoIterator<Item = u8>,
+    now_unix_ms: i64,
+    sequence: usize,
+) -> f64 {
+    let mut hash =
+        2_166_136_261u32 ^ ((now_unix_ms / 1000) / KADEMLIA_PUBLISH_JITTER_WINDOW_SECS) as u32;
+    for byte in file_hash_bytes {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    }
+    hash = (hash ^ sequence as u32).wrapping_mul(16_777_619);
+    f64::from(hash % 1000) / 1000.0 * 15.0
 }
 
 fn publish_balanced_score(
@@ -305,5 +350,25 @@ mod tests {
             now_unix_ms: 4_000,
         });
         assert!(compare_shared_publish_rank(&requested, &quiet).is_lt());
+    }
+
+    #[test]
+    fn deterministic_jitter_matches_legacy_hex_decode() {
+        for file_hash in [
+            "00112233445566778899aabbccddeeff",
+            "00112233445566778899AABBCCDDEEFF",
+            "not-a-hex-hash",
+        ] {
+            let now_unix_ms = 1_700_000_000_000;
+            let sequence = 7;
+            assert_eq!(
+                publish_deterministic_jitter(file_hash, now_unix_ms, sequence),
+                deterministic_jitter_for_bytes(
+                    legacy_decode_hash_bytes_for_test(file_hash),
+                    now_unix_ms,
+                    sequence
+                )
+            );
+        }
     }
 }
