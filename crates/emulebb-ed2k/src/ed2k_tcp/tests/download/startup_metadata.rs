@@ -100,6 +100,11 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
     assert_eq!(manifest.canonical_name, "captured.epub");
     assert_eq!(manifest.file_size, payload.len() as u64);
     assert!(manifest.sources.contains(&Ed2kSourceHint {
+        ip: test_bind_ip().to_string(),
+        tcp_port: peer_addr.port(),
+        user_hash: Some(hex::encode([0x42; 16])),
+    }));
+    assert!(manifest.sources.contains(&Ed2kSourceHint {
         ip: "127.0.0.2".to_string(),
         tcp_port: 4662,
         user_hash: Some(hex::encode([0x77; 16])),

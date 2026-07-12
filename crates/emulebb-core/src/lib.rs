@@ -1837,7 +1837,7 @@ impl EmulebbCore {
         match result {
             Ok(Some(next_state)) => {
                 settled_state = next_state;
-                retry_downloading = next_state == "downloading";
+                retry_downloading = should_retry_download_attempt_state(next_state);
                 // Materialize the finished file by name (eMule move-to-Incoming)
                 // BEFORE refreshing the in-memory transfer, so the refreshed view
                 // surfaces the deliveredPath in the same step.
@@ -1868,8 +1868,9 @@ impl EmulebbCore {
         // Release the dedup slot before re-queueing so the retry can re-acquire it.
         drop(guard);
         // Evidence instrumentation: make the task-exit decision (and whether it
-        // re-drives) visible. Today `willReask` is only ever true for "downloading";
-        // a "queued" exit dies here — which is exactly the defect under investigation.
+        // re-drives) visible. A queued active download still needs the periodic
+        // Process-style re-drive: sources, server availability, and peer upload
+        // state can change after an attempt that made no immediate progress.
         crate::diag_sched::download_task_settled(&hash, settled_state, retry_downloading);
         if retry_downloading {
             core.queue_ed2k_download_retry(hash);
@@ -1883,7 +1884,7 @@ impl EmulebbCore {
             crate::diag_sched::download_retry_outcome(&hash, "missing", false);
             return;
         };
-        if transfer.state != "downloading" {
+        if !should_retry_download_attempt_state(&transfer.state) {
             crate::diag_sched::download_retry_outcome(&hash, &transfer.state, false);
             return;
         }
@@ -5935,15 +5936,22 @@ fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
 }
 
 fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<Ed2kSourceHint> {
-    let mut sources = Vec::new();
-    let mut seen = HashSet::new();
+    let mut sources: Vec<Ed2kSourceHint> = Vec::new();
     for section in sections {
         let Some(rest) = section.strip_prefix("sources,") else {
             continue;
         };
         for item in rest.split(',') {
-            let Some((address, port)) = item.rsplit_once(':') else {
-                continue;
+            let parts = item.split(':').collect::<Vec<_>>();
+            let (address, port, user_hash) = match parts.as_slice() {
+                [address, port] => (*address, *port, None),
+                [address, port, user_hash] => {
+                    let Some(user_hash) = parse_ed2k_source_user_hash(user_hash) else {
+                        continue;
+                    };
+                    (*address, *port, Some(user_hash))
+                }
+                _ => continue,
             };
             let Ok(ip) = address.parse::<Ipv4Addr>() else {
                 continue;
@@ -5951,17 +5959,36 @@ fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<E
             let Ok(tcp_port) = port.parse::<u16>() else {
                 continue;
             };
-            if ip.is_unspecified() || tcp_port == 0 || !seen.insert((ip, tcp_port)) {
+            if ip.is_unspecified() || tcp_port == 0 {
                 continue;
+            };
+            let ip = ip.to_string();
+            if let Some(existing) = sources
+                .iter_mut()
+                .find(|source| source.ip == ip && source.tcp_port == tcp_port)
+            {
+                if existing.user_hash.is_none() {
+                    existing.user_hash = user_hash;
+                }
+            } else {
+                sources.push(Ed2kSourceHint {
+                    ip: ip.to_string(),
+                    tcp_port,
+                    user_hash,
+                });
             }
-            sources.push(Ed2kSourceHint {
-                ip: ip.to_string(),
-                tcp_port,
-                user_hash: None,
-            });
         }
     }
     sources
+}
+
+fn parse_ed2k_source_user_hash(value: &str) -> Option<String> {
+    (value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+fn should_retry_download_attempt_state(state: &str) -> bool {
+    matches!(state, "downloading" | "queued")
 }
 
 /// Case-insensitive check that `path` resides within `dir`, tolerating the

@@ -80,6 +80,24 @@ fn apply_emule_info_profile(
     }
 }
 
+async fn remember_connected_peer_source(
+    transfer_runtime: &Ed2kTransferRuntime,
+    file_hash_hex: &str,
+    peer_addr: SocketAddr,
+    user_hash: [u8; 16],
+) -> Result<()> {
+    transfer_runtime
+        .remember_source(
+            file_hash_hex,
+            Ed2kSourceHint {
+                ip: peer_addr.ip().to_string(),
+                tcp_port: peer_addr.port(),
+                user_hash: Some(hex::encode(user_hash)),
+            },
+        )
+        .await
+}
+
 /// Outcome of one outbound ED2K peer download attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ed2kPeerDownloadOutcome {
@@ -367,6 +385,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    // WHY: server search/source rows may not carry a user hash.
+                    // The TCP hello is the first durable identity proof for that
+                    // endpoint, so upgrade the remembered source before REST
+                    // reads expose a hashless peer.
+                    remember_connected_peer_source(
+                        transfer_runtime,
+                        file_hash_hex,
+                        peer_addr,
+                        hello_profile.identity.user_hash,
+                    )
+                    .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
                     if hello_profile.identity.udp_port != 0 {
                         session_state.peer_udp_port = hello_profile.identity.udp_port;
@@ -413,6 +442,17 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     }
                     session_state.hello_complete = true;
                     session_state.peer_user_hash = Some(hello_profile.identity.user_hash);
+                    // WHY: server search/source rows may not carry a user hash.
+                    // The TCP hello answer is the first durable identity proof
+                    // for that endpoint, so upgrade the remembered source before
+                    // REST reads expose a hashless peer.
+                    remember_connected_peer_source(
+                        transfer_runtime,
+                        file_hash_hex,
+                        peer_addr,
+                        hello_profile.identity.user_hash,
+                    )
+                    .await?;
                     session_state.peer_connect_options = Some(hello_profile.connect_options);
                     // The peer's eD2k UDP port rides in the hello (CT_EMULE_UDPPORTS);
                     // capture it for UDP-reask detach (udp_version comes from OP_EMULEINFO).

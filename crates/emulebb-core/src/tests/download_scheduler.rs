@@ -326,6 +326,26 @@ fn direct_download_candidates_skip_attempted_endpoint_family() {
     assert_eq!(candidates, vec![next_endpoint]);
 }
 
+#[test]
+fn direct_download_candidates_skip_required_obfuscation_without_user_hash() {
+    let file_hash = Ed2kHash::from_bytes([0x50; 16]);
+    let mut hashless_required = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 10), 41001);
+    hashless_required.obfuscated = true;
+    hashless_required.obfuscation_options = Some(0x07);
+    hashless_required.user_hash = None;
+    let mut hashed_required = direct_test_source(file_hash, Ipv4Addr::new(192, 0, 2, 11), 41002);
+    hashed_required.obfuscated = true;
+    hashed_required.obfuscation_options = Some(0x07);
+    hashed_required.user_hash = Some([0x11; 16]);
+
+    let candidates = direct_download_candidate_sources(
+        &[hashless_required, hashed_required.clone()],
+        &HashSet::new(),
+    );
+
+    assert_eq!(candidates, vec![hashed_required]);
+}
+
 #[tokio::test]
 async fn direct_download_source_leases_defer_peer_to_better_file_candidate() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
@@ -528,6 +548,16 @@ async fn run_attempt_stops_immediately_when_pre_cancelled() {
         result.is_none(),
         "a cancelled attempt must return Ok(None) so it neither restates nor retries"
     );
+}
+
+#[test]
+fn queued_active_download_attempts_remain_retryable() {
+    assert!(should_retry_download_attempt_state("downloading"));
+    assert!(should_retry_download_attempt_state("queued"));
+    assert!(!should_retry_download_attempt_state("paused"));
+    assert!(!should_retry_download_attempt_state("stopped"));
+    assert!(!should_retry_download_attempt_state("completed"));
+    assert!(!should_retry_download_attempt_state("error"));
 }
 
 #[tokio::test]

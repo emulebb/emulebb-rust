@@ -99,7 +99,13 @@ pub(crate) fn found_source_from_hint(
         client_id: u32::from_be_bytes(ip.octets()),
         low_id: false,
         obfuscated: user_hash.is_some(),
-        obfuscation_options: None,
+        // WHY: persisted hints store only endpoint + user hash, not the full
+        // server/Kad connect-options byte. A remembered user hash is still enough
+        // to safely attempt the stock obfuscated TCP handshake when the local
+        // profile supports it; without these support/request bits, required-crypt
+        // peers reject the fallback plaintext connect before hello can refresh the
+        // source identity.
+        obfuscation_options: user_hash.map(|_| 0x03),
         user_hash,
         source_server: None,
         buddy_id: None,

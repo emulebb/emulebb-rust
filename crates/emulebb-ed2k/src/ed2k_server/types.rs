@@ -154,7 +154,13 @@ impl Ed2kFoundSource {
     /// Returns `true` when this source can be dialed directly over TCP.
     #[must_use]
     pub fn is_direct_dialable(&self) -> bool {
-        !self.low_id
+        const EMULE_CRYPT_REQUIRES: u8 = 0x04;
+        if self.low_id {
+            return false;
+        }
+        !self
+            .obfuscation_options
+            .is_some_and(|options| options & EMULE_CRYPT_REQUIRES != 0 && self.user_hash.is_none())
     }
 
     /// Returns `true` when this is a firewalled LowID Kad source whose Kad buddy

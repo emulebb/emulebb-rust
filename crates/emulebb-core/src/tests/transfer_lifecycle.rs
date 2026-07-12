@@ -189,7 +189,7 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
     let transfer = core
         .create_transfer(TransferCreate {
             link: Some(
-                "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662,bad-source,192.0.2.10:4662,192.0.2.11:0|/"
+                "ed2k://|file|Seeded.Link.bin|4096|00112233445566778899aabbccddeeff|sources,192.0.2.10:4662:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bad-source,192.0.2.10:4662,192.0.2.11:0|/"
                     .to_string(),
             ),
             links: None,
@@ -208,6 +208,10 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].address, "192.0.2.10");
     assert_eq!(sources[0].port, 4662);
+    assert_eq!(
+        sources[0].user_hash.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
 }
 
 #[test]

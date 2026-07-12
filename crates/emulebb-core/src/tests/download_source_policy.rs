@@ -710,6 +710,7 @@ fn remembered_source_hint_becomes_direct_dial_source() {
     assert_eq!(source.tcp_port, 4662);
     assert!(source.is_direct_dialable());
     assert!(source.obfuscated);
+    assert_eq!(source.obfuscation_options, Some(0x03));
     assert_eq!(
         source.user_hash,
         Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
