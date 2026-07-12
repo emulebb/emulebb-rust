@@ -1,9 +1,9 @@
 # emulebb-rust
 
-`emulebb-rust` is the Rust headless client for the eMuleBB product family and the
-forward eD2K/Kad core. It owns the Rust-forward `/api/v1` contract and is driven
-by **TrackMuleBB**, the forward eMuleBB Suite controller; it keeps local client
-state plus indexing data in SQLite.
+`emulebb-rust` is the Rust client for the eMuleBB product family and the forward
+eD2K/Kad core. It owns the Rust-forward `/api/v1` contract, runs as a headless
+daemon, and is paired with the Rust-native `emulebb-rust-ui`; it keeps local
+client state plus indexing data in SQLite.
 
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The 0.0.x line does not expose a coordinator API.
@@ -15,9 +15,9 @@ gate; normal development must not float independently on `stable`.
 
 The 0.0.3 scope is core eMule client parity: configured binding, ED2K/Kad
 interoperability, search, sharing, transfers, uploads, queues, persistence,
-local SQLite/FTS indexing, and REST controller visibility. It is not legacy
-HTML WebServer parity, a qBittorrent/Torznab adapter host, a coordinator, or a
-remote indexer fleet.
+local SQLite/FTS indexing, REST controller visibility, and Rust-native UI
+operation. It is not legacy HTML WebServer parity, a qBittorrent/Torznab adapter
+host, a TrackMuleBB dependency, a coordinator, or a remote indexer fleet.
 
 Active product docs, backlog, design notes, release scope, and the Rust OpenAPI
 contract live in
