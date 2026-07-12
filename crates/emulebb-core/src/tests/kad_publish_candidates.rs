@@ -573,11 +573,14 @@ fn windowed_candidate_build_selects_identically_to_full_clone_build() {
         .collect();
     let old_keyword_candidates = old_keyword_files
         .iter()
-        .map(|entry| KadKeywordPublishCandidate {
-            file_hash: entry.file_hash.clone(),
-            canonical_name: entry.canonical_name.clone(),
-            file_size: entry.file_size,
-            aich_root: entry.aich_root.clone(),
+        .map(|entry| {
+            KadKeywordPublishCandidate::new(
+                entry.file_hash.clone(),
+                entry.canonical_name.clone(),
+                entry.file_size,
+                entry.aich_root.clone(),
+            )
+            .expect("test hash is valid")
         })
         .collect::<Vec<_>>();
 

@@ -3,19 +3,25 @@ use super::*;
 #[test]
 fn keyword_publish_entries_batch_matching_files_up_to_stock_limit() {
     let mut shared_files = (0..160)
-        .map(|index| KadKeywordPublishCandidate {
-            file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
-            canonical_name: format!("Ubuntu Python Sample {index}.iso"),
-            file_size: 1000 + index,
-            aich_root: None,
+        .map(|index| {
+            KadKeywordPublishCandidate::new(
+                Ed2kHash::from_bytes([index as u8; 16]).to_string(),
+                format!("Ubuntu Python Sample {index}.iso"),
+                1000 + index,
+                None,
+            )
+            .expect("test hash is valid")
         })
         .collect::<Vec<_>>();
-    shared_files.push(KadKeywordPublishCandidate {
-        file_hash: Ed2kHash::from_bytes([0xFE; 16]).to_string(),
-        canonical_name: "Apache Camel Sample.iso".to_string(),
-        file_size: 1,
-        aich_root: None,
-    });
+    shared_files.push(
+        KadKeywordPublishCandidate::new(
+            Ed2kHash::from_bytes([0xFE; 16]).to_string(),
+            "Apache Camel Sample.iso".to_string(),
+            1,
+            None,
+        )
+        .expect("test hash is valid"),
+    );
 
     let entries = kad_keyword_publish_entries_for_keyword(
         &shared_files,
@@ -37,11 +43,14 @@ fn keyword_publish_entries_batch_matching_files_up_to_stock_limit() {
 #[test]
 fn keyword_publish_entries_start_at_triggering_file_and_wrap() {
     let shared_files = (0..160)
-        .map(|index| KadKeywordPublishCandidate {
-            file_hash: Ed2kHash::from_bytes([index as u8; 16]).to_string(),
-            canonical_name: format!("Ubuntu Python Sample {index}.iso"),
-            file_size: 1000 + index,
-            aich_root: None,
+        .map(|index| {
+            KadKeywordPublishCandidate::new(
+                Ed2kHash::from_bytes([index as u8; 16]).to_string(),
+                format!("Ubuntu Python Sample {index}.iso"),
+                1000 + index,
+                None,
+            )
+            .expect("test hash is valid")
         })
         .collect::<Vec<_>>();
 
@@ -74,12 +83,15 @@ fn keyword_publish_entry_publishes_self_inclusive_source_count() {
     // rust tracks no other complete sources for shared files, so the built
     // keyword entry carries the self-only TAG_SOURCES value of 1 rather than
     // a hardcoded constant divorced from the oracle semantics.
-    let shared_files = vec![KadKeywordPublishCandidate {
-        file_hash: Ed2kHash::from_bytes([7_u8; 16]).to_string(),
-        canonical_name: "Ubuntu Sample.iso".to_string(),
-        file_size: 4096,
-        aich_root: None,
-    }];
+    let shared_files = vec![
+        KadKeywordPublishCandidate::new(
+            Ed2kHash::from_bytes([7_u8; 16]).to_string(),
+            "Ubuntu Sample.iso".to_string(),
+            4096,
+            None,
+        )
+        .expect("test hash is valid"),
+    ];
 
     let entries = kad_keyword_publish_entries_for_keyword(
         &shared_files,

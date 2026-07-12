@@ -4253,20 +4253,42 @@ struct KadPublishCandidateSets {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KadKeywordPublishCandidate {
     file_hash: String,
+    file_hash_bytes: Ed2kHash,
     canonical_name: String,
+    keyword_terms: Vec<String>,
     file_size: u64,
     aich_root: Option<String>,
 }
 
+impl KadKeywordPublishCandidate {
+    fn new(
+        file_hash: String,
+        canonical_name: String,
+        file_size: u64,
+        aich_root: Option<String>,
+    ) -> Result<Self> {
+        let file_hash_bytes = file_hash.parse()?;
+        let keyword_terms = significant_keyword_words_unique(&canonical_name);
+        Ok(Self {
+            file_hash,
+            file_hash_bytes,
+            canonical_name,
+            keyword_terms,
+            file_size,
+            aich_root,
+        })
+    }
+}
+
 fn kad_keyword_publish_candidate_from_shared_entry(
     entry: &Ed2kSharedEntry,
-) -> KadKeywordPublishCandidate {
-    KadKeywordPublishCandidate {
-        file_hash: entry.file_hash.clone(),
-        canonical_name: entry.canonical_name.clone(),
-        file_size: entry.file_size,
-        aich_root: entry.aich_root.clone(),
-    }
+) -> Result<KadKeywordPublishCandidate> {
+    KadKeywordPublishCandidate::new(
+        entry.file_hash.clone(),
+        entry.canonical_name.clone(),
+        entry.file_size,
+        entry.aich_root.clone(),
+    )
 }
 
 /// Whether a shared-catalog entry may be published as a Kad SOURCE: one of our
@@ -4446,7 +4468,19 @@ fn compute_kad_publish_candidates(
     let keyword_order = ranked_shared_entry_order(&keyword_refs, now_unix_ms, |_| 0);
     let keyword_files = keyword_order
         .iter()
-        .map(|&index| kad_keyword_publish_candidate_from_shared_entry(keyword_refs[index]))
+        .filter_map(|&index| {
+            match kad_keyword_publish_candidate_from_shared_entry(keyword_refs[index]) {
+                Ok(candidate) => Some(candidate),
+                Err(error) => {
+                    tracing::warn!(
+                        file_hash = %keyword_refs[index].file_hash,
+                        error = %error,
+                        "skipping invalid shared-file hash during Kad keyword candidate build"
+                    );
+                    None
+                }
+            }
+        })
         .collect::<Vec<_>>();
     let keyword_index = keyword_files
         .iter()
@@ -4587,23 +4621,9 @@ fn kad_keyword_publish_entries_for_keyword(
             break;
         }
         let entry = &shared_files[(start_index + offset) % shared_files.len()];
-        if !significant_keyword_words_unique(&entry.canonical_name)
-            .iter()
-            .any(|term| term == keyword)
-        {
+        if !entry.keyword_terms.iter().any(|term| term == keyword) {
             continue;
         }
-        let file_hash = match entry.file_hash.parse() {
-            Ok(file_hash) => file_hash,
-            Err(error) => {
-                tracing::warn!(
-                    file_hash = %entry.file_hash,
-                    error = %error,
-                    "skipping invalid shared-file hash during Kad keyword batch build"
-                );
-                continue;
-            }
-        };
         let mut tags = vec![
             Tag::filename(entry.canonical_name.clone()),
             Tag::filesize(entry.file_size),
@@ -4615,7 +4635,7 @@ fn kad_keyword_publish_entries_for_keyword(
         entries.push((
             entry.file_hash.clone(),
             KeywordPublishEntry {
-                file_hash,
+                file_hash: entry.file_hash_bytes,
                 tags,
                 aich_hash: entry
                     .aich_root
