@@ -37,6 +37,15 @@ pub(crate) enum KadPublishKind {
     Notes,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KadLocalStorePacketSummary {
+    pub(crate) packet_kind: &'static str,
+    pub(crate) count: u64,
+    pub(crate) error_count: u64,
+    pub(crate) elapsed_us: u64,
+    pub(crate) max_elapsed_us: u64,
+}
+
 impl KadPublishKind {
     fn publish_kind(self) -> &'static str {
         match self {
@@ -357,6 +366,41 @@ pub(crate) fn routing_summary(
     emit(FAMILY, "routing_summary", "info", json!({}), body);
 }
 
+/// Periodic local-store packet summary (rust superset): aggregates the inbound
+/// Kad packet dispatcher by packet kind so live profiles can distinguish hot
+/// lookup, publish, routing, and firewall lanes without logging every packet.
+pub(crate) fn local_store_summary(elapsed_secs: u64, summaries: &[KadLocalStorePacketSummary]) {
+    if summaries.is_empty() {
+        return;
+    }
+    let packet_summaries = summaries
+        .iter()
+        .map(|summary| {
+            json!({
+                "packetKind": summary.packet_kind,
+                "count": summary.count,
+                "errorCount": summary.error_count,
+                "elapsedUs": summary.elapsed_us,
+                "maxElapsedUs": summary.max_elapsed_us,
+            })
+        })
+        .collect::<Vec<_>>();
+    let total_count = summaries.iter().map(|summary| summary.count).sum::<u64>();
+    let total_errors = summaries
+        .iter()
+        .map(|summary| summary.error_count)
+        .sum::<u64>();
+    let body = json!({
+        "milestone": "local_store_summary",
+        "action": "observe",
+        "elapsedSecs": elapsed_secs,
+        "packetCount": total_count,
+        "errorCount": total_errors,
+        "packets": packet_summaries,
+    });
+    emit(FAMILY, "kad_local_store", "info", json!({}), body);
+}
+
 /// The master uses these Kad search-type integers in `LogSearchResponseEvent`
 /// (`KadSearchTypeFile`/`KadSearchTypeKeyword`). The rust lookup hooks know which
 /// kind they are, so map them to the same integers for harness alignment.
@@ -417,6 +461,16 @@ mod tests {
         publish(KadPublishKind::Source, "abc123", 1, stats);
         publish(KadPublishKind::Notes, "abc123", 1, stats);
         publish_round(4, 2, 9, 1, 4, 1, 2);
+        local_store_summary(
+            30,
+            &[KadLocalStorePacketSummary {
+                packet_kind: "SearchSourceReq",
+                count: 4,
+                error_count: 1,
+                elapsed_us: 2_000,
+                max_elapsed_us: 750,
+            }],
+        );
     }
 
     #[test]

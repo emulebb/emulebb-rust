@@ -4769,10 +4769,16 @@ struct KadLocalStoreRuntime {
 
 async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<AtomicBool>) {
     let mut packets = runtime.dht.subscribe_packets();
+    let mut metrics = KadLocalStoreLoopMetrics::new(Instant::now());
     while !shutdown.load(Ordering::SeqCst) {
         match tokio::time::timeout(Duration::from_millis(250), packets.recv()).await {
             Ok(Ok(received)) => {
-                if let Err(error) = handle_kad_local_store_packet(&runtime, received).await {
+                let packet_kind = kad_packet_kind(&received.packet);
+                let started = Instant::now();
+                let result = handle_kad_local_store_packet(&runtime, received).await;
+                metrics.record(packet_kind, started.elapsed(), result.is_err());
+                metrics.emit_if_due(Instant::now());
+                if let Err(error) = result {
                     tracing::warn!("failed to handle unsolicited Kad packet: {error:#}");
                 }
             }
@@ -4783,6 +4789,7 @@ async fn run_kad_local_store_loop(runtime: KadLocalStoreRuntime, shutdown: Arc<A
             Err(_) => {}
         }
     }
+    metrics.emit(Instant::now());
 }
 
 /// Shared inputs for the buddy-management task.
@@ -4966,6 +4973,102 @@ const LEGACY_VERIFY_VERSION_THRESHOLD: u8 = 8;
 /// but not `HELLO_RES_ACK`, so on a HELLO_REQ it is verified with a PING
 /// challenge, and it is not challenged at all on the HELLO_RES leg.
 const KAD_VERSION_7: u8 = 7;
+const KAD_LOCAL_STORE_DIAG_INTERVAL_SECS: u64 = 30;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct KadLocalStorePacketMetrics {
+    count: u64,
+    error_count: u64,
+    elapsed_us: u64,
+    max_elapsed_us: u64,
+}
+
+struct KadLocalStoreLoopMetrics {
+    last_emit: Instant,
+    packets: BTreeMap<&'static str, KadLocalStorePacketMetrics>,
+}
+
+impl KadLocalStoreLoopMetrics {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_emit: now,
+            packets: BTreeMap::new(),
+        }
+    }
+
+    fn record(&mut self, packet_kind: &'static str, elapsed: Duration, failed: bool) {
+        let elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        let metrics = self.packets.entry(packet_kind).or_default();
+        metrics.count = metrics.count.saturating_add(1);
+        metrics.error_count = metrics.error_count.saturating_add(u64::from(failed));
+        metrics.elapsed_us = metrics.elapsed_us.saturating_add(elapsed_us);
+        metrics.max_elapsed_us = metrics.max_elapsed_us.max(elapsed_us);
+    }
+
+    fn emit_if_due(&mut self, now: Instant) {
+        if now.duration_since(self.last_emit)
+            < Duration::from_secs(KAD_LOCAL_STORE_DIAG_INTERVAL_SECS)
+        {
+            return;
+        }
+        self.emit(now);
+    }
+
+    fn emit(&mut self, now: Instant) {
+        let elapsed_secs = now.duration_since(self.last_emit).as_secs();
+        self.last_emit = now;
+        if self.packets.is_empty() {
+            return;
+        }
+        let summaries = self
+            .packets
+            .iter()
+            .map(
+                |(&packet_kind, metrics)| diag_kad_event::KadLocalStorePacketSummary {
+                    packet_kind,
+                    count: metrics.count,
+                    error_count: metrics.error_count,
+                    elapsed_us: metrics.elapsed_us,
+                    max_elapsed_us: metrics.max_elapsed_us,
+                },
+            )
+            .collect::<Vec<_>>();
+        self.packets.clear();
+        diag_kad_event::local_store_summary(elapsed_secs, &summaries);
+    }
+}
+
+fn kad_packet_kind(packet: &KadPacket) -> &'static str {
+    match packet {
+        KadPacket::BootstrapReq => "BootstrapReq",
+        KadPacket::BootstrapRes(_) => "BootstrapRes",
+        KadPacket::HelloReq(_) => "HelloReq",
+        KadPacket::HelloRes(_) => "HelloRes",
+        KadPacket::HelloResAck(_) => "HelloResAck",
+        KadPacket::Req(_) => "Req",
+        KadPacket::Res(_) => "Res",
+        KadPacket::SearchKeyReq(_) => "SearchKeyReq",
+        KadPacket::SearchSourceReq(_) => "SearchSourceReq",
+        KadPacket::SearchNotesReq(_) => "SearchNotesReq",
+        KadPacket::SearchRes(_) => "SearchRes",
+        KadPacket::PublishKeyReq(_) => "PublishKeyReq",
+        KadPacket::PublishSourceReq(_) => "PublishSourceReq",
+        KadPacket::PublishNotesReq(_) => "PublishNotesReq",
+        KadPacket::PublishRes(_) => "PublishRes",
+        KadPacket::PublishResAck => "PublishResAck",
+        KadPacket::FirewalledReq(_) => "FirewalledReq",
+        KadPacket::Firewalled2Req(_) => "Firewalled2Req",
+        KadPacket::FirewalledRes(_) => "FirewalledRes",
+        KadPacket::FirewalledAckRes => "FirewalledAckRes",
+        KadPacket::FirewallUdp(_) => "FirewallUdp",
+        KadPacket::FindBuddyReq(_) => "FindBuddyReq",
+        KadPacket::FindBuddyRes(_) => "FindBuddyRes",
+        KadPacket::CallbackReq(_) => "CallbackReq",
+        KadPacket::Ping => "Ping",
+        KadPacket::Pong(_) => "Pong",
+        KadPacket::Unknown { .. } => "Unknown",
+    }
+}
 
 #[expect(
     clippy::cognitive_complexity,
