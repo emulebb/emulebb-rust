@@ -1,4 +1,4 @@
-import { Button, LineEdit, StandardTableView } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, StandardTableView } from "std-widgets.slint";
 
 export struct TransferItem {
     hash: string,
@@ -30,12 +30,15 @@ export struct ServerItem {
     name: string,
     endpoint-id: string,
     endpoint: string,
+    address: string,
+    port-text: string,
     status: string,
     users-text: string,
     files-text: string,
     ping-text: string,
     priority: string,
     failed-text: string,
+    static-server: bool,
     current: bool,
     detail: string,
 }
@@ -78,14 +81,14 @@ component TabButton inherits Rectangle {
     callback clicked;
 
     height: 28px;
-    width: max(92px, label.preferred-width + 24px);
+    width: max(72px, label.preferred-width + 18px);
     background: selected ? #1f2937 : transparent;
     border-color: selected ? #1f2937 : #cbd5e1;
     border-width: selected ? 1px : 0px;
     border-radius: 3px;
 
     label := Text {
-        x: 12px;
+        x: 9px;
         y: 0px;
         height: parent.height;
         text: root.text;
@@ -141,6 +144,30 @@ component EmptyState inherits Rectangle {
     }
 }
 
+component SettingField inherits Rectangle {
+    in property <string> label;
+    in-out property <string> value;
+
+    height: 32px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        Text {
+            text: root.label;
+            color: #334155;
+            font-size: 12px;
+            vertical-alignment: center;
+            min-width: 190px;
+        }
+        LineEdit {
+            text <=> root.value;
+            min-width: 120px;
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     in-out property <string> base-url;
     in-out property <string> api-key;
@@ -158,6 +185,33 @@ export component MainWindow inherits Window {
     in-out property <string> search-method;
     in-out property <string> search-type;
     in-out property <string> search-status-line;
+    in-out property <string> settings-status-line;
+    in-out property <string> pref-upload-limit;
+    in-out property <string> pref-download-limit;
+    in-out property <string> pref-max-connections;
+    in-out property <string> pref-max-connections-per-five;
+    in-out property <string> pref-max-sources;
+    in-out property <string> pref-upload-client-rate;
+    in-out property <string> pref-max-upload-slots;
+    in-out property <string> pref-upload-elastic-percent;
+    in-out property <string> pref-queue-size;
+    in-out property <bool> pref-auto-connect;
+    in-out property <bool> pref-reconnect;
+    in-out property <bool> pref-new-auto-up;
+    in-out property <bool> pref-new-auto-down;
+    in-out property <bool> pref-credit-system;
+    in-out property <bool> pref-safe-server-connect;
+    in-out property <bool> pref-add-servers-from-server;
+    in-out property <bool> pref-network-kademlia;
+    in-out property <bool> pref-network-ed2k;
+    in-out property <bool> pref-download-auto-broadband-io;
+    in-out property <string> server-address;
+    in-out property <string> server-port;
+    in-out property <string> server-name;
+    in-out property <string> server-priority;
+    in-out property <bool> server-static;
+    in-out property <bool> server-connect-after-add;
+    in-out property <string> server-import-url;
     in-out property <[TransferItem]> transfers;
     in-out property <[SearchResultItem]> search-results;
     in-out property <[UploadItem]> uploads;
@@ -211,8 +265,16 @@ export component MainWindow inherits Window {
     callback search-requested(string, string, string);
     callback search-refresh-requested();
     callback search-download-requested(string, string, bool);
+    callback settings-reload-requested();
+    callback settings-apply-requested();
+    callback settings-revert-requested();
+    callback kad-action-requested(string);
     callback transfer-action-requested(string, string);
-    callback server-action-requested(string);
+    callback server-action-requested(string, string);
+    callback server-add-requested();
+    callback server-update-requested();
+    callback server-delete-requested();
+    callback server-import-requested();
 
     title: "eMuleBB Rust UI";
     preferred-width: 1240px;
@@ -256,6 +318,7 @@ export component MainWindow inherits Window {
             MenuItem { title: "Known Clients"; activated => { root.tab-requested(6); } }
             MenuItem { title: "Shared Files"; activated => { root.tab-requested(7); } }
             MenuItem { title: "Logs"; activated => { root.tab-requested(8); } }
+            MenuItem { title: "Settings"; activated => { root.tab-requested(9); } }
             MenuSeparator {}
             MenuItem {
                 title: "Reset Layout";
@@ -301,11 +364,11 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "Connect Server";
                 enabled: root.selected-kind == "server";
-                activated => { root.server-action-requested("connect"); }
+                activated => { root.server-action-requested("connect-selected", root.selected-id); }
             }
             MenuItem {
                 title: "Disconnect Servers";
-                activated => { root.server-action-requested("disconnect"); }
+                activated => { root.server-action-requested("disconnect", ""); }
             }
         }
         Menu {
@@ -402,6 +465,7 @@ export component MainWindow inherits Window {
                 TabButton { text: "Known Clients"; selected: root.selected-tab == 6; clicked => { root.tab-requested(6); } }
                 TabButton { text: "Shared Files"; selected: root.selected-tab == 7; clicked => { root.tab-requested(7); } }
                 TabButton { text: "Logs"; selected: root.selected-tab == 8; clicked => { root.tab-requested(8); } }
+                TabButton { text: "Settings"; selected: root.selected-tab == 9; clicked => { root.tab-requested(9); } }
             }
         }
 
@@ -439,35 +503,120 @@ export component MainWindow inherits Window {
             border-width: 1px;
             border-radius: 3px;
 
-            if root.selected-tab == 0 : EmptyState {
+            if root.selected-tab == 0 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                title: "Kad";
-                detail: root.network-line;
-            }
+                background: #ffffff;
 
-            if root.selected-tab == 1 && root.server-rows.length > 0 : StandardTableView {
-                width: parent.width;
-                height: parent.height;
-                columns <=> root.server-columns;
-                rows: root.server-rows;
-                sort-ascending(column) => { root.table-sort-requested("servers", column, false); }
-                sort-descending(column) => { root.table-sort-requested("servers", column, true); }
-                current-row-changed(row) => {
-                    if row >= 0 && row < root.servers.length {
-                        root.selected-kind = "server";
-                        root.selected-id = root.servers[row].endpoint-id;
-                        root.inspector-title = root.servers[row].name;
-                        root.inspector-detail = root.servers[row].detail;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+
+                    Text {
+                        text: "Kad";
+                        color: #111827;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: root.network-line;
+                        color: #334155;
+                        font-size: 12px;
+                    }
+                    HorizontalLayout {
+                        height: 30px;
+                        spacing: 6px;
+                        Button { text: "Start"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("start"); } }
+                        Button { text: "Stop"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("stop"); } }
+                        Button { text: "Bootstrap"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("bootstrap"); } }
+                        Button { text: "Recheck Firewall"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("recheck-firewall"); } }
                     }
                 }
             }
 
-            if root.selected-tab == 1 && root.server-rows.length == 0 : EmptyState {
+            if root.selected-tab == 1 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                title: "No servers";
-                detail: "The REST snapshot did not return any known servers.";
+                background: #ffffff;
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: 74px;
+                        background: #f8fafc;
+                        border-color: #d7dee8;
+                        border-width: 1px;
+                        border-radius: 3px;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 5px;
+
+                            HorizontalLayout {
+                                height: 28px;
+                                spacing: 6px;
+                                LineEdit { text <=> root.server-address; placeholder-text: "Address"; min-width: 170px; }
+                                LineEdit { text <=> root.server-port; placeholder-text: "Port"; min-width: 72px; }
+                                LineEdit { text <=> root.server-name; placeholder-text: "Name"; min-width: 180px; }
+                                LineEdit { text <=> root.server-priority; placeholder-text: "low, normal, high"; min-width: 130px; }
+                                CheckBox { text: "Static"; checked <=> root.server-static; }
+                                CheckBox { text: "Connect"; checked <=> root.server-connect-after-add; }
+                                Button { text: "Add"; enabled: !root.is-refreshing; clicked => { root.server-add-requested(); } }
+                                Button {
+                                    text: "Update";
+                                    enabled: !root.is-refreshing && root.selected-kind == "server";
+                                    clicked => { root.server-update-requested(); }
+                                }
+                                Button {
+                                    text: "Delete";
+                                    enabled: !root.is-refreshing && root.selected-kind == "server";
+                                    clicked => { root.server-delete-requested(); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 28px;
+                                spacing: 6px;
+                                LineEdit { text <=> root.server-import-url; placeholder-text: "server.met URL"; min-width: 450px; }
+                                Button { text: "Import"; enabled: !root.is-refreshing; clicked => { root.server-import-requested(); } }
+                                Button { text: "Connect All"; enabled: !root.is-refreshing; clicked => { root.server-action-requested("connect", ""); } }
+                                Button { text: "Disconnect"; enabled: !root.is-refreshing; clicked => { root.server-action-requested("disconnect", ""); } }
+                                Button {
+                                    text: "Connect Selected";
+                                    enabled: !root.is-refreshing && root.selected-kind == "server";
+                                    clicked => { root.server-action-requested("connect-selected", root.selected-id); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.server-rows.length > 0 : StandardTableView {
+                        columns <=> root.server-columns;
+                        rows: root.server-rows;
+                        sort-ascending(column) => { root.table-sort-requested("servers", column, false); }
+                        sort-descending(column) => { root.table-sort-requested("servers", column, true); }
+                        current-row-changed(row) => {
+                            if row >= 0 && row < root.servers.length {
+                                root.selected-kind = "server";
+                                root.selected-id = root.servers[row].endpoint-id;
+                                root.inspector-title = root.servers[row].name;
+                                root.inspector-detail = root.servers[row].detail;
+                                root.server-address = root.servers[row].address;
+                                root.server-port = root.servers[row].port-text;
+                                root.server-name = root.servers[row].name;
+                                root.server-priority = root.servers[row].priority;
+                                root.server-static = root.servers[row].static-server;
+                            }
+                        }
+                    }
+
+                    if root.server-rows.length == 0 : EmptyState {
+                        title: "No servers";
+                        detail: "The REST snapshot did not return any known servers.";
+                    }
+                }
             }
 
             if root.selected-tab == 2 : Rectangle {
@@ -669,6 +818,71 @@ export component MainWindow inherits Window {
                 title: "No logs";
                 detail: "The REST snapshot did not return log entries.";
             }
+
+            if root.selected-tab == 9 : Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: #ffffff;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        height: 30px;
+                        spacing: 6px;
+                        Text {
+                            text: "Settings";
+                            color: #111827;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            min-width: 190px;
+                        }
+                        Button { text: "Reload"; enabled: !root.is-refreshing; clicked => { root.settings-reload-requested(); } }
+                        Button { text: "Apply"; enabled: !root.is-refreshing; clicked => { root.settings-apply-requested(); } }
+                        Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
+                        Text {
+                            text: root.settings-status-line;
+                            color: #334155;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 28px;
+
+                        VerticalLayout {
+                            spacing: 5px;
+                            SettingField { label: "Upload limit KiB/s"; value <=> root.pref-upload-limit; }
+                            SettingField { label: "Download limit KiB/s"; value <=> root.pref-download-limit; }
+                            SettingField { label: "Max connections"; value <=> root.pref-max-connections; }
+                            SettingField { label: "Max connections / 5 sec"; value <=> root.pref-max-connections-per-five; }
+                            SettingField { label: "Max sources / file"; value <=> root.pref-max-sources; }
+                            SettingField { label: "Upload client KiB/s"; value <=> root.pref-upload-client-rate; }
+                            SettingField { label: "Max upload slots"; value <=> root.pref-max-upload-slots; }
+                            SettingField { label: "Upload elastic percent"; value <=> root.pref-upload-elastic-percent; }
+                            SettingField { label: "Queue size"; value <=> root.pref-queue-size; }
+                        }
+
+                        VerticalLayout {
+                            spacing: 5px;
+                            CheckBox { text: "Auto connect"; checked <=> root.pref-auto-connect; }
+                            CheckBox { text: "Reconnect"; checked <=> root.pref-reconnect; }
+                            CheckBox { text: "Credit system"; checked <=> root.pref-credit-system; }
+                            CheckBox { text: "Safe server connect"; checked <=> root.pref-safe-server-connect; }
+                            CheckBox { text: "Add servers from server"; checked <=> root.pref-add-servers-from-server; }
+                            CheckBox { text: "Kademlia"; checked <=> root.pref-network-kademlia; }
+                            CheckBox { text: "eD2K"; checked <=> root.pref-network-ed2k; }
+                            CheckBox { text: "New auto upload priority"; checked <=> root.pref-new-auto-up; }
+                            CheckBox { text: "New auto download priority"; checked <=> root.pref-new-auto-down; }
+                            CheckBox { text: "Download auto broadband IO"; checked <=> root.pref-download-auto-broadband-io; }
+                        }
+                    }
+                }
+            }
         }
 
         Rectangle {
@@ -699,8 +913,8 @@ export component MainWindow inherits Window {
                     if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
                     if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
                     if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
-                    if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect"); } }
-                    if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect"); } }
+                    if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect-selected", root.selected-id); } }
+                    if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect", ""); } }
                 }
                 Text {
                     text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;

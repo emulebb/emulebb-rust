@@ -1473,6 +1473,7 @@ dependencies = [
  "emulebb-kad-proto",
  "emulebb-kad-routing",
  "emulebb-metadata",
+ "emulebb-preferences",
  "hex",
  "ipnet",
  "md4",
@@ -1647,6 +1648,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulebb-preferences"
+version = "0.1.0-beta.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "emulebb-rest"
 version = "0.1.0-beta.1"
 dependencies = [
@@ -1667,6 +1676,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "clap",
+ "emulebb-preferences",
  "reqwest",
  "serde",
  "serde_json",

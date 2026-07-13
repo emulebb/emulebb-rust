@@ -378,6 +378,8 @@ pub(super) fn server_items(servers: &[ServerDto]) -> Vec<ServerItem> {
             ServerItem {
                 name: text(display_or(&item.name, &endpoint)),
                 endpoint_id: text(&endpoint),
+                address: text(&item.address),
+                port_text: text(item.port.to_string()),
                 endpoint: text(format!(
                 "{}:{}{}",
                 item.address,
@@ -400,6 +402,7 @@ pub(super) fn server_items(servers: &[ServerDto]) -> Vec<ServerItem> {
                 }),
                 priority: text(&item.priority),
                 failed_text: text(format!("{} fails", item.failed_count)),
+                static_server: item.static_server,
                 current: item.current,
                 detail: text(detail),
             }

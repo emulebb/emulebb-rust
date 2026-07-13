@@ -240,15 +240,15 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
+pub use emulebb_preferences::{Preferences, PreferencesUpdate};
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
     IndexingStatus, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
-    NullableU32Field, Preferences, PreferencesUpdate, Search, SearchCreate, SearchResult,
-    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource, TransferStats,
-    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    NullableU32Field, Search, SearchCreate, SearchResult, SearchResultDownloadCreate, ServerCreate,
+    ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer, TransferCreate, TransferDetails,
+    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,

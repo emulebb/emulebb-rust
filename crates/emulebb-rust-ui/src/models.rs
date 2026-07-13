@@ -20,6 +20,7 @@ pub(super) struct ApiError {
 pub(super) struct DataCache {
     pub(super) snapshot: Option<Snapshot>,
     pub(super) search: Option<SearchDto>,
+    pub(super) preferences: Option<Preferences>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -220,4 +221,69 @@ pub(super) struct SearchCreateRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchResultDownloadRequest {
     pub(super) paused: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PreferencesForm {
+    pub(super) upload_limit_ki_bps: String,
+    pub(super) download_limit_ki_bps: String,
+    pub(super) max_connections: String,
+    pub(super) max_connections_per_five_seconds: String,
+    pub(super) max_sources_per_file: String,
+    pub(super) upload_client_data_rate: String,
+    pub(super) max_upload_slots: String,
+    pub(super) upload_slot_elastic_percent: String,
+    pub(super) queue_size: String,
+    pub(super) auto_connect: bool,
+    pub(super) reconnect: bool,
+    pub(super) new_auto_up: bool,
+    pub(super) new_auto_down: bool,
+    pub(super) credit_system: bool,
+    pub(super) safe_server_connect: bool,
+    pub(super) add_servers_from_server: bool,
+    pub(super) network_kademlia: bool,
+    pub(super) network_ed2k: bool,
+    pub(super) download_auto_broadband_io: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ServerForm {
+    pub(super) address: String,
+    pub(super) port: String,
+    pub(super) name: String,
+    pub(super) priority: String,
+    pub(super) static_server: bool,
+    pub(super) connect: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ServerCreateRequest {
+    pub(super) address: String,
+    pub(super) port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) priority: Option<String>,
+    #[serde(rename = "static", skip_serializing_if = "Option::is_none")]
+    pub(super) static_server: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) connect: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ServerUpdateRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) priority: Option<String>,
+    #[serde(rename = "static", skip_serializing_if = "Option::is_none")]
+    pub(super) static_server: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UrlImportRequest {
+    pub(super) url: String,
 }

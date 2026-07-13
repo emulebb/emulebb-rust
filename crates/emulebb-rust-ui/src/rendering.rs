@@ -41,6 +41,31 @@ pub(super) fn publish_search(weak: &slint::Weak<MainWindow>, search: SearchDto) 
     });
 }
 
+pub(super) fn publish_preferences(
+    weak: &slint::Weak<MainWindow>,
+    preferences: Preferences,
+    status: String,
+) {
+    let update = move |ui: MainWindow| {
+        render_preferences(&ui, &preferences, &status);
+    };
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            update(ui);
+        }
+    });
+}
+
+pub(super) fn publish_settings_status(weak: &slint::Weak<MainWindow>, status: String) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_settings_status_line(status.into());
+        }
+    });
+}
+
 pub(super) fn publish_empty_search(weak: &slint::Weak<MainWindow>, status: &str) {
     let status = status.to_string();
     let weak = weak.clone();
@@ -104,6 +129,12 @@ pub(super) fn store_search(cache: &Arc<Mutex<DataCache>>, search: Option<SearchD
     }
 }
 
+pub(super) fn store_preferences(cache: &Arc<Mutex<DataCache>>, preferences: Preferences) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.preferences = Some(preferences);
+    }
+}
+
 pub(super) fn rerender_from_cache(ui: &MainWindow, cache: &Arc<Mutex<DataCache>>) {
     let Ok(cache) = cache.lock() else {
         return;
@@ -114,6 +145,58 @@ pub(super) fn rerender_from_cache(ui: &MainWindow, cache: &Arc<Mutex<DataCache>>
     if let Some(search) = cache.search.as_ref() {
         render_search_table(ui, search);
     }
+    if let Some(preferences) = cache.preferences.as_ref() {
+        render_preferences(ui, preferences, "Settings restored from cache");
+    }
+}
+
+pub(super) fn rerender_preferences_from_cache(
+    ui: &MainWindow,
+    cache: &Arc<Mutex<DataCache>>,
+) -> bool {
+    let Ok(cache) = cache.lock() else {
+        return false;
+    };
+    let Some(preferences) = cache.preferences.as_ref() else {
+        return false;
+    };
+    render_preferences(ui, preferences, "Settings reverted");
+    true
+}
+
+pub(super) fn cached_preferences(cache: &Arc<Mutex<DataCache>>) -> Option<Preferences> {
+    cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.preferences.as_ref().cloned())
+}
+
+pub(super) fn render_preferences(ui: &MainWindow, preferences: &Preferences, status: &str) {
+    ui.set_pref_upload_limit(preferences.upload_limit_ki_bps.to_string().into());
+    ui.set_pref_download_limit(preferences.download_limit_ki_bps.to_string().into());
+    ui.set_pref_max_connections(preferences.max_connections.to_string().into());
+    ui.set_pref_max_connections_per_five(
+        preferences
+            .max_connections_per_five_seconds
+            .to_string()
+            .into(),
+    );
+    ui.set_pref_max_sources(preferences.max_sources_per_file.to_string().into());
+    ui.set_pref_upload_client_rate(preferences.upload_client_data_rate.to_string().into());
+    ui.set_pref_max_upload_slots(preferences.max_upload_slots.to_string().into());
+    ui.set_pref_upload_elastic_percent(preferences.upload_slot_elastic_percent.to_string().into());
+    ui.set_pref_queue_size(preferences.queue_size.to_string().into());
+    ui.set_pref_auto_connect(preferences.auto_connect);
+    ui.set_pref_reconnect(preferences.reconnect);
+    ui.set_pref_new_auto_up(preferences.new_auto_up);
+    ui.set_pref_new_auto_down(preferences.new_auto_down);
+    ui.set_pref_credit_system(preferences.credit_system);
+    ui.set_pref_safe_server_connect(preferences.safe_server_connect);
+    ui.set_pref_add_servers_from_server(preferences.add_servers_from_server);
+    ui.set_pref_network_kademlia(preferences.network_kademlia);
+    ui.set_pref_network_ed2k(preferences.network_ed2k);
+    ui.set_pref_download_auto_broadband_io(preferences.download_auto_broadband_io);
+    ui.set_settings_status_line(status.into());
 }
 
 pub(super) fn render_snapshot_tables(ui: &MainWindow, snapshot: &Snapshot) {

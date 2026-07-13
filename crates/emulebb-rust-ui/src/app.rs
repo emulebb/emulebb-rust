@@ -21,6 +21,13 @@ use crate::ui_state;
 use anyhow::{Context, Result};
 use api::*;
 use clap::Parser;
+use emulebb_preferences::{
+    FIELD_DOWNLOAD_LIMIT_KIBPS, FIELD_MAX_CONNECTIONS, FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS,
+    FIELD_MAX_SOURCES_PER_FILE, FIELD_MAX_UPLOAD_SLOTS, FIELD_QUEUE_SIZE,
+    FIELD_UPLOAD_CLIENT_DATA_RATE, FIELD_UPLOAD_LIMIT_KIBPS, FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
+    Preferences, PreferencesUpdate, changed_preferences_update, parse_u32_preference,
+    preferences_update_is_empty,
+};
 use models::*;
 use presentation::*;
 use rendering::*;
@@ -71,6 +78,10 @@ struct ConnectionConfig {
 enum UiCommand {
     Connect(ConnectionConfig),
     Refresh,
+    PreferencesReload,
+    PreferencesApply {
+        form: PreferencesForm,
+    },
     SearchStart {
         query: String,
         method: String,
@@ -87,6 +98,23 @@ enum UiCommand {
         action: String,
     },
     ServerAction {
+        action: String,
+        endpoint: String,
+    },
+    ServerAdd {
+        form: ServerForm,
+    },
+    ServerUpdate {
+        endpoint: String,
+        form: ServerForm,
+    },
+    ServerDelete {
+        endpoint: String,
+    },
+    ServerImport {
+        url: String,
+    },
+    KadAction {
         action: String,
     },
 }
@@ -114,6 +142,21 @@ pub(crate) fn run() -> Result<()> {
     ui.set_search_method("automatic".into());
     ui.set_search_type("".into());
     ui.set_search_status_line("No active search".into());
+    ui.set_settings_status_line("Connect to load settings".into());
+    ui.set_pref_upload_limit("".into());
+    ui.set_pref_download_limit("".into());
+    ui.set_pref_max_connections("".into());
+    ui.set_pref_max_connections_per_five("".into());
+    ui.set_pref_max_sources("".into());
+    ui.set_pref_upload_client_rate("".into());
+    ui.set_pref_max_upload_slots("".into());
+    ui.set_pref_upload_elastic_percent("".into());
+    ui.set_pref_queue_size("".into());
+    ui.set_server_address("".into());
+    ui.set_server_port("4661".into());
+    ui.set_server_name("".into());
+    ui.set_server_priority("normal".into());
+    ui.set_server_import_url("".into());
     ui.set_transfers(empty_model());
     ui.set_search_results(empty_model());
     ui.set_uploads(empty_model());
@@ -187,6 +230,13 @@ pub(crate) fn run() -> Result<()> {
     let search_download_tx = tx.clone();
     let transfer_tx = tx.clone();
     let server_tx = tx.clone();
+    let server_add_tx = tx.clone();
+    let server_update_tx = tx.clone();
+    let server_delete_tx = tx.clone();
+    let server_import_tx = tx.clone();
+    let settings_reload_tx = tx.clone();
+    let settings_apply_tx = tx.clone();
+    let kad_tx = tx.clone();
     let close_ui = ui.as_weak();
     ui.window().on_close_requested(move || {
         if let Some(ui) = close_ui.upgrade() {
@@ -279,6 +329,35 @@ pub(crate) fn run() -> Result<()> {
         });
     });
 
+    ui.on_settings_reload_requested(move || {
+        let _ = settings_reload_tx.send(UiCommand::PreferencesReload);
+    });
+
+    let settings_apply_ui = ui.as_weak();
+    ui.on_settings_apply_requested(move || {
+        if let Some(ui) = settings_apply_ui.upgrade() {
+            let _ = settings_apply_tx.send(UiCommand::PreferencesApply {
+                form: preferences_form(&ui),
+            });
+        }
+    });
+
+    let settings_revert_ui = ui.as_weak();
+    let settings_revert_cache = Arc::clone(&cache);
+    ui.on_settings_revert_requested(move || {
+        if let Some(ui) = settings_revert_ui.upgrade() {
+            if !rerender_preferences_from_cache(&ui, &settings_revert_cache) {
+                ui.set_settings_status_line("No settings snapshot is loaded".into());
+            }
+        }
+    });
+
+    ui.on_kad_action_requested(move |action| {
+        let _ = kad_tx.send(UiCommand::KadAction {
+            action: action.to_string(),
+        });
+    });
+
     ui.on_transfer_action_requested(move |hash, action| {
         let _ = transfer_tx.send(UiCommand::TransferAction {
             hash: hash.to_string(),
@@ -286,13 +365,86 @@ pub(crate) fn run() -> Result<()> {
         });
     });
 
-    ui.on_server_action_requested(move |action| {
+    ui.on_server_action_requested(move |action, endpoint| {
         let _ = server_tx.send(UiCommand::ServerAction {
             action: action.to_string(),
+            endpoint: endpoint.to_string(),
         });
     });
 
+    let server_add_ui = ui.as_weak();
+    ui.on_server_add_requested(move || {
+        if let Some(ui) = server_add_ui.upgrade() {
+            let _ = server_add_tx.send(UiCommand::ServerAdd {
+                form: server_form(&ui),
+            });
+        }
+    });
+
+    let server_update_ui = ui.as_weak();
+    ui.on_server_update_requested(move || {
+        if let Some(ui) = server_update_ui.upgrade() {
+            let _ = server_update_tx.send(UiCommand::ServerUpdate {
+                endpoint: ui.get_selected_id().to_string(),
+                form: server_form(&ui),
+            });
+        }
+    });
+
+    let server_delete_ui = ui.as_weak();
+    ui.on_server_delete_requested(move || {
+        if let Some(ui) = server_delete_ui.upgrade() {
+            let _ = server_delete_tx.send(UiCommand::ServerDelete {
+                endpoint: ui.get_selected_id().to_string(),
+            });
+        }
+    });
+
+    let server_import_ui = ui.as_weak();
+    ui.on_server_import_requested(move || {
+        if let Some(ui) = server_import_ui.upgrade() {
+            let _ = server_import_tx.send(UiCommand::ServerImport {
+                url: ui.get_server_import_url().to_string(),
+            });
+        }
+    });
+
     ui.run().context("Slint event loop failed")
+}
+
+fn preferences_form(ui: &MainWindow) -> PreferencesForm {
+    PreferencesForm {
+        upload_limit_ki_bps: ui.get_pref_upload_limit().to_string(),
+        download_limit_ki_bps: ui.get_pref_download_limit().to_string(),
+        max_connections: ui.get_pref_max_connections().to_string(),
+        max_connections_per_five_seconds: ui.get_pref_max_connections_per_five().to_string(),
+        max_sources_per_file: ui.get_pref_max_sources().to_string(),
+        upload_client_data_rate: ui.get_pref_upload_client_rate().to_string(),
+        max_upload_slots: ui.get_pref_max_upload_slots().to_string(),
+        upload_slot_elastic_percent: ui.get_pref_upload_elastic_percent().to_string(),
+        queue_size: ui.get_pref_queue_size().to_string(),
+        auto_connect: ui.get_pref_auto_connect(),
+        reconnect: ui.get_pref_reconnect(),
+        new_auto_up: ui.get_pref_new_auto_up(),
+        new_auto_down: ui.get_pref_new_auto_down(),
+        credit_system: ui.get_pref_credit_system(),
+        safe_server_connect: ui.get_pref_safe_server_connect(),
+        add_servers_from_server: ui.get_pref_add_servers_from_server(),
+        network_kademlia: ui.get_pref_network_kademlia(),
+        network_ed2k: ui.get_pref_network_ed2k(),
+        download_auto_broadband_io: ui.get_pref_download_auto_broadband_io(),
+    }
+}
+
+fn server_form(ui: &MainWindow) -> ServerForm {
+    ServerForm {
+        address: ui.get_server_address().to_string(),
+        port: ui.get_server_port().to_string(),
+        name: ui.get_server_name().to_string(),
+        priority: ui.get_server_priority().to_string(),
+        static_server: ui.get_server_static(),
+        connect: ui.get_server_connect_after_add(),
+    }
 }
 
 fn default_base_url() -> String {
@@ -303,7 +455,7 @@ fn default_base_url() -> String {
 }
 
 fn apply_saved_state(ui: &MainWindow, state: &ui_state::UiState) {
-    ui.set_selected_tab(state.selected_tab.unwrap_or(0).clamp(0, 8));
+    ui.set_selected_tab(state.selected_tab.unwrap_or(0).clamp(0, 9));
     apply_saved_table_sort(ui, state, TABLE_TRANSFERS);
     apply_saved_table_sort(ui, state, TABLE_SEARCH_RESULTS);
     apply_saved_table_sort(ui, state, TABLE_SERVERS);
