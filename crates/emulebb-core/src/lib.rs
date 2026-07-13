@@ -240,7 +240,10 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
-pub use emulebb_preferences::{Preferences, PreferencesUpdate};
+pub use emulebb_preferences::{
+    PREFERENCE_SPECS, PreferenceFieldKind, PreferenceSpec, Preferences, PreferencesUpdate,
+    preference_field, preference_schema,
+};
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,

@@ -285,6 +285,10 @@ async fn preferences_patch_body_uses_canonical_validation() {
         ),
         (r#"{"reconnect":1}"#, "reconnect must be a boolean"),
         (
+            r#"{"addServersFromServer":1}"#,
+            "addServersFromServer must be a boolean",
+        ),
+        (
             r#"{"networkEd2k":"false"}"#,
             "networkEd2k must be a boolean",
         ),

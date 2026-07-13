@@ -20,54 +20,260 @@ pub const FIELD_ADD_SERVERS_FROM_SERVER: &str = "addServersFromServer";
 pub const FIELD_NETWORK_KADEMLIA: &str = "networkKademlia";
 pub const FIELD_NETWORK_ED2K: &str = "networkEd2k";
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PreferenceFieldKind {
     Number,
     Boolean,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct PreferenceField {
-    pub json_name: &'static str,
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PreferenceGroup {
+    Network,
+    Transfers,
+    Server,
+    Kad,
+    Safety,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum PreferenceDefaultValue {
+    Number(u32),
+    Boolean(bool),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferenceSpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub group: PreferenceGroup,
     pub kind: PreferenceFieldKind,
     pub min: Option<u32>,
     pub max: Option<u32>,
+    pub unit: Option<&'static str>,
+    pub default_value: PreferenceDefaultValue,
+    pub restart_required: bool,
+    pub advanced: bool,
+    pub description: &'static str,
 }
 
-pub const PREFERENCE_FIELDS: &[PreferenceField] = &[
-    number(FIELD_UPLOAD_LIMIT_KIBPS, 1, u32::MAX - 1),
-    number(FIELD_DOWNLOAD_LIMIT_KIBPS, 1, u32::MAX - 1),
-    number(FIELD_MAX_CONNECTIONS, 1, i32::MAX as u32),
-    number(FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS, 1, i32::MAX as u32),
-    number(FIELD_MAX_SOURCES_PER_FILE, 1, i32::MAX as u32),
-    number(FIELD_UPLOAD_CLIENT_DATA_RATE, 1, u32::MAX),
-    number(FIELD_MAX_UPLOAD_SLOTS, 1, 64),
-    number(FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, 0, 100),
-    number(FIELD_QUEUE_SIZE, 2_000, 10_000),
-    boolean(FIELD_AUTO_CONNECT),
-    boolean(FIELD_RECONNECT),
-    boolean(FIELD_CREDIT_SYSTEM),
-    boolean(FIELD_SAFE_SERVER_CONNECT),
-    boolean(FIELD_ADD_SERVERS_FROM_SERVER),
-    boolean(FIELD_NETWORK_KADEMLIA),
-    boolean(FIELD_NETWORK_ED2K),
+pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
+    number(
+        FIELD_UPLOAD_LIMIT_KIBPS,
+        "Upload limit",
+        PreferenceGroup::Transfers,
+        1,
+        u32::MAX - 1,
+        Some("KiB/s"),
+        6200,
+        false,
+        false,
+        "Maximum upload payload budget.",
+    ),
+    number(
+        FIELD_DOWNLOAD_LIMIT_KIBPS,
+        "Download limit",
+        PreferenceGroup::Transfers,
+        1,
+        u32::MAX - 1,
+        Some("KiB/s"),
+        12207,
+        false,
+        false,
+        "Maximum download payload budget.",
+    ),
+    number(
+        FIELD_MAX_CONNECTIONS,
+        "Maximum connections",
+        PreferenceGroup::Network,
+        1,
+        i32::MAX as u32,
+        Some("connections"),
+        500,
+        false,
+        true,
+        "Global outgoing connection budget.",
+    ),
+    number(
+        FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS,
+        "New connections per five seconds",
+        PreferenceGroup::Network,
+        1,
+        i32::MAX as u32,
+        Some("connections"),
+        50,
+        false,
+        true,
+        "New outgoing connection budget over the rolling five-second window.",
+    ),
+    number(
+        FIELD_MAX_SOURCES_PER_FILE,
+        "Maximum sources per file",
+        PreferenceGroup::Transfers,
+        1,
+        i32::MAX as u32,
+        Some("sources"),
+        600,
+        false,
+        true,
+        "Maximum tracked eD2K sources per transfer.",
+    ),
+    number(
+        FIELD_UPLOAD_CLIENT_DATA_RATE,
+        "Target upload slot rate",
+        PreferenceGroup::Transfers,
+        1,
+        u32::MAX,
+        Some("KiB/s"),
+        32,
+        false,
+        true,
+        "Target per-peer upload rate used to derive elastic slot behavior.",
+    ),
+    number(
+        FIELD_MAX_UPLOAD_SLOTS,
+        "Maximum upload slots",
+        PreferenceGroup::Transfers,
+        1,
+        64,
+        Some("slots"),
+        12,
+        false,
+        false,
+        "Maximum active upload slots.",
+    ),
+    number(
+        FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
+        "Upload slot elasticity",
+        PreferenceGroup::Transfers,
+        0,
+        100,
+        Some("percent"),
+        80,
+        false,
+        true,
+        "Elastic underfill percentage for upload slot expansion.",
+    ),
+    number(
+        FIELD_QUEUE_SIZE,
+        "Upload queue size",
+        PreferenceGroup::Transfers,
+        2_000,
+        10_000,
+        Some("clients"),
+        10000,
+        false,
+        true,
+        "Maximum waiting upload clients.",
+    ),
+    boolean(
+        FIELD_AUTO_CONNECT,
+        "Auto-connect",
+        PreferenceGroup::Server,
+        false,
+        true,
+        "Connect to eD2K servers automatically on daemon startup.",
+    ),
+    boolean(
+        FIELD_RECONNECT,
+        "Reconnect",
+        PreferenceGroup::Server,
+        true,
+        true,
+        "Reconnect after an eD2K server session drops.",
+    ),
+    boolean(
+        FIELD_CREDIT_SYSTEM,
+        "Credit system",
+        PreferenceGroup::Safety,
+        true,
+        false,
+        "Use peer credit history when scoring upload queue clients.",
+    ),
+    boolean(
+        FIELD_SAFE_SERVER_CONNECT,
+        "Safe server connect",
+        PreferenceGroup::Server,
+        true,
+        false,
+        "Limit automatic server connection concurrency.",
+    ),
+    boolean(
+        FIELD_ADD_SERVERS_FROM_SERVER,
+        "Add servers from server",
+        PreferenceGroup::Server,
+        true,
+        false,
+        "Accept servers advertised by the connected eD2K server.",
+    ),
+    boolean(
+        FIELD_NETWORK_KADEMLIA,
+        "Kad enabled",
+        PreferenceGroup::Kad,
+        true,
+        true,
+        "Enable Kad runtime participation on startup.",
+    ),
+    boolean(
+        FIELD_NETWORK_ED2K,
+        "eD2K enabled",
+        PreferenceGroup::Network,
+        true,
+        true,
+        "Enable eD2K server and peer networking on startup.",
+    ),
 ];
 
-const fn number(json_name: &'static str, min: u32, max: u32) -> PreferenceField {
-    PreferenceField {
-        json_name,
+const fn number(
+    key: &'static str,
+    label: &'static str,
+    group: PreferenceGroup,
+    min: u32,
+    max: u32,
+    unit: Option<&'static str>,
+    default_value: u32,
+    restart_required: bool,
+    advanced: bool,
+    description: &'static str,
+) -> PreferenceSpec {
+    PreferenceSpec {
+        key,
+        label,
+        group,
         kind: PreferenceFieldKind::Number,
         min: Some(min),
         max: Some(max),
+        unit,
+        default_value: PreferenceDefaultValue::Number(default_value),
+        restart_required,
+        advanced,
+        description,
     }
 }
 
-const fn boolean(json_name: &'static str) -> PreferenceField {
-    PreferenceField {
-        json_name,
+const fn boolean(
+    key: &'static str,
+    label: &'static str,
+    group: PreferenceGroup,
+    default_value: bool,
+    restart_required: bool,
+    description: &'static str,
+) -> PreferenceSpec {
+    PreferenceSpec {
+        key,
+        label,
+        group,
         kind: PreferenceFieldKind::Boolean,
         min: None,
         max: None,
+        unit: None,
+        default_value: PreferenceDefaultValue::Boolean(default_value),
+        restart_required,
+        advanced: false,
+        description,
     }
 }
 
@@ -343,10 +549,14 @@ pub fn validate_u32(field_name: &str, value: u32) -> Result<(), PreferenceValida
     Ok(())
 }
 
-pub fn preference_field(field_name: &str) -> Option<&'static PreferenceField> {
-    PREFERENCE_FIELDS
+pub fn preference_schema() -> &'static [PreferenceSpec] {
+    PREFERENCE_SPECS
+}
+
+pub fn preference_field(field_name: &str) -> Option<&'static PreferenceSpec> {
+    PREFERENCE_SPECS
         .iter()
-        .find(|field| field.json_name == field_name)
+        .find(|field| field.key == field_name)
 }
 
 pub fn derive_upload_slots(upload_limit_ki_bps: u32, upload_client_data_rate: u32) -> u32 {
@@ -377,7 +587,20 @@ mod tests {
 
         assert_eq!(value[FIELD_UPLOAD_LIMIT_KIBPS], 6200);
         assert_eq!(value[FIELD_RECONNECT], true);
-        assert_eq!(value.as_object().unwrap().len(), PREFERENCE_FIELDS.len());
+        assert_eq!(value.as_object().unwrap().len(), PREFERENCE_SPECS.len());
+    }
+
+    #[test]
+    fn preference_schema_matches_default_values() {
+        let defaults = serde_json::to_value(default_preferences()).unwrap();
+
+        for field in preference_schema() {
+            let expected_default = match field.default_value {
+                PreferenceDefaultValue::Number(value) => serde_json::json!(value),
+                PreferenceDefaultValue::Boolean(value) => serde_json::json!(value),
+            };
+            assert_eq!(defaults[field.key], expected_default);
+        }
     }
 
     #[test]

@@ -141,6 +141,36 @@ async fn preferences_use_canonical_get_and_patch_route() {
     assert_eq!(value["data"]["uploadLimitKiBps"], 6200);
     assert_eq!(value["data"]["reconnect"], true);
 
+    let schema = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app/preferences/schema")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(schema.status(), StatusCode::OK);
+    let body = to_bytes(schema.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let fields = value["data"].as_array().unwrap();
+    assert_eq!(fields.len(), 16);
+    assert_eq!(fields[0]["key"], "uploadLimitKiBps");
+    assert_eq!(fields[0]["label"], "Upload limit");
+    assert_eq!(fields[0]["group"], "transfers");
+    assert_eq!(fields[0]["kind"], "number");
+    assert_eq!(fields[0]["defaultValue"], 6200);
+    assert_eq!(fields[0]["min"], 1);
+    assert_eq!(fields[0]["max"], 4294967294u32);
+    assert_eq!(fields[0]["unit"], "KiB/s");
+    assert_eq!(fields[0]["restartRequired"], false);
+    assert_eq!(fields[0]["advanced"], false);
+    assert_eq!(fields[13]["key"], "addServersFromServer");
+    assert_eq!(fields[13]["kind"], "boolean");
+    assert_eq!(fields[13]["defaultValue"], true);
+
     let update = app
         .clone()
         .oneshot(

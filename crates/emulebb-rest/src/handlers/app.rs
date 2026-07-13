@@ -13,7 +13,7 @@ use axum::{
 };
 use serde_json::json;
 
-use emulebb_core::PreferencesUpdate;
+use emulebb_core::{PreferencesUpdate, preference_schema};
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
@@ -95,6 +95,10 @@ pub(crate) async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoRespo
 
 pub(crate) async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(state.core.preferences().await)
+}
+
+pub(crate) async fn preferences_schema() -> impl IntoResponse {
+    api_ok(preference_schema())
 }
 
 pub(crate) async fn update_preferences(

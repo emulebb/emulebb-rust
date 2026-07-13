@@ -28,8 +28,8 @@ pub(crate) mod transfers;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
-    app, capabilities, capture_diagnostic_dump, preferences, shutdown_app, snapshot, stats, status,
-    trigger_diagnostic_crash_test, update_preferences,
+    app, capabilities, capture_diagnostic_dump, preferences, preferences_schema, shutdown_app,
+    snapshot, stats, status, trigger_diagnostic_crash_test, update_preferences,
 };
 pub(crate) use categories::{
     categories, category, create_category, delete_category, update_category,

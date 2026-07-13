@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use emulebb_core::preference_field;
 
 use crate::envelope::{api_error, json_error_message};
 use validators::{
@@ -54,10 +55,22 @@ fn validate_allowed_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
     let Some(allowed_fields) = route_body_fields(method, path) else {
+        if method == "PATCH" && path == "/api/v1/app/preferences" {
+            return validate_preference_body_fields(object);
+        }
         return Ok(());
     };
     for name in object.keys() {
         if !allowed_fields.contains(&name.as_str()) {
+            return Err(invalid_body_error(format!("unknown JSON field: {name}")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_preference_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    for name in object.keys() {
+        if preference_field(name).is_none() {
             return Err(invalid_body_error(format!("unknown JSON field: {name}")));
         }
     }
@@ -167,24 +180,6 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
-    const PREFERENCES_PATCH: &[&str] = &[
-        "uploadLimitKiBps",
-        "downloadLimitKiBps",
-        "maxConnections",
-        "maxConnectionsPerFiveSeconds",
-        "maxSourcesPerFile",
-        "uploadClientDataRate",
-        "maxUploadSlots",
-        "uploadSlotElasticPercent",
-        "queueSize",
-        "autoConnect",
-        "reconnect",
-        "creditSystem",
-        "safeServerConnect",
-        "addServersFromServer",
-        "networkKademlia",
-        "networkEd2k",
-    ];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
     const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
@@ -224,9 +219,6 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "POST" && path == "/api/v1/logs/operations/clear" {
         return Some(CONFIRM_CLEAR_LOGS);
-    }
-    if method == "PATCH" && path == "/api/v1/app/preferences" {
-        return Some(PREFERENCES_PATCH);
     }
     if method == "POST" && path == "/api/v1/servers" {
         return Some(SERVER_CREATE);

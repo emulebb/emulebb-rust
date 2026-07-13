@@ -1,6 +1,7 @@
 //! App-preferences PATCH request-body validation.
 
 use axum::response::Response;
+use emulebb_core::{PreferenceFieldKind, preference_field};
 
 use super::super::{JsonObject, invalid_body_error};
 
@@ -13,98 +14,43 @@ pub(super) fn validate_preferences_patch_body_fields(
         ));
     }
 
-    validate_unsigned_preference(
-        object,
-        "uploadLimitKiBps",
-        "uploadLimitKiBps must be an unsigned number in the range 1..4294967294",
-        |value| (1..=4_294_967_294).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "downloadLimitKiBps",
-        "downloadLimitKiBps must be an unsigned number in the range 1..4294967294",
-        |value| (1..=4_294_967_294).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "maxConnections",
-        "maxConnections must be an unsigned number in the range 1..2147483647",
-        |value| (1..=2_147_483_647).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "maxConnectionsPerFiveSeconds",
-        "maxConnectionsPerFiveSeconds must be an unsigned number in the range 1..2147483647",
-        |value| (1..=2_147_483_647).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "maxSourcesPerFile",
-        "maxSourcesPerFile must be an unsigned number in the range 1..2147483647",
-        |value| (1..=2_147_483_647).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "uploadClientDataRate",
-        "uploadClientDataRate must be an unsigned number in the range 1..4294967295",
-        |value| (1..=u32::MAX as u64).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "maxUploadSlots",
-        "maxUploadSlots must be an unsigned number in the range 1..64",
-        |value| (1..=64).contains(&value),
-    )?;
-    validate_unsigned_preference(
-        object,
-        "uploadSlotElasticPercent",
-        "uploadSlotElasticPercent must be an unsigned number in the range 0..100",
-        |value| value <= 100,
-    )?;
-    validate_unsigned_preference(
-        object,
-        "queueSize",
-        "queueSize must be an unsigned number in the range 2000..10000",
-        |value| (2_000..=10_000).contains(&value),
-    )?;
-
-    for field in [
-        "autoConnect",
-        "reconnect",
-        "creditSystem",
-        "safeServerConnect",
-        "networkKademlia",
-        "networkEd2k",
-    ] {
-        validate_boolean_preference(object, field)?;
+    for (field_name, value) in object {
+        let Some(field) = preference_field(field_name) else {
+            continue;
+        };
+        match field.kind {
+            PreferenceFieldKind::Number => validate_unsigned_preference(field_name, value)?,
+            PreferenceFieldKind::Boolean => validate_boolean_preference(field_name, value)?,
+        }
     }
 
     Ok(())
 }
 
 fn validate_unsigned_preference(
-    object: &JsonObject,
-    field: &'static str,
-    message: &'static str,
-    is_valid: impl Fn(u64) -> bool,
+    field: &str,
+    value: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
-    let Some(value) = object.get(field) else {
+    let Some(spec) = preference_field(field) else {
         return Ok(());
     };
+    let min = spec.min.unwrap_or(0);
+    let max = spec.max.unwrap_or(u32::MAX);
+    let message = format!("{field} must be an unsigned number in the range {min}..{max}");
     let Some(value) = value.as_u64() else {
         return Err(invalid_body_error(message));
     };
-    if !is_valid(value) {
+    if !(u64::from(min)..=u64::from(max)).contains(&value) {
         return Err(invalid_body_error(message));
     }
     Ok(())
 }
 
 fn validate_boolean_preference(
-    object: &JsonObject,
-    field: &'static str,
+    field: &str,
+    value: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
-    if object.get(field).is_some_and(|value| !value.is_boolean()) {
+    if !value.is_boolean() {
         return Err(invalid_body_error(format!("{field} must be a boolean")));
     }
     Ok(())
