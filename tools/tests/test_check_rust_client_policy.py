@@ -81,6 +81,85 @@ class TestActionPins(unittest.TestCase):
         self.assertFalse(CHECKER.action_ref_is_immutable("a" * 39))
 
 
+class TestOmissionRegistry(unittest.TestCase):
+    def test_active_registry_rejects_fixed_entries(self) -> None:
+        policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}
+        omissions = {
+            "omissions": [
+                {
+                    "id": "already-fixed",
+                    "area": "ed2k",
+                    "stock_behavior": "stock",
+                    "rust_behavior": "rust",
+                    "reason": "done",
+                    "compatibility": "compatible",
+                    "disposition": "fixed",
+                    "owner": "core-protocol",
+                    "target": "implemented",
+                    "beta_blocker": False,
+                }
+            ]
+        }
+
+        errors = CHECKER.check_omission_registry(policy, omissions)
+
+        self.assertTrue(any("unsupported disposition: fixed" in error for error in errors))
+
+    def test_active_registry_rejects_contradictory_review_disposition(self) -> None:
+        policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}
+        omissions = {
+            "omissions": [
+                {
+                    "id": "preview",
+                    "area": "ed2k",
+                    "stock_behavior": "stock",
+                    "rust_behavior": "rust",
+                    "reason": "drop",
+                    "compatibility": "compatible",
+                    "disposition": "protocol_drop_approved",
+                    "review_disposition": "defer",
+                    "owner": "operator",
+                    "target": "beta",
+                    "beta_blocker": False,
+                }
+            ]
+        }
+
+        errors = CHECKER.check_omission_registry(policy, omissions)
+
+        self.assertTrue(any("contradicts disposition" in error for error in errors))
+
+    def test_resolved_history_rejects_active_overlap(self) -> None:
+        omissions = {
+            "omissions": [
+                {
+                    "id": "same-id",
+                    "area": "ed2k",
+                    "stock_behavior": "stock",
+                    "rust_behavior": "rust",
+                    "reason": "defer",
+                    "compatibility": "compatible",
+                    "disposition": "protocol_defer",
+                    "owner": "core-protocol",
+                    "target": "post-beta",
+                    "beta_blocker": False,
+                }
+            ]
+        }
+        history = {
+            "resolved_omissions": [
+                {
+                    "id": "same-id",
+                    "disposition": "fixed",
+                }
+            ]
+        }
+
+        errors = CHECKER.check_omission_history(omissions, history)
+
+        self.assertTrue(any("also appears in active registry" in error for error in errors))
+
+
 class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """

@@ -5,6 +5,10 @@ stock_behavior = "Legacy clients may advertise and use Source Exchange v1 live r
 rust_behavior = "The Rust client is SX2-only on every live source-exchange leg: it never sends OP_REQUESTSOURCES (download startup + multipacket request request only SX2 OP_REQUESTSOURCES2, with no SX1 fallback even for an SX1-only peer), never answers an inbound OP_REQUESTSOURCES with OP_ANSWERSOURCES (the standalone + both multipacket serve paths decode-and-ignore SX1), and does not ingest an inbound OP_ANSWERSOURCES (it is decoded for the diagnostic dump only and its sources are dropped). SX2 (OP_REQUESTSOURCES2 / OP_ANSWERSOURCES2) request, serve, and ingest stay fully active. The SX1 wire encoders/decoders remain only for codec round-trip tests."
 reason = "Workspace policy records SX1 live source exchange as intentionally removed deprecated behavior; eMuleBB is SX2-only (operator decision REF-002)."
 compatibility = "Stock-compatible for the supported surface because unsupported SX1 is not advertised or acted on; an SX1-only peer simply yields no exchanged sources, and an unsolicited SX1 answer is ignored."
+disposition = "protocol_drop_approved"
+owner = "operator"
+target = "rust-v0.1.0-beta.1"
+beta_blocker = false
 
 [[omissions]]
 id = "conn-rate-rolling-five-second-window"
@@ -13,18 +17,12 @@ stock_behavior = "eMule's connection-rate limiter (CListenSocket::TooManySockets
 rust_behavior = "The Rust shared download coordinator instead enforces the new-connection rate as a conservative rolling 5-second sliding window (download_coordinator.rs recent_connection_grants: a grant is counted for a full DEFAULT_CONNECTION_WINDOW=5s and only then ages out), so at most GetMaxConperFive() new outgoing connections are admitted in ANY 5s span. The concurrent cap (GetMaxConnections), the per-5s rate value, and the half-open cap (GetMaxHalfConnections, default 50) are all matched; only the rate-window MODEL is the conservative sliding variant rather than eMule's per-tick reset."
 reason = "Deliberate divergence (operator decision option B, connection-management safe subset): a VPN'd headless client must be gentle and avoid connection-rate bans, and a true rolling window can never burst above the per-5s budget the way eMule's per-tick batches can. The conservative window is strictly less aggressive than the master."
 compatibility = "Does not affect eD2K or Kad wire compatibility; it only makes outbound connection pacing equal-or-gentler than the master. A peer/server sees the same protocol, just never a per-tick burst."
+disposition = "protocol_defer"
+owner = "core-protocol"
+target = "post-beta polish"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED accurate - rust holds grants a full 5s then ages out (download_coordinator.rs), strictly gentler than stock's per-tick reset (ListenSocket.cpp:2530/2649). No protocol surface. DEFER."
-
-[[omissions]]
-id = "conn-rate-spike-modifier"
-area = "ed2k"
-stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (CListenSocket::TooManySockets / GetMaxConperFiveModifier, ListenSocket.cpp:2653,2722-2728). The modifier is a SUPPRESSOR, not a raiser: it returns a multiplier in [0,1) computed from the recent open-socket spike ((SpikeSize > SpikeTolerance) ? 0 : 1 - SpikeSize/SpikeTolerance), so during a connection spike stock throttles its effective per-5s budget BELOW GetMaxConperFive() (down to 0), then relaxes back to the flat budget as the spike subsides."
-rust_behavior = "IMPLEMENTED (RUST-PAR-026): the Rust download coordinator samples its live connection count once per second, maintains MFC's capped moving average, and applies GetMaxConperFiveModifier's [0,1) spike suppressor to the five-second admission window with the same strict-greater-than boundary."
-reason = "RUST-PAR-026 closed the only connection-pacing axis where Rust could be more aggressive than MFC during a sudden socket burst."
-compatibility = "No packet shape changed; connection admission pacing now matches MFC's adaptive suppressor."
-review_disposition = "fix"
-review_disposition_note = "RUST-PAR-026 (2026-07-10): IMPLEMENTED in download_coordinator.rs with focused burst and zero-modifier boundary tests. No longer an omission; retained as audit history."
 
 [[omissions]]
 id = "upload-throttle-focus-slot-distribution"
@@ -33,6 +31,10 @@ stock_behavior = "STOCK eMule's CUploadBandwidthThrottler front-loads: it walks 
 rust_behavior = "The Rust client distributes upload bandwidth with a shared FIFO token-bucket (reserve_upload_payload): each independent per-transfer upload task reserves its turn in arrival order, so the budget is shared roughly equally across all active slots. This MATCHES the fork's equal-share model on the fairness axis. The only residual is send granularity: rust reserves+sends per wire packet (<=10240B) then sleeps bytes/limit, vs the fork's finer 2600B/536B chunks - coarser bursts at low upload caps but identical average per-peer rate and no per-download completion penalty."
 reason = "Deliberate architectural choice (operator decision 2026-06-17), and - per the round-20 re-derivation - rust already matches the reference fork's equal-share throttler; only the send-granularity/burst-shape at low caps differs, with identical average throughput. The FIFO token-bucket fits the task-per-transfer async model (no central ordered send authority). Per 'prefer rust's efficiency when the result is the same or better', equal-share is the correct target here (the fork itself abandoned focus-slot front-loading)."
 compatibility = "Does not affect eD2K or Kad wire compatibility; a downloading peer sees the same protocol. Correction to the earlier claim: rust is NOT 'more even than the fork' - the fork is already equal-share, so rust matches it; the only difference is coarser low-cap burst granularity with the same average rate."
+disposition = "protocol_defer"
+owner = "transfer-runtime"
+target = "post-beta polish"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-020 round-20 upload-throttler re-derivation (2026-07-08): the registry stock_behavior (and the round-19 note) restated the WRONG premise - the reference fork's throttler is EQUAL-share (UploadBandwidthThrottler.cpp:547,580), not focus-slot front-loading (that is stock eMule, abandoned by this fork). Text corrected. rust's FIFO token bucket already matches the fork's fairness model; the only residual is low-cap send granularity (10240B vs 2600B/536B chunks), same average rate, no completion penalty. DEFER holds - rust is at the fork's fairness parity; the granularity nicety is optional polish, not a gap."
 
@@ -43,18 +45,12 @@ stock_behavior = "Some modern clients may have protocol-adjacent IPv6 connectivi
 rust_behavior = "The Rust client is IPv4-only for eD2K, Kad, peer transfer, NAT, and bootstrap behavior."
 reason = "Rust client policy chooses IPv4-only scope for this line."
 compatibility = "Stock-compatible for IPv4 peers and servers; IPv6 is not advertised as supported."
+disposition = "protocol_drop_approved"
+owner = "operator"
+target = "ipv4-only beta line"
+beta_blocker = false
 review_disposition = "permanent-drop"
 review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED IPv4-only; no IPv6 capability bit is advertised on the eD2K/Kad hello (Ipv6 hits in-tree are incidental SocketAddr/UPnP types), so nothing is advertised-but-unimplemented. Standing IPv4-only operator direction. PERMANENT DROP."
-
-[[omissions]]
-id = "legacy-html-webserver"
-area = "controller"
-stock_behavior = "Classic eMule exposes a legacy HTML WebServer controller surface."
-rust_behavior = "The Rust client exposes the eMuleBB /api/v1 REST controller surface only."
-reason = "The Rust client is a headless local eMuleBB client, not legacy WebServer parity."
-compatibility = "Does not affect eD2K or Kad wire compatibility."
-review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED - only /api/v1 REST exists, no HTML WebServer surface. Headless architectural choice, no wire surface. PERMANENT DROP."
 
 [[omissions]]
 id = "peer-chat-messaging"
@@ -63,6 +59,10 @@ stock_behavior = "Classic eMule supports interactive peer-to-peer text chat/mess
 rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state (OP_MESSAGE / the captcha challenge-response are decode-only). It DOES advertise the captcha-support hello bit (CT_EMULE_MISCOPTIONS2 bit 11 = 1) to stay wire-identical to a stock eMule 0.72a client, which hardcodes that bit to 1 (BaseClient.cpp uSupportsCaptcha); only the interactive chat behavior is omitted, not the advertised capability."
 reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so the chat session is outside the headless, REST-controllable scope. The advertised capability bit still mirrors stock so the hello is not a non-stock fingerprint (RUST-FIX-035)."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the hello bitfield matches stock eMule, and an unsolicited OP_MESSAGE from a peer is simply not surfaced (as with a stock user who never opens the chat window)."
+disposition = "protocol_defer"
+owner = "core-protocol"
+target = "post-beta only if peer messaging becomes a Rust product feature"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED and wire-verified - rust hardcodes supports_captcha=1<<11 in CT_EMULE_MISCOPTIONS2 (hello.rs:114,124) matching stock uSupportsCaptcha (BaseClient.cpp:1052,1062), regression-tested (tests/protocol/hello.rs). No hello fingerprint; OP_MESSAGE/captcha decode-only. DEFER."
 
@@ -73,68 +73,12 @@ stock_behavior = "Classic eMule can request a media preview from a peer (OP_REQU
 rust_behavior = "The Rust client decodes and logs inbound OP_REQUESTPREVIEW / OP_PREVIEWANSWER for diagnostics but never generates a preview answer and never requests previews; there is no frame-extraction or preview surface."
 reason = "Preview is a rarely-used interactive media feature: answering it needs a heavy media frame-extraction dependency and opens an untrusted-media decode surface, with no eMuleBB /api/v1 route to drive or expose it. Deliberately omitted (operator decision 2026-06-15); it is not advertised as required."
 compatibility = "Does not affect eD2K or Kad wire compatibility; an unanswered preview request simply yields no preview, exactly as a stock peer that has the feature disabled."
-review_disposition = "defer"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED and wire-verified - rust sets preview_supported=0 (MISCOPTIONS1 bit 0, hello.rs:89,101) matching stock ShouldAllowPeerPreview=0 for a user with preview off (BaseClient.cpp:1022,1039); OP_REQUESTPREVIEW/PREVIEWANSWER decode-and-dump only. Wire-silent like stock-preview-disabled. DEFER."
-
-[[omissions]]
-id = "pref-safe-server-connect"
-area = "preferences"
-stock_behavior = "Classic eMule's 'Safe connect' (safeServerConnect) gates how aggressively it cycles through servers when auto-connecting."
-rust_behavior = "IMPLEMENTED (RUST-PAR-027): safeServerConnect now selects MFC's one automatic in-flight attempt when enabled and two when disabled. Attempts use isolated state, the first logged-in session wins, failed servers cycle without per-server backoff, and an explicit REST target remains pinned to one attempt."
-reason = "RUST-PAR-027 closed the automatic server connection-state divergence while preserving the headless controller's explicit-target semantics."
-compatibility = "No server packet shape changed; automatic connection concurrency and cycling now follow MFC."
-review_disposition = "fix"
-review_disposition_note = "RUST-PAR-027 (2026-07-10): IMPLEMENTED in loop_runtime.rs and wired from the persisted preference through effective_ed2k_config. Focused safe-connect and preference propagation tests pass."
-
-[[omissions]]
-id = "pref-new-auto-up"
-area = "preferences"
-stock_behavior = "Classic eMule's newAutoUp toggles auto-management of the upload priority for newly added shared files in the GUI."
-rust_behavior = "The Rust client accepts, persists and echoes the newAutoUp preference for REST-contract compatibility, but does not drive a global new-file auto-upload-priority behavior from it; upload priority is set per file via the REST control plane."
-reason = "newAutoUp is an eMule GUI default-priority convenience with no clean headless mapping: per-file upload priority is managed explicitly over REST, so a global GUI default flag is intentionally not wired."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
+disposition = "protocol_drop_approved"
+owner = "operator"
+target = "no media decode surface"
+beta_blocker = false
 review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED inert (DTO + round-trip only, preferences.rs; no behavior-driving read). GUI-only default-priority knob, no headless mapping, no wire surface. PERMANENT DROP."
-
-[[omissions]]
-id = "pref-new-auto-down"
-area = "preferences"
-stock_behavior = "Classic eMule's newAutoDown toggles auto-management of the download priority for newly added downloads in the GUI."
-rust_behavior = "The Rust client accepts, persists and echoes the newAutoDown preference for REST-contract compatibility, but does not drive a global new-file auto-download-priority behavior from it; download priority is set per transfer via the REST control plane."
-reason = "newAutoDown is an eMule GUI default-priority convenience with no clean headless mapping: per-transfer download priority is managed explicitly over REST, so a global GUI default flag is intentionally not wired."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
-review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED inert (DTO + round-trip only, preferences.rs; no behavior-driving read). GUI-only default-priority knob, no headless mapping, no wire surface. PERMANENT DROP."
-
-[[omissions]]
-id = "time-based-scheduler"
-area = "controller"
-stock_behavior = "eMuleBB's CScheduler (Scheduler.cpp) runs time-of-day / weekday automation: scheduled actions on daily/weekday timers change the upload/download speed limits (ACTION_SETUPL / ACTION_SETDOWNL), the per-file source limit (ACTION_SOURCESL), the connection-rate limits (ACTION_CON5SEC / ACTION_CONS), and stop/resume categories (ACTION_CATSTOP / ACTION_CATRESUME), plus timed connect/disconnect."
-rust_behavior = "The Rust client implements no in-process time-of-day scheduler. Every action the scheduler would automate is already a first-class /api/v1 REST operation (preferences PATCH for the speed/source/connection limits, the server/Kad connect+disconnect operations, and per-transfer/category pause+resume), so scheduling is delegated to the external controller (cron / systemd timer / the controller process) that drives the headless client."
-reason = "Deliberate divergence for the headless model: time-of-day automation is an external-orchestration concern, not a client-core one. An external scheduler driving the existing REST surface is strictly more flexible than an in-process daily/weekday timer, and avoids duplicating scheduling logic (and a wall-clock dependency) inside the core. The operator's excluded-surface list records the time-based scheduler as intentionally out of scope."
-compatibility = "Does not affect eD2K or Kad wire compatibility; it is a local automation convenience with no protocol surface. Every scheduled effect remains reachable on demand over the REST contract."
-review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED - no CScheduler analog; every scheduled effect is a first-class /api/v1 op driven by an external scheduler. External-orchestration concern, no protocol surface. PERMANENT DROP."
-
-[[omissions]]
-id = "pref-download-auto-broadband-io"
-area = "preferences"
-stock_behavior = "Classic eMule's downloadAutoBroadbandIo enables an adaptive disk/broadband IO tuning mode in the GUI."
-rust_behavior = "The Rust client accepts, persists and echoes the downloadAutoBroadbandIo preference for REST-contract compatibility, but does not drive any adaptive IO tuning from it; the transfer runtime uses its own fixed IO/throttle model."
-reason = "downloadAutoBroadbandIo is an eMule GUI adaptive-IO convenience with no clean headless mapping: the headless transfer runtime has its own IO and throttle model, so the GUI auto-IO flag is intentionally not wired."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the preference round-trips over the REST contract unchanged."
-review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED inert (DTO + round-trip only, preferences.rs; no behavior-driving read). GUI adaptive-IO knob, no headless mapping, no wire surface. PERMANENT DROP."
-
-[[omissions]]
-id = "server-udp-description-poll"
-area = "ed2k"
-stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connected server (up to twice, GetLastDescPingedCount() < 2) with OP_SERVER_DESC_REQ carrying a uint32 challenge ((GetRandomUInt16() << 16) | INV_SERV_DESC_LEN=0xF0FF), and parses the OP_SERVER_DESC_RES answer (legacy <name_len><name><desc_len><desc> strings, or the eserver 16.45+ challenge-echo taglist with name/description/dynip/version/aux ports) to refresh server-list name/description/version metadata (UDPSocket.cpp:481-540)."
-rust_behavior = "IMPLEMENTED (RUST-PAR-028): a paced one-shot background pass status-pings non-connected servers, sends challenge-bearing OP_SERVER_DESC_REQ only after a validated status response, decodes legacy strings and challenge-tag OP_SERVER_DESC_RES, and persists refreshed name/description metadata."
-reason = "RUST-PAR-028 implemented the requested server-list metadata parity with conservative one-second pacing and one poll per server per daemon run."
-compatibility = "The 0xA2/0xA3 packet and challenge shapes match MFC; no proprietary extension was introduced."
-review_disposition = "fix"
-review_disposition_note = "RUST-PAR-028 (2026-07-10): IMPLEMENTED with challenge, legacy/tag decoder, mismatch, persistence, and diagnostic-name tests. No longer an omission; retained as audit history."
+review_disposition_note = "RUST-REF-004 beta disposition (2026-07-13): permanent drop approved. Rust does not advertise peer media-preview support, carries no local preview REST operation, and should not add an untrusted media-decoding surface for beta. OP_REQUESTPREVIEW/PREVIEWANSWER remain decode-and-dump diagnostics only; wire behavior is equivalent to preview-disabled stock clients."
 
 [[omissions]]
 id = "kad-flood-lan-exemption"
@@ -143,18 +87,12 @@ stock_behavior = "eMule's inbound Kad packet flood tracker exempts LAN/loopback 
 rust_behavior = "The Rust inbound flood tracker exempts all LAN/loopback source IPs unconditionally (`flood_exempt = is_lan_ip(from.ip())`, receive_loop.rs), regardless of LAN-mode, so a flooding LAN peer is never throttled or banned by the flood tracker."
 reason = "Deliberate be-gentle simplification: a public VPN'd node (the release posture) essentially never receives Kad traffic from LAN peers, and unconditionally trusting LAN sources avoids a LAN-mode state dependency in the hot receive path. Strictly gentler than stock (it only ever exempts more, never bans more)."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the exemption only relaxes local flood defense against LAN sources, which are absent on a public node. Non-LAN (public) sources are throttled/banned exactly as stock."
+disposition = "protocol_drop_approved"
+owner = "operator"
+target = "public VPN deployment posture"
+beta_blocker = false
 review_disposition = "permanent-drop"
 review_disposition_note = "RUST-PAR-018 round-18 LowID-lane re-audit (2026-07-08): confirmed. Implementing the oracle's LAN-mode-only conditional (PacketTracking.cpp:199) would require introducing a LAN-mode concept solely to REDUCE leniency toward LAN sources that do not exist in the VPN'd public deployment. No wire effect on public peers; strictly gentler local defense. PERMANENT DROP - added to excluded_surface_ids in rust-client.toml."
-
-[[omissions]]
-id = "upload-slow-cooldown-suppression"
-area = "ed2k"
-stock_behavior = "eMule holds a slow-rate-recycled upload peer in a cooldown window (SetSlowUploadCooldownUntil / IsInSlowUploadCooldown gates FindBestClientInQueue, UploadQueue.cpp:228) and suppresses its queue score (bCooldownSuppressed, UploadClient.cpp:497), re-promoting it only via the broadband cooldown-probe path when capacity would otherwise idle."
-rust_behavior = "IMPLEMENTED (RUST-PAR-020 U-GAP3): the Rust upload queue now carries the fork's per-IP upload anti-abuse layer (upload_cooldown.rs + upload_queue.rs). A recycled slot seeds an IP-scoped cooldown that gates promotion AND the inline free-slot grant (best_admissible_waiting_key / begin_session, mirroring the IsInSlowUploadCooldown gate on FindBestClientInQueue, UploadQueue.cpp:228); a never-requested (0-byte) recycle also accrues a rolling-window strike with exponential-backoff cooldown and, past 8/16/hash-rotation-3 strikes, a repeat-offender ban wired to the shared BanStore (client->Ban, UploadQueue.cpp:1640); and the cooldown probe re-promotes a cooled waiter only when a base slot would otherwise idle (cooldownProbeClient, UploadQueue.cpp:235-243). No longer an omission."
-reason = "RUST-PAR-020 ported the cooldown/repeat-offender/ban apparatus (UploadQueue.cpp:1117-1779, UploadQueueSeams.h) faithfully. Rust surfaces score suppression as hard promotion/grant gating on the cooled IP rather than a bCooldownSuppressed score term, which is equivalent for selection (a cooled peer is never promoted); the fork's failed-admission/no-socket/short-failed cooldowns map to the failed promote-connect path in rust's connection-per-op model."
-compatibility = "Does not affect eD2K or Kad wire compatibility; it only changes local upload-slot scheduling among already-connected peers and can ban a local abuser. A downloading peer sees the same protocol."
-review_disposition = "fix"
-review_disposition_note = "RUST-PAR-020 round-20 (2026-07-08): IMPLEMENTED. Ported the per-IP no-request cooldown tiers (standard 60/180s, broadband 15/45s, base 30s), the repeat-offender ban (standard 8 / broadband 16 / hash-rotation >=3 hashes & >=5 strikes within 4h) wired to the shared BanStore, selection gating on cooled IPs (promotion + inline grant), and the cooldown probe (upload_cooldown.rs, upload_queue.rs). No longer an omission; entry retained as the audit trail for the fix."
 
 [[omissions]]
 id = "upload-duplicate-queued-intra-packet"
@@ -163,18 +101,12 @@ stock_behavior = "eMule tracks queued (pending, not-yet-served) upload block req
 rust_behavior = "The Rust listener serves upload block requests synchronously (no persistent pending-block queue between packets), so it detects a queued-duplicate only within one request batch (accepted_ranges in upload_payload.rs). A cross-packet re-request of a not-yet-served block collapses into the already-served DuplicateDone path instead, so it is still rejected but may be labeled upload_duplicate_done_block_rejected rather than the queued sibling."
 reason = "Architectural consequence of the synchronous serve model (rust serves each request batch to completion rather than holding a pending-block queue). Net anti-abuse coverage is preserved — the duplicate is always rejected; only the emitted bad_peer event label can differ for a cross-packet queued duplicate."
 compatibility = "Does not affect eD2K or Kad wire compatibility; the peer's duplicate block request is rejected either way. Only the diagnostic event classification differs from the oracle for the cross-packet case."
+disposition = "protocol_defer"
+owner = "transfer-runtime"
+target = "RUST-FEAT-025 diagnostics cleanup"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED anti-abuse intact - rust rejects both DuplicateQueued (intra-batch) and cross-packet re-requests collapsed to DuplicateDone (upload_payload.rs:48-52,311-362). The duplicate is ALWAYS rejected; only the diagnostic event label can differ. No wire difference. DEFER."
-
-[[omissions]]
-id = "ed2k-partial-file-preview"
-area = "controller"
-stock_behavior = "eMule can preview an incomplete download (CPartFile::PreviewAvailable + launching an external player against the partial .part file, or the archive/image preview handlers)."
-rust_behavior = "The Rust `/api/v1/transfers/{hash}/operations/preview` route returns the transfer view for a completed transfer and rejects a non-completed one; there is no partial-file preview action (no external-player launch, no partial media handling). The route shape (200 -> TransferResponse) is honored."
-reason = "Partial-file preview is an interactive GUI/media concept with no headless mapping: the core has no player and no display surface, and the REST contract exposes no preview media payload. Deliberately omitted (consistent with the ed2k-preview peer-preview omission)."
-compatibility = "Does not affect eD2K or Kad wire compatibility; it is a local UI convenience. The REST route remains contract-shaped for a completed transfer."
-review_disposition = "permanent-drop"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED - preview_transfer returns the view only for completed transfers and rejects otherwise (lib.rs:2557-2566); no partial-file/player surface. Local UI concept, no wire. PERMANENT DROP."
 
 [[omissions]]
 id = "server-obfuscation-metadata-non-config"
@@ -183,6 +115,10 @@ stock_behavior = "eMule's server.met persists per-server obfuscation metadata (S
 rust_behavior = "The Rust client carries server obfuscation ports/flags only for statically CONFIGURED servers (from the operator config's Ed2kServerEntry). The REST/state server model (ServerInfo, at /api/v1 contract parity) intentionally has no obfuscation fields, the server.met parser does not extract obfuscation tags, and the OP_SERVERLIST decode carries only (ip, port) — so a non-config discovered/imported server has no obfuscation metadata to persist. The servers table's obfuscation_tcp_port / udp_flags columns are reserved/forward-looking."
 reason = "Deliberate scoping: obfuscation is delivered where it matters (the operator's configured servers, which keep it from config on every restart), while the headless server pipeline (REST ServerInfo -> SQLite) stays at /api/v1 contract parity without obfuscation fields. Threading obfuscation through the REST/state model would either regress the documented server schema or persist empty values, since no non-config path currently supplies obfuscation metadata."
 compatibility = "Does not affect eD2K or Kad wire compatibility for the supported path: configured servers connect with obfuscation exactly as intended. Only a non-config discovered/imported obfuscation-required server is unsupported (it would need config entry), which is the operator-driven server model already in use."
+disposition = "protocol_defer"
+owner = "server-runtime"
+target = "post-beta if discovered obfuscated server support becomes required"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-018 round-18 server-lane re-audit (2026-07-08): confirmed. The OP_GLOBSERVSTATRES handler does harvest live udp_flags but does not persist obfuscation ports; configured servers supply obfuscation where it matters. DEFER as an accepted scoping divergence; revisit only if a discovered-server obfuscation path becomes a requirement."
 
@@ -191,7 +127,11 @@ id = "kad-keyword-media-metadata-tags"
 area = "kad"
 stock_behavior = "eMule attaches media-metadata tags to each Kad keyword-publish file entry when GetMetaDataVer() > 0 (PreparePacketForTags, Search.cpp:1499-1547): FT_MEDIA_ARTIST / FT_MEDIA_ALBUM / FT_MEDIA_TITLE (string), FT_MEDIA_LENGTH / FT_MEDIA_BITRATE (uint32), FT_MEDIA_CODEC (string), skipping empty strings / zero ints / filename-redundant strings. A searcher can then filter Kad keyword-search results by bitrate / length / codec / artist / album / title."
 rust_behavior = "The Rust client attaches only FILENAME, FILESIZE, SOURCES, FILETYPE (+AICH when applicable) to a keyword-publish entry and no media-metadata tags. This is systemic: the Rust client has no media-metadata extraction pipeline and its transfer/known-file model (MetadataTransferPublishEntry, the known_files schema) carries no bitrate/codec/length/artist/album/title fields. A Rust-published file is fully findable by keyword, file type, name, and size, but NOT by a media-attribute-filtered Kad search."
-reason = "Media-metadata extraction is a heavy pipeline (a media demuxer/parser dependency to read container/codec/bitrate/length/tags) with no headless mapping and no eMuleBB /api/v1 surface to drive or expose it. It is consistent with the already-deferred interactive media features (ed2k-preview, ed2k-partial-file-preview). Only the OPTIONAL media-filter dimension of a Kad keyword search is affected; the file remains findable by keyword/type/name/size, which is the dominant search path."
+reason = "Media-metadata extraction is a heavy pipeline (a media demuxer/parser dependency to read container/codec/bitrate/length/tags) with no headless mapping and no eMuleBB /api/v1 surface to drive or expose it. It is consistent with the dropped peer media-preview surface. Only the OPTIONAL media-filter dimension of a Kad keyword search is affected; the file remains findable by keyword/type/name/size, which is the dominant search path."
 compatibility = "Does not break eD2K or Kad wire compatibility: the keyword entry we publish is a valid subset of the oracle's tag set (all attached tags are byte-exact and correctly gated), and a Kad index node stores it without issue. The only difference is that a searcher applying a media-attribute filter (bitrate/length/codec/artist/album/title) will not match Rust-published entries, exactly as an eMule client that has metadata extraction disabled (GetMetaDataVer()==0) would also publish no media tags."
+disposition = "protocol_defer"
+owner = "kad-runtime"
+target = "post-beta media metadata extractor decision"
+beta_blocker = false
 review_disposition = "defer"
 review_disposition_note = "RUST-PAR-022 round-22 Kad-publish-content review (2026-07-09): CONFIRMED absent (keyword entry lib.rs:6875-6882 emits no media tags; no extraction pipeline / schema columns). DEFER pending an explicit decision to build a media-metadata extractor — a large scope item consistent with the deferred ed2k-preview media features. Findability impact limited to the optional media-filter search dimension; keyword/type/name/size search unaffected. Revisit if media-filtered search parity becomes a requirement."

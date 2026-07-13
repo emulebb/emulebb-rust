@@ -197,14 +197,11 @@ export component MainWindow inherits Window {
     in-out property <string> pref-queue-size;
     in-out property <bool> pref-auto-connect;
     in-out property <bool> pref-reconnect;
-    in-out property <bool> pref-new-auto-up;
-    in-out property <bool> pref-new-auto-down;
     in-out property <bool> pref-credit-system;
     in-out property <bool> pref-safe-server-connect;
     in-out property <bool> pref-add-servers-from-server;
     in-out property <bool> pref-network-kademlia;
     in-out property <bool> pref-network-ed2k;
-    in-out property <bool> pref-download-auto-broadband-io;
     in-out property <string> server-address;
     in-out property <string> server-port;
     in-out property <string> server-name;
@@ -876,9 +873,6 @@ export component MainWindow inherits Window {
                             CheckBox { text: "Add servers from server"; checked <=> root.pref-add-servers-from-server; }
                             CheckBox { text: "Kademlia"; checked <=> root.pref-network-kademlia; }
                             CheckBox { text: "eD2K"; checked <=> root.pref-network-ed2k; }
-                            CheckBox { text: "New auto upload priority"; checked <=> root.pref-new-auto-up; }
-                            CheckBox { text: "New auto download priority"; checked <=> root.pref-new-auto-down; }
-                            CheckBox { text: "Download auto broadband IO"; checked <=> root.pref-download-auto-broadband-io; }
                         }
                     }
                 }
@@ -910,7 +904,6 @@ export component MainWindow inherits Window {
                     if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
                     if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
                     if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
-                    if root.selected-kind == "transfer" : Button { text: "Preview"; clicked => { root.transfer-action-requested(root.selected-id, "preview"); } }
                     if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
                     if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
                     if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect-selected", root.selected-id); } }

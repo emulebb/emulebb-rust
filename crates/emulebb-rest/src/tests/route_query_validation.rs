@@ -72,7 +72,7 @@ async fn pagination_rejects_out_of_range_bounds_with_details() {
 }
 
 #[tokio::test]
-async fn all_limited_routes_reject_out_of_range_limit_like_mfc() {
+async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
     for uri in [
         "/api/v1/snapshot?limit=0",
         "/api/v1/logs?limit=5000",
@@ -89,7 +89,7 @@ async fn all_limited_routes_reject_out_of_range_limit_like_mfc() {
 }
 
 #[tokio::test]
-async fn transfers_category_id_query_uses_mfc_unsigned_validation() {
+async fn transfers_category_id_query_uses_canonical_unsigned_validation() {
     let cases = [
         (
             "/api/v1/transfers?categoryId=-1",
@@ -125,7 +125,7 @@ async fn transfers_category_id_query_uses_mfc_unsigned_validation() {
 }
 
 #[tokio::test]
-async fn destructive_query_confirmations_use_mfc_validation() {
+async fn destructive_query_confirmations_use_canonical_validation() {
     let cases = [
         ("DELETE", "/api/v1/searches"),
         ("DELETE", "/api/v1/searches?confirm=false"),

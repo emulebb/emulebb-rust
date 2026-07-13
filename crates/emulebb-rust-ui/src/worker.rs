@@ -353,14 +353,11 @@ fn preferences_update_from_form(
         queue_size: parse_u32_preference(FIELD_QUEUE_SIZE, &form.queue_size)?,
         auto_connect: form.auto_connect,
         reconnect: form.reconnect,
-        new_auto_up: form.new_auto_up,
-        new_auto_down: form.new_auto_down,
         credit_system: form.credit_system,
         safe_server_connect: form.safe_server_connect,
         add_servers_from_server: form.add_servers_from_server,
         network_kademlia: form.network_kademlia,
         network_ed2k: form.network_ed2k,
-        download_auto_broadband_io: form.download_auto_broadband_io,
     };
     Ok(changed_preferences_update(&next, baseline))
 }

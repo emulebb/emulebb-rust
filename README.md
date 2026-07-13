@@ -13,11 +13,12 @@ Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
 gate; normal development must not float independently on `stable`.
 
-The 0.0.3 scope is core eMule client parity: configured binding, ED2K/Kad
+The 0.0.3 scope is eD2K/Kad protocol-operational parity: configured binding,
 interoperability, search, sharing, transfers, uploads, queues, persistence,
 local SQLite/FTS indexing, REST controller visibility, and Rust-native UI
-operation. It is not legacy HTML WebServer parity, a qBittorrent/Torznab adapter
-host, a TrackMuleBB dependency, a coordinator, or a remote indexer fleet.
+operation. Local API, UI, settings, diagnostics, and scheduling surfaces are
+Rust-native async daemon design. Broadband-oriented async IO is the default
+runtime model, not a compatibility toggle.
 
 Active product docs, backlog, design notes, release scope, and the Rust OpenAPI
 contract live in

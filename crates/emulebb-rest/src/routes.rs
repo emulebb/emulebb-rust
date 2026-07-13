@@ -253,10 +253,6 @@ pub fn router_with_shutdown(
             "/api/v1/transfers/{hash}/operations/recheck",
             post(transfer_recheck),
         )
-        .route(
-            "/api/v1/transfers/{hash}/operations/preview",
-            post(transfer_preview),
-        )
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
         .fallback(fallback)

@@ -18,7 +18,7 @@ async fn path_error_value(method: &str, uri: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn category_id_path_uses_mfc_unsigned_validation() {
+async fn category_id_path_uses_canonical_unsigned_validation() {
     let cases = [
         (
             "/api/v1/categories/abc",
@@ -43,7 +43,7 @@ async fn category_id_path_uses_mfc_unsigned_validation() {
 }
 
 #[tokio::test]
-async fn search_id_path_uses_mfc_unsigned_validation() {
+async fn search_id_path_uses_canonical_unsigned_validation() {
     let cases = [
         (
             "GET",
@@ -71,7 +71,7 @@ async fn search_id_path_uses_mfc_unsigned_validation() {
 }
 
 #[tokio::test]
-async fn hash_path_parameters_use_mfc_lowercase_hex_validation() {
+async fn hash_path_parameters_use_canonical_lowercase_hex_validation() {
     let cases = [
         (
             "GET",
@@ -98,7 +98,7 @@ async fn hash_path_parameters_use_mfc_lowercase_hex_validation() {
 }
 
 #[tokio::test]
-async fn endpoint_path_parameters_use_mfc_address_port_validation() {
+async fn endpoint_path_parameters_use_canonical_address_port_validation() {
     let cases = [
         (
             "GET",

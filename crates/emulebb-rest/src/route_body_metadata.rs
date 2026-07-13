@@ -1,8 +1,7 @@
 //! REST JSON body metadata validation shared by the route middleware.
 //!
-//! The ordering mirrors the MFC route seam: object-shape validation, unknown
-//! fields, category selector normalization/validation, then route-specific body
-//! rules.
+//! Validation is deliberately staged: object shape, unknown fields, category
+//! selector normalization, route-specific rules, then destructive confirmations.
 
 mod validators;
 
@@ -180,14 +179,11 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
         "queueSize",
         "autoConnect",
         "reconnect",
-        "newAutoUp",
-        "newAutoDown",
         "creditSystem",
         "safeServerConnect",
         "addServersFromServer",
         "networkKademlia",
         "networkEd2k",
-        "downloadAutoBroadbandIo",
     ];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
     const SERVER_PATCH: &[&str] = &["name", "priority", "static"];

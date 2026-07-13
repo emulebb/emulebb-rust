@@ -425,14 +425,11 @@ fn preferences_form(ui: &MainWindow) -> PreferencesForm {
         queue_size: ui.get_pref_queue_size().to_string(),
         auto_connect: ui.get_pref_auto_connect(),
         reconnect: ui.get_pref_reconnect(),
-        new_auto_up: ui.get_pref_new_auto_up(),
-        new_auto_down: ui.get_pref_new_auto_down(),
         credit_system: ui.get_pref_credit_system(),
         safe_server_connect: ui.get_pref_safe_server_connect(),
         add_servers_from_server: ui.get_pref_add_servers_from_server(),
         network_kademlia: ui.get_pref_network_kademlia(),
         network_ed2k: ui.get_pref_network_ed2k(),
-        download_auto_broadband_io: ui.get_pref_download_auto_broadband_io(),
     }
 }
 

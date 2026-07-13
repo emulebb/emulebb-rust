@@ -71,13 +71,10 @@ pub(super) fn validate_preferences_patch_body_fields(
     for field in [
         "autoConnect",
         "reconnect",
-        "newAutoUp",
-        "newAutoDown",
         "creditSystem",
         "safeServerConnect",
         "networkKademlia",
         "networkEd2k",
-        "downloadAutoBroadbandIo",
     ] {
         validate_boolean_preference(object, field)?;
     }

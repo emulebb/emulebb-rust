@@ -31,8 +31,7 @@ fn upload_queue_entry(upload: Upload) -> UploadQueueEntry {
     }
 }
 
-/// Drops `scoreBreakdown` from every upload so list endpoints stay parity-exact
-/// with master, which omits the breakdown unless the caller opts in.
+/// Drops `scoreBreakdown` from compact list endpoints unless the caller opts in.
 pub(crate) fn without_score_breakdown(mut uploads: Vec<Upload>) -> Vec<Upload> {
     for upload in &mut uploads {
         upload.score_breakdown = None;
@@ -41,7 +40,6 @@ pub(crate) fn without_score_breakdown(mut uploads: Vec<Upload>) -> Vec<Upload> {
 }
 
 pub(crate) async fn uploads(State(state): State<RestState>) -> impl IntoResponse {
-    // Master's /uploads list never attaches scoreBreakdown.
     api_collection(without_score_breakdown(state.core.uploads().await))
 }
 
@@ -60,8 +58,6 @@ pub(crate) async fn upload_queue(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    // Master gates scoreBreakdown on the includeScoreBreakdown query (default
-    // off) for the /upload-queue list.
     let include_score_breakdown = query.include_score_breakdown.unwrap_or(false);
     let items = state.core.upload_queue().await;
     let items = if include_score_breakdown {

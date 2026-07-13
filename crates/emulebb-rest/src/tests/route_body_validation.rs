@@ -1,7 +1,7 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
-async fn paused_body_uses_mfc_boolean_validation() {
+async fn paused_body_uses_canonical_boolean_validation() {
     let app = test_router();
     let link = "ed2k://|file|PausedBody.bin|1|00112233445566778899aabbccddeeff|/";
     let cases = [r#""true""#, "1", "null"];
@@ -30,7 +30,7 @@ async fn paused_body_uses_mfc_boolean_validation() {
 }
 
 #[tokio::test]
-async fn category_create_body_uses_mfc_validation() {
+async fn category_create_body_uses_canonical_validation() {
     let app = test_router();
     let cases = [
         (r#"{}"#, "name must be a non-empty string"),
@@ -80,7 +80,7 @@ async fn category_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn category_patch_body_uses_mfc_validation() {
+async fn category_patch_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/categories/1";
     let cases = [
@@ -118,7 +118,7 @@ async fn category_patch_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn friend_create_body_uses_mfc_validation() {
+async fn friend_create_body_uses_canonical_validation() {
     let app = test_router();
     let user_hash = "00112233445566778899aabbccddeeff";
     let long_name = "a".repeat(129);
@@ -166,7 +166,7 @@ async fn friend_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn search_create_body_uses_mfc_validation() {
+async fn search_create_body_uses_canonical_validation() {
     let app = test_router();
     let long_query = "a".repeat(161);
     let cases = [
@@ -239,7 +239,7 @@ async fn search_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn preferences_patch_body_uses_mfc_validation() {
+async fn preferences_patch_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/app/preferences";
     let cases = [
@@ -289,8 +289,8 @@ async fn preferences_patch_body_uses_mfc_validation() {
             "networkEd2k must be a boolean",
         ),
         (
-            r#"{"downloadAutoBroadbandIo":1}"#,
-            "downloadAutoBroadbandIo must be a boolean",
+            r#"{"unsupportedPreference":1}"#,
+            "unknown JSON field: unsupportedPreference",
         ),
     ];
 
@@ -307,7 +307,7 @@ async fn preferences_patch_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
+async fn transfer_add_body_keeps_canonical_link_validation_before_paused() {
     let app = test_router();
     let link = "ed2k://|file|PausedOrder.bin|1|00112233445566778899aabbccddeeff|/";
     let cases = [
@@ -334,7 +334,7 @@ async fn transfer_add_body_keeps_mfc_link_validation_before_paused() {
 }
 
 #[tokio::test]
-async fn transfer_add_link_body_uses_mfc_shape_validation() {
+async fn transfer_add_link_body_uses_canonical_shape_validation() {
     let app = test_router();
     let cases = [
         (r#"{"link":1}"#.to_string(), "link must be a string"),
@@ -363,7 +363,7 @@ async fn transfer_add_link_body_uses_mfc_shape_validation() {
 }
 
 #[tokio::test]
-async fn transfer_add_links_body_uses_mfc_array_validation() {
+async fn transfer_add_links_body_uses_canonical_array_validation() {
     let app = test_router();
     let too_many_links = std::iter::repeat_n(
         r#""ed2k://|file|Many.bin|1|00112233445566778899aabbccddeeff|/""#,
@@ -408,7 +408,7 @@ async fn transfer_add_links_body_uses_mfc_array_validation() {
 }
 
 #[tokio::test]
-async fn transfer_patch_body_uses_mfc_mutation_family_validation() {
+async fn transfer_patch_body_uses_canonical_mutation_family_validation() {
     let app = test_router();
     let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
     let cases = [
@@ -439,7 +439,7 @@ async fn transfer_patch_body_uses_mfc_mutation_family_validation() {
 }
 
 #[tokio::test]
-async fn transfer_patch_priority_body_uses_mfc_validation() {
+async fn transfer_patch_priority_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
     let cases = [
@@ -463,7 +463,7 @@ async fn transfer_patch_priority_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn transfer_patch_name_body_uses_mfc_validation() {
+async fn transfer_patch_name_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/transfers/00112233445566778899aabbccddeeff";
     let cases = [
@@ -488,7 +488,7 @@ async fn transfer_patch_name_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_patch_body_uses_mfc_priority_validation() {
+async fn shared_file_patch_body_uses_canonical_priority_validation() {
     let app = test_router();
     let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
     let cases = [
@@ -516,7 +516,7 @@ async fn shared_file_patch_body_uses_mfc_priority_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_patch_body_uses_mfc_comment_rating_validation() {
+async fn shared_file_patch_body_uses_canonical_comment_rating_validation() {
     let app = test_router();
     let uri = "/api/v1/shared-files/00112233445566778899aabbccddeeff";
     let cases = [
@@ -553,7 +553,7 @@ async fn shared_file_patch_body_uses_mfc_comment_rating_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_add_body_uses_mfc_path_validation() {
+async fn shared_file_add_body_uses_canonical_path_validation() {
     let app = test_router();
     let cases = [
         (r#"{}"#, "path must be a non-empty string path"),
@@ -574,7 +574,7 @@ async fn shared_file_add_body_uses_mfc_path_validation() {
 }
 
 #[tokio::test]
-async fn shared_directories_patch_body_uses_mfc_root_validation() {
+async fn shared_directories_patch_body_uses_canonical_root_validation() {
     let app = test_router();
     let uri = "/api/v1/shared-directories";
     let cases = [
@@ -619,7 +619,7 @@ async fn shared_directories_patch_body_uses_mfc_root_validation() {
 }
 
 #[tokio::test]
-async fn destructive_confirmation_bodies_use_mfc_validation() {
+async fn destructive_confirmation_bodies_use_canonical_validation() {
     let app = test_router();
     let cases = [
         (
@@ -667,7 +667,7 @@ async fn destructive_confirmation_bodies_use_mfc_validation() {
 }
 
 #[tokio::test]
-async fn diagnostic_dump_body_uses_mfc_full_memory_validation() {
+async fn diagnostic_dump_body_uses_canonical_full_memory_validation() {
     let app = test_router();
     let cases = [
         (
@@ -693,7 +693,7 @@ async fn diagnostic_dump_body_uses_mfc_full_memory_validation() {
 }
 
 #[tokio::test]
-async fn server_create_body_uses_mfc_validation() {
+async fn server_create_body_uses_canonical_validation() {
     let app = test_router();
     let cases = [
         (r#"{}"#, "address must be a non-empty string"),
@@ -756,7 +756,7 @@ async fn server_create_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn server_patch_body_uses_mfc_validation() {
+async fn server_patch_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/servers/127.0.0.1:4661";
     let cases = [
@@ -783,7 +783,7 @@ async fn server_patch_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn url_import_body_uses_mfc_validation() {
+async fn url_import_body_uses_canonical_validation() {
     let app = test_router();
     let routes = [
         "POST /api/v1/servers/operations/import-met-url",
@@ -825,7 +825,7 @@ async fn url_import_body_uses_mfc_validation() {
 }
 
 #[tokio::test]
-async fn kad_bootstrap_body_uses_mfc_validation() {
+async fn kad_bootstrap_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/kad/operations/bootstrap";
     let cases = [

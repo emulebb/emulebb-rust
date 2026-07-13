@@ -1,8 +1,8 @@
 //! REST route metadata validation shared by the router middleware.
 //!
-//! This module mirrors the MFC route-spec validation order: registered route,
-//! decoded unique query fields, query value checks, DELETE-body rejection, then
-//! JSON content-type validation.
+//! This module validates the Rust REST contract in a stable order: registered
+//! route, decoded unique query fields, query value checks, DELETE-body
+//! rejection, then JSON content-type validation.
 
 use std::collections::HashSet;
 
@@ -550,10 +550,7 @@ fn route_query_fields_for_parameterized(
         ("POST", ["servers", _, "operations", "connect"])
         | ("POST", ["searches", _, "results", _, "operations", "download"]) => Some(NONE),
         ("POST", ["transfers", _, "operations", operation])
-            if matches!(
-                *operation,
-                "pause" | "resume" | "stop" | "recheck" | "preview"
-            ) =>
+            if matches!(*operation, "pause" | "resume" | "stop" | "recheck") =>
         {
             Some(NONE)
         }

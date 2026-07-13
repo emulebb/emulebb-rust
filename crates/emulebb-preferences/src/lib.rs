@@ -14,14 +14,11 @@ pub const FIELD_UPLOAD_SLOT_ELASTIC_PERCENT: &str = "uploadSlotElasticPercent";
 pub const FIELD_QUEUE_SIZE: &str = "queueSize";
 pub const FIELD_AUTO_CONNECT: &str = "autoConnect";
 pub const FIELD_RECONNECT: &str = "reconnect";
-pub const FIELD_NEW_AUTO_UP: &str = "newAutoUp";
-pub const FIELD_NEW_AUTO_DOWN: &str = "newAutoDown";
 pub const FIELD_CREDIT_SYSTEM: &str = "creditSystem";
 pub const FIELD_SAFE_SERVER_CONNECT: &str = "safeServerConnect";
 pub const FIELD_ADD_SERVERS_FROM_SERVER: &str = "addServersFromServer";
 pub const FIELD_NETWORK_KADEMLIA: &str = "networkKademlia";
 pub const FIELD_NETWORK_ED2K: &str = "networkEd2k";
-pub const FIELD_DOWNLOAD_AUTO_BROADBAND_IO: &str = "downloadAutoBroadbandIo";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PreferenceFieldKind {
@@ -49,14 +46,11 @@ pub const PREFERENCE_FIELDS: &[PreferenceField] = &[
     number(FIELD_QUEUE_SIZE, 2_000, 10_000),
     boolean(FIELD_AUTO_CONNECT),
     boolean(FIELD_RECONNECT),
-    boolean(FIELD_NEW_AUTO_UP),
-    boolean(FIELD_NEW_AUTO_DOWN),
     boolean(FIELD_CREDIT_SYSTEM),
     boolean(FIELD_SAFE_SERVER_CONNECT),
     boolean(FIELD_ADD_SERVERS_FROM_SERVER),
     boolean(FIELD_NETWORK_KADEMLIA),
     boolean(FIELD_NETWORK_ED2K),
-    boolean(FIELD_DOWNLOAD_AUTO_BROADBAND_IO),
 ];
 
 const fn number(json_name: &'static str, min: u32, max: u32) -> PreferenceField {
@@ -92,15 +86,12 @@ pub struct Preferences {
     pub auto_connect: bool,
     #[serde(default = "default_reconnect")]
     pub reconnect: bool,
-    pub new_auto_up: bool,
-    pub new_auto_down: bool,
     pub credit_system: bool,
     pub safe_server_connect: bool,
     #[serde(default = "default_add_servers_from_server")]
     pub add_servers_from_server: bool,
     pub network_kademlia: bool,
     pub network_ed2k: bool,
-    pub download_auto_broadband_io: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -129,10 +120,6 @@ pub struct PreferencesUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_auto_up: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_auto_down: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_system: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe_server_connect: Option<bool>,
@@ -142,8 +129,6 @@ pub struct PreferencesUpdate {
     pub network_kademlia: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_ed2k: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub download_auto_broadband_io: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -180,14 +165,11 @@ pub fn default_preferences() -> Preferences {
         queue_size: 10000,
         auto_connect: false,
         reconnect: true,
-        new_auto_up: true,
-        new_auto_down: true,
         credit_system: true,
         safe_server_connect: true,
         add_servers_from_server: true,
         network_kademlia: true,
         network_ed2k: true,
-        download_auto_broadband_io: true,
     }
 }
 
@@ -203,14 +185,11 @@ pub fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
         && update.queue_size.is_none()
         && update.auto_connect.is_none()
         && update.reconnect.is_none()
-        && update.new_auto_up.is_none()
-        && update.new_auto_down.is_none()
         && update.credit_system.is_none()
         && update.safe_server_connect.is_none()
         && update.add_servers_from_server.is_none()
         && update.network_kademlia.is_none()
         && update.network_ed2k.is_none()
-        && update.download_auto_broadband_io.is_none()
 }
 
 pub fn apply_preferences_update(
@@ -260,12 +239,6 @@ pub fn apply_preferences_update(
     if let Some(value) = update.reconnect {
         preferences.reconnect = value;
     }
-    if let Some(value) = update.new_auto_up {
-        preferences.new_auto_up = value;
-    }
-    if let Some(value) = update.new_auto_down {
-        preferences.new_auto_down = value;
-    }
     if let Some(value) = update.credit_system {
         preferences.credit_system = value;
     }
@@ -280,9 +253,6 @@ pub fn apply_preferences_update(
     }
     if let Some(value) = update.network_ed2k {
         preferences.network_ed2k = value;
-    }
-    if let Some(value) = update.download_auto_broadband_io {
-        preferences.download_auto_broadband_io = value;
     }
     Ok(())
 }
@@ -304,14 +274,11 @@ pub fn changed_preferences_update(
             queue_size: Some(next.queue_size),
             auto_connect: Some(next.auto_connect),
             reconnect: Some(next.reconnect),
-            new_auto_up: Some(next.new_auto_up),
-            new_auto_down: Some(next.new_auto_down),
             credit_system: Some(next.credit_system),
             safe_server_connect: Some(next.safe_server_connect),
             add_servers_from_server: Some(next.add_servers_from_server),
             network_kademlia: Some(next.network_kademlia),
             network_ed2k: Some(next.network_ed2k),
-            download_auto_broadband_io: Some(next.download_auto_broadband_io),
         };
     };
     PreferencesUpdate {
@@ -335,8 +302,6 @@ pub fn changed_preferences_update(
         queue_size: changed(next.queue_size, baseline.queue_size),
         auto_connect: changed(next.auto_connect, baseline.auto_connect),
         reconnect: changed(next.reconnect, baseline.reconnect),
-        new_auto_up: changed(next.new_auto_up, baseline.new_auto_up),
-        new_auto_down: changed(next.new_auto_down, baseline.new_auto_down),
         credit_system: changed(next.credit_system, baseline.credit_system),
         safe_server_connect: changed(next.safe_server_connect, baseline.safe_server_connect),
         add_servers_from_server: changed(
@@ -345,10 +310,6 @@ pub fn changed_preferences_update(
         ),
         network_kademlia: changed(next.network_kademlia, baseline.network_kademlia),
         network_ed2k: changed(next.network_ed2k, baseline.network_ed2k),
-        download_auto_broadband_io: changed(
-            next.download_auto_broadband_io,
-            baseline.download_auto_broadband_io,
-        ),
     }
 }
 
@@ -416,7 +377,7 @@ mod tests {
 
         assert_eq!(value[FIELD_UPLOAD_LIMIT_KIBPS], 6200);
         assert_eq!(value[FIELD_RECONNECT], true);
-        assert_eq!(value[FIELD_DOWNLOAD_AUTO_BROADBAND_IO], true);
+        assert_eq!(value.as_object().unwrap().len(), PREFERENCE_FIELDS.len());
     }
 
     #[test]

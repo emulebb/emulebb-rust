@@ -286,17 +286,6 @@ impl EmulebbCore {
         }
     }
 
-    pub async fn preview_transfer(&self, hash: &str) -> Result<Option<Transfer>> {
-        let Some(transfer) = self.transfer(hash).await else {
-            return Ok(None);
-        };
-        ensure!(
-            transfer.state == "completed",
-            "transfer is not ready for preview"
-        );
-        Ok(Some(transfer))
-    }
-
     pub async fn delete_transfer_files(&self, hash: &str) -> Result<Option<Transfer>> {
         let transfer = if let Some(transfer) = self.transfer(hash).await {
             transfer

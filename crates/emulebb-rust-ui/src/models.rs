@@ -236,14 +236,11 @@ pub(super) struct PreferencesForm {
     pub(super) queue_size: String,
     pub(super) auto_connect: bool,
     pub(super) reconnect: bool,
-    pub(super) new_auto_up: bool,
-    pub(super) new_auto_down: bool,
     pub(super) credit_system: bool,
     pub(super) safe_server_connect: bool,
     pub(super) add_servers_from_server: bool,
     pub(super) network_kademlia: bool,
     pub(super) network_ed2k: bool,
-    pub(super) download_auto_broadband_io: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -12,7 +12,16 @@ Everything below is this repo's local deltas only:
   surface aligned with the Rust-forward `/api/v1` contract in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\api`;
   do not treat the frozen emulebb-mfc contract as a forward compatibility
-  constraint.
+  constraint. Before an explicit Rust API-freeze decision, there is no external
+  Rust REST consumer: evolve daemon routes, DTOs, OpenAPI, route/body validators,
+  Rust-native UI models, and tests together when a cleaner contract is useful;
+  do not keep compatibility aliases or awkward legacy shapes for hypothetical
+  consumers. Rust is not an MFC, stock GUI, legacy WebServer, or legacy
+  preference mirror: preserve eD2K/Kad protocol-operational parity, but design
+  local REST, UI, scheduling, diagnostics, and preference surfaces as clean
+  Rust-native async daemon concepts with Rust-native names. Broadband-oriented
+  async IO is the daemon baseline, not a compatibility preference or runtime
+  toggle.
 - Follow the responsibility-based source-structure and test-placement policy in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
   Source length is advisory; split by responsibility, keep substantial tests

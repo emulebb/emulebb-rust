@@ -48,28 +48,6 @@ async fn stopped_transfer_resume_returns_bad_request() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
 
-    let preview_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/operations/preview")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(preview_response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(preview_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        value["error"]["message"],
-        "transfer is not ready for preview"
-    );
-
     let stop_response = app
         .clone()
         .oneshot(

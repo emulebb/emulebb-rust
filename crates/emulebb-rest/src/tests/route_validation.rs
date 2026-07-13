@@ -59,7 +59,7 @@ async fn malformed_json_uses_canonical_error_envelope() {
 }
 
 #[tokio::test]
-async fn json_body_must_be_an_object_like_mfc() {
+async fn json_body_must_be_an_object_for_canonical_contract() {
     let cases = [
         ("POST", "/api/v1/app/shutdown", "[]"),
         ("POST", "/api/v1/transfers", "[]"),
@@ -455,7 +455,7 @@ async fn transfers_reject_unknown_state_query_values() {
 }
 
 #[tokio::test]
-async fn boolean_query_values_use_mfc_validation_messages() {
+async fn boolean_query_values_use_canonical_validation_messages() {
     let cases = [
         (
             "DELETE",

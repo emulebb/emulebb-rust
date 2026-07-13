@@ -1,7 +1,7 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
-async fn category_id_body_uses_mfc_unsigned_validation() {
+async fn category_id_body_uses_canonical_unsigned_validation() {
     let app = test_router();
     let routes = [
         ("POST", "/api/v1/transfers", r#"{"categoryId":%s}"#),
@@ -32,7 +32,7 @@ async fn category_id_body_uses_mfc_unsigned_validation() {
 }
 
 #[tokio::test]
-async fn category_name_body_uses_mfc_selector_validation() {
+async fn category_name_body_uses_canonical_selector_validation() {
     let app = test_router();
     let link = "ed2k://|file|CategoryName.bin|1|00112233445566778899aabbccddeeff|/";
     let routes = [

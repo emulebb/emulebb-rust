@@ -13,7 +13,37 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "policy" / "rust-client.toml"
 OMISSIONS_PATH = ROOT / "policy" / "rust-client-omissions.toml"
+OMISSIONS_HISTORY_PATH = ROOT / "policy" / "rust-client-omissions-history.toml"
 TOOLCHAIN_PATH = ROOT / "rust-toolchain.toml"
+OMISSION_DISPOSITIONS = {
+    "protocol_defer",
+    "protocol_drop_approved",
+    "protocol_fix",
+    "rust_native_remove",
+    "rust_native_replace",
+}
+RESOLVED_OMISSION_DISPOSITIONS = {
+    "fixed",
+    "rust_native_remove",
+    "rust_native_replace",
+}
+REVIEW_DISPOSITION_BY_DISPOSITION = {
+    "protocol_defer": "defer",
+    "protocol_drop_approved": "permanent-drop",
+    "protocol_fix": "fix",
+    "rust_native_remove": "remove",
+    "rust_native_replace": "replace",
+}
+NON_GAP_DISPOSITIONS = {"fixed", "protocol_drop_approved", "rust_native_remove"}
+FORBIDDEN_RUST_NATIVE_SURFACE = {
+    "newAutoUp": "legacy GUI preference field",
+    "newAutoDown": "legacy GUI preference field",
+    "downloadAutoBroadbandIo": "legacy GUI preference toggle; broadband-optimized IO is not a compatibility switch",
+    "/api/v1/transfers/{hash}/operations/preview": "fake transfer preview REST operation",
+    "operations/preview": "fake transfer preview REST operation",
+    "preview_transfer": "fake transfer preview implementation",
+    "transfer_preview": "fake transfer preview handler",
+}
 P2P_BIND_FAIL_CLOSED_BOUNDARIES = (
     "crates/emulebb-core/src/lib.rs",
     "crates/emulebb-core/src/kad_hello.rs",
@@ -33,8 +63,10 @@ CHANGED_FILES_REPORTED = 20
 def main() -> int:
     policy = read_toml(POLICY_PATH)
     omissions = read_toml(OMISSIONS_PATH)
+    omission_history = read_toml(OMISSIONS_HISTORY_PATH)
     errors: list[str] = []
     errors.extend(check_omission_registry(policy, omissions))
+    errors.extend(check_omission_history(omissions, omission_history))
     errors.extend(check_review_reporting(policy, omissions))
     errors.extend(check_toolchain_pin())
     errors.extend(check_package_metadata())
@@ -48,6 +80,7 @@ def main() -> int:
     errors.extend(check_p2p_bind_fail_closed_boundaries())
     errors.extend(check_no_loopback_binds())
     errors.extend(check_egress_audit_is_test_only())
+    errors.extend(check_no_legacy_rust_native_surface())
     if errors:
         print("rust client policy check failed:", file=sys.stderr)
         for error in errors:
@@ -92,7 +125,18 @@ def check_omission_registry(policy: dict, omissions: dict) -> list[str]:
     errors = []
     if expected != actual:
         errors.append(f"protocol.omission_registry points to {expected}, expected {actual}")
-    required_fields = {"id", "area", "stock_behavior", "rust_behavior", "reason", "compatibility"}
+    required_fields = {
+        "id",
+        "area",
+        "stock_behavior",
+        "rust_behavior",
+        "reason",
+        "compatibility",
+        "disposition",
+        "owner",
+        "target",
+        "beta_blocker",
+    }
     seen_ids: set[str] = set()
     for index, entry in enumerate(omissions.get("omissions", []), start=1):
         missing = sorted(required_fields.difference(entry))
@@ -103,8 +147,53 @@ def check_omission_registry(policy: dict, omissions: dict) -> list[str]:
             errors.append(f"duplicate omission id: {entry_id}")
         if entry_id:
             seen_ids.add(entry_id)
+        disposition = entry.get("disposition")
+        if disposition is not None and disposition not in OMISSION_DISPOSITIONS:
+            errors.append(
+                f"omission {entry_id or f'#{index}'} has unsupported disposition: {disposition}"
+            )
+        review_disposition = entry.get("review_disposition")
+        expected_review = REVIEW_DISPOSITION_BY_DISPOSITION.get(str(disposition))
+        if review_disposition is not None and review_disposition != expected_review:
+            errors.append(
+                f"omission {entry_id or f'#{index}'} review_disposition "
+                f"{review_disposition!r} contradicts disposition {disposition!r}; "
+                f"expected {expected_review!r}"
+            )
+        if "beta_blocker" in entry and not isinstance(entry["beta_blocker"], bool):
+            errors.append(f"omission {entry_id or f'#{index}'} beta_blocker must be boolean")
+        for field in ("owner", "target"):
+            if field in entry and not str(entry[field]).strip():
+                errors.append(f"omission {entry_id or f'#{index}'} {field} must not be empty")
     if not seen_ids:
         errors.append("omission registry must contain at least one entry")
+    return errors
+
+
+def check_omission_history(omissions: dict, history: dict) -> list[str]:
+    """Keep resolved audit records outside the active beta omission board."""
+    active_ids = {
+        entry.get("id")
+        for entry in omissions.get("omissions", [])
+        if entry.get("id")
+    }
+    errors = []
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(history.get("resolved_omissions", []), start=1):
+        entry_id = entry.get("id")
+        if not entry_id:
+            errors.append(f"resolved omission #{index} is missing id")
+            continue
+        if entry_id in seen_ids:
+            errors.append(f"duplicate resolved omission id: {entry_id}")
+        seen_ids.add(entry_id)
+        if entry_id in active_ids:
+            errors.append(f"resolved omission {entry_id} also appears in active registry")
+        disposition = entry.get("disposition")
+        if disposition not in RESOLVED_OMISSION_DISPOSITIONS:
+            errors.append(
+                f"resolved omission {entry_id} has unresolved disposition: {disposition}"
+            )
     return errors
 
 
@@ -116,8 +205,40 @@ def check_review_reporting(policy: dict, omissions: dict) -> list[str]:
     missing = sorted(excluded.difference(omission_ids))
     for entry_id in missing:
         errors.append(f"review_reporting excluded surface is not in omission registry: {entry_id}")
+    by_id = {entry["id"]: entry for entry in omissions.get("omissions", []) if entry.get("id")}
+    for entry_id in sorted(excluded.intersection(omission_ids)):
+        disposition = by_id[entry_id].get("disposition")
+        if disposition not in NON_GAP_DISPOSITIONS:
+            errors.append(
+                f"review_reporting excluded surface {entry_id} has disposition "
+                f"{disposition!r}; expected one of {sorted(NON_GAP_DISPOSITIONS)}"
+            )
     if reporting.get("intentional_omissions_are_not_gaps") and not excluded:
         errors.append("review_reporting excludes no surfaces while intentional omissions are not gaps")
+    return errors
+
+
+def check_no_legacy_rust_native_surface() -> list[str]:
+    """Keep non-protocol Rust REST/settings/UI surface free of old GUI residue."""
+    errors = []
+    checked_roots = (
+        "crates/emulebb-preferences",
+        "crates/emulebb-rest",
+        "crates/emulebb-rust-ui",
+        "crates/emulebb-core",
+    )
+    files = [
+        rel
+        for root in checked_roots
+        for rel in tracked_files(f"{root}/*")
+        if rel.endswith((".rs", ".slint", ".toml", ".md", ".yaml", ".yml"))
+    ]
+    for rel in sorted(set(files)):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        normalized = rel.replace("\\", "/")
+        for needle, reason in FORBIDDEN_RUST_NATIVE_SURFACE.items():
+            if needle in text:
+                errors.append(f"{normalized} contains {reason}: {needle}")
     return errors
 
 

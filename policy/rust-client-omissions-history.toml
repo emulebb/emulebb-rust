@@ -1,0 +1,60 @@
+# Resolved Rust client omission audit history.
+#
+# Keep implemented or removed divergence records here so the active beta registry
+# only contains current omissions and approved protocol drops.
+
+[[resolved_omissions]]
+id = "conn-rate-spike-modifier"
+area = "ed2k"
+stock_behavior = "eMule scales the per-5s new-connection budget by GetMaxConperFiveModifier() (CListenSocket::TooManySockets / GetMaxConperFiveModifier, ListenSocket.cpp:2653,2722-2728). The modifier is a SUPPRESSOR, not a raiser: it returns a multiplier in [0,1) computed from the recent open-socket spike ((SpikeSize > SpikeTolerance) ? 0 : 1 - SpikeSize/SpikeTolerance), so during a connection spike stock throttles its effective per-5s budget BELOW GetMaxConperFive() (down to 0), then relaxes back to the flat budget as the spike subsides."
+rust_behavior = "IMPLEMENTED (RUST-PAR-026): the Rust download coordinator samples its live connection count once per second, maintains MFC's capped moving average, and applies GetMaxConperFiveModifier's [0,1) spike suppressor to the five-second admission window with the same strict-greater-than boundary."
+reason = "RUST-PAR-026 closed the only connection-pacing axis where Rust could be more aggressive than MFC during a sudden socket burst."
+compatibility = "No packet shape changed; connection admission pacing now matches MFC's adaptive suppressor."
+disposition = "fixed"
+owner = "core-protocol"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-026 (2026-07-10): IMPLEMENTED in download_coordinator.rs with focused burst and zero-modifier boundary tests. No longer an omission; retained as audit history."
+
+[[resolved_omissions]]
+id = "pref-safe-server-connect"
+area = "preferences"
+stock_behavior = "Classic eMule's 'Safe connect' (safeServerConnect) gates how aggressively it cycles through servers when auto-connecting."
+rust_behavior = "IMPLEMENTED (RUST-PAR-027): safeServerConnect now selects MFC's one automatic in-flight attempt when enabled and two when disabled. Attempts use isolated state, the first logged-in session wins, failed servers cycle without per-server backoff, and an explicit REST target remains pinned to one attempt."
+reason = "RUST-PAR-027 closed the automatic server connection-state divergence while preserving the headless controller's explicit-target semantics."
+compatibility = "No server packet shape changed; automatic connection concurrency and cycling now follow MFC."
+disposition = "rust_native_replace"
+owner = "rust-settings"
+target = "rust-v0.1.0-beta.1"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-027 (2026-07-10): IMPLEMENTED in loop_runtime.rs and wired from the persisted preference through effective_ed2k_config. Focused safe-connect and preference propagation tests pass."
+
+[[resolved_omissions]]
+id = "server-udp-description-poll"
+area = "ed2k"
+stock_behavior = "After a valid OP_GLOBSERVSTATRES, eMule polls each non-connected server (up to twice, GetLastDescPingedCount() < 2) with OP_SERVER_DESC_REQ carrying a uint32 challenge ((GetRandomUInt16() << 16) | INV_SERV_DESC_LEN=0xF0FF), and parses the OP_SERVER_DESC_RES answer (legacy <name_len><name><desc_len><desc> strings, or the eserver 16.45+ challenge-echo taglist with name/description/dynip/version/aux ports) to refresh server-list name/description/version metadata (UDPSocket.cpp:481-540)."
+rust_behavior = "IMPLEMENTED (RUST-PAR-028): a paced one-shot background pass status-pings non-connected servers, sends challenge-bearing OP_SERVER_DESC_REQ only after a validated status response, decodes legacy strings and challenge-tag OP_SERVER_DESC_RES, and persists refreshed name/description metadata."
+reason = "RUST-PAR-028 implemented the requested server-list metadata parity with conservative one-second pacing and one poll per server per daemon run."
+compatibility = "The 0xA2/0xA3 packet and challenge shapes match MFC; no proprietary extension was introduced."
+disposition = "fixed"
+owner = "core-protocol"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-028 (2026-07-10): IMPLEMENTED with challenge, legacy/tag decoder, mismatch, persistence, and diagnostic-name tests. No longer an omission; retained as audit history."
+
+[[resolved_omissions]]
+id = "upload-slow-cooldown-suppression"
+area = "ed2k"
+stock_behavior = "eMule holds a slow-rate-recycled upload peer in a cooldown window (SetSlowUploadCooldownUntil / IsInSlowUploadCooldown gates FindBestClientInQueue, UploadQueue.cpp:228) and suppresses its queue score (bCooldownSuppressed, UploadClient.cpp:497), re-promoting it only via the broadband cooldown-probe path when capacity would otherwise idle."
+rust_behavior = "IMPLEMENTED (RUST-PAR-020 U-GAP3): the Rust upload queue now carries the fork's per-IP upload anti-abuse layer (upload_cooldown.rs + upload_queue.rs). A recycled slot seeds an IP-scoped cooldown that gates promotion AND the inline free-slot grant (best_admissible_waiting_key / begin_session, mirroring the IsInSlowUploadCooldown gate on FindBestClientInQueue, UploadQueue.cpp:228); a never-requested (0-byte) recycle also accrues a rolling-window strike with exponential-backoff cooldown and, past 8/16/hash-rotation-3 strikes, a repeat-offender ban wired to the shared BanStore (client->Ban, UploadQueue.cpp:1640); and the cooldown probe re-promotes a cooled waiter only when a base slot would otherwise idle (cooldownProbeClient, UploadQueue.cpp:235-243). No longer an omission."
+reason = "RUST-PAR-020 ported the cooldown/repeat-offender/ban apparatus (UploadQueue.cpp:1117-1779, UploadQueueSeams.h) faithfully. Rust surfaces score suppression as hard promotion/grant gating on the cooled IP rather than a bCooldownSuppressed score term, which is equivalent for selection (a cooled peer is never promoted); the fork's failed-admission/no-socket/short-failed cooldowns map to the failed promote-connect path in rust's connection-per-op model."
+compatibility = "Does not affect eD2K or Kad wire compatibility; it only changes local upload-slot scheduling among already-connected peers and can ban a local abuser. A downloading peer sees the same protocol."
+disposition = "fixed"
+owner = "transfer-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "RUST-PAR-020 round-20 (2026-07-08): IMPLEMENTED. Ported the per-IP no-request cooldown tiers (standard 60/180s, broadband 15/45s, base 30s), the repeat-offender ban (standard 8 / broadband 16 / hash-rotation >=3 hashes & >=5 strikes within 4h) wired to the shared BanStore, selection gating on cooled IPs (promotion + inline grant), and the cooldown probe (upload_cooldown.rs, upload_queue.rs). No longer an omission; entry retained as the audit trail for the fix."

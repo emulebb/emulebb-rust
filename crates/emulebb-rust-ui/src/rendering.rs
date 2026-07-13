@@ -188,14 +188,11 @@ pub(super) fn render_preferences(ui: &MainWindow, preferences: &Preferences, sta
     ui.set_pref_queue_size(preferences.queue_size.to_string().into());
     ui.set_pref_auto_connect(preferences.auto_connect);
     ui.set_pref_reconnect(preferences.reconnect);
-    ui.set_pref_new_auto_up(preferences.new_auto_up);
-    ui.set_pref_new_auto_down(preferences.new_auto_down);
     ui.set_pref_credit_system(preferences.credit_system);
     ui.set_pref_safe_server_connect(preferences.safe_server_connect);
     ui.set_pref_add_servers_from_server(preferences.add_servers_from_server);
     ui.set_pref_network_kademlia(preferences.network_kademlia);
     ui.set_pref_network_ed2k(preferences.network_ed2k);
-    ui.set_pref_download_auto_broadband_io(preferences.download_auto_broadband_io);
     ui.set_settings_status_line(status.into());
 }
 
