@@ -22,6 +22,11 @@ Everything below is this repo's local deltas only:
   Rust-native async daemon concepts with Rust-native names. Broadband-oriented
   async IO is the daemon baseline, not a compatibility preference or runtime
   toggle.
+- Until an explicit Rust API-freeze or release-candidate decision, do not bump
+  `apiVersion` or REST `contractVersion` for each route, DTO, validator, or
+  OpenAPI cleanup. During this development phase, evolve the implementation,
+  OpenAPI artifact, first-party Rust UI, and tests together; reserve version
+  bumps for deliberate freeze/release boundaries.
 - Follow the responsibility-based source-structure and test-placement policy in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
   Source length is advisory; split by responsibility, keep substantial tests
