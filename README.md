@@ -86,15 +86,14 @@ on top of the fail-closed VPN gates.
 
 ## Binding Contract
 
-Run the daemon with `--config <path>`. The daemon does not read machine-local
-environment variables for product binding decisions, and it does not invent
-listener addresses when config is missing. REST `bindAddr` is required in the
-TOML file. When ED2K servers are configured, `p2pBindIp`, `ed2k.listenPort`,
-and `kad.listenPort` are also required so the peer listener and Kad UDP surface
-bind to the configured address.
+Run the daemon with `--profile <dir>`. The daemon reads REST bootstrap settings
+from `<dir>\emulebb-rust-settings.toml` and opens its SQLite repository at
+`<dir>\emulebb-rust-metadata.db`. The TOML file is control-plane bootstrap only:
+REST `bindAddr` is required there, while runtime/network settings live in the
+database and are exposed through `/api/v1/app/settings`.
 
-Harnesses may use operator-local inputs to generate that TOML file, but the
-Rust client itself only consumes the configured addresses.
+Harnesses may use operator-local inputs to create the profile directory and
+write those fixed files, but the Rust client itself only consumes the profile.
 
 ## Licensing
 

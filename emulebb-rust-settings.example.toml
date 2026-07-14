@@ -1,5 +1,3 @@
-runtimeDir = "runtime"
-
 [rest]
 bindAddr = "192.0.2.10:13301"
 apiKey = "change-me"

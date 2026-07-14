@@ -33,7 +33,7 @@ Everything below is this repo's local deltas only:
   compatibility readers, Rust schema migrations, or version bumps for
   development-phase cleanup. When a local persisted development profile must be
   preserved, use an explicit one-off SQLite/Python update against that
-  operator-local DB (for example a soak `metadata.sqlite`) instead of encoding
+  operator-local DB (for example a soak `emulebb-rust-metadata.db`) instead of encoding
   the compatibility path in product code.
 - Follow the responsibility-based source-structure and test-placement policy in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.

@@ -354,7 +354,7 @@ pub struct PreferencesUpdate {
 pub struct DaemonRuntimeSettings {
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
-    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
+    /// by its canonical name. Defaults to `<profile>/incoming` when unset.
     pub incoming_dir: Option<PathBuf>,
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,

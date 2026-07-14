@@ -11,7 +11,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 #[command(name = "emulebb-rust", about = "Rust headless eMuleBB client")]
 struct Cli {
     #[arg(short, long)]
-    config: Option<PathBuf>,
+    profile: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -23,5 +23,5 @@ async fn main() -> Result<()> {
         .with(LogBufferLayer.with_filter(LevelFilter::INFO))
         .init();
     let cli = Cli::parse();
-    run(DaemonConfig::load(cli.config)?).await
+    run(DaemonConfig::load(cli.profile)?).await
 }

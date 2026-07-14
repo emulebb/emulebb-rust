@@ -88,24 +88,19 @@ fn iface_with_description(name: &str, description: &str, ip: &str) -> NetworkInt
 }
 
 fn write_bootstrap_config(dir: &std::path::Path) -> PathBuf {
-    let config_path = dir.join("emulebb-rust.toml");
-    let runtime_dir = dir.join("runtime");
-    fs::create_dir_all(&runtime_dir).unwrap();
-    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
+    let profile_dir = dir.join("runtime");
+    fs::create_dir_all(&profile_dir).unwrap();
+    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
-        &config_path,
-        format!(
-            r#"
-runtimeDir = "{runtime_dir_text}"
-
+        &settings_path,
+        r#"
 [rest]
 bindAddr = "192.0.2.10:13301"
 apiKey = "secret"
-"#
-        ),
+"#,
     )
     .unwrap();
-    config_path
+    profile_dir
 }
 
 fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_json::Value) {
@@ -116,20 +111,20 @@ fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_
 }
 
 #[test]
-fn load_requires_explicit_config_path() {
+fn load_requires_explicit_profile_path() {
     let error = DaemonConfig::load(None).unwrap_err().to_string();
 
-    assert!(error.contains("--config is required"));
+    assert!(error.contains("--profile is required"));
 }
 
 #[test]
-fn load_requires_existing_config_path() {
+fn load_requires_existing_profile_settings_path() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("missing.toml");
+    let path = temp.path().join("missing-profile");
 
     let error = DaemonConfig::load(Some(path)).unwrap_err().to_string();
 
-    assert!(error.contains("config file does not exist"));
+    assert!(error.contains("profile settings file does not exist"));
 }
 
 #[test]
@@ -139,9 +134,8 @@ fn load_requires_existing_config_path() {
 )]
 fn load_parses_bootstrap_toml_and_db_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = write_bootstrap_config(temp.path());
-    let runtime_dir = temp.path().join("runtime");
-    let metadata = MetadataStore::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    let runtime_dir = write_bootstrap_config(temp.path());
+    let metadata = MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
         SECTION_DAEMON_RUNTIME,
@@ -291,7 +285,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
         serde_json::json!("203.0.113.10"),
     );
 
-    let config = DaemonConfig::load(Some(config_path)).unwrap();
+    let config = DaemonConfig::load(Some(runtime_dir.clone())).unwrap();
 
     assert_eq!(config.runtime_dir, runtime_dir);
     assert_eq!(config.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
@@ -347,9 +341,9 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
 #[test]
 fn load_uses_default_db_runtime_config_when_missing() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = write_bootstrap_config(temp.path());
+    let runtime_dir = write_bootstrap_config(temp.path());
 
-    let config = DaemonConfig::load(Some(config_path)).unwrap();
+    let config = DaemonConfig::load(Some(runtime_dir)).unwrap();
     let metadata = MetadataStore::open(config.metadata_path()).unwrap();
 
     assert!(!metadata.has_settings_section(SECTION_ED2K).unwrap());
@@ -383,15 +377,12 @@ fn default_nat_settings_match_runtime_config_defaults() {
 #[test]
 fn load_rejects_runtime_fields_in_bootstrap_toml() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("emulebb-rust.toml");
     let runtime_dir = temp.path().join("runtime");
     fs::create_dir_all(&runtime_dir).unwrap();
-    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
+    let settings_path = runtime_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
-        &config_path,
-        format!(
-            r#"
-runtimeDir = "{runtime_dir_text}"
+        &settings_path,
+        r#"
 p2pBindIp = "192.0.2.10"
 
 [rest]
@@ -400,12 +391,11 @@ apiKey = "secret"
 
 [ed2k]
 listenPort = 41001
-"#
-        ),
+"#,
     )
     .unwrap();
 
-    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    let error = DaemonConfig::load(Some(runtime_dir)).unwrap_err();
     assert!(
         format!("{error:#}").contains("unknown field"),
         "unexpected error: {error:#}"
@@ -415,9 +405,8 @@ listenPort = 41001
 #[test]
 fn load_rejects_retired_nat_backend_from_db_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = write_bootstrap_config(temp.path());
-    let metadata =
-        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    let runtime_dir = write_bootstrap_config(temp.path());
+    let metadata = MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
         SECTION_NAT,
@@ -425,7 +414,7 @@ fn load_rejects_retired_nat_backend_from_db_runtime_config() {
         serde_json::json!(["upnp_rupnp"]),
     );
 
-    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    let error = DaemonConfig::load(Some(runtime_dir)).unwrap_err();
     assert!(
         error.to_string().contains("invalid NAT config"),
         "unexpected error: {error:#}"
@@ -439,9 +428,8 @@ fn load_rejects_retired_nat_backend_from_db_runtime_config() {
 #[test]
 fn load_rejects_db_runtime_server_endpoints() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = write_bootstrap_config(temp.path());
-    let metadata =
-        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    let runtime_dir = write_bootstrap_config(temp.path());
+    let metadata = MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
         SECTION_ED2K,
@@ -449,7 +437,7 @@ fn load_rejects_db_runtime_server_endpoints() {
         serde_json::json!(["192.0.2.20:4661"]),
     );
 
-    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    let error = DaemonConfig::load(Some(runtime_dir)).unwrap_err();
 
     assert!(
         error.to_string().contains("failed to load ed2k settings"),
@@ -464,9 +452,8 @@ fn load_rejects_db_runtime_server_endpoints() {
 #[test]
 fn load_rejects_db_runtime_server_entries() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = write_bootstrap_config(temp.path());
-    let metadata =
-        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    let runtime_dir = write_bootstrap_config(temp.path());
+    let metadata = MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
         SECTION_ED2K,
@@ -480,7 +467,7 @@ fn load_rejects_db_runtime_server_entries() {
         ]),
     );
 
-    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    let error = DaemonConfig::load(Some(runtime_dir)).unwrap_err();
 
     assert!(
         format!("{error:#}").contains("unknown field `serverEntries`"),
@@ -491,16 +478,12 @@ fn load_rejects_db_runtime_server_entries() {
 #[test]
 fn load_rejects_legacy_toml_preferences_instead_of_migrating() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("emulebb-rust.toml");
     let runtime_dir = temp.path().join("runtime");
     fs::create_dir_all(&runtime_dir).unwrap();
-    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
+    let settings_path = runtime_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
-        &config_path,
-        format!(
-            r#"
-runtimeDir = "{runtime_dir_text}"
-
+        &settings_path,
+        r#"
 [rest]
 bindAddr = "192.0.2.10:13301"
 apiKey = "secret"
@@ -508,11 +491,10 @@ apiKey = "secret"
 [preferences]
 autoConnect = false
 "#,
-        ),
     )
     .unwrap();
 
-    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    let error = DaemonConfig::load(Some(runtime_dir)).unwrap_err();
     assert!(
         format!("{error:#}").contains("unknown field"),
         "unexpected error: {error:#}"

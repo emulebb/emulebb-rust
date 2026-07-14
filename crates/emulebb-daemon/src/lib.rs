@@ -33,13 +33,16 @@ pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard_monitor;
 
+pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
+pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DaemonConfig {
     pub runtime_dir: PathBuf,
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
-    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
+    /// by its canonical name. Defaults to `<profile>/incoming` when unset.
     pub incoming_dir: Option<PathBuf>,
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
@@ -55,8 +58,7 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct DaemonBootstrapConfig {
-    pub runtime_dir: PathBuf,
+struct DaemonBootstrapSettings {
     pub rest: RestListenerConfig,
 }
 
@@ -87,10 +89,9 @@ impl Default for DaemonConfig {
     }
 }
 
-impl Default for DaemonBootstrapConfig {
+impl Default for DaemonBootstrapSettings {
     fn default() -> Self {
         Self {
-            runtime_dir: PathBuf::from("runtime"),
             rest: RestListenerConfig::default(),
         }
     }
@@ -106,25 +107,30 @@ impl Default for RestListenerConfig {
 }
 
 impl DaemonConfig {
-    pub fn load(path: Option<PathBuf>) -> Result<Self> {
-        let path = path.context("--config is required; network bindings must come from config")?;
-        if !path.exists() {
-            bail!("config file does not exist: {}", path.display());
+    pub fn load(profile_dir: Option<PathBuf>) -> Result<Self> {
+        let runtime_dir =
+            profile_dir.context("--profile is required; profile directory owns settings and DB")?;
+        let settings_path = runtime_dir.join(PROFILE_SETTINGS_FILE);
+        if !settings_path.exists() {
+            bail!(
+                "profile settings file does not exist: {}",
+                settings_path.display()
+            );
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config {}", path.display()))?;
-        let bootstrap: DaemonBootstrapConfig = toml::from_str(&text)
-            .with_context(|| format!("failed to parse config {}", path.display()))?;
-        let metadata = MetadataStore::open(bootstrap.runtime_dir.join("metadata.sqlite"))
-            .with_context(|| {
+        let text = fs::read_to_string(&settings_path)
+            .with_context(|| format!("failed to read settings {}", settings_path.display()))?;
+        let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
+            .with_context(|| format!("failed to parse settings {}", settings_path.display()))?;
+        let metadata =
+            MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).with_context(|| {
                 format!(
                     "failed to open metadata store under {}",
-                    bootstrap.runtime_dir.display()
+                    runtime_dir.display()
                 )
             })?;
         let runtime = load_runtime_settings(&metadata)?;
         let config = Self {
-            runtime_dir: bootstrap.runtime_dir,
+            runtime_dir,
             incoming_dir: runtime.daemon.incoming_dir,
             p2p_bind_ip: runtime.daemon.p2p_bind_ip,
             p2p_bind_interface: runtime.daemon.p2p_bind_interface,
@@ -145,7 +151,7 @@ impl DaemonConfig {
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        self.runtime_dir.join("metadata.sqlite")
+        self.runtime_dir.join(PROFILE_METADATA_FILE)
     }
 
     pub fn transfer_root(&self) -> PathBuf {
@@ -153,7 +159,7 @@ impl DaemonConfig {
     }
 
     /// Resolve the finished-file delivery directory: the configured
-    /// `incomingDir`, or `<runtimeDir>/incoming` by default.
+    /// `incomingDir`, or `<profile>/incoming` by default.
     pub fn incoming_dir(&self) -> PathBuf {
         self.incoming_dir
             .clone()
