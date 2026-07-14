@@ -21,49 +21,15 @@ impl super::MetadataStore {
 
         tx.prepare_cached(
             r#"
-            INSERT INTO content_objects(
-                kind, primary_hash_kind, primary_hash, display_name, size_bytes,
-                first_seen_ms, last_seen_ms, updated_at_ms
-            )
-            VALUES ('ed2k_file', 'ed2k', ?1, ?2, ?3, ?4, ?4, ?4)
-            ON CONFLICT(kind, primary_hash_kind, primary_hash) DO UPDATE SET
-                display_name = excluded.display_name,
-                size_bytes = excluded.size_bytes,
-                last_seen_ms = excluded.last_seen_ms,
-                updated_at_ms = excluded.updated_at_ms,
-                deleted_at_ms = NULL
-            "#,
-        )?
-        .execute(params![
-            hash,
-            manifest.canonical_name,
-            manifest.file_size as i64,
-            now
-        ])?;
-        let content_object_id: i64 = tx
-            .prepare_cached(
-                r#"
-                SELECT id FROM content_objects
-                WHERE kind = 'ed2k_file' AND primary_hash_kind = 'ed2k' AND primary_hash = ?1
-                "#,
-            )?
-            .query_row(
-                params![decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?],
-                |row| row.get(0),
-            )?;
-
-        tx.prepare_cached(
-            r#"
             INSERT INTO known_files(
-                content_object_id, ed2k_hash, size_bytes, canonical_name,
+                ed2k_hash, size_bytes, canonical_name,
                 part_size, part_count, completed, md4_hashset_acquired,
                 aich_hashset_acquired, aich_root, upload_priority,
                 auto_upload_priority, comment, rating,
                 first_seen_ms, last_seen_ms, updated_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?14)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
-                content_object_id = excluded.content_object_id,
                 size_bytes = excluded.size_bytes,
                 canonical_name = excluded.canonical_name,
                 part_size = excluded.part_size,
@@ -81,8 +47,7 @@ impl super::MetadataStore {
             "#,
         )?
         .execute(params![
-            content_object_id,
-            decode_fixed_hex(&manifest.file_hash, 16, "ED2K hash")?,
+            hash,
             manifest.file_size as i64,
             manifest.canonical_name,
             manifest.piece_size as i64,

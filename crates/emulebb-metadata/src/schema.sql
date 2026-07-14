@@ -56,25 +56,8 @@ CREATE TABLE friends (
     deleted_at_ms INTEGER
 );
 
-CREATE TABLE content_objects (
-    id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL,
-    primary_hash_kind TEXT,
-    primary_hash BLOB,
-    display_name TEXT NOT NULL DEFAULT '',
-    size_bytes INTEGER,
-    raw_metadata BLOB,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER,
-    UNIQUE(kind, primary_hash_kind, primary_hash),
-    CHECK (primary_hash IS NULL OR length(primary_hash) IN (16, 20))
-);
-
 CREATE TABLE known_files (
     id INTEGER PRIMARY KEY,
-    content_object_id INTEGER NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
     ed2k_hash BLOB NOT NULL UNIQUE CHECK(length(ed2k_hash) = 16),
     size_bytes INTEGER NOT NULL,
     canonical_name TEXT NOT NULL,

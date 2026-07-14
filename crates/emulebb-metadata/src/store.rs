@@ -215,37 +215,12 @@ impl MetadataStore {
 
         tx.execute(
             r#"
-            INSERT INTO content_objects(
-                kind, primary_hash_kind, primary_hash, display_name, size_bytes,
-                first_seen_ms, last_seen_ms, updated_at_ms
-            )
-            VALUES ('ed2k_file', 'ed2k', ?1, ?2, ?3, ?4, ?4, ?4)
-            ON CONFLICT(kind, primary_hash_kind, primary_hash) DO UPDATE SET
-                display_name = excluded.display_name,
-                size_bytes = excluded.size_bytes,
-                last_seen_ms = excluded.last_seen_ms,
-                updated_at_ms = excluded.updated_at_ms
-            "#,
-            params![hash, file.name, file.size_bytes as i64, now],
-        )?;
-        let content_object_id: i64 = tx.query_row(
-            r#"
-            SELECT id FROM content_objects
-            WHERE kind = 'ed2k_file' AND primary_hash_kind = 'ed2k' AND primary_hash = ?1
-            "#,
-            params![decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?],
-            |row| row.get(0),
-        )?;
-
-        tx.execute(
-            r#"
             INSERT INTO known_files(
-                content_object_id, ed2k_hash, size_bytes, canonical_name,
+                ed2k_hash, size_bytes, canonical_name,
                 content_type, availability_score, first_seen_ms, last_seen_ms, updated_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
-                content_object_id = excluded.content_object_id,
                 size_bytes = excluded.size_bytes,
                 canonical_name = excluded.canonical_name,
                 content_type = excluded.content_type,
@@ -254,8 +229,7 @@ impl MetadataStore {
                 updated_at_ms = excluded.updated_at_ms
             "#,
             params![
-                content_object_id,
-                decode_fixed_hex(&file.ed2k_hash, 16, "ED2K hash")?,
+                hash,
                 file.size_bytes as i64,
                 file.name,
                 file.content_type,
@@ -611,14 +585,8 @@ mod tests {
             let conn = store.connection().unwrap();
             // Two known files + transfers: one live, one removed.
             conn.execute(
-                "INSERT INTO content_objects(id, kind, first_seen_ms, last_seen_ms, updated_at_ms)
-                 VALUES (1, 'ed2k_file', 0, 0, 0), (2, 'ed2k_file', 0, 0, 0)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO known_files(id, content_object_id, ed2k_hash, size_bytes, canonical_name, first_seen_ms, last_seen_ms, updated_at_ms)
-                 VALUES (1, 1, ?1, 1, 'a.bin', 0, 0, 0), (2, 2, ?2, 1, 'b.bin', 0, 0, 0)",
+                "INSERT INTO known_files(id, ed2k_hash, size_bytes, canonical_name, first_seen_ms, last_seen_ms, updated_at_ms)
+                 VALUES (1, ?1, 1, 'a.bin', 0, 0, 0), (2, ?2, 1, 'b.bin', 0, 0, 0)",
                 params![vec![0x11u8; 16], vec![0x22u8; 16]],
             )
             .unwrap();
