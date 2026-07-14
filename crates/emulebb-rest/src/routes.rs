@@ -23,15 +23,15 @@ use tokio::sync::watch;
 use crate::envelope::api_error;
 use crate::handlers::*;
 use crate::route_metadata::validate_route_metadata;
-use crate::{RestConfig, RestState};
+use crate::{RestServerSettings, RestState};
 
-pub fn router(core: Arc<EmulebbCore>, config: RestConfig) -> Router {
+pub fn router(core: Arc<EmulebbCore>, config: RestServerSettings) -> Router {
     router_with_shutdown(core, config, None)
 }
 
 pub fn router_with_shutdown(
     core: Arc<EmulebbCore>,
-    config: RestConfig,
+    config: RestServerSettings,
     shutdown: Option<watch::Sender<bool>>,
 ) -> Router {
     let state = RestState {

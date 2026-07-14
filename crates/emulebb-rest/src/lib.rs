@@ -31,7 +31,7 @@ pub(crate) use dto::*;
 pub(crate) use handlers::without_score_breakdown;
 
 #[derive(Debug, Clone)]
-pub struct RestConfig {
+pub struct RestServerSettings {
     pub api_key: String,
 }
 

@@ -11,14 +11,14 @@ pub(crate) use serde_json::{Value, json};
 pub(crate) use tokio::sync::watch;
 pub(crate) use tower::ServiceExt;
 
-pub(crate) use crate::{RestConfig, router, router_with_shutdown};
+pub(crate) use crate::{RestServerSettings, router, router_with_shutdown};
 
 pub(crate) fn test_router() -> Router {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     )

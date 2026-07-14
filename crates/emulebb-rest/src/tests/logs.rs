@@ -8,14 +8,14 @@ use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use crate::{RestConfig, log_buffer, record_log, router};
+use crate::{RestServerSettings, log_buffer, record_log, router};
 
 fn test_router() -> axum::Router {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     )

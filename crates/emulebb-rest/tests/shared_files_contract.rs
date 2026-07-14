@@ -9,7 +9,7 @@ use axum::{
 };
 use emulebb_core::EmulebbCore;
 use emulebb_index::FileIndex;
-use emulebb_rest::{RestConfig, router};
+use emulebb_rest::{RestServerSettings, router};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -24,7 +24,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
     );
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -305,7 +305,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     );
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );

@@ -9,7 +9,7 @@ use emulebb_index::FileIndex;
 use serde_json::Value;
 use tower::ServiceExt;
 
-use crate::{RestConfig, router};
+use crate::{RestServerSettings, router};
 
 #[tokio::test]
 async fn server_connect_reports_core_failures() {
@@ -17,7 +17,7 @@ async fn server_connect_reports_core_failures() {
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -63,7 +63,7 @@ async fn snapshot_limit_does_not_truncate_servers() {
     }
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );

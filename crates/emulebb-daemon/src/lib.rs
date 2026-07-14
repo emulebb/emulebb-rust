@@ -17,7 +17,7 @@ use emulebb_ed2k::{
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
-use emulebb_rest::{RestConfig, router_with_shutdown};
+use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
     DaemonRuntimeSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
     NatSettings, SECTION_DAEMON_RUNTIME, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
@@ -555,7 +555,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(
         Arc::clone(&core),
-        RestConfig {
+        RestServerSettings {
             api_key: profile.rest.api_key.clone(),
         },
         Some(shutdown_tx.clone()),

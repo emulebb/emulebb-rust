@@ -7,7 +7,7 @@ async fn app_shutdown_requires_confirmation_and_signals_daemon() {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let app = router_with_shutdown(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
         Some(shutdown_tx),
@@ -58,7 +58,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
     );
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -293,7 +293,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
     .unwrap();
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );

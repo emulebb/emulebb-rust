@@ -472,7 +472,7 @@ async fn search_results_use_canonical_paging_query() {
     .unwrap();
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -558,7 +558,7 @@ async fn search_to_download_flow_uses_local_index() {
     .unwrap();
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -622,7 +622,7 @@ async fn search_result_download_accepts_paused_request_body() {
     .unwrap();
     let app = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );

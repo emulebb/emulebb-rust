@@ -333,7 +333,7 @@ async fn delete_completed_transfer_row_preserves_files() {
         .unwrap();
     let app = router(
         Arc::clone(&core),
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
@@ -405,7 +405,7 @@ async fn clear_completed_transfers_requires_confirmation_and_preserves_files() {
         .unwrap();
     let app = router(
         Arc::clone(&core),
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );

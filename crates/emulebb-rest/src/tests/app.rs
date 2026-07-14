@@ -10,14 +10,14 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::rest_test_support::unique_test_dir;
-use crate::{RestConfig, router};
+use crate::{RestServerSettings, router};
 
 fn test_router() -> axum::Router {
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     )
@@ -232,7 +232,7 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
     let router = router(
         core,
-        RestConfig {
+        RestServerSettings {
             api_key: "secret".to_string(),
         },
     );
