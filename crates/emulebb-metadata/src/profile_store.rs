@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     profile_model::{MetadataCategory, MetadataFriend, MetadataServer},
-    store::{bool_to_i64, decode_fixed_hex, unix_ms},
+    store::{bool_to_i64, decode_fixed_hex, unix_ms, upsert_local_path},
 };
 
 impl super::MetadataStore {
@@ -142,10 +142,12 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, name, path, comment, priority, color
+            SELECT categories.id, categories.name, local_paths.display_path,
+                   categories.comment, categories.priority, categories.color
             FROM categories
+            LEFT JOIN local_paths ON local_paths.id = categories.path_id
             WHERE deleted_at_ms IS NULL
-            ORDER BY id
+            ORDER BY categories.id
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -164,13 +166,21 @@ impl super::MetadataStore {
 
     pub fn upsert_category(&self, category: &MetadataCategory) -> Result<()> {
         let now = unix_ms();
-        self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let path_id = category
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| upsert_local_path(&tx, path, now))
+            .transpose()?;
+        tx.execute(
             r#"
-            INSERT INTO categories(id, name, path, comment, priority, color, created_at_ms, updated_at_ms, deleted_at_ms)
+            INSERT INTO categories(id, name, path_id, comment, priority, color, created_at_ms, updated_at_ms, deleted_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
-                path = excluded.path,
+                path_id = excluded.path_id,
                 comment = excluded.comment,
                 priority = excluded.priority,
                 color = excluded.color,
@@ -180,13 +190,14 @@ impl super::MetadataStore {
             params![
                 i64::from(category.id),
                 category.name,
-                category.path,
+                path_id,
                 category.comment,
                 i64::from(category.priority),
                 category.color.map(i64::from),
                 now,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

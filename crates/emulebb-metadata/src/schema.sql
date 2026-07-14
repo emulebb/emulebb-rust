@@ -36,7 +36,7 @@ CREATE TABLE settings (
 CREATE TABLE categories (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    path TEXT,
+    path_id INTEGER REFERENCES local_paths(id),
     comment TEXT NOT NULL DEFAULT '',
     priority INTEGER NOT NULL DEFAULT 0,
     color INTEGER,
