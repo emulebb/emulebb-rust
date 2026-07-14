@@ -215,9 +215,8 @@ CREATE TABLE transfers (
     -- Last-modified time (Unix milliseconds) of the share-in-place source file
     -- captured at ingest. Compared against the on-disk mtime on every reload so
     -- an unchanged shared file (same source_path + size_bytes + mtime) is reused
-    -- from this row instead of being re-hashed. NULL for a real download or a
-    -- share-in-place row written before this column existed (treated as a miss,
-    -- so the file is re-hashed once and the mtime is then recorded).
+    -- from this row instead of being re-hashed. NULL means no reusable source
+    -- mtime is available.
     source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),

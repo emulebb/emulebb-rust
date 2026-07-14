@@ -33,8 +33,8 @@ pub struct MetadataTransferManifest {
     /// Last-modified time (Unix milliseconds) of the share-in-place source file
     /// captured at ingest. Compared against the on-disk mtime on reload so an
     /// unchanged shared file (same `source_path` + `file_size` + mtime) is reused
-    /// instead of being re-hashed. `None` for a real download or a share-in-place
-    /// row written before this field existed.
+    /// instead of being re-hashed. `None` means no reusable source mtime is
+    /// available.
     pub source_mtime_ms: Option<i64>,
 }
 
@@ -140,7 +140,7 @@ pub struct MetadataTransferPiece {
     pub bytes_written: u64,
     /// Lowercase-hex packed per-part block presence bitmap, or `None` when the
     /// part's present blocks are simply the contiguous prefix up to
-    /// `bytes_written` (legacy / contiguous fast path).
+    /// `bytes_written` (contiguous fast path).
     pub block_bitmap: Option<String>,
     /// Whether the part previously failed its MD4 flush check and is pending
     /// MD4-only ICH salvage: the stale on-disk bytes are retained so the part
