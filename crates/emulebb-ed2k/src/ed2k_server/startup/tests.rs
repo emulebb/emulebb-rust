@@ -8,7 +8,7 @@ use super::*;
 fn one_entry() -> Ed2kSharedEntry {
     Ed2kSharedEntry {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "lan-bind-source.bin".to_string(),
+        display_name: "lan-bind-source.bin".to_string(),
         file_size: 1234,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -31,7 +31,7 @@ fn shared_entry(index: usize) -> Ed2kSharedEntry {
     hash[8..16].copy_from_slice(&(!(index as u64)).to_le_bytes());
     Ed2kSharedEntry {
         file_hash: hex::encode(hash),
-        canonical_name: format!("sample-file-{index:03}.bin"),
+        display_name: format!("sample-file-{index:03}.bin"),
         file_size: 1_000 + index as u64,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -139,7 +139,7 @@ fn offer_files_preserves_complete_sentinel_for_compression_servers() {
 #[test]
 fn offer_files_preserves_unicode_filename_tag() {
     let mut entry = one_entry();
-    entry.canonical_name = "unicode-\u{00e9}-\u{6f22}.bin".to_string();
+    entry.display_name = "unicode-\u{00e9}-\u{6f22}.bin".to_string();
     let payload = encode_offer_files_payload(
         &[entry],
         Some(u32::from_le_bytes([192, 168, 1, 210])),

@@ -48,12 +48,12 @@ pub(crate) fn expected_piece_length(file_size: u64, piece_size: u64, piece_index
 #[must_use]
 pub fn new_transfer_job(
     file_hash: Ed2kHash,
-    canonical_name: String,
+    display_name: String,
     file_size: u64,
 ) -> Ed2kTransferJob {
     Ed2kTransferJob {
         file_hash: file_hash.to_string(),
-        canonical_name,
+        display_name,
         file_size,
         piece_size: ED2K_PART_SIZE,
     }

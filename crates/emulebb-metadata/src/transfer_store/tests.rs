@@ -16,7 +16,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         .unwrap();
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "Sample.Transfer.bin".to_string(),
+        display_name: "Sample.Transfer.bin".to_string(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -64,7 +64,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         store.completed_transfer_catalog_entries().unwrap(),
         vec![MetadataTransferCatalogEntry {
             file_hash: manifest.file_hash.clone(),
-            canonical_name: manifest.canonical_name.clone(),
+            display_name: manifest.display_name.clone(),
             file_size: manifest.file_size,
             aich_root: manifest.aich_root.clone(),
             upload_priority: manifest.upload_priority.clone(),
@@ -98,7 +98,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         store.completed_transfer_publish_entries().unwrap(),
         vec![MetadataTransferPublishEntry {
             file_hash: manifest.file_hash.clone(),
-            canonical_name: manifest.canonical_name.clone(),
+            display_name: manifest.display_name.clone(),
             file_size: manifest.file_size,
             aich_root: manifest.aich_root.clone(),
             upload_priority: manifest.upload_priority.clone(),
@@ -118,7 +118,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         store.completed_transfer_share_entries().unwrap(),
         vec![MetadataTransferShareEntry {
             file_hash: manifest.file_hash.clone(),
-            canonical_name: manifest.canonical_name.clone(),
+            display_name: manifest.display_name.clone(),
             file_size: manifest.file_size,
             part_count: 1,
             source_path: manifest.source_path.clone(),
@@ -137,7 +137,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
         (
             vec![MetadataTransferShareEntry {
                 file_hash: manifest.file_hash.clone(),
-                canonical_name: manifest.canonical_name.clone(),
+                display_name: manifest.display_name.clone(),
                 file_size: manifest.file_size,
                 part_count: 1,
                 source_path: manifest.source_path.clone(),
@@ -167,7 +167,7 @@ fn upload_demand_counters_persist_on_known_files() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "Demand.Sample.bin".to_string(),
+        display_name: "Demand.Sample.bin".to_string(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -230,7 +230,7 @@ fn share_in_place_reload_entries_remember_duplicate_source_paths() {
     let store = MetadataStore::in_memory().unwrap();
     let mut manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "Duplicate.Payload.bin".to_string(),
+        display_name: "Duplicate.Payload.bin".to_string(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -347,7 +347,7 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
         .unwrap();
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "Recovered.Source.bin".to_string(),
+        display_name: "Recovered.Source.bin".to_string(),
         file_size: 1024,
         piece_size: 1024,
         completed: true,
@@ -388,7 +388,7 @@ fn delete_transfer_manifest_removes_transfer_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {
         file_hash: "00112233445566778899aabbccddeeff".to_string(),
-        canonical_name: "Sample.Transfer.bin".to_string(),
+        display_name: "Sample.Transfer.bin".to_string(),
         file_size: 1,
         piece_size: 1,
         completed: false,
@@ -441,7 +441,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
     let hash = "00112233445566778899aabbccddeeff";
     let manifest = MetadataTransferManifest {
         file_hash: hash.to_string(),
-        canonical_name: "Scenario.File.bin".to_string(),
+        display_name: "Scenario.File.bin".to_string(),
         file_size: 1,
         piece_size: 1,
         completed: false,

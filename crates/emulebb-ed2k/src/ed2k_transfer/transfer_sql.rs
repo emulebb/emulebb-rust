@@ -12,7 +12,7 @@ use super::{
 pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTransferManifest {
     MetadataTransferManifest {
         file_hash: manifest.file_hash.clone(),
-        canonical_name: manifest.canonical_name.clone(),
+        display_name: manifest.display_name.clone(),
         file_size: manifest.file_size,
         piece_size: manifest.piece_size,
         completed: manifest.completed,
@@ -80,7 +80,7 @@ pub(super) fn manifest_from_metadata(
     }
     Ok(Ed2kResumeManifest {
         file_hash: manifest.file_hash,
-        canonical_name: manifest.canonical_name,
+        display_name: manifest.display_name,
         file_size: manifest.file_size,
         piece_size: manifest.piece_size,
         completed: manifest.completed,
@@ -145,7 +145,7 @@ pub(super) fn completed_catalog_from_metadata_store(
 fn shared_entry_from_catalog_entry(entry: MetadataTransferCatalogEntry) -> Result<Ed2kSharedEntry> {
     Ok(Ed2kSharedEntry {
         file_hash: entry.file_hash,
-        canonical_name: entry.canonical_name,
+        display_name: entry.display_name,
         file_size: entry.file_size,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -193,7 +193,7 @@ mod tests {
     fn manifest_row(file_size: u64, piece_size: u64) -> MetadataTransferManifest {
         MetadataTransferManifest {
             file_hash: "00000000000000000000000000000000".to_string(),
-            canonical_name: "f.bin".to_string(),
+            display_name: "f.bin".to_string(),
             file_size,
             piece_size,
             completed: false,

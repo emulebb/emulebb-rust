@@ -229,7 +229,7 @@ pub struct Ed2kSharedEntry {
     /// Stable ED2K file hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name used in offer-files and filename answers.
-    pub canonical_name: String,
+    pub display_name: String,
     /// Full file size in bytes.
     pub file_size: u64,
     /// Whether the payload is fully verified and safe to serve to peers.
@@ -303,7 +303,7 @@ impl Ed2kSharedEntry {
         let _ = Ed2kHash::from_str(value).ok()?;
         Some(Self {
             file_hash: value.clone(),
-            canonical_name: hash.canonical_name.clone(),
+            display_name: hash.display_name.clone(),
             file_size: hash.size,
             verified_complete: false,
             verified_ranges: Vec::new(),
@@ -334,7 +334,7 @@ impl Ed2kSharedEntry {
         };
         Self {
             file_hash: manifest.file_hash.clone(),
-            canonical_name: manifest.canonical_name.clone(),
+            display_name: manifest.display_name.clone(),
             file_size: manifest.file_size,
             verified_complete: manifest.completed,
             verified_ranges: manifest.verified_ranges.clone(),
@@ -451,7 +451,7 @@ mod indexed_catalog_tests {
     fn verified_entry(nibble: u8) -> Ed2kSharedEntry {
         Ed2kSharedEntry {
             file_hash: hex_hash(nibble),
-            canonical_name: format!("file-{nibble}.bin"),
+            display_name: format!("file-{nibble}.bin"),
             file_size: 1_000,
             verified_complete: true,
             verified_ranges: Vec::new(),

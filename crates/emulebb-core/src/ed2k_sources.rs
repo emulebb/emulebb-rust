@@ -155,14 +155,14 @@ pub(crate) fn ed2k_keyword_server_attempts(config: &Ed2kRuntimeConfig, query: &s
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LearnedEd2kMetadata {
-    pub(crate) canonical_name: Option<String>,
+    pub(crate) display_name: Option<String>,
     pub(crate) file_size: Option<u64>,
 }
 
 impl LearnedEd2kMetadata {
     pub(crate) fn merge_missing_from(&mut self, other: Self) {
-        if self.canonical_name.is_none() {
-            self.canonical_name = other.canonical_name;
+        if self.display_name.is_none() {
+            self.display_name = other.display_name;
         }
         if self.file_size.is_none() {
             self.file_size = other.file_size;
@@ -170,15 +170,15 @@ impl LearnedEd2kMetadata {
     }
 
     pub(crate) fn is_complete(&self) -> bool {
-        self.canonical_name.is_some() && self.file_size.is_some()
+        self.display_name.is_some() && self.file_size.is_some()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.canonical_name.is_none() && self.file_size.is_none()
+        self.display_name.is_none() && self.file_size.is_none()
     }
 }
 
-pub(crate) fn normalized_optional_canonical_name(value: Option<&str>) -> Option<String> {
+pub(crate) fn normalized_optional_display_name(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -198,12 +198,12 @@ pub(crate) fn select_ed2k_keyword_metadata(
         .filter(|result| result.file_hash == file_hash)
         .filter_map(|result| {
             let metadata = LearnedEd2kMetadata {
-                canonical_name: normalized_optional_canonical_name(result.file_name.as_deref()),
+                display_name: normalized_optional_display_name(result.file_name.as_deref()),
                 file_size: result.file_size.filter(|file_size| *file_size != 0),
             };
             (!metadata.is_empty()).then_some((
                 metadata.file_size.is_some(),
-                metadata.canonical_name.is_some(),
+                metadata.display_name.is_some(),
                 result.source_count.unwrap_or_default(),
                 metadata,
             ))
@@ -220,10 +220,10 @@ pub(crate) fn select_kad_keyword_metadata(
         return None;
     }
     let metadata = LearnedEd2kMetadata {
-        canonical_name: result
+        display_name: result
             .names
             .iter()
-            .find_map(|name| normalized_optional_canonical_name(Some(name))),
+            .find_map(|name| normalized_optional_display_name(Some(name))),
         file_size: result.size.filter(|file_size| *file_size != 0),
     };
     (!metadata.is_empty()).then_some(metadata)

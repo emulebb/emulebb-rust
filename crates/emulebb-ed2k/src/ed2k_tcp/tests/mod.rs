@@ -107,7 +107,7 @@ macro_rules! download_file_from_peer_test {
             $hello_identity:expr,
             $secure_ident:expr,
             $transfer_runtime:expr,
-            $canonical_name:expr,
+            $display_name:expr,
             $file_size:expr,
             $timeout:expr $(,)?
         ) => {
@@ -117,7 +117,7 @@ macro_rules! download_file_from_peer_test {
             hello_identity: $hello_identity,
             secure_ident: $secure_ident,
             transfer_runtime: $transfer_runtime,
-            canonical_name: $canonical_name,
+            display_name: $display_name,
             file_size: $file_size,
             current_source_count: 0,
             timeout: $timeout,

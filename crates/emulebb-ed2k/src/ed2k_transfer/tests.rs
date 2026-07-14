@@ -640,7 +640,7 @@ async fn ensure_job_ignores_legacy_json_manifest_for_fresh_sql_profiles() {
     fs::write(
             transfer_dir.join("resume-manifest.json"),
             format!(
-                "{{\"file_hash\":\"{}\",\"canonical_name\":\"legacy.iso\",\"file_size\":{},\"piece_size\":{},\"completed\":false,\"md4_hashset_acquired\":false,\"md4_hashset\":[],\"verified_ranges\":[],\"pieces\":[],\"sources\":[]}}",
+                "{{\"file_hash\":\"{}\",\"display_name\":\"legacy.iso\",\"file_size\":{},\"piece_size\":{},\"completed\":false,\"md4_hashset_acquired\":false,\"md4_hashset\":[],\"verified_ranges\":[],\"pieces\":[],\"sources\":[]}}",
                 file_hash,
                 ED2K_PART_SIZE + 1,
                 ED2K_PART_SIZE,
@@ -706,7 +706,7 @@ async fn reconcile_job_metadata_adopts_unknown_size_and_name() {
         )
         .await
         .unwrap();
-    assert_eq!(updated.canonical_name, "ubuntu-live.iso");
+    assert_eq!(updated.display_name, "ubuntu-live.iso");
     assert_eq!(updated.file_size, ED2K_PART_SIZE + 7);
     assert_eq!(updated.pieces.len(), 2);
     assert!(
@@ -1019,7 +1019,7 @@ async fn replace_catalog_hints_preserves_verified_entries() {
     runtime
         .replace_catalog_hints(&[PopularHash {
             hash: HashType::Ed2k("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-            canonical_name: "hint.bin".to_string(),
+            display_name: "hint.bin".to_string(),
             size: 12,
             source_count: 3,
         }])

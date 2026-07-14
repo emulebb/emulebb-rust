@@ -26,7 +26,7 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO known_files(
-                ed2k_hash, size_bytes, canonical_name,
+                ed2k_hash, size_bytes, display_name,
                 part_size, part_count, completed, md4_hashset_acquired,
                 aich_hashset_acquired, aich_root, upload_priority,
                 auto_upload_priority, comment, rating,
@@ -35,7 +35,7 @@ impl super::MetadataStore {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?14)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
-                canonical_name = excluded.canonical_name,
+                display_name = excluded.display_name,
                 part_size = excluded.part_size,
                 part_count = excluded.part_count,
                 completed = excluded.completed,
@@ -53,7 +53,7 @@ impl super::MetadataStore {
         .execute(params![
             hash,
             manifest.file_size as i64,
-            manifest.canonical_name,
+            manifest.display_name,
             manifest.piece_size as i64,
             manifest.pieces.len() as i64,
             bool_to_i64(manifest.completed),
@@ -156,7 +156,7 @@ impl super::MetadataStore {
             .prepare_cached(
                 r#"
                 SELECT known_files.id, transfers.id,
-                       lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                       lower(hex(known_files.ed2k_hash)), known_files.display_name,
                        known_files.size_bytes, coalesce(known_files.part_size, 0),
                        known_files.completed, known_files.md4_hashset_acquired,
                        known_files.aich_hashset_acquired,
@@ -181,7 +181,7 @@ impl super::MetadataStore {
                     known_file_id: row.get(0)?,
                     transfer_id: row.get(1)?,
                     file_hash: row.get(2)?,
-                    canonical_name: row.get(3)?,
+                    display_name: row.get(3)?,
                     file_size: row.get::<_, i64>(4)? as u64,
                     piece_size: row.get::<_, i64>(5)? as u64,
                     completed: row.get::<_, i64>(6)? != 0,
@@ -369,7 +369,7 @@ impl super::MetadataStore {
         let sql = format!(
             r#"
             SELECT known_files.id, transfers.id,
-                   lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+                   lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_size, 0),
                    known_files.completed, known_files.md4_hashset_acquired,
                    known_files.aich_hashset_acquired,
@@ -396,7 +396,7 @@ impl super::MetadataStore {
                 known_file_id: row.get(0)?,
                 transfer_id: row.get(1)?,
                 file_hash: row.get(2)?,
-                canonical_name: row.get(3)?,
+                display_name: row.get(3)?,
                 file_size: row.get::<_, i64>(4)? as u64,
                 piece_size: row.get::<_, i64>(5)? as u64,
                 completed: row.get::<_, i64>(6)? != 0,
@@ -423,7 +423,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
@@ -448,7 +448,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataTransferCatalogEntry {
                 file_hash: row.get(0)?,
-                canonical_name: row.get(1)?,
+                display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
                 upload_priority: row.get(4)?,
@@ -607,7 +607,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
@@ -639,7 +639,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataTransferPublishEntry {
                 file_hash: row.get(0)?,
-                canonical_name: row.get(1)?,
+                display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
                 upload_priority: row.get(4)?,
@@ -666,7 +666,7 @@ impl super::MetadataStore {
         };
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes,
                    CASE
                        WHEN known_files.aich_root IS NULL THEN NULL
@@ -698,7 +698,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataTransferPublishEntry {
                 file_hash: row.get(0)?,
-                canonical_name: row.get(1)?,
+                display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 aich_root: row.get(3)?,
                 upload_priority: row.get(4)?,
@@ -723,7 +723,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
                    COALESCE(source_paths.display_path, (
                        SELECT local_paths.display_path
@@ -756,7 +756,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataTransferShareEntry {
                 file_hash: row.get(0)?,
-                canonical_name: row.get(1)?,
+                display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
                 source_path: row.get(4)?,
@@ -795,7 +795,7 @@ impl super::MetadataStore {
         )? as usize;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
+            SELECT lower(hex(known_files.ed2k_hash)), known_files.display_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
                    COALESCE(source_paths.display_path, (
                        SELECT local_paths.display_path
@@ -829,7 +829,7 @@ impl super::MetadataStore {
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
             Ok(MetadataTransferShareEntry {
                 file_hash: row.get(0)?,
-                canonical_name: row.get(1)?,
+                display_name: row.get(1)?,
                 file_size: row.get::<_, i64>(2)? as u64,
                 part_count: row.get::<_, i64>(3)? as u32,
                 source_path: row.get(4)?,
@@ -903,7 +903,7 @@ struct TransferRow {
     known_file_id: i64,
     transfer_id: i64,
     file_hash: String,
-    canonical_name: String,
+    display_name: String,
     file_size: u64,
     piece_size: u64,
     completed: bool,
@@ -1027,7 +1027,7 @@ fn manifest_from_row(
 ) -> Result<MetadataTransferManifest> {
     Ok(MetadataTransferManifest {
         file_hash: row.file_hash,
-        canonical_name: row.canonical_name,
+        display_name: row.display_name,
         file_size: row.file_size,
         piece_size: row.piece_size,
         completed: row.completed,

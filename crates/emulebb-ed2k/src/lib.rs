@@ -57,7 +57,7 @@ pub enum HashType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PopularHash {
     pub hash: HashType,
-    pub canonical_name: String,
+    pub display_name: String,
     pub size: u64,
     pub source_count: u32,
 }

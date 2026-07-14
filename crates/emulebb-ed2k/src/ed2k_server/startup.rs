@@ -483,9 +483,9 @@ fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<([u8; 16], String, 
     let file_hash = hash.parsed_hash().ok()?;
     Some((
         file_hash.0,
-        hash.canonical_name.clone(),
+        hash.display_name.clone(),
         hash.file_size,
-        ed2k_offer_file_type(&hash.canonical_name),
+        ed2k_offer_file_type(&hash.display_name),
     ))
 }
 

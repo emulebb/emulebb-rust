@@ -879,7 +879,7 @@ impl EmulebbCore {
                 .await?
             {
                 let learned_name = should_adopt_hash_only_metadata_name(&transfer)
-                    .then_some(metadata.canonical_name.as_deref())
+                    .then_some(metadata.display_name.as_deref())
                     .flatten();
                 let manifest = self
                     .ed2k_transfers
@@ -1051,7 +1051,7 @@ impl EmulebbCore {
                     .register_callback_intent(Ed2kCallbackIntent {
                         client_id: source.client_id,
                         file_hash: transfer.hash.clone(),
-                        canonical_name: transfer.name.clone(),
+                        display_name: transfer.name.clone(),
                         file_size: transfer.size_bytes,
                         source: Ed2kSourceHint {
                             ip: source.ip.to_string(),
@@ -1157,7 +1157,7 @@ impl EmulebbCore {
                                 hello_identity,
                                 secure_ident: &secure_ident,
                                 transfer_runtime: transfer_runtime.as_ref(),
-                                canonical_name: file_name,
+                                display_name: file_name,
                                 file_size,
                                 current_source_count: source_exchange_source_count,
                                 timeout: connect_timeout,
@@ -1931,7 +1931,7 @@ impl EmulebbCore {
                         tracing::info!(
                             "ED2K hash-only metadata learned from background search file_hash={} file_name={} file_size={}",
                             file_hash,
-                            learned.canonical_name.as_deref().unwrap_or("-"),
+                            learned.display_name.as_deref().unwrap_or("-"),
                             learned.file_size.unwrap_or_default()
                         );
                     }
@@ -1952,7 +1952,7 @@ impl EmulebbCore {
             tracing::info!(
                 "ED2K hash-only metadata learned from Kad search file_hash={} file_name={} file_size={}",
                 file_hash,
-                learned.canonical_name.as_deref().unwrap_or("-"),
+                learned.display_name.as_deref().unwrap_or("-"),
                 learned.file_size.unwrap_or_default()
             );
         }
@@ -2381,7 +2381,7 @@ impl EmulebbCore {
                 .register_callback_intent(Ed2kCallbackIntent {
                     client_id: source.client_id,
                     file_hash: transfer.hash.clone(),
-                    canonical_name: transfer.name.clone(),
+                    display_name: transfer.name.clone(),
                     file_size: transfer.size_bytes,
                     source: Ed2kSourceHint {
                         ip: source.ip.to_string(),
@@ -3596,7 +3596,7 @@ async fn publish_kad_due_shared_files(
         let keyword_terms = if let Some(keyword_terms) = source_candidate.keyword_terms.as_ref() {
             keyword_terms
         } else {
-            source_only_keyword_terms = significant_keyword_words_unique(&entry.canonical_name);
+            source_only_keyword_terms = significant_keyword_words_unique(&entry.display_name);
             &source_only_keyword_terms
         };
         schedule.sync_keyword_terms(&entry.file_hash, keyword_terms);
@@ -3800,7 +3800,7 @@ async fn publish_kad_due_shared_files(
                 attempted_this_file = true;
                 // Master STORENOTES taglist: FILENAME, FILERATING (>0 only),
                 // DESCRIPTION (non-empty only), FILESIZE.
-                let mut notes_tags = vec![Tag::filename(entry.canonical_name.clone())];
+                let mut notes_tags = vec![Tag::filename(entry.display_name.clone())];
                 if entry.rating > 0 {
                     notes_tags.push(Tag::new_short(
                         emulebb_kad_proto::tag_name::FILERATING,
@@ -4260,7 +4260,7 @@ struct KadSourcePublishCandidate {
 struct KadKeywordPublishCandidate {
     file_hash: String,
     file_hash_bytes: Ed2kHash,
-    canonical_name: String,
+    display_name: String,
     keyword_terms: Vec<String>,
     file_size: u64,
     aich_root: Option<String>,
@@ -4269,16 +4269,16 @@ struct KadKeywordPublishCandidate {
 impl KadKeywordPublishCandidate {
     fn new(
         file_hash: String,
-        canonical_name: String,
+        display_name: String,
         file_size: u64,
         aich_root: Option<String>,
     ) -> Result<Self> {
         let file_hash_bytes = file_hash.parse()?;
-        let keyword_terms = significant_keyword_words_unique(&canonical_name);
+        let keyword_terms = significant_keyword_words_unique(&display_name);
         Ok(Self {
             file_hash,
             file_hash_bytes,
-            canonical_name,
+            display_name,
             keyword_terms,
             file_size,
             aich_root,
@@ -4291,7 +4291,7 @@ fn kad_keyword_publish_candidate_from_shared_entry(
 ) -> Result<KadKeywordPublishCandidate> {
     KadKeywordPublishCandidate::new(
         entry.file_hash.clone(),
-        entry.canonical_name.clone(),
+        entry.display_name.clone(),
         entry.file_size,
         entry.aich_root.clone(),
     )
@@ -4504,7 +4504,7 @@ fn compute_kad_publish_candidates(
             KadSourcePublishCandidate {
                 entry: kad_publish_entry_from_shared_entry(entry),
                 keyword_terms: kad_keyword_publish_eligible(entry)
-                    .then(|| significant_keyword_words_unique(&entry.canonical_name)),
+                    .then(|| significant_keyword_words_unique(&entry.display_name)),
             }
         })
         .collect::<Vec<_>>();
@@ -4528,7 +4528,7 @@ fn compute_kad_publish_candidates(
 fn kad_publish_entry_from_shared_entry(entry: &Ed2kSharedEntry) -> MetadataTransferPublishEntry {
     MetadataTransferPublishEntry {
         file_hash: entry.file_hash.clone(),
-        canonical_name: entry.canonical_name.clone(),
+        display_name: entry.display_name.clone(),
         file_size: entry.file_size,
         aich_root: entry.aich_root.clone(),
         upload_priority: entry.upload_priority.clone(),
@@ -4697,11 +4697,11 @@ fn kad_keyword_publish_entries_for_keyword(
             continue;
         }
         let mut tags = vec![
-            Tag::filename(entry.canonical_name.clone()),
+            Tag::filename(entry.display_name.clone()),
             Tag::filesize(entry.file_size),
             Tag::sources(keyword_publish_complete_source_count(0)),
         ];
-        if let Some(file_type) = ed2k_file_type_search_term(&entry.canonical_name) {
+        if let Some(file_type) = ed2k_file_type_search_term(&entry.display_name) {
             tags.push(Tag::filetype(file_type));
         }
         entries.push((
@@ -6002,10 +6002,10 @@ fn local_share_from_summary(
     LocalShare {
         ed2k_link: format!(
             "ed2k://|file|{}|{}|{}|/",
-            summary.canonical_name, summary.file_size, summary.file_hash
+            summary.display_name, summary.file_size, summary.file_hash
         ),
         hash: summary.file_hash,
-        name: summary.canonical_name,
+        name: summary.display_name,
         size_bytes: summary.file_size,
         part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,

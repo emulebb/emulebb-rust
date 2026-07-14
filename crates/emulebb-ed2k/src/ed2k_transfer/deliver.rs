@@ -57,7 +57,7 @@ impl Ed2kTransferRuntime {
     ) -> Result<Ed2kDeliveryOutcome> {
         // Phase 1: snapshot what we need under the manifest IO lock, then
         // release it before touching the destination filesystem.
-        let canonical_name = {
+        let display_name = {
             let _guard = self.lock_manifest(file_hash).await;
             let manifest = self.load_manifest_unlocked(file_hash).await?;
             if !manifest.completed {
@@ -71,11 +71,11 @@ impl Ed2kTransferRuntime {
                 // A delivered path was recorded but the file is gone (the
                 // operator moved or deleted it). Fall through and re-deliver.
             }
-            manifest.canonical_name.clone()
+            manifest.display_name.clone()
         };
 
         let source = self.payload_path(file_hash);
-        let final_path = deliver_payload_file(&source, dest_dir, &canonical_name)
+        let final_path = deliver_payload_file(&source, dest_dir, &display_name)
             .await
             .with_context(|| format!("failed to deliver completed transfer {file_hash}"))?;
 
@@ -107,17 +107,17 @@ impl Ed2kTransferRuntime {
 }
 
 /// Copy/link `source` (`pieces.bin`) into `dest_dir` under a collision-free
-/// file name derived from `canonical_name`, returning the final path.
+/// file name derived from `display_name`, returning the final path.
 async fn deliver_payload_file(
     source: &Path,
     dest_dir: &Path,
-    canonical_name: &str,
+    display_name: &str,
 ) -> Result<PathBuf> {
     tokio::fs::create_dir_all(long_path(dest_dir))
         .await
         .with_context(|| format!("failed to create delivery directory {}", dest_dir.display()))?;
 
-    let file_name = sanitize_file_name(canonical_name);
+    let file_name = sanitize_file_name(display_name);
     let target = pick_target(dest_dir, &file_name).await;
     link_or_copy(source, &target).await?;
     Ok(target)
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivers_payload_with_canonical_name() {
+    async fn delivers_payload_with_display_name() {
         let dir = temp_dir();
         let source = dir.join("pieces.bin");
         let dest = dir.join("incoming");

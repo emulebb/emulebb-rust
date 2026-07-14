@@ -97,7 +97,7 @@ async fn hash_only_small_file_download_learns_metadata_from_startup_answer() {
 
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(manifest.completed);
-    assert_eq!(manifest.canonical_name, "captured.epub");
+    assert_eq!(manifest.display_name, "captured.epub");
     assert_eq!(manifest.file_size, payload.len() as u64);
     assert!(manifest.sources.contains(&Ed2kSourceHint {
         ip: test_bind_ip().to_string(),

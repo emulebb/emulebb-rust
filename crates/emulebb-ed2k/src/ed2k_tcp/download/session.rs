@@ -1369,7 +1369,7 @@ mod tests {
     fn manifest_with_states(states: &[Ed2kTransferState]) -> Ed2kResumeManifest {
         let job = Ed2kTransferJob {
             file_hash: "0".repeat(32),
-            canonical_name: "sample.bin".to_string(),
+            display_name: "sample.bin".to_string(),
             file_size: u64::try_from(states.len()).unwrap_or(0) * 9_728_000,
             piece_size: 9_728_000,
         };

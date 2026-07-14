@@ -4,7 +4,7 @@ use super::*;
 fn kad_publishable_shared_files_follow_mfc_publish_rank() {
     let shared = MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([0x11; 16]).to_string(),
-        canonical_name: "shared.bin".to_string(),
+        display_name: "shared.bin".to_string(),
         file_size: 128,
         aich_root: None,
         upload_priority: "normal".to_string(),
@@ -21,7 +21,7 @@ fn kad_publishable_shared_files_follow_mfc_publish_rank() {
     };
     let other = MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([0x22; 16]).to_string(),
-        canonical_name: "other.bin".to_string(),
+        display_name: "other.bin".to_string(),
         upload_priority: "release".to_string(),
         ..shared.clone()
     };
@@ -42,7 +42,7 @@ fn kad_publish_rank_age_term_favors_longest_unpublished() {
     let hour_ms = 3_600_000i64;
     let recent = MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([0xA1; 16]).to_string(),
-        canonical_name: "recent.bin".to_string(),
+        display_name: "recent.bin".to_string(),
         file_size: 1_000,
         aich_root: None,
         upload_priority: "normal".to_string(),
@@ -59,12 +59,12 @@ fn kad_publish_rank_age_term_favors_longest_unpublished() {
     };
     let stale = MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([0xB2; 16]).to_string(),
-        canonical_name: "stale.bin".to_string(),
+        display_name: "stale.bin".to_string(),
         ..recent.clone()
     };
     let never = MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([0xC3; 16]).to_string(),
-        canonical_name: "never.bin".to_string(),
+        display_name: "never.bin".to_string(),
         ..recent.clone()
     };
 
@@ -122,7 +122,7 @@ fn best_notes_candidate_uses_notes_clock_not_source_clock() {
     let now_unix_ms = 200_000_000i64;
     let annotated = |tag: u8, name: &str| MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([tag; 16]).to_string(),
-        canonical_name: name.to_string(),
+        display_name: name.to_string(),
         file_size: 1_000,
         aich_root: None,
         upload_priority: "normal".to_string(),
@@ -179,7 +179,7 @@ fn best_notes_candidate_uses_notes_clock_not_source_clock() {
 fn kad_publish_entry_from_shared_catalog_preserves_live_rank_inputs() {
     let mut entry = Ed2kSharedEntry {
         file_hash: Ed2kHash::from_bytes([0x33; 16]).to_string(),
-        canonical_name: "ubuntu-python-sample.iso".to_string(),
+        display_name: "ubuntu-python-sample.iso".to_string(),
         file_size: 4096,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -222,7 +222,7 @@ fn keyword_ordering_holds_age_constant_and_ignores_source_publish_clock() {
     let now_unix_ms = 100_000_000i64;
     let make = |hash: u8| MetadataTransferPublishEntry {
         file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
-        canonical_name: "ubuntu-python-sample.iso".to_string(),
+        display_name: "ubuntu-python-sample.iso".to_string(),
         file_size: 4096,
         aich_root: None,
         upload_priority: "normal".to_string(),
@@ -288,7 +288,7 @@ fn keyword_ordering_holds_age_constant_and_ignores_source_publish_clock() {
 fn kad_source_publish_admits_servable_partfiles_but_keyword_stays_complete_only() {
     let base = |hash: u8, verified_complete: bool, complete_parts: Vec<bool>| Ed2kSharedEntry {
         file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
-        canonical_name: "ubuntu-python-sample.iso".to_string(),
+        display_name: "ubuntu-python-sample.iso".to_string(),
         file_size: 4096,
         verified_complete,
         verified_ranges: Vec::new(),
@@ -339,7 +339,7 @@ fn cheap_prune_hash_set_matches_old_source_scan_and_prunes_on_blocked_tick() {
 
     let base = |hash: u8, verified_complete: bool, complete_parts: Vec<bool>| Ed2kSharedEntry {
         file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
-        canonical_name: "ubuntu-python-sample.iso".to_string(),
+        display_name: "ubuntu-python-sample.iso".to_string(),
         file_size: 4096,
         verified_complete,
         verified_ranges: Vec::new(),
@@ -434,7 +434,7 @@ fn windowed_candidate_build_selects_identically_to_full_clone_build() {
               rating: u8,
               all_time_uploaded_bytes: u64| Ed2kSharedEntry {
         file_hash: Ed2kHash::from_bytes([hash; 16]).to_string(),
-        canonical_name: name.to_string(),
+        display_name: name.to_string(),
         file_size: 4096,
         verified_complete,
         verified_ranges: Vec::new(),
@@ -576,7 +576,7 @@ fn windowed_candidate_build_selects_identically_to_full_clone_build() {
         .map(|entry| {
             KadKeywordPublishCandidate::new(
                 entry.file_hash.clone(),
-                entry.canonical_name.clone(),
+                entry.display_name.clone(),
                 entry.file_size,
                 entry.aich_root.clone(),
             )

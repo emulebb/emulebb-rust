@@ -80,10 +80,10 @@ pub(crate) fn transfer_from_manifest(
     Transfer {
         ed2k_link: format!(
             "ed2k://|file|{}|{}|{}|/",
-            manifest.canonical_name, manifest.file_size, manifest.file_hash
+            manifest.display_name, manifest.file_size, manifest.file_hash
         ),
         hash: manifest.file_hash.clone(),
-        name: manifest.canonical_name.clone(),
+        name: manifest.display_name.clone(),
         path: payload_path,
         delivered_path: manifest.delivered_path.clone(),
         size_bytes: manifest.file_size,

@@ -20,7 +20,7 @@ use crate::paths::unique_test_dir;
 async fn ingest_completed(
     runtime: &Ed2kTransferRuntime,
     _root: &Path,
-    canonical_name: &str,
+    display_name: &str,
 ) -> String {
     // A single-part payload (< one ED2K part) so one verified piece completes it.
     let mut payload = Vec::with_capacity(1_048_576);
@@ -30,7 +30,7 @@ async fn ingest_completed(
     payload.truncate(1_048_576);
     let file_hash = Ed2kHash::from_bytes(Md4::digest(&payload).into());
     let file_hash_hex = file_hash.to_string();
-    let job = new_transfer_job(file_hash, canonical_name.to_string(), payload.len() as u64);
+    let job = new_transfer_job(file_hash, display_name.to_string(), payload.len() as u64);
     runtime.ensure_job(&job).await.unwrap();
     runtime
         .store_md4_hashset(&file_hash_hex, Vec::new())

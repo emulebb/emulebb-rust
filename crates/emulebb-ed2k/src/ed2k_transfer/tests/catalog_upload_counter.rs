@@ -27,7 +27,7 @@ async fn seed_verified_entry(runtime: &Ed2kTransferRuntime, hash: &Ed2kHash) {
     let mut entries: Vec<Ed2kSharedEntry> = guard.iter().cloned().collect();
     entries.push(Ed2kSharedEntry {
         file_hash: hash.to_string(),
-        canonical_name: "Seed.bin".to_string(),
+        display_name: "Seed.bin".to_string(),
         file_size: 4 * FRAGMENT,
         verified_complete: true,
         verified_ranges: Vec::new(),

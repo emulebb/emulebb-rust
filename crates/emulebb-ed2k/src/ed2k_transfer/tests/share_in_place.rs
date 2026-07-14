@@ -195,7 +195,7 @@ async fn ingest_shares_files_with_unicode_brackets_and_nested_subfolders() {
     write_repeating_pattern_file(&cjk_file, size, payload);
 
     // Every one of these must ingest without a stat/skip failure.
-    for (label, source_path, canonical_name) in [
+    for (label, source_path, display_name) in [
         (
             "accented+bracketed nested file",
             &accented_file,
@@ -209,7 +209,7 @@ async fn ingest_shares_files_with_unicode_brackets_and_nested_subfolders() {
         ),
     ] {
         let summary = runtime
-            .ingest_local_file(source_path, canonical_name)
+            .ingest_local_file(source_path, display_name)
             .await
             .unwrap_or_else(|error| panic!("ingest of {label} failed: {error:#}"));
         assert_eq!(

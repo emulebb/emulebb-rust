@@ -91,7 +91,7 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
     core.metadata_store
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: file_hash.clone(),
-            canonical_name: "Imported.Source.bin".to_string(),
+            display_name: "Imported.Source.bin".to_string(),
             file_size: size,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
             completed: true,
@@ -153,7 +153,7 @@ async fn incremental_reload_reuses_delivered_download_without_rehash() {
     core.metadata_store
         .upsert_transfer_manifest(&emulebb_metadata::MetadataTransferManifest {
             file_hash: file_hash.clone(),
-            canonical_name: "Completed.Download.bin".to_string(),
+            display_name: "Completed.Download.bin".to_string(),
             file_size: size,
             piece_size: emulebb_ed2k::ed2k_transfer::ED2K_PART_SIZE,
             completed: true,

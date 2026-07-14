@@ -38,7 +38,7 @@ pub struct Ed2kPeerDownloadOptions<'a> {
     pub hello_identity: Ed2kHelloIdentity,
     pub secure_ident: &'a Arc<Ed2kSecureIdent>,
     pub transfer_runtime: &'a Ed2kTransferRuntime,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub current_source_count: usize,
     pub timeout: Duration,
@@ -56,7 +56,7 @@ pub async fn download_file_from_peer(
         hello_identity,
         secure_ident,
         transfer_runtime,
-        canonical_name,
+        display_name,
         file_size,
         current_source_count,
         timeout,
@@ -64,7 +64,7 @@ pub async fn download_file_from_peer(
     } = options;
     let file_hash = peer.file_hash;
     let file_hash_hex = file_hash.to_string();
-    let job = new_transfer_job(file_hash, canonical_name, file_size);
+    let job = new_transfer_job(file_hash, display_name, file_size);
     transfer_runtime.ensure_job(&job).await?;
     transfer_runtime
         .remember_source(

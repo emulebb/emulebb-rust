@@ -88,7 +88,7 @@ pub(crate) fn upload_from_snapshot(
         uploading,
         waiting_queue,
         requested_file_hash: Some(entry.file_hash),
-        requested_file_name: manifest.map(|manifest| manifest.canonical_name.clone()),
+        requested_file_name: manifest.map(|manifest| manifest.display_name.clone()),
         requested_file_size_bytes: manifest.map(|manifest| manifest.file_size),
         requested_parts_obtained,
         requested_parts_total,

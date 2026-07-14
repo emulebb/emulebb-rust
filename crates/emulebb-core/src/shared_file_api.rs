@@ -3,7 +3,7 @@ use super::*;
 impl EmulebbCore {
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
         let source_path = Path::new(&request.path);
-        let canonical_name = match request.name {
+        let display_name = match request.name {
             Some(name) => name,
             None => source_path
                 .file_name()
@@ -13,7 +13,7 @@ impl EmulebbCore {
         };
         let summary = self
             .ed2k_transfers
-            .ingest_local_file(source_path, &canonical_name)
+            .ingest_local_file(source_path, &display_name)
             .await?;
         self.ed2k_transfers
             .remove_completed_transfer_row(&summary.file_hash)
@@ -28,9 +28,9 @@ impl EmulebbCore {
             .remove(&summary.file_hash);
         self.index.lock().await.upsert_file(&IndexedFile {
             ed2k_hash: summary.file_hash.clone(),
-            name: summary.canonical_name.clone(),
+            name: summary.display_name.clone(),
             size_bytes: summary.file_size,
-            content_type: ed2k_file_type_search_term(&summary.canonical_name)
+            content_type: ed2k_file_type_search_term(&summary.display_name)
                 .unwrap_or("unknown")
                 .to_string(),
             availability_score: 1,
@@ -71,12 +71,12 @@ impl EmulebbCore {
     fn local_share_from_entry(&self, entry: MetadataTransferShareEntry) -> LocalShare {
         LocalShare {
             hash: entry.file_hash.clone(),
-            name: entry.canonical_name.clone(),
+            name: entry.display_name.clone(),
             size_bytes: entry.file_size,
             part_count: entry.part_count,
             ed2k_link: format!(
                 "ed2k://|file|{}|{}|{}|/",
-                entry.canonical_name, entry.file_size, entry.file_hash
+                entry.display_name, entry.file_size, entry.file_hash
             ),
             aich_root: entry.aich_root.clone().unwrap_or_default(),
             transfer_dir: self

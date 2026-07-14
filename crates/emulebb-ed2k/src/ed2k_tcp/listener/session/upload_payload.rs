@@ -440,7 +440,7 @@ pub(in crate::ed2k_tcp) async fn serve_upload_payload(
             let fragment_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             let replies = build_upload_part_packets(
                 &requested,
-                &shared.canonical_name,
+                &shared.display_name,
                 fragment_start,
                 fragment_end,
                 &bytes,

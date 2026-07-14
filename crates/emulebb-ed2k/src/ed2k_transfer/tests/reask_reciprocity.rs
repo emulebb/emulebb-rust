@@ -20,7 +20,7 @@ const PEER_UDP_VERSION: u8 = 4;
 fn shared_entry(file_hash: &Ed2kHash) -> Ed2kSharedEntry {
     Ed2kSharedEntry {
         file_hash: file_hash.to_string(),
-        canonical_name: "ubuntu-linux.iso".to_string(),
+        display_name: "ubuntu-linux.iso".to_string(),
         file_size: 9_728_000,
         verified_complete: true,
         verified_ranges: Vec::new(),

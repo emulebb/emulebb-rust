@@ -298,8 +298,8 @@ fn upload_packet_fragment_len(remaining: usize) -> usize {
     }
 }
 
-fn should_attempt_upload_compression(canonical_name: &str) -> bool {
-    let Some(extension) = Path::new(canonical_name)
+fn should_attempt_upload_compression(display_name: &str) -> bool {
+    let Some(extension) = Path::new(display_name)
         .extension()
         .and_then(|value| value.to_str())
     else {
@@ -363,8 +363,8 @@ fn should_attempt_upload_compression(canonical_name: &str) -> bool {
     )
 }
 
-fn compress_upload_payload(canonical_name: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>> {
-    if !should_attempt_upload_compression(canonical_name) {
+fn compress_upload_payload(display_name: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>> {
+    if !should_attempt_upload_compression(display_name) {
         return Ok(None);
     }
 
@@ -403,7 +403,7 @@ fn compress_upload_payload(canonical_name: &str, bytes: &[u8]) -> Result<Option<
 
 pub(in crate::ed2k_tcp) fn build_upload_part_packets(
     file_hash: &Ed2kHash,
-    canonical_name: &str,
+    display_name: &str,
     start: u64,
     end: u64,
     bytes: &[u8],
@@ -418,7 +418,7 @@ pub(in crate::ed2k_tcp) fn build_upload_part_packets(
         );
     }
 
-    if let Some(compressed) = compress_upload_payload(canonical_name, bytes)? {
+    if let Some(compressed) = compress_upload_payload(display_name, bytes)? {
         // Compressed reply opcode is selected PER BLOCK from the block's end
         // offset, matching CUploadDiskIOThread::CreatePackedPackets
         // (UploadDiskIOThread.cpp:770 `if (uEndOffset > UINT32_MAX)`). Every

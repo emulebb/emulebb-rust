@@ -47,7 +47,7 @@ fn manifest(file_size: u64, completed: bool, ranges: Vec<Ed2kSharedRange>) -> Ed
         .collect();
     Ed2kResumeManifest {
         file_hash: "0".repeat(32),
-        canonical_name: "f".to_string(),
+        display_name: "f".to_string(),
         file_size,
         piece_size: ED2K_PART_SIZE,
         completed,

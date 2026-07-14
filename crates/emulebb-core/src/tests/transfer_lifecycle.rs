@@ -79,7 +79,7 @@ fn select_ed2k_keyword_metadata_prefers_exact_hash_with_size_and_name() {
     )
     .unwrap();
 
-    assert_eq!(metadata.canonical_name.as_deref(), Some("resolved.bin"));
+    assert_eq!(metadata.display_name.as_deref(), Some("resolved.bin"));
     assert_eq!(metadata.file_size, Some(4_294_967_299));
 }
 
@@ -98,7 +98,7 @@ fn kad_search_result_exposes_exact_hash_metadata() {
     )
     .unwrap();
 
-    assert_eq!(metadata.canonical_name.as_deref(), Some("resolved.bin"));
+    assert_eq!(metadata.display_name.as_deref(), Some("resolved.bin"));
     assert_eq!(metadata.file_size, Some(5_000));
 }
 

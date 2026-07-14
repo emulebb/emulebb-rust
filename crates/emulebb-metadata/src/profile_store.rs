@@ -528,7 +528,7 @@ mod tests {
         store
             .upsert_transfer_manifest(&crate::MetadataTransferManifest {
                 file_hash: "00112233445566778899aabbccddeeff".to_string(),
-                canonical_name: "Sample.bin".to_string(),
+                display_name: "Sample.bin".to_string(),
                 file_size: 10,
                 piece_size: 10,
                 completed: true,

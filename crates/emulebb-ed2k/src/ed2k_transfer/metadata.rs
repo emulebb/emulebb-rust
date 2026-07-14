@@ -95,18 +95,18 @@ impl Ed2kTransferRuntime {
     pub async fn reconcile_job_metadata(
         &self,
         file_hash: &str,
-        canonical_name: Option<&str>,
+        display_name: Option<&str>,
         file_size: Option<u64>,
     ) -> Result<Ed2kResumeManifest> {
         let _guard = self.lock_manifest(file_hash).await;
         let mut manifest = self.load_manifest_unlocked(file_hash).await?;
         let mut changed = false;
 
-        if let Some(canonical_name) = canonical_name.map(str::trim)
-            && !canonical_name.is_empty()
-            && manifest.canonical_name != canonical_name
+        if let Some(display_name) = display_name.map(str::trim)
+            && !display_name.is_empty()
+            && manifest.display_name != display_name
         {
-            manifest.canonical_name = canonical_name.to_string();
+            manifest.display_name = display_name.to_string();
             changed = true;
         }
 

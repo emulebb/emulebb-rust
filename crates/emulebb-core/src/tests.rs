@@ -552,7 +552,7 @@ async fn completed_ed2k_transfer_runtime(
         transfer_runtime,
         secure_ident,
         summary.file_hash,
-        summary.canonical_name,
+        summary.display_name,
         summary.file_size,
     )
 }

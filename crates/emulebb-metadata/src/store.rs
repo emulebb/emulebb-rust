@@ -216,13 +216,13 @@ impl MetadataStore {
         tx.execute(
             r#"
             INSERT INTO known_files(
-                ed2k_hash, size_bytes, canonical_name,
+                ed2k_hash, size_bytes, display_name,
                 content_type, availability_score, first_seen_ms, last_seen_ms, updated_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
             ON CONFLICT(ed2k_hash) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
-                canonical_name = excluded.canonical_name,
+                display_name = excluded.display_name,
                 content_type = excluded.content_type,
                 availability_score = max(known_files.availability_score, excluded.availability_score),
                 last_seen_ms = excluded.last_seen_ms,
@@ -585,7 +585,7 @@ mod tests {
             let conn = store.connection().unwrap();
             // Two known files + transfers: one live, one removed.
             conn.execute(
-                "INSERT INTO known_files(id, ed2k_hash, size_bytes, canonical_name, first_seen_ms, last_seen_ms, updated_at_ms)
+                "INSERT INTO known_files(id, ed2k_hash, size_bytes, display_name, first_seen_ms, last_seen_ms, updated_at_ms)
                  VALUES (1, ?1, 1, 'a.bin', 0, 0, 0), (2, ?2, 1, 'b.bin', 0, 0, 0)",
                 params![vec![0x11u8; 16], vec![0x22u8; 16]],
             )

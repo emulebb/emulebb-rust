@@ -60,7 +60,7 @@ CREATE TABLE known_files (
     id INTEGER PRIMARY KEY,
     ed2k_hash BLOB NOT NULL UNIQUE CHECK(length(ed2k_hash) = 16),
     size_bytes INTEGER NOT NULL,
-    canonical_name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
     part_size INTEGER,
     part_count INTEGER,

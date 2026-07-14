@@ -512,7 +512,7 @@ fn plaintext_server_sessions_preserve_crypt_capability_bits() {
 fn offer_files_payload_matches_oracle_search_session_sample() {
     let shared_catalog = vec![Ed2kSharedEntry {
         file_hash: hex::encode(OFFER_FILE_SAMPLE_HASH),
-        canonical_name: OFFER_FILE_SAMPLE_NAME.to_string(),
+        display_name: OFFER_FILE_SAMPLE_NAME.to_string(),
         file_size: u64::from(OFFER_FILE_SAMPLE_SIZE),
         verified_complete: false,
         verified_ranges: Vec::new(),
@@ -554,7 +554,7 @@ fn offer_files_payload_matches_oracle_search_session_sample() {
 fn offer_files_payload_uses_integer_file_type_for_typetaginteger_servers() {
     let shared_catalog = vec![Ed2kSharedEntry {
         file_hash: hex::encode(OFFER_FILE_SAMPLE_HASH),
-        canonical_name: OFFER_FILE_SAMPLE_NAME.to_string(),
+        display_name: OFFER_FILE_SAMPLE_NAME.to_string(),
         file_size: u64::from(OFFER_FILE_SAMPLE_SIZE),
         verified_complete: false,
         verified_ranges: Vec::new(),
@@ -596,7 +596,7 @@ fn offer_files_payload_advertises_large_file_size_truthfully() {
     let large_size = (5u64 << 32) + 12_345;
     let shared_catalog = vec![Ed2kSharedEntry {
         file_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        canonical_name: "large-shared-file.iso".to_string(),
+        display_name: "large-shared-file.iso".to_string(),
         file_size: large_size,
         verified_complete: true,
         verified_ranges: Vec::new(),
@@ -647,7 +647,7 @@ fn offer_files_payload_advertises_large_file_size_truthfully() {
 fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
     let base_catalog = vec![Ed2kSharedEntry {
         file_hash: hex::encode(OFFER_FILE_SAMPLE_HASH),
-        canonical_name: OFFER_FILE_SAMPLE_NAME.to_string(),
+        display_name: OFFER_FILE_SAMPLE_NAME.to_string(),
         file_size: u64::from(OFFER_FILE_SAMPLE_SIZE),
         verified_complete: false,
         verified_ranges: Vec::new(),
@@ -665,7 +665,7 @@ fn offer_files_fingerprint_changes_when_shared_catalog_changes() {
     let mut expanded_catalog = base_catalog.clone();
     expanded_catalog.push(Ed2kSharedEntry {
         file_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        canonical_name: "new-shared-file.bin".to_string(),
+        display_name: "new-shared-file.bin".to_string(),
         file_size: 42_000,
         verified_complete: true,
         verified_ranges: Vec::new(),

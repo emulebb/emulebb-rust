@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferManifest {
     pub file_hash: String,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub piece_size: u64,
     pub completed: bool,
@@ -41,7 +41,7 @@ pub struct MetadataTransferManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferCatalogEntry {
     pub file_hash: String,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
     pub upload_priority: String,
@@ -64,7 +64,7 @@ pub struct MetadataTransferCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferPublishEntry {
     pub file_hash: String,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub aich_root: Option<String>,
     pub upload_priority: String,
@@ -83,7 +83,7 @@ pub struct MetadataTransferPublishEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataTransferShareEntry {
     pub file_hash: String,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub part_count: u32,
     pub source_path: Option<String>,

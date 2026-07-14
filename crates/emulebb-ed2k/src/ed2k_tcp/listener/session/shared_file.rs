@@ -98,7 +98,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_ext2_request(
     let status_body = include_status.then(|| shared.encode_part_status_body());
     let reply = encode_multipacket_ext2_answer(
         &shared_identifier,
-        &shared.canonical_name,
+        &shared.display_name,
         include_filename,
         status_body.as_deref(),
     )?;
@@ -188,7 +188,7 @@ pub(in crate::ed2k_tcp) async fn handle_multipacket_request(
         let status_body = include_status.then(|| shared.encode_part_status_body());
         let reply = encode_multipacket_answer(
             &requested,
-            &shared.canonical_name,
+            &shared.display_name,
             include_filename,
             status_body.as_deref(),
             include_aich_root,
@@ -224,7 +224,7 @@ pub(in crate::ed2k_tcp) async fn handle_request_filename(
 ) -> Result<Option<Ed2kHash>> {
     let requested = decode_file_hash_payload(payload)?;
     let reply = if let Some(shared) = transfer_runtime.local_servable_entry(&requested).await? {
-        encode_request_filename_answer(&requested, &shared.canonical_name)?
+        encode_request_filename_answer(&requested, &shared.display_name)?
     } else {
         encode_file_req_ans_nofil(&requested)
     };

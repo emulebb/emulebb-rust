@@ -183,7 +183,7 @@ impl EmulebbCore {
                 .register_callback_intent(Ed2kCallbackIntent {
                     client_id: source.client_id,
                     file_hash: transfer.hash.clone(),
-                    canonical_name: transfer.name.clone(),
+                    display_name: transfer.name.clone(),
                     file_size: transfer.size_bytes,
                     source: Ed2kSourceHint {
                         ip: source.ip.to_string(),

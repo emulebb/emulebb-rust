@@ -107,7 +107,7 @@ mod upsert_collapse_tests {
     fn entry(nibble: u8, hint: bool, marker: u64) -> Ed2kSharedEntry {
         Ed2kSharedEntry {
             file_hash: hex_hash(nibble),
-            canonical_name: format!("file-{nibble}.bin"),
+            display_name: format!("file-{nibble}.bin"),
             file_size: 1_000,
             verified_complete: !hint,
             verified_ranges: Vec::new(),

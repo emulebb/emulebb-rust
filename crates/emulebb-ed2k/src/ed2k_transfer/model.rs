@@ -11,7 +11,7 @@ pub struct Ed2kTransferJob {
     /// ED2K file hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name.
-    pub canonical_name: String,
+    pub display_name: String,
     /// Target file size.
     pub file_size: u64,
     /// Piece size used by the local piece store.
@@ -200,7 +200,7 @@ pub(crate) struct Ed2kAichHashset {
 #[serde(rename_all = "camelCase")]
 pub struct Ed2kLocalIngestSummary {
     pub file_hash: String,
-    pub canonical_name: String,
+    pub display_name: String,
     pub file_size: u64,
     pub md4_hashset_count: usize,
     pub aich_root: String,
@@ -232,7 +232,7 @@ pub struct Ed2kCallbackIntent {
     /// File hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name.
-    pub canonical_name: String,
+    pub display_name: String,
     /// Expected file size.
     pub file_size: u64,
     /// Best-effort source hint captured when the callback was requested.
@@ -245,7 +245,7 @@ pub struct Ed2kResumeManifest {
     /// ED2K file hash in lowercase hex.
     pub file_hash: String,
     /// Canonical file name.
-    pub canonical_name: String,
+    pub display_name: String,
     /// Target file size.
     pub file_size: u64,
     /// Piece size used in the piece store.
@@ -332,7 +332,7 @@ impl Ed2kResumeManifest {
         let piece_count = piece_count(job.file_size, job.piece_size);
         Self {
             file_hash: job.file_hash.clone(),
-            canonical_name: job.canonical_name.clone(),
+            display_name: job.display_name.clone(),
             file_size: job.file_size,
             piece_size: job.piece_size,
             completed: false,

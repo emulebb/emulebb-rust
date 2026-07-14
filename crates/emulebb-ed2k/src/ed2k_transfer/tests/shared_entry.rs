@@ -9,7 +9,7 @@ use crate::{HashType, PopularHash};
 fn shared_entry_from_popular_hash_requires_valid_ed2k_hash() {
     let popular = PopularHash {
         hash: HashType::Ed2k("not-a-real-hash".to_string()),
-        canonical_name: "bad.bin".to_string(),
+        display_name: "bad.bin".to_string(),
         size: 1,
         source_count: 1,
     };

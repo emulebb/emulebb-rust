@@ -21,10 +21,10 @@ impl Ed2kTransferRuntime {
     pub async fn ingest_local_file(
         &self,
         source_path: &Path,
-        canonical_name: &str,
+        display_name: &str,
     ) -> Result<Ed2kLocalIngestSummary> {
-        let canonical_name = canonical_name.trim();
-        if canonical_name.is_empty() {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
             anyhow::bail!("local ED2K ingest requires a non-empty canonical name");
         }
         // Operator-facing shared-file ingest boundary: normalize the operator's
@@ -72,7 +72,7 @@ impl Ed2kTransferRuntime {
             tokio::task::spawn_blocking(move || build_md4_hashset_from_payload(&md4_path, md4_len))
                 .await
                 .context("MD4 hashing task panicked")??;
-        let job = new_transfer_job(file_hash, canonical_name.to_string(), metadata.len());
+        let job = new_transfer_job(file_hash, display_name.to_string(), metadata.len());
         let transfer_dir = self.transfer_dir(&job.file_hash);
         tokio::fs::create_dir_all(&transfer_dir)
             .await
@@ -135,7 +135,7 @@ impl Ed2kTransferRuntime {
 
         Ok(Ed2kLocalIngestSummary {
             file_hash: manifest.file_hash,
-            canonical_name: manifest.canonical_name,
+            display_name: manifest.display_name,
             file_size: manifest.file_size,
             md4_hashset_count: manifest.md4_hashset.len(),
             aich_root: manifest.aich_root.unwrap_or_default(),

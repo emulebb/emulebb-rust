@@ -1119,7 +1119,7 @@ async fn waiter_for_an_unshared_file_is_purged_on_maintenance() {
         .await
         .push(Ed2kSharedEntry {
             file_hash: shared_file.to_string(),
-            canonical_name: "shared.bin".to_string(),
+            display_name: "shared.bin".to_string(),
             file_size: 1_000_000,
             verified_complete: true,
             verified_ranges: Vec::new(),
@@ -1173,7 +1173,7 @@ async fn unshared_purge_observes_catalog_mutation_after_cached_scan() {
         .await
         .push(Ed2kSharedEntry {
             file_hash: file_hash.to_string(),
-            canonical_name: "shared-cache.bin".to_string(),
+            display_name: "shared-cache.bin".to_string(),
             file_size: 1_000_000,
             verified_complete: true,
             verified_ranges: Vec::new(),
