@@ -242,8 +242,8 @@ mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
 pub use emulebb_settings::{
-    PREFERENCE_SPECS, PreferenceFieldKind, PreferenceSpec, Preferences, PreferencesUpdate,
-    preference_field, preference_schema,
+    AppSettings, AppSettingsUpdate, PREFERENCE_SPECS, PreferenceFieldKind, PreferenceSpec,
+    Preferences, PreferencesUpdate, preference_field, preference_schema,
 };
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,

@@ -67,6 +67,14 @@ impl EmulebbCore {
         self.state.lock().await.preferences.clone()
     }
 
+    pub async fn app_settings(&self) -> Result<AppSettings> {
+        profile_state::load_app_settings(&self.metadata_store)
+    }
+
+    pub async fn update_app_settings(&self, request: AppSettingsUpdate) -> Result<AppSettings> {
+        profile_state::persist_app_settings_update(&self.metadata_store, request)
+    }
+
     pub async fn update_preferences(&self, request: PreferencesUpdate) -> Result<Preferences> {
         ensure!(
             !preferences_update_is_empty(&request),

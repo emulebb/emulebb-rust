@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, net::Ipv4Addr, path::PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
 pub const SECTION_CORE_PREFERENCES: &str = "core.preferences";
@@ -470,6 +470,28 @@ pub struct IpFilterSettings {
     pub level: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppSettings {
+    pub daemon_runtime: DaemonRuntimeSettings,
+    pub ed2k: Ed2kSettings,
+    pub kad: KadSettings,
+    pub nat: NatSettings,
+    pub vpn_guard: VpnGuardSettings,
+    pub ip_filter: IpFilterSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppSettingsUpdate {
+    pub daemon_runtime: Option<DaemonRuntimeSettings>,
+    pub ed2k: Option<Ed2kSettings>,
+    pub kad: Option<KadSettings>,
+    pub nat: Option<NatSettings>,
+    pub vpn_guard: Option<VpnGuardSettings>,
+    pub ip_filter: Option<IpFilterSettings>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PreferenceValidationError {
     message: String,
@@ -509,6 +531,19 @@ pub fn default_preferences() -> Preferences {
         add_servers_from_server: true,
         network_kademlia: true,
         network_ed2k: true,
+    }
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            daemon_runtime: DaemonRuntimeSettings::default(),
+            ed2k: Ed2kSettings::default(),
+            kad: KadSettings::default(),
+            nat: NatSettings::default(),
+            vpn_guard: VpnGuardSettings::default(),
+            ip_filter: IpFilterSettings::default(),
+        }
     }
 }
 
@@ -674,6 +709,63 @@ pub fn preferences_to_setting_values(
             serde_json::to_string(value).map(|value_json| (field.key, value_json))
         })
         .collect()
+}
+
+pub fn section_settings_from_values<'a, T>(
+    section: &str,
+    values: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<T, PreferenceValidationError>
+where
+    T: Default + DeserializeOwned,
+{
+    let mut object = Map::new();
+    for (key, value_json) in values {
+        let value = serde_json::from_str::<Value>(value_json).map_err(|error| {
+            PreferenceValidationError::new(format!(
+                "{section}.{key} contains invalid JSON: {error}"
+            ))
+        })?;
+        if object.insert(key.to_string(), value).is_some() {
+            return Err(PreferenceValidationError::new(format!(
+                "duplicate setting field: {section}.{key}"
+            )));
+        }
+    }
+    if object.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_value::<T>(Value::Object(object)).map_err(|error| {
+        PreferenceValidationError::new(format!("invalid settings section {section}: {error}"))
+    })
+}
+
+pub fn section_settings_to_values<T>(
+    settings: &T,
+) -> Result<Vec<(String, String)>, serde_json::Error>
+where
+    T: Serialize,
+{
+    let values = serde_json::to_value(settings)?;
+    let object = values
+        .as_object()
+        .expect("settings section serializes as object");
+    let mut entries = object
+        .iter()
+        .map(|(key, value)| {
+            serde_json::to_string(value).map(|value_json| (key.clone(), value_json))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries)
+}
+
+pub fn app_settings_update_is_empty(update: &AppSettingsUpdate) -> bool {
+    update.daemon_runtime.is_none()
+        && update.ed2k.is_none()
+        && update.kad.is_none()
+        && update.nat.is_none()
+        && update.vpn_guard.is_none()
+        && update.ip_filter.is_none()
 }
 
 pub fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
@@ -921,6 +1013,42 @@ mod tests {
     #[test]
     fn preference_settings_reject_unknown_keys() {
         let error = preferences_from_setting_values([("hiddenLegacySetting", "true")]).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn typed_settings_section_roundtrips_as_scalar_rows() {
+        let settings = VpnGuardSettings {
+            enabled: true,
+            mode: "block".to_string(),
+            allowed_public_ip_cidrs: "192.0.2.0/24".to_string(),
+        };
+
+        let rows = section_settings_to_values(&settings).unwrap();
+        assert!(rows.contains(&("enabled".to_string(), "true".to_string())));
+        assert!(rows.contains(&("mode".to_string(), r#""block""#.to_string())));
+
+        let decoded: VpnGuardSettings = section_settings_from_values(
+            SECTION_VPN_GUARD,
+            rows.iter()
+                .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
+        )
+        .unwrap();
+
+        assert_eq!(decoded, settings);
+    }
+
+    #[test]
+    fn typed_settings_section_rejects_unknown_keys() {
+        let error = section_settings_from_values::<VpnGuardSettings>(
+            SECTION_VPN_GUARD,
+            [("hidden", "true")],
+        )
+        .unwrap_err();
 
         assert!(
             error.to_string().contains("unknown field"),

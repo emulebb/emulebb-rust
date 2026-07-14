@@ -178,6 +178,14 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_SHUTDOWN: &[&str] = &["confirmShutdown"];
     const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
+    const APP_SETTINGS: &[&str] = &[
+        "daemonRuntime",
+        "ed2k",
+        "kad",
+        "nat",
+        "vpnGuard",
+        "ipFilter",
+    ];
     const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
@@ -213,6 +221,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "POST" && path == "/api/v1/diagnostics/crash-tests" {
         return Some(CONFIRM_CRASH);
+    }
+    if method == "PATCH" && path == "/api/v1/app/settings" {
+        return Some(APP_SETTINGS);
     }
     if method == "POST" && path == "/api/v1/transfers/operations/clear-completed" {
         return Some(CONFIRM_CLEAR_COMPLETED);

@@ -13,7 +13,7 @@ use axum::{
 };
 use serde_json::json;
 
-use emulebb_core::{PreferencesUpdate, preference_schema};
+use emulebb_core::{AppSettingsUpdate, PreferencesUpdate, preference_schema};
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
@@ -99,6 +99,31 @@ pub(crate) async fn preferences(State(state): State<RestState>) -> impl IntoResp
 
 pub(crate) async fn preferences_schema() -> impl IntoResponse {
     api_ok(preference_schema())
+}
+
+pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoResponse {
+    match state.core.app_settings().await {
+        Ok(settings) => api_ok(settings).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn update_settings(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let request = match parse_required_json_body::<AppSettingsUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state.core.update_app_settings(request).await {
+        Ok(settings) => api_ok(settings).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
 }
 
 pub(crate) async fn update_preferences(

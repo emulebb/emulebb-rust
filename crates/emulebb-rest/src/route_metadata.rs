@@ -470,6 +470,8 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("GET", "/api/v1/app/preferences")
         | ("GET", "/api/v1/app/preferences/schema")
         | ("PATCH", "/api/v1/app/preferences")
+        | ("GET", "/api/v1/app/settings")
+        | ("PATCH", "/api/v1/app/settings")
         | ("GET", "/api/v1/status")
         | ("GET", "/api/v1/stats")
         | ("GET", "/api/v1/categories")

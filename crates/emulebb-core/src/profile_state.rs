@@ -4,7 +4,10 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 use emulebb_settings::{
-    SECTION_CORE_PREFERENCES, preferences_from_setting_values, preferences_to_setting_values,
+    AppSettings, AppSettingsUpdate, SECTION_CORE_PREFERENCES, SECTION_DAEMON_RUNTIME, SECTION_ED2K,
+    SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
+    preferences_from_setting_values, preferences_to_setting_values, section_settings_from_values,
+    section_settings_to_values,
 };
 
 use crate::{
@@ -104,6 +107,72 @@ pub(crate) fn persist_preferences(
         entries
             .iter()
             .map(|(key, value_json)| (*key, value_json.as_str())),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
+    Ok(AppSettings {
+        daemon_runtime: load_settings_section(metadata, SECTION_DAEMON_RUNTIME)?,
+        ed2k: load_settings_section(metadata, SECTION_ED2K)?,
+        kad: load_settings_section(metadata, SECTION_KAD)?,
+        nat: load_settings_section(metadata, SECTION_NAT)?,
+        vpn_guard: load_settings_section(metadata, SECTION_VPN_GUARD)?,
+        ip_filter: load_settings_section(metadata, SECTION_IP_FILTER)?,
+    })
+}
+
+pub(crate) fn persist_app_settings_update(
+    metadata: &MetadataStore,
+    update: AppSettingsUpdate,
+) -> Result<AppSettings> {
+    anyhow::ensure!(
+        !app_settings_update_is_empty(&update),
+        "settings PATCH requires at least one settings section"
+    );
+    if let Some(settings) = update.daemon_runtime {
+        persist_settings_section(metadata, SECTION_DAEMON_RUNTIME, &settings)?;
+    }
+    if let Some(settings) = update.ed2k {
+        persist_settings_section(metadata, SECTION_ED2K, &settings)?;
+    }
+    if let Some(settings) = update.kad {
+        persist_settings_section(metadata, SECTION_KAD, &settings)?;
+    }
+    if let Some(settings) = update.nat {
+        persist_settings_section(metadata, SECTION_NAT, &settings)?;
+    }
+    if let Some(settings) = update.vpn_guard {
+        persist_settings_section(metadata, SECTION_VPN_GUARD, &settings)?;
+    }
+    if let Some(settings) = update.ip_filter {
+        persist_settings_section(metadata, SECTION_IP_FILTER, &settings)?;
+    }
+    load_app_settings(metadata)
+}
+
+fn load_settings_section<T>(metadata: &MetadataStore, section: &str) -> Result<T>
+where
+    T: Default + serde::de::DeserializeOwned,
+{
+    let rows = metadata.load_settings_section(section)?;
+    Ok(section_settings_from_values(
+        section,
+        rows.iter()
+            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
+    )?)
+}
+
+fn persist_settings_section<T>(metadata: &MetadataStore, section: &str, settings: &T) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    let entries = section_settings_to_values(settings)?;
+    metadata.replace_settings_section(
+        section,
+        entries
+            .iter()
+            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
     )?;
     Ok(())
 }

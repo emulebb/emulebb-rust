@@ -249,6 +249,98 @@ async fn preferences_use_canonical_get_and_patch_route() {
 }
 
 #[tokio::test]
+async fn settings_use_typed_get_and_patch_route() {
+    let app = test_router();
+    let read = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["data"]["daemonRuntime"]["p2pBindInterface"],
+        Value::Null
+    );
+    assert_eq!(value["data"]["ed2k"]["obfuscationEnabled"], true);
+    assert_eq!(value["data"]["kad"]["bootstrapMinRoutingContacts"], 10);
+    assert_eq!(value["data"]["nat"]["enabled"], false);
+    assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
+    assert_eq!(value["data"]["ipFilter"]["level"], 127);
+
+    let update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"daemonRuntime":{"p2pBindInterface":"hide.me"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["data"]["daemonRuntime"]["p2pBindInterface"],
+        "hide.me"
+    );
+    assert_eq!(value["data"]["vpnGuard"]["enabled"], true);
+    assert_eq!(value["data"]["vpnGuard"]["mode"], "block");
+    assert_eq!(value["data"]["nat"]["enabled"], true);
+
+    let empty_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty_patch.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_section = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"legacyNetwork":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_section.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(unknown_section.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        value["error"]["message"],
+        "unknown JSON field: legacyNetwork"
+    );
+}
+
+#[tokio::test]
 async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let runtime_dir = unique_test_dir("snapshot");
     let transfer_root = runtime_dir.join("transfers");

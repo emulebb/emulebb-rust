@@ -53,6 +53,7 @@ pub fn router_with_shutdown(
             get(preferences).patch(update_preferences),
         )
         .route("/api/v1/app/preferences/schema", get(preferences_schema))
+        .route("/api/v1/app/settings", get(settings).patch(update_settings))
         .route("/api/v1/status", get(status))
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/snapshot", get(snapshot))
