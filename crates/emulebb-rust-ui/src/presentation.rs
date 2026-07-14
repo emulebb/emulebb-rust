@@ -394,6 +394,9 @@ pub(super) fn server_items(servers: &[ServerDto]) -> Vec<ServerItem> {
                 priority: text(&item.priority),
                 failed_text: text(format!("{} fails", item.failed_count)),
                 static_server: item.static_server,
+                enabled: item.enabled,
+                connected: item.connected,
+                connecting: item.connecting,
                 current: item.current,
                 detail: text(detail),
             }

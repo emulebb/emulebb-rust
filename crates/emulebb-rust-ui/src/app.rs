@@ -209,6 +209,9 @@ pub(crate) fn run() -> Result<()> {
     ui.set_selected_kind("".into());
     ui.set_selected_id("".into());
     ui.set_selected_search_id("".into());
+    ui.set_selected_server_enabled(false);
+    ui.set_selected_server_connected(false);
+    ui.set_selected_server_connecting(false);
     ui.set_inspector_title("Inspector".into());
     ui.set_inspector_detail("Select a row to inspect details and actions.".into());
     apply_saved_state(&ui, &saved_state);
@@ -291,6 +294,9 @@ pub(crate) fn run() -> Result<()> {
         if let Some(ui) = about_ui.upgrade() {
             ui.set_selected_kind("".into());
             ui.set_selected_id("".into());
+            ui.set_selected_server_enabled(false);
+            ui.set_selected_server_connected(false);
+            ui.set_selected_server_connecting(false);
             ui.set_inspector_title("eMuleBB Rust UI".into());
             ui.set_inspector_detail(
                 "Native Slint UI for the emulebb-rust REST API.\nLayout state is stored per user and does not persist API keys."

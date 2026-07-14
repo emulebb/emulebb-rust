@@ -135,7 +135,7 @@ pub(super) fn worker_loop(
                         )
                         .await?;
                     }
-                    "connect" | "disconnect" => {
+                    "disconnect" => {
                         post_operation(
                             &client,
                             &config_for_command,

@@ -39,6 +39,9 @@ export struct ServerItem {
     priority: string,
     failed-text: string,
     static-server: bool,
+    enabled: bool,
+    connected: bool,
+    connecting: bool,
     current: bool,
     detail: string,
 }
@@ -234,6 +237,9 @@ export component MainWindow inherits Window {
     in-out property <string> selected-kind;
     in-out property <string> selected-id;
     in-out property <string> selected-search-id;
+    in-out property <bool> selected-server-enabled;
+    in-out property <bool> selected-server-connected;
+    in-out property <bool> selected-server-connecting;
     in-out property <string> inspector-title;
     in-out property <string> inspector-detail;
     in-out property <bool> is-refreshing;
@@ -360,11 +366,11 @@ export component MainWindow inherits Window {
             title: "Network";
             MenuItem {
                 title: "Connect Server";
-                enabled: root.selected-kind == "server";
+                enabled: root.selected-kind == "server" && root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
                 activated => { root.server-action-requested("connect-selected", root.selected-id); }
             }
             MenuItem {
-                title: "Disconnect Servers";
+                title: "Disconnect Server";
                 activated => { root.server-action-requested("disconnect", ""); }
             }
         }
@@ -578,11 +584,10 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 LineEdit { text <=> root.server-import-url; placeholder-text: "server.met URL"; min-width: 450px; }
                                 Button { text: "Import"; enabled: !root.is-refreshing; clicked => { root.server-import-requested(); } }
-                                Button { text: "Connect All"; enabled: !root.is-refreshing; clicked => { root.server-action-requested("connect", ""); } }
                                 Button { text: "Disconnect"; enabled: !root.is-refreshing; clicked => { root.server-action-requested("disconnect", ""); } }
                                 Button {
                                     text: "Connect Selected";
-                                    enabled: !root.is-refreshing && root.selected-kind == "server";
+                                    enabled: !root.is-refreshing && root.selected-kind == "server" && root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
                                     clicked => { root.server-action-requested("connect-selected", root.selected-id); }
                                 }
                             }
@@ -605,6 +610,9 @@ export component MainWindow inherits Window {
                                 root.server-name = root.servers[row].name;
                                 root.server-priority = root.servers[row].priority;
                                 root.server-static = root.servers[row].static-server;
+                                root.selected-server-enabled = root.servers[row].enabled;
+                                root.selected-server-connected = root.servers[row].connected;
+                                root.selected-server-connecting = root.servers[row].connecting;
                             }
                         }
                     }
@@ -906,7 +914,11 @@ export component MainWindow inherits Window {
                     if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
                     if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
                     if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
-                    if root.selected-kind == "server" : Button { text: "Connect"; clicked => { root.server-action-requested("connect-selected", root.selected-id); } }
+                    if root.selected-kind == "server" : Button {
+                        text: "Connect";
+                        enabled: root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
+                        clicked => { root.server-action-requested("connect-selected", root.selected-id); }
+                    }
                     if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect", ""); } }
                 }
                 Text {

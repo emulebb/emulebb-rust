@@ -307,6 +307,9 @@ fn restore_selection(ui: &MainWindow, selected: Selection) {
                 ui.set_selected_id(item.endpoint_id.clone());
                 ui.set_inspector_title(item.name.clone());
                 ui.set_inspector_detail(item.detail.clone());
+                ui.set_selected_server_enabled(item.enabled);
+                ui.set_selected_server_connected(item.connected);
+                ui.set_selected_server_connecting(item.connecting);
                 restored = true;
             }
         }
@@ -339,6 +342,9 @@ fn restore_selection(ui: &MainWindow, selected: Selection) {
         ui.set_selected_kind("".into());
         ui.set_selected_id("".into());
         ui.set_selected_search_id("".into());
+        ui.set_selected_server_enabled(false);
+        ui.set_selected_server_connected(false);
+        ui.set_selected_server_connecting(false);
         ui.set_inspector_title("Inspector".into());
         ui.set_inspector_detail("Select a row to inspect details and actions.".into());
     }
