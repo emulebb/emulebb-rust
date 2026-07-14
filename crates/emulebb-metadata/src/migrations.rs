@@ -49,8 +49,8 @@
 //!   `FT_CORRUPTEDPARTS` corrupted-parts list, PartFile.cpp:1445-1462).
 //! - v14 -> v15: replace the legacy `preferences(key, value_json)` blob bucket
 //!   with `settings(section, key, value_json)` scalar rows and
-//!   `kad_bootstrap_nodes(position, endpoint)`. Dev-phase setting values are not
-//!   migrated; operators seed the new rows explicitly.
+//!   `kad_bootstrap_nodes(position, endpoint)`. Dev-phase legacy setting values
+//!   are deliberately not migrated; the old table is dropped.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -256,7 +256,8 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
             "INTEGER NOT NULL DEFAULT 0",
         ),
         // v14 -> v15: real settings store. Intentionally no data migration from
-        // the legacy preferences bucket during dev-phase cleanup.
+        // the legacy preferences bucket during dev-phase cleanup: old rows are
+        // dropped instead of accepted through aliases or compatibility shims.
         15 => {
             tx.execute_batch(
                 r#"
@@ -526,6 +527,46 @@ mod tests {
         // error on the already-added columns.
         migrate_to_current(&mut conn).unwrap();
         assert_eq!(stored_version(&conn).unwrap(), Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn upgrade_from_v14_drops_legacy_preferences_without_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE metadata_schema (
+                schema_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE preferences (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
+            VALUES ('emulebb.metadata.clean-v2', 14, 0);
+            INSERT INTO preferences(key, value_json, updated_at_ms)
+            VALUES ('daemon.runtimeConfig', '{"ed2k":{"listenPort":4662}}', 0);
+            "#,
+        )
+        .unwrap();
+
+        migrate_to_current(&mut conn).unwrap();
+
+        assert_eq!(stored_version(&conn).unwrap(), Some(SCHEMA_VERSION));
+        let legacy_table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'preferences'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_table_count, 0);
+        let settings_rows: i64 = conn
+            .query_row("SELECT count(*) FROM settings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(settings_rows, 0);
     }
 
     #[test]
