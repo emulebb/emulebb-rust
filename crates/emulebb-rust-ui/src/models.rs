@@ -77,7 +77,7 @@ pub(super) struct Stats {
     pub(super) ed2k_high_id: bool,
     pub(super) kad_running: bool,
     pub(super) kad_connected: bool,
-    pub(super) kad_firewalled: Option<bool>,
+    pub(super) kad_firewall_state: FirewallState,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -85,11 +85,20 @@ pub(super) struct Stats {
 pub(super) struct KadDto {
     pub(super) running: bool,
     pub(super) connected: bool,
-    pub(super) firewalled: Option<bool>,
+    pub(super) firewall_state: FirewallState,
     pub(super) bootstrapping: bool,
     pub(super) contact_count: Option<u64>,
     pub(super) users: Option<u64>,
     pub(super) files: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum FirewallState {
+    #[default]
+    Unknown,
+    Open,
+    Firewalled,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -290,7 +299,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_accepts_unknown_kad_firewall_state() {
+    fn snapshot_accepts_explicit_kad_firewall_state() {
         let raw = r#"{
             "data": {
                 "app": {
@@ -323,7 +332,7 @@ mod tests {
                         "ed2kHighId": false,
                         "kadRunning": false,
                         "kadConnected": false,
-                        "kadFirewalled": null
+                        "kadFirewallState": "unknown"
                     }
                 },
                 "transfers": [],
@@ -334,7 +343,7 @@ mod tests {
                 "kad": {
                     "running": false,
                     "connected": false,
-                    "firewalled": null,
+                    "firewallState": "unknown",
                     "bootstrapping": false,
                     "contactCount": 0,
                     "users": null,
@@ -346,7 +355,10 @@ mod tests {
 
         let envelope: Envelope<Snapshot> = serde_json::from_str(raw).unwrap();
 
-        assert_eq!(envelope.data.status.stats.kad_firewalled, None);
-        assert_eq!(envelope.data.kad.firewalled, None);
+        assert_eq!(
+            envelope.data.status.stats.kad_firewall_state,
+            FirewallState::Unknown
+        );
+        assert_eq!(envelope.data.kad.firewall_state, FirewallState::Unknown);
     }
 }

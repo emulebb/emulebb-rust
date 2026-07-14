@@ -673,6 +673,11 @@ pub(super) fn lifecycle_line(app: &AppInfo, status: &StatusInfo) -> String {
 }
 
 pub(super) fn network_line(stats: &Stats, kad: &KadDto) -> String {
+    let firewall_state = if kad.firewall_state == FirewallState::Unknown {
+        stats.kad_firewall_state
+    } else {
+        kad.firewall_state
+    };
     let kad_mode = if kad.bootstrapping {
         "bootstrapping"
     } else if kad.connected || stats.kad_connected {
@@ -692,16 +697,16 @@ pub(super) fn network_line(stats: &Stats, kad: &KadDto) -> String {
             "low-id"
         },
         kad_mode,
-        kad_firewall_label(kad.firewalled.or(stats.kad_firewalled)),
+        kad_firewall_label(firewall_state),
         kad.contact_count.unwrap_or(0)
     )
 }
 
-fn kad_firewall_label(firewalled: Option<bool>) -> &'static str {
-    match firewalled {
-        Some(true) => "firewalled",
-        Some(false) => "open",
-        None => "unknown",
+fn kad_firewall_label(state: FirewallState) -> &'static str {
+    match state {
+        FirewallState::Unknown => "unknown",
+        FirewallState::Open => "open",
+        FirewallState::Firewalled => "firewalled",
     }
 }
 

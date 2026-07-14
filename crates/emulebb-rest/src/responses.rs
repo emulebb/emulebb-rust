@@ -91,7 +91,7 @@ pub(crate) fn stats_response(
         "ed2kHighId": ed2k_high_id,
         "kadRunning": status.kad.running,
         "kadConnected": kad_connected,
-        "kadFirewalled": status.kad.firewalled
+        "kadFirewallState": firewall_state(status.kad.firewalled)
     })
 }
 
@@ -212,7 +212,7 @@ pub(crate) fn kad_response(
     json!({
         "running": kad.running,
         "connected": kad.connected,
-        "firewalled": kad.firewalled,
+        "firewallState": firewall_state(kad.firewalled),
         "bootstrapping": kad.bootstrapping.unwrap_or(false),
         "bootstrapProgress": kad.bootstrap_progress.unwrap_or(0),
         "contactCount": contact_count,
@@ -285,6 +285,14 @@ pub(crate) fn search_status_token(status: &str) -> &str {
         "complete"
     } else {
         status
+    }
+}
+
+fn firewall_state(firewalled: Option<bool>) -> &'static str {
+    match firewalled {
+        Some(true) => "firewalled",
+        Some(false) => "open",
+        None => "unknown",
     }
 }
 
@@ -541,13 +549,16 @@ mod tests {
         let value = kad_response(&kad, None, &guard);
         assert_eq!(value["indexedSources"], 42);
         assert_eq!(value["indexedKeywords"], 13);
+        assert_eq!(value["firewallState"], "open");
 
         // When Kad is not running the counts are unknown -> reported as 0.
+        kad.firewalled = None;
         kad.indexed_sources = None;
         kad.indexed_keywords = None;
         let value = kad_response(&kad, None, &guard);
         assert_eq!(value["indexedSources"], 0);
         assert_eq!(value["indexedKeywords"], 0);
+        assert_eq!(value["firewallState"], "unknown");
     }
 
     #[test]
@@ -640,6 +651,7 @@ mod tests {
 
         assert_eq!(value["ed2kConnected"], true);
         assert_eq!(value["ed2kHighId"], false);
+        assert_eq!(value["kadFirewallState"], "unknown");
     }
 
     #[tokio::test]
