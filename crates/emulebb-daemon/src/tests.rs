@@ -1,12 +1,12 @@
 use super::*;
 use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, NetworkInterfaceAddress};
 
-fn metadata_store(config: &DaemonProfile) -> MetadataStore {
-    MetadataStore::open(config.metadata_path()).unwrap()
+fn metadata_store(profile: &DaemonProfile) -> MetadataStore {
+    MetadataStore::open(profile.metadata_path()).unwrap()
 }
 
-fn persist_test_server(config: &DaemonProfile) {
-    metadata_store(config)
+fn persist_test_server(profile: &DaemonProfile) {
+    metadata_store(profile)
         .upsert_server(&emulebb_metadata::MetadataServer {
             address: "192.0.2.20".to_string(),
             port: 4661,
@@ -46,9 +46,9 @@ fn profile_with_ed2k_network(profile_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>
 }
 
 fn profile_with_server(profile_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonProfile {
-    let config = profile_with_ed2k_network(profile_dir, p2p_bind_ip);
-    persist_test_server(&config);
-    config
+    let profile = profile_with_ed2k_network(profile_dir, p2p_bind_ip);
+    persist_test_server(&profile);
+    profile
 }
 
 fn profile_with_rest_bind(profile_dir: PathBuf, bind_addr: Option<SocketAddr>) -> DaemonProfile {
@@ -87,8 +87,8 @@ fn iface_with_description(name: &str, description: &str, ip: &str) -> NetworkInt
     }
 }
 
-fn write_bootstrap_config(dir: &std::path::Path) -> PathBuf {
-    let profile_dir = dir.join("runtime");
+fn write_bootstrap_settings(dir: &std::path::Path) -> PathBuf {
+    let profile_dir = dir.join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
@@ -134,7 +134,7 @@ fn load_requires_existing_profile_settings_path() {
 )]
 fn load_parses_bootstrap_toml_and_db_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_config(temp.path());
+    let profile_dir = write_bootstrap_settings(temp.path());
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
@@ -285,55 +285,55 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
         serde_json::json!("203.0.113.10"),
     );
 
-    let config = DaemonProfile::load(Some(profile_dir.clone())).unwrap();
+    let profile = DaemonProfile::load(Some(profile_dir.clone())).unwrap();
 
-    assert_eq!(config.profile_dir, profile_dir);
-    assert_eq!(config.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
-    assert_eq!(config.p2p_bind_interface.as_deref(), Some("Ethernet"));
+    assert_eq!(profile.profile_dir, profile_dir);
+    assert_eq!(profile.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
+    assert_eq!(profile.p2p_bind_interface.as_deref(), Some("Ethernet"));
     assert_eq!(
-        config.rest.bind_addr,
+        profile.rest.bind_addr,
         Some("192.0.2.10:13301".parse().unwrap())
     );
-    assert_eq!(config.kad.listen_port, Some(41002));
-    assert_eq!(config.kad_bootstrap_endpoints, ["192.0.2.30:41002"]);
-    assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
-    assert!(config.kad.local_store_enabled);
-    assert_eq!(config.kad.local_store_keyword_ttl_secs, 86_400);
-    assert_eq!(config.kad.local_store_source_ttl_secs, 21_600);
-    assert_eq!(config.kad.local_store_notes_ttl_secs, 86_400);
-    assert_eq!(config.kad.local_store_keyword_capacity, 20_000);
-    assert_eq!(config.kad.local_store_source_capacity, 20_000);
-    assert_eq!(config.kad.local_store_notes_capacity, 5_000);
-    assert!(config.kad.publish_shared_files_enabled);
-    assert_eq!(config.kad.republish_interval_secs, 120);
-    assert_eq!(config.kad.publish_contact_fanout, 5);
-    assert_eq!(config.kad.snoop_queue_dedup_window_secs, 28_800);
-    assert_eq!(config.kad.snoop_queue_general_max_queries_per_600s, 24);
-    assert_eq!(config.kad.snoop_queue_general_drain_cooldown_secs, 900);
-    assert_eq!(config.kad.snoop_queue_source_max_queries_per_600s, 60);
-    assert_eq!(config.kad.snoop_queue_source_drain_cooldown_secs, 300);
-    assert_eq!(config.kad.snoop_queue_source_stop_after_results, 2);
-    assert_eq!(config.ed2k.listen_port, Some(41001));
-    assert!(config.ed2k.server_endpoints.is_empty());
-    assert_eq!(config.ed2k.connect_timeout_secs, 1);
-    assert_eq!(config.ed2k.reconnect_interval_secs, 60);
-    assert!(config.ed2k.enable_udp_reask);
-    assert!(config.ed2k.publish_emule_rust_identity);
-    assert!(config.nat.enabled);
-    assert!(!config.nat.require_initial_mapping);
-    assert_eq!(config.nat.backend_order, ["upnp_miniupnpc".to_string()]);
-    assert_eq!(config.nat.bind_ip.as_deref(), Some("192.0.2.11"));
-    assert_eq!(config.nat.igd_ip.as_deref(), Some("192.0.2.1"));
+    assert_eq!(profile.kad.listen_port, Some(41002));
+    assert_eq!(profile.kad_bootstrap_endpoints, ["192.0.2.30:41002"]);
+    assert_eq!(profile.kad.bootstrap_min_routing_contacts, 3);
+    assert!(profile.kad.local_store_enabled);
+    assert_eq!(profile.kad.local_store_keyword_ttl_secs, 86_400);
+    assert_eq!(profile.kad.local_store_source_ttl_secs, 21_600);
+    assert_eq!(profile.kad.local_store_notes_ttl_secs, 86_400);
+    assert_eq!(profile.kad.local_store_keyword_capacity, 20_000);
+    assert_eq!(profile.kad.local_store_source_capacity, 20_000);
+    assert_eq!(profile.kad.local_store_notes_capacity, 5_000);
+    assert!(profile.kad.publish_shared_files_enabled);
+    assert_eq!(profile.kad.republish_interval_secs, 120);
+    assert_eq!(profile.kad.publish_contact_fanout, 5);
+    assert_eq!(profile.kad.snoop_queue_dedup_window_secs, 28_800);
+    assert_eq!(profile.kad.snoop_queue_general_max_queries_per_600s, 24);
+    assert_eq!(profile.kad.snoop_queue_general_drain_cooldown_secs, 900);
+    assert_eq!(profile.kad.snoop_queue_source_max_queries_per_600s, 60);
+    assert_eq!(profile.kad.snoop_queue_source_drain_cooldown_secs, 300);
+    assert_eq!(profile.kad.snoop_queue_source_stop_after_results, 2);
+    assert_eq!(profile.ed2k.listen_port, Some(41001));
+    assert!(profile.ed2k.server_endpoints.is_empty());
+    assert_eq!(profile.ed2k.connect_timeout_secs, 1);
+    assert_eq!(profile.ed2k.reconnect_interval_secs, 60);
+    assert!(profile.ed2k.enable_udp_reask);
+    assert!(profile.ed2k.publish_emule_rust_identity);
+    assert!(profile.nat.enabled);
+    assert!(!profile.nat.require_initial_mapping);
+    assert_eq!(profile.nat.backend_order, ["upnp_miniupnpc".to_string()]);
+    assert_eq!(profile.nat.bind_ip.as_deref(), Some("192.0.2.11"));
+    assert_eq!(profile.nat.igd_ip.as_deref(), Some("192.0.2.1"));
     assert_eq!(
-        config.nat.minissdpd_socket.as_deref(),
+        profile.nat.minissdpd_socket.as_deref(),
         Some("/var/run/minissdpd.sock")
     );
-    assert_eq!(config.nat.ssdp_local_port, Some(1901));
-    assert_eq!(config.nat.discovery_timeout_secs, 7);
-    assert_eq!(config.nat.lease_duration_secs, 1200);
-    assert_eq!(config.nat.renew_margin_secs, 120);
+    assert_eq!(profile.nat.ssdp_local_port, Some(1901));
+    assert_eq!(profile.nat.discovery_timeout_secs, 7);
+    assert_eq!(profile.nat.lease_duration_secs, 1200);
+    assert_eq!(profile.nat.renew_margin_secs, 120);
     assert_eq!(
-        config.nat.external_ip_override.as_deref(),
+        profile.nat.external_ip_override.as_deref(),
         Some("203.0.113.10")
     );
 }
@@ -341,13 +341,13 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
 #[test]
 fn load_uses_default_db_runtime_config_when_missing() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_config(temp.path());
+    let profile_dir = write_bootstrap_settings(temp.path());
 
-    let config = DaemonProfile::load(Some(profile_dir)).unwrap();
-    let metadata = MetadataStore::open(config.metadata_path()).unwrap();
+    let profile = DaemonProfile::load(Some(profile_dir)).unwrap();
+    let metadata = MetadataStore::open(profile.metadata_path()).unwrap();
 
     assert!(!metadata.has_settings_section(SECTION_ED2K).unwrap());
-    assert_eq!(config.ed2k.listen_port, None);
+    assert_eq!(profile.ed2k.listen_port, None);
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn default_nat_settings_match_runtime_config_defaults() {
 #[test]
 fn load_rejects_runtime_fields_in_bootstrap_toml() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("runtime");
+    let profile_dir = temp.path().join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
@@ -405,7 +405,7 @@ listenPort = 41001
 #[test]
 fn load_rejects_retired_nat_backend_from_db_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_config(temp.path());
+    let profile_dir = write_bootstrap_settings(temp.path());
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
@@ -428,7 +428,7 @@ fn load_rejects_retired_nat_backend_from_db_runtime_config() {
 #[test]
 fn load_rejects_db_runtime_server_endpoints() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_config(temp.path());
+    let profile_dir = write_bootstrap_settings(temp.path());
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
@@ -452,7 +452,7 @@ fn load_rejects_db_runtime_server_endpoints() {
 #[test]
 fn load_rejects_db_runtime_server_entries() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = write_bootstrap_config(temp.path());
+    let profile_dir = write_bootstrap_settings(temp.path());
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
@@ -476,9 +476,9 @@ fn load_rejects_db_runtime_server_entries() {
 }
 
 #[test]
-fn load_rejects_legacy_toml_preferences_instead_of_migrating() {
+fn load_rejects_retired_toml_preferences_section() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("runtime");
+    let profile_dir = temp.path().join("profile");
     fs::create_dir_all(&profile_dir).unwrap();
     let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
     fs::write(
@@ -503,7 +503,7 @@ autoConnect = false
 
 #[test]
 fn kad_local_store_config_is_config_driven_and_clamped() {
-    let config = DaemonProfile {
+    let profile = DaemonProfile {
         kad: KadSettings {
             listen_port: Some(41002),
             local_store_enabled: false,
@@ -518,7 +518,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
         ..DaemonProfile::default()
     };
 
-    let local_store = config.kad_local_store_config();
+    let local_store = profile.kad_local_store_config();
 
     assert!(!local_store.enabled);
     assert_eq!(local_store.keyword_ttl, std::time::Duration::from_secs(1));
@@ -549,7 +549,7 @@ fn kad_local_store_defaults_follow_index_defaults() {
 
 #[test]
 fn kad_snoop_queue_config_is_config_driven_and_clamped() {
-    let config = DaemonProfile {
+    let profile = DaemonProfile {
         kad: KadSettings {
             listen_port: Some(41002),
             snoop_queue_dedup_window_secs: 0,
@@ -563,7 +563,7 @@ fn kad_snoop_queue_config_is_config_driven_and_clamped() {
         ..DaemonProfile::default()
     };
 
-    let queue = config.kad_snoop_queue_config();
+    let queue = profile.kad_snoop_queue_config();
 
     assert_eq!(queue.dedup_window_secs, 1);
     assert_eq!(queue.general_max_queries_per_600s, 1);
@@ -576,9 +576,9 @@ fn kad_snoop_queue_config_is_config_driven_and_clamped() {
 #[test]
 fn rest_bind_addr_requires_configured_address() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_rest_bind(temp.path().to_path_buf(), None);
+    let profile = profile_with_rest_bind(temp.path().to_path_buf(), None);
 
-    let error = config.rest_bind_addr().unwrap_err().to_string();
+    let error = profile.rest_bind_addr().unwrap_err().to_string();
 
     assert!(error.contains("rest.bindAddr is required"));
 }
@@ -586,13 +586,13 @@ fn rest_bind_addr_requires_configured_address() {
 #[test]
 fn rest_bind_addr_accepts_configured_loopback_address() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_rest_bind(
+    let profile = profile_with_rest_bind(
         temp.path().to_path_buf(),
         Some("127.0.0.1:13301".parse().unwrap()),
     );
 
     assert_eq!(
-        config.rest_bind_addr().unwrap(),
+        profile.rest_bind_addr().unwrap(),
         "127.0.0.1:13301".parse::<SocketAddr>().unwrap()
     );
 }
@@ -600,13 +600,13 @@ fn rest_bind_addr_accepts_configured_loopback_address() {
 #[test]
 fn rest_bind_addr_accepts_configured_wildcard_address() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_rest_bind(
+    let profile = profile_with_rest_bind(
         temp.path().to_path_buf(),
         Some("0.0.0.0:13301".parse().unwrap()),
     );
 
     assert_eq!(
-        config.rest_bind_addr().unwrap(),
+        profile.rest_bind_addr().unwrap(),
         "0.0.0.0:13301".parse::<SocketAddr>().unwrap()
     );
 }
@@ -614,13 +614,13 @@ fn rest_bind_addr_accepts_configured_wildcard_address() {
 #[test]
 fn rest_bind_addr_accepts_configured_non_loopback_address() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_rest_bind(
+    let profile = profile_with_rest_bind(
         temp.path().to_path_buf(),
         Some("192.0.2.10:13301".parse().unwrap()),
     );
 
     assert_eq!(
-        config.rest_bind_addr().unwrap(),
+        profile.rest_bind_addr().unwrap(),
         "192.0.2.10:13301".parse::<SocketAddr>().unwrap()
     );
 }
@@ -628,14 +628,14 @@ fn rest_bind_addr_accepts_configured_non_loopback_address() {
 #[test]
 fn ed2k_network_config_is_absent_without_servers() {
     let temp = tempfile::tempdir().unwrap();
-    let config = DaemonProfile {
+    let profile = DaemonProfile {
         profile_dir: temp.path().to_path_buf(),
         ..DaemonProfile::default()
     };
 
     assert!(
-        config
-            .ed2k_network_config(&metadata_store(&config))
+        profile
+            .ed2k_network_config(&metadata_store(&profile))
             .unwrap()
             .is_none()
     );
@@ -644,10 +644,10 @@ fn ed2k_network_config_is_absent_without_servers() {
 #[test]
 fn ed2k_network_config_requires_configured_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_server(temp.path().to_path_buf(), None);
+    let profile = profile_with_server(temp.path().to_path_buf(), None);
 
-    let error = config
-        .ed2k_network_config(&metadata_store(&config))
+    let error = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap_err()
         .to_string();
     assert!(error.contains("p2pBindIp or p2pBindInterface is required"));
@@ -656,14 +656,14 @@ fn ed2k_network_config_requires_configured_bind_ip() {
 #[test]
 fn ed2k_network_config_requires_configured_kad_listen_port() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.kad.listen_port = None;
+    profile.kad.listen_port = None;
 
-    let error = config
-        .ed2k_network_config(&metadata_store(&config))
+    let error = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap_err()
         .to_string();
     assert!(error.contains("kad.listenPort is required"));
@@ -672,14 +672,14 @@ fn ed2k_network_config_requires_configured_kad_listen_port() {
 #[test]
 fn ed2k_network_config_requires_configured_ed2k_listen_port() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.ed2k.listen_port = None;
+    profile.ed2k.listen_port = None;
 
-    let error = config
-        .ed2k_network_config(&metadata_store(&config))
+    let error = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap_err()
         .to_string();
     assert!(error.contains("ed2k.listenPort is required"));
@@ -688,10 +688,10 @@ fn ed2k_network_config_requires_configured_ed2k_listen_port() {
 #[test]
 fn ed2k_network_config_accepts_configured_loopback_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_server(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
+    let profile = profile_with_server(temp.path().to_path_buf(), Some(Ipv4Addr::LOCALHOST));
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 
@@ -703,13 +703,13 @@ fn ed2k_network_config_accepts_configured_loopback_bind_ip() {
 #[test]
 fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let config = profile_with_server(
+    let profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 
@@ -729,7 +729,7 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
         std::time::Duration::from_secs(18_000)
     );
     assert_eq!(network.kad_snoop_queue.source_stop_after_results, 2);
-    let store = metadata_store(&config);
+    let store = metadata_store(&profile);
     assert!(
         store
             .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
@@ -746,8 +746,8 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
             .private_secret
             .is_some()
     );
-    assert!(!config.profile_dir.join("ed2k-user-hash.hex").exists());
-    assert!(!config.profile_dir.join("ed2k-secure-ident.pk8").exists());
+    assert!(!profile.profile_dir.join("ed2k-user-hash.hex").exists());
+    assert!(!profile.profile_dir.join("ed2k-secure-ident.pk8").exists());
 }
 
 #[test]
@@ -770,21 +770,21 @@ fn ed2k_user_hash_rejects_emule_bad_hash_after_marker_normalization() {
 #[test]
 fn ed2k_network_config_normalizes_configured_user_hash() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.ed2k_user_hash = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+    profile.ed2k_user_hash = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 
     assert_eq!(network.user_hash[5], 0x0E);
     assert_eq!(network.user_hash[14], 0x6F);
     assert_eq!(
-        metadata_store(&config)
+        metadata_store(&profile)
             .load_local_identity(ED2K_USER_HASH_IDENTITY_KIND)
             .unwrap()
             .unwrap()
@@ -868,10 +868,10 @@ fn load_or_create_secure_ident_reuses_sql_private_secret() {
 #[test]
 fn p2p_bind_interface_resolves_configured_interface_ipv4() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[
             iface("Ethernet", "192.0.2.10"),
             iface("hide.me", "10.44.55.66"),
@@ -884,24 +884,24 @@ fn p2p_bind_interface_resolves_configured_interface_ipv4() {
 #[test]
 fn p2p_bind_interface_only_keeps_no_configured_ip_override() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
         .unwrap();
 
     assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
-    assert_eq!(config.p2p_bind_ip, None);
+    assert_eq!(profile.p2p_bind_ip, None);
 }
 
 #[test]
 fn p2p_bind_interface_matches_name_case_insensitively() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("HIDE.ME".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("HIDE.ME".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
         .unwrap();
 
@@ -911,10 +911,10 @@ fn p2p_bind_interface_matches_name_case_insensitively() {
 #[test]
 fn p2p_bind_interface_matches_name_or_description_token() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface_with_description(
             "Ethernet 7",
             "hide.me VPN Adapter",
@@ -928,10 +928,10 @@ fn p2p_bind_interface_matches_name_or_description_token() {
 #[test]
 fn p2p_bind_interface_rejects_ambiguous_case_insensitive_names() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let error = config
+    let error = profile
         .resolve_p2p_bind_ip_from_interfaces(&[
             iface("hide.me", "10.44.55.66"),
             iface("HIDE.ME", "10.44.55.67"),
@@ -945,13 +945,13 @@ fn p2p_bind_interface_rejects_ambiguous_case_insensitive_names() {
 #[test]
 fn p2p_bind_ip_and_interface_accept_matching_pair() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("10.44.55.66".parse().unwrap()),
     );
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface("hide.me", "10.44.55.66")])
         .unwrap();
 
@@ -961,13 +961,13 @@ fn p2p_bind_ip_and_interface_accept_matching_pair() {
 #[test]
 fn p2p_bind_ip_and_interface_prefers_current_interface_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[
             iface("Ethernet", "192.0.2.10"),
             iface("hide.me", "10.44.55.66"),
@@ -980,16 +980,16 @@ fn p2p_bind_ip_and_interface_prefers_current_interface_ip() {
 #[test]
 fn ed2k_network_config_stores_resolved_interface_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.p2p_bind_interface = Some("hide.me".to_string());
-    config.nat.enabled = false;
+    profile.p2p_bind_interface = Some("hide.me".to_string());
+    profile.nat.enabled = false;
 
-    let network = config
+    let network = profile
         .ed2k_network_config_from_interfaces(
-            &metadata_store(&config),
+            &metadata_store(&profile),
             &[
                 iface("Ethernet", "192.0.2.10"),
                 iface("hide.me", "10.44.55.66"),
@@ -1009,29 +1009,29 @@ fn ed2k_network_config_stores_resolved_interface_bind_ip() {
 #[test]
 fn p2p_bind_ip_and_interface_mismatch_starts_when_vpn_guard_blocks_p2p() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.p2p_bind_interface = Some("hide.me".to_string());
-    config.vpn_guard.enabled = true;
-    config.vpn_guard.mode = "block".to_string();
+    profile.p2p_bind_interface = Some("hide.me".to_string());
+    profile.vpn_guard.enabled = true;
+    profile.vpn_guard.mode = "block".to_string();
 
-    let bind_ip = config
+    let bind_ip = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface("Ethernet", "192.0.2.10")])
         .unwrap();
 
     assert_eq!(bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
-    assert!(!config.vpn_binding_confirmed(bind_ip, &[iface("Ethernet", "192.0.2.10")]));
+    assert!(!profile.vpn_binding_confirmed(bind_ip, &[iface("Ethernet", "192.0.2.10")]));
 }
 
 #[test]
 fn p2p_bind_interface_requires_matching_ipv4_interface() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    let error = config
+    let error = profile
         .resolve_p2p_bind_ip_from_interfaces(&[iface("Ethernet", "192.0.2.10")])
         .unwrap_err()
         .to_string();
@@ -1043,10 +1043,10 @@ fn p2p_bind_interface_requires_matching_ipv4_interface() {
 #[test]
 fn vpn_binding_is_confirmed_by_named_interface_or_vpn_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(temp.path().to_path_buf(), None);
-    config.p2p_bind_interface = Some("HIDE.ME".to_string());
+    let mut profile = profile_with_server(temp.path().to_path_buf(), None);
+    profile.p2p_bind_interface = Some("HIDE.ME".to_string());
 
-    assert!(config.vpn_binding_confirmed(
+    assert!(profile.vpn_binding_confirmed(
         "10.44.55.66".parse().unwrap(),
         &[iface("hide.me", "10.44.55.66")]
     ));
@@ -1064,13 +1064,13 @@ fn vpn_binding_is_confirmed_by_named_interface_or_vpn_ip() {
 #[test]
 fn vpn_binding_does_not_treat_mismatched_name_as_confirmed() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.p2p_bind_interface = Some("hide.me".to_string());
+    profile.p2p_bind_interface = Some("hide.me".to_string());
 
-    assert!(!config.vpn_binding_confirmed(
+    assert!(!profile.vpn_binding_confirmed(
         "192.0.2.10".parse().unwrap(),
         &[
             iface("Ethernet", "192.0.2.10"),
@@ -1082,14 +1082,14 @@ fn vpn_binding_does_not_treat_mismatched_name_as_confirmed() {
 #[test]
 fn ed2k_network_config_derives_nat_bind_from_configured_p2p_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.nat.enabled = true;
+    profile.nat.enabled = true;
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 
@@ -1101,14 +1101,14 @@ fn ed2k_network_config_derives_nat_bind_from_configured_p2p_bind_ip() {
 #[test]
 fn ed2k_network_config_honors_explicit_nat_bind_ip() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.nat.bind_ip = Some("198.51.100.20".to_string());
+    profile.nat.bind_ip = Some("198.51.100.20".to_string());
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 
@@ -1118,17 +1118,17 @@ fn ed2k_network_config_honors_explicit_nat_bind_ip() {
 #[test]
 fn ed2k_network_config_passes_configured_kad_bootstrap_endpoints() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = profile_with_server(
+    let mut profile = profile_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.kad_bootstrap_endpoints = vec!["192.0.2.30:41002".to_string()];
-    config.kad.bootstrap_min_routing_contacts = 0;
-    config.kad.republish_interval_secs = 0;
-    config.kad.publish_contact_fanout = 0;
+    profile.kad_bootstrap_endpoints = vec!["192.0.2.30:41002".to_string()];
+    profile.kad.bootstrap_min_routing_contacts = 0;
+    profile.kad.republish_interval_secs = 0;
+    profile.kad.publish_contact_fanout = 0;
 
-    let network = config
-        .ed2k_network_config(&metadata_store(&config))
+    let network = profile
+        .ed2k_network_config(&metadata_store(&profile))
         .unwrap()
         .unwrap();
 

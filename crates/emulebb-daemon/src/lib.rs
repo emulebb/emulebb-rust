@@ -73,7 +73,7 @@ impl Default for DaemonProfile {
     fn default() -> Self {
         let daemon = DaemonSettings::default();
         Self {
-            profile_dir: PathBuf::from("runtime"),
+            profile_dir: PathBuf::from("profile"),
             incoming_dir: daemon.incoming_dir,
             p2p_bind_ip: daemon.p2p_bind_ip,
             p2p_bind_interface: daemon.p2p_bind_interface,
@@ -121,7 +121,7 @@ impl DaemonProfile {
                 )
             })?;
         let settings = load_settings(&metadata)?;
-        let config = Self {
+        let profile = Self {
             profile_dir,
             incoming_dir: settings.daemon.incoming_dir,
             p2p_bind_ip: settings.daemon.p2p_bind_ip,
@@ -135,11 +135,11 @@ impl DaemonProfile {
             vpn_guard: settings.vpn_guard,
             ip_filter: settings.ip_filter,
         };
-        config
+        profile
             .nat
             .validate()
             .context("invalid NAT config in metadata store")?;
-        Ok(config)
+        Ok(profile)
     }
 
     pub fn metadata_path(&self) -> PathBuf {

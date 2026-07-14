@@ -263,9 +263,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
             }
         }
         if !reconnect_enabled {
-            info!(
-                "ED2K server reconnect disabled by settings; leaving background session stopped"
-            );
+            info!("ED2K server reconnect disabled by settings; leaving background session stopped");
             return;
         }
 
