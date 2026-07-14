@@ -19,6 +19,21 @@ pub(super) async fn update_preferences(
     patch_json(client, config, "app/preferences", request).await
 }
 
+pub(super) async fn fetch_app_settings(
+    client: &Client,
+    config: &ConnectionConfig,
+) -> Result<AppSettings> {
+    get(client, config, "app/settings").await
+}
+
+pub(super) async fn update_app_settings(
+    client: &Client,
+    config: &ConnectionConfig,
+    request: &AppSettingsUpdate,
+) -> Result<AppSettings> {
+    patch_json(client, config, "app/settings", request).await
+}
+
 pub(super) async fn create_search(
     client: &Client,
     config: &ConnectionConfig,

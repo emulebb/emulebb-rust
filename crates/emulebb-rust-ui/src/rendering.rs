@@ -44,10 +44,12 @@ pub(super) fn publish_search(weak: &slint::Weak<MainWindow>, search: SearchDto) 
 pub(super) fn publish_preferences(
     weak: &slint::Weak<MainWindow>,
     preferences: Preferences,
+    settings: AppSettings,
     status: String,
 ) {
     let update = move |ui: MainWindow| {
         render_preferences(&ui, &preferences, &status);
+        render_app_settings(&ui, &settings);
     };
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -126,6 +128,12 @@ pub(super) fn store_preferences(cache: &Arc<Mutex<DataCache>>, preferences: Pref
     }
 }
 
+pub(super) fn store_app_settings(cache: &Arc<Mutex<DataCache>>, settings: AppSettings) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.settings = Some(settings);
+    }
+}
+
 pub(super) fn rerender_from_cache(ui: &MainWindow, cache: &Arc<Mutex<DataCache>>) {
     let Ok(cache) = cache.lock() else {
         return;
@@ -138,6 +146,9 @@ pub(super) fn rerender_from_cache(ui: &MainWindow, cache: &Arc<Mutex<DataCache>>
     }
     if let Some(preferences) = cache.preferences.as_ref() {
         render_preferences(ui, preferences, "Settings restored from cache");
+    }
+    if let Some(settings) = cache.settings.as_ref() {
+        render_app_settings(ui, settings);
     }
 }
 
@@ -152,6 +163,9 @@ pub(super) fn rerender_preferences_from_cache(
         return false;
     };
     render_preferences(ui, preferences, "Settings reverted");
+    if let Some(settings) = cache.settings.as_ref() {
+        render_app_settings(ui, settings);
+    }
     true
 }
 
@@ -160,6 +174,13 @@ pub(super) fn cached_preferences(cache: &Arc<Mutex<DataCache>>) -> Option<Prefer
         .lock()
         .ok()
         .and_then(|cache| cache.preferences.as_ref().cloned())
+}
+
+pub(super) fn cached_app_settings(cache: &Arc<Mutex<DataCache>>) -> Option<AppSettings> {
+    cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.settings.as_ref().cloned())
 }
 
 pub(super) fn render_preferences(ui: &MainWindow, preferences: &Preferences, status: &str) {
@@ -185,6 +206,76 @@ pub(super) fn render_preferences(ui: &MainWindow, preferences: &Preferences, sta
     ui.set_pref_network_kademlia(preferences.network_kademlia);
     ui.set_pref_network_ed2k(preferences.network_ed2k);
     ui.set_settings_status_line(status.into());
+}
+
+pub(super) fn render_app_settings(ui: &MainWindow, settings: &AppSettings) {
+    ui.set_settings_incoming_dir(optional_path(&settings.daemon_runtime.incoming_dir).into());
+    ui.set_settings_p2p_bind_ip(
+        settings
+            .daemon_runtime
+            .p2p_bind_ip
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_settings_p2p_bind_interface(
+        settings
+            .daemon_runtime
+            .p2p_bind_interface
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_settings_ed2k_listen_port(optional_u16(settings.ed2k.listen_port).into());
+    ui.set_settings_ed2k_obfuscation_enabled(settings.ed2k.obfuscation_enabled);
+    ui.set_settings_ed2k_connect_timeout_secs(
+        settings.ed2k.connect_timeout_secs.to_string().into(),
+    );
+    ui.set_settings_ed2k_reconnect_interval_secs(
+        settings.ed2k.reconnect_interval_secs.to_string().into(),
+    );
+    ui.set_settings_ed2k_enable_udp_reask(settings.ed2k.enable_udp_reask);
+    ui.set_settings_ed2k_publish_emule_rust_identity(settings.ed2k.publish_emule_rust_identity);
+    ui.set_settings_kad_listen_port(optional_u16(settings.kad.listen_port).into());
+    ui.set_settings_kad_bootstrap_min_routing_contacts(
+        settings
+            .kad
+            .bootstrap_min_routing_contacts
+            .to_string()
+            .into(),
+    );
+    ui.set_settings_kad_publish_shared_files_enabled(settings.kad.publish_shared_files_enabled);
+    ui.set_settings_kad_routing_maintenance_enabled(settings.kad.routing_maintenance_enabled);
+    ui.set_settings_nat_enabled(settings.nat.enabled);
+    ui.set_settings_nat_require_initial_mapping(settings.nat.require_initial_mapping);
+    ui.set_settings_nat_bind_ip(settings.nat.bind_ip.clone().unwrap_or_default().into());
+    ui.set_settings_nat_external_ip_override(
+        settings
+            .nat
+            .external_ip_override
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_settings_vpn_guard_enabled(settings.vpn_guard.enabled);
+    ui.set_settings_vpn_guard_mode(settings.vpn_guard.mode.clone().into());
+    ui.set_settings_vpn_guard_allowed_public_ip_cidrs(
+        settings.vpn_guard.allowed_public_ip_cidrs.clone().into(),
+    );
+    ui.set_settings_ip_filter_enabled(settings.ip_filter.enabled);
+    ui.set_settings_ip_filter_path(optional_path(&settings.ip_filter.path).into());
+    ui.set_settings_ip_filter_level(settings.ip_filter.level.to_string().into());
+}
+
+fn optional_path(value: &Option<std::path::PathBuf>) -> String {
+    value
+        .as_ref()
+        .map(|value| value.display().to_string())
+        .unwrap_or_default()
+}
+
+fn optional_u16(value: Option<u16>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
 }
 
 pub(super) fn render_snapshot_tables(ui: &MainWindow, snapshot: &Snapshot) {

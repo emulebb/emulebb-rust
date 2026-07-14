@@ -1,4 +1,5 @@
 use super::*;
+use emulebb_settings::AppSettings;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct Envelope<T> {
@@ -21,6 +22,7 @@ pub(super) struct DataCache {
     pub(super) snapshot: Option<Snapshot>,
     pub(super) search: Option<SearchDto>,
     pub(super) preferences: Option<Preferences>,
+    pub(super) settings: Option<AppSettings>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -250,6 +252,33 @@ pub(super) struct PreferencesForm {
     pub(super) add_servers_from_server: bool,
     pub(super) network_kademlia: bool,
     pub(super) network_ed2k: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AppSettingsForm {
+    pub(super) incoming_dir: String,
+    pub(super) p2p_bind_ip: String,
+    pub(super) p2p_bind_interface: String,
+    pub(super) ed2k_listen_port: String,
+    pub(super) ed2k_obfuscation_enabled: bool,
+    pub(super) ed2k_connect_timeout_secs: String,
+    pub(super) ed2k_reconnect_interval_secs: String,
+    pub(super) ed2k_enable_udp_reask: bool,
+    pub(super) ed2k_publish_emule_rust_identity: bool,
+    pub(super) kad_listen_port: String,
+    pub(super) kad_bootstrap_min_routing_contacts: String,
+    pub(super) kad_publish_shared_files_enabled: bool,
+    pub(super) kad_routing_maintenance_enabled: bool,
+    pub(super) nat_enabled: bool,
+    pub(super) nat_require_initial_mapping: bool,
+    pub(super) nat_bind_ip: String,
+    pub(super) nat_external_ip_override: String,
+    pub(super) vpn_guard_enabled: bool,
+    pub(super) vpn_guard_mode: String,
+    pub(super) vpn_guard_allowed_public_ip_cidrs: String,
+    pub(super) ip_filter_enabled: bool,
+    pub(super) ip_filter_path: String,
+    pub(super) ip_filter_level: String,
 }
 
 #[derive(Debug, Clone)]

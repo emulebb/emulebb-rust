@@ -161,11 +161,11 @@ component SettingField inherits Rectangle {
             color: #334155;
             font-size: 12px;
             vertical-alignment: center;
-            min-width: 190px;
+            min-width: 150px;
         }
         LineEdit {
             text <=> root.value;
-            min-width: 120px;
+            min-width: 96px;
         }
     }
 }
@@ -197,6 +197,29 @@ export component MainWindow inherits Window {
     in-out property <string> pref-max-upload-slots;
     in-out property <string> pref-upload-elastic-percent;
     in-out property <string> pref-queue-size;
+    in-out property <string> settings-incoming-dir;
+    in-out property <string> settings-p2p-bind-ip;
+    in-out property <string> settings-p2p-bind-interface;
+    in-out property <string> settings-ed2k-listen-port;
+    in-out property <bool> settings-ed2k-obfuscation-enabled;
+    in-out property <string> settings-ed2k-connect-timeout-secs;
+    in-out property <string> settings-ed2k-reconnect-interval-secs;
+    in-out property <bool> settings-ed2k-enable-udp-reask;
+    in-out property <bool> settings-ed2k-publish-emule-rust-identity;
+    in-out property <string> settings-kad-listen-port;
+    in-out property <string> settings-kad-bootstrap-min-routing-contacts;
+    in-out property <bool> settings-kad-publish-shared-files-enabled;
+    in-out property <bool> settings-kad-routing-maintenance-enabled;
+    in-out property <bool> settings-nat-enabled;
+    in-out property <bool> settings-nat-require-initial-mapping;
+    in-out property <string> settings-nat-bind-ip;
+    in-out property <string> settings-nat-external-ip-override;
+    in-out property <bool> settings-vpn-guard-enabled;
+    in-out property <string> settings-vpn-guard-mode;
+    in-out property <string> settings-vpn-guard-allowed-public-ip-cidrs;
+    in-out property <bool> settings-ip-filter-enabled;
+    in-out property <string> settings-ip-filter-path;
+    in-out property <string> settings-ip-filter-level;
     in-out property <bool> pref-auto-connect;
     in-out property <bool> pref-reconnect;
     in-out property <bool> pref-credit-system;
@@ -858,31 +881,80 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    HorizontalLayout {
-                        spacing: 28px;
+                    VerticalLayout {
+                        spacing: 12px;
 
-                        VerticalLayout {
-                            spacing: 5px;
-                            SettingField { label: "Upload limit KiB/s"; value <=> root.pref-upload-limit; }
-                            SettingField { label: "Download limit KiB/s"; value <=> root.pref-download-limit; }
-                            SettingField { label: "Max connections"; value <=> root.pref-max-connections; }
-                            SettingField { label: "Max connections / 5 sec"; value <=> root.pref-max-connections-per-five; }
-                            SettingField { label: "Max sources / file"; value <=> root.pref-max-sources; }
-                            SettingField { label: "Upload client KiB/s"; value <=> root.pref-upload-client-rate; }
-                            SettingField { label: "Max upload slots"; value <=> root.pref-max-upload-slots; }
-                            SettingField { label: "Upload elastic percent"; value <=> root.pref-upload-elastic-percent; }
-                            SettingField { label: "Queue size"; value <=> root.pref-queue-size; }
+                        HorizontalLayout {
+                            spacing: 28px;
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text { text: "Live Preferences"; color: #111827; font-size: 13px; font-weight: 700; }
+                                SettingField { label: "Upload limit KiB/s"; value <=> root.pref-upload-limit; }
+                                SettingField { label: "Download limit KiB/s"; value <=> root.pref-download-limit; }
+                                SettingField { label: "Max connections"; value <=> root.pref-max-connections; }
+                                SettingField { label: "Max connections / 5 sec"; value <=> root.pref-max-connections-per-five; }
+                                SettingField { label: "Max sources / file"; value <=> root.pref-max-sources; }
+                                SettingField { label: "Upload client KiB/s"; value <=> root.pref-upload-client-rate; }
+                                SettingField { label: "Max upload slots"; value <=> root.pref-max-upload-slots; }
+                                SettingField { label: "Upload elastic percent"; value <=> root.pref-upload-elastic-percent; }
+                                SettingField { label: "Queue size"; value <=> root.pref-queue-size; }
+                            }
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text { text: "Runtime Binding"; color: #111827; font-size: 13px; font-weight: 700; }
+                                SettingField { label: "Incoming directory"; value <=> root.settings-incoming-dir; }
+                                SettingField { label: "P2P bind IP"; value <=> root.settings-p2p-bind-ip; }
+                                SettingField { label: "P2P bind interface"; value <=> root.settings-p2p-bind-interface; }
+                                Text { text: "Network"; color: #111827; font-size: 13px; font-weight: 700; }
+                                SettingField { label: "eD2K listen port"; value <=> root.settings-ed2k-listen-port; }
+                                SettingField { label: "eD2K connect timeout sec"; value <=> root.settings-ed2k-connect-timeout-secs; }
+                                SettingField { label: "eD2K reconnect sec"; value <=> root.settings-ed2k-reconnect-interval-secs; }
+                                SettingField { label: "Kad listen port"; value <=> root.settings-kad-listen-port; }
+                                SettingField { label: "Kad bootstrap contacts"; value <=> root.settings-kad-bootstrap-min-routing-contacts; }
+                            }
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text { text: "NAT / VPN Guard"; color: #111827; font-size: 13px; font-weight: 700; }
+                                CheckBox { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
+                                CheckBox { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
+                                SettingField { label: "NAT bind IP"; value <=> root.settings-nat-bind-ip; }
+                                SettingField { label: "External IP override"; value <=> root.settings-nat-external-ip-override; }
+                                CheckBox { text: "VPN Guard enabled"; checked <=> root.settings-vpn-guard-enabled; }
+                                SettingField { label: "VPN Guard mode"; value <=> root.settings-vpn-guard-mode; }
+                                SettingField { label: "Allowed public CIDRs"; value <=> root.settings-vpn-guard-allowed-public-ip-cidrs; }
+                                CheckBox { text: "IP filter enabled"; checked <=> root.settings-ip-filter-enabled; }
+                                SettingField { label: "IP filter path"; value <=> root.settings-ip-filter-path; }
+                                SettingField { label: "IP filter level"; value <=> root.settings-ip-filter-level; }
+                            }
                         }
 
-                        VerticalLayout {
-                            spacing: 5px;
-                            CheckBox { text: "Auto connect"; checked <=> root.pref-auto-connect; }
-                            CheckBox { text: "Reconnect"; checked <=> root.pref-reconnect; }
-                            CheckBox { text: "Credit system"; checked <=> root.pref-credit-system; }
-                            CheckBox { text: "Safe server connect"; checked <=> root.pref-safe-server-connect; }
-                            CheckBox { text: "Add servers from server"; checked <=> root.pref-add-servers-from-server; }
-                            CheckBox { text: "Kademlia"; checked <=> root.pref-network-kademlia; }
-                            CheckBox { text: "eD2K"; checked <=> root.pref-network-ed2k; }
+                        HorizontalLayout {
+                            spacing: 28px;
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text { text: "Live Toggles"; color: #111827; font-size: 13px; font-weight: 700; }
+                                CheckBox { text: "Auto connect"; checked <=> root.pref-auto-connect; }
+                                CheckBox { text: "Reconnect"; checked <=> root.pref-reconnect; }
+                                CheckBox { text: "Credit system"; checked <=> root.pref-credit-system; }
+                                CheckBox { text: "Safe server connect"; checked <=> root.pref-safe-server-connect; }
+                                CheckBox { text: "Add servers from server"; checked <=> root.pref-add-servers-from-server; }
+                                CheckBox { text: "Kademlia"; checked <=> root.pref-network-kademlia; }
+                                CheckBox { text: "eD2K"; checked <=> root.pref-network-ed2k; }
+                            }
+
+                            VerticalLayout {
+                                spacing: 5px;
+                                Text { text: "Network Toggles"; color: #111827; font-size: 13px; font-weight: 700; }
+                                CheckBox { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
+                                CheckBox { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
+                                CheckBox { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
+                                CheckBox { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }
+                                CheckBox { text: "Kad routing maintenance"; checked <=> root.settings-kad-routing-maintenance-enabled; }
+                            }
                         }
                     }
                 }

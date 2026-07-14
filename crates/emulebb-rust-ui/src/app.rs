@@ -22,11 +22,11 @@ use anyhow::{Context, Result};
 use api::*;
 use clap::Parser;
 use emulebb_settings::{
-    FIELD_DOWNLOAD_LIMIT_KIBPS, FIELD_MAX_CONNECTIONS, FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS,
-    FIELD_MAX_SOURCES_PER_FILE, FIELD_MAX_UPLOAD_SLOTS, FIELD_QUEUE_SIZE,
-    FIELD_UPLOAD_CLIENT_DATA_RATE, FIELD_UPLOAD_LIMIT_KIBPS, FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
-    Preferences, PreferencesUpdate, changed_preferences_update, parse_u32_preference,
-    preferences_update_is_empty,
+    AppSettings, AppSettingsUpdate, FIELD_DOWNLOAD_LIMIT_KIBPS, FIELD_MAX_CONNECTIONS,
+    FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS, FIELD_MAX_SOURCES_PER_FILE, FIELD_MAX_UPLOAD_SLOTS,
+    FIELD_QUEUE_SIZE, FIELD_UPLOAD_CLIENT_DATA_RATE, FIELD_UPLOAD_LIMIT_KIBPS,
+    FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, Preferences, PreferencesUpdate, changed_preferences_update,
+    parse_u32_preference, preferences_update_is_empty,
 };
 use models::*;
 use presentation::*;
@@ -81,6 +81,7 @@ enum UiCommand {
     PreferencesReload,
     PreferencesApply {
         form: PreferencesForm,
+        settings_form: AppSettingsForm,
     },
     SearchStart {
         query: String,
@@ -152,6 +153,20 @@ pub(crate) fn run() -> Result<()> {
     ui.set_pref_max_upload_slots("".into());
     ui.set_pref_upload_elastic_percent("".into());
     ui.set_pref_queue_size("".into());
+    ui.set_settings_incoming_dir("".into());
+    ui.set_settings_p2p_bind_ip("".into());
+    ui.set_settings_p2p_bind_interface("".into());
+    ui.set_settings_ed2k_listen_port("".into());
+    ui.set_settings_ed2k_connect_timeout_secs("".into());
+    ui.set_settings_ed2k_reconnect_interval_secs("".into());
+    ui.set_settings_kad_listen_port("".into());
+    ui.set_settings_kad_bootstrap_min_routing_contacts("".into());
+    ui.set_settings_nat_bind_ip("".into());
+    ui.set_settings_nat_external_ip_override("".into());
+    ui.set_settings_vpn_guard_mode("".into());
+    ui.set_settings_vpn_guard_allowed_public_ip_cidrs("".into());
+    ui.set_settings_ip_filter_path("".into());
+    ui.set_settings_ip_filter_level("".into());
     ui.set_server_address("".into());
     ui.set_server_port("4661".into());
     ui.set_server_name("".into());
@@ -345,6 +360,7 @@ pub(crate) fn run() -> Result<()> {
         if let Some(ui) = settings_apply_ui.upgrade() {
             let _ = settings_apply_tx.send(UiCommand::PreferencesApply {
                 form: preferences_form(&ui),
+                settings_form: app_settings_form(&ui),
             });
         }
     });
@@ -437,6 +453,38 @@ fn preferences_form(ui: &MainWindow) -> PreferencesForm {
         add_servers_from_server: ui.get_pref_add_servers_from_server(),
         network_kademlia: ui.get_pref_network_kademlia(),
         network_ed2k: ui.get_pref_network_ed2k(),
+    }
+}
+
+fn app_settings_form(ui: &MainWindow) -> AppSettingsForm {
+    AppSettingsForm {
+        incoming_dir: ui.get_settings_incoming_dir().to_string(),
+        p2p_bind_ip: ui.get_settings_p2p_bind_ip().to_string(),
+        p2p_bind_interface: ui.get_settings_p2p_bind_interface().to_string(),
+        ed2k_listen_port: ui.get_settings_ed2k_listen_port().to_string(),
+        ed2k_obfuscation_enabled: ui.get_settings_ed2k_obfuscation_enabled(),
+        ed2k_connect_timeout_secs: ui.get_settings_ed2k_connect_timeout_secs().to_string(),
+        ed2k_reconnect_interval_secs: ui.get_settings_ed2k_reconnect_interval_secs().to_string(),
+        ed2k_enable_udp_reask: ui.get_settings_ed2k_enable_udp_reask(),
+        ed2k_publish_emule_rust_identity: ui.get_settings_ed2k_publish_emule_rust_identity(),
+        kad_listen_port: ui.get_settings_kad_listen_port().to_string(),
+        kad_bootstrap_min_routing_contacts: ui
+            .get_settings_kad_bootstrap_min_routing_contacts()
+            .to_string(),
+        kad_publish_shared_files_enabled: ui.get_settings_kad_publish_shared_files_enabled(),
+        kad_routing_maintenance_enabled: ui.get_settings_kad_routing_maintenance_enabled(),
+        nat_enabled: ui.get_settings_nat_enabled(),
+        nat_require_initial_mapping: ui.get_settings_nat_require_initial_mapping(),
+        nat_bind_ip: ui.get_settings_nat_bind_ip().to_string(),
+        nat_external_ip_override: ui.get_settings_nat_external_ip_override().to_string(),
+        vpn_guard_enabled: ui.get_settings_vpn_guard_enabled(),
+        vpn_guard_mode: ui.get_settings_vpn_guard_mode().to_string(),
+        vpn_guard_allowed_public_ip_cidrs: ui
+            .get_settings_vpn_guard_allowed_public_ip_cidrs()
+            .to_string(),
+        ip_filter_enabled: ui.get_settings_ip_filter_enabled(),
+        ip_filter_path: ui.get_settings_ip_filter_path().to_string(),
+        ip_filter_level: ui.get_settings_ip_filter_level().to_string(),
     }
 }
 

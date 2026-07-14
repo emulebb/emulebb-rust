@@ -31,14 +31,15 @@ pub(super) fn worker_loop(
                 let result = runtime.block_on(async {
                     let snapshot = fetch_snapshot(&client, &next_config).await?;
                     let preferences = fetch_preferences(&client, &next_config).await?;
+                    let settings = fetch_app_settings(&client, &next_config).await?;
                     let search = fetch_latest_search(&client, &next_config)
                         .await
                         .ok()
                         .flatten();
-                    Ok::<_, anyhow::Error>((snapshot, preferences, search))
+                    Ok::<_, anyhow::Error>((snapshot, preferences, settings, search))
                 });
                 match result {
-                    Ok((snapshot, preferences, search)) => {
+                    Ok((snapshot, preferences, settings, search)) => {
                         if let Some(search) = search {
                             active_search_id = Some(search.id.clone());
                             store_search(&cache, Some(search.clone()));
@@ -48,9 +49,11 @@ pub(super) fn worker_loop(
                             publish_empty_search(&weak, "No active search");
                         }
                         store_preferences(&cache, preferences.clone());
+                        store_app_settings(&cache, settings.clone());
                         publish_preferences(
                             &weak,
                             preferences,
+                            settings,
                             "Settings loaded from daemon".to_string(),
                         );
                         store_snapshot(&cache, snapshot.clone());
@@ -80,31 +83,59 @@ pub(super) fn worker_loop(
         let result = match command {
             Some(UiCommand::PreferencesReload) => runtime.block_on(async {
                 let preferences = fetch_preferences(&client, &config_for_command).await?;
+                let settings = fetch_app_settings(&client, &config_for_command).await?;
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((
                     snapshot,
                     None,
                     None,
-                    Some((preferences, "Settings reloaded".to_string())),
+                    Some((preferences, settings, "Settings reloaded".to_string())),
                 ))
             }),
-            Some(UiCommand::PreferencesApply { form }) => runtime.block_on(async {
+            Some(UiCommand::PreferencesApply {
+                form,
+                settings_form,
+            }) => runtime.block_on(async {
                 let baseline = cached_preferences(&cache);
+                let settings_baseline = match cached_app_settings(&cache) {
+                    Some(settings) => settings,
+                    None => fetch_app_settings(&client, &config_for_command).await?,
+                };
                 let patch = preferences_update_from_form(&form, baseline.as_ref())?;
-                let (preferences, status) = if preferences_update_is_empty(&patch) {
-                    let preferences = match baseline {
+                let settings_patch =
+                    app_settings_update_from_form(&settings_form, &settings_baseline)?;
+                let preferences_changed = !preferences_update_is_empty(&patch);
+                let settings_changed =
+                    !emulebb_settings::app_settings_update_is_empty(&settings_patch);
+                let preferences = if preferences_changed {
+                    update_preferences(&client, &config_for_command, &patch).await?
+                } else {
+                    match baseline {
                         Some(preferences) => preferences,
                         None => fetch_preferences(&client, &config_for_command).await?,
-                    };
-                    (preferences, "No settings changes to apply".to_string())
+                    }
+                };
+                let settings = if settings_changed {
+                    update_app_settings(&client, &config_for_command, &settings_patch).await?
                 } else {
-                    (
-                        update_preferences(&client, &config_for_command, &patch).await?,
-                        "Settings applied".to_string(),
-                    )
+                    settings_baseline
+                };
+                let status = if preferences_changed || settings_changed {
+                    if settings_changed {
+                        "Settings applied; restart daemon for bind, port, NAT, VPN, and filter changes"
+                    } else {
+                        "Settings applied"
+                    }
+                } else {
+                    "No settings changes to apply"
                 };
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
-                Ok((snapshot, None, None, Some((preferences, status))))
+                Ok((
+                    snapshot,
+                    None,
+                    None,
+                    Some((preferences, settings, status.to_string())),
+                ))
             }),
             Some(UiCommand::TransferAction { hash, action }) => runtime.block_on(async {
                 if hash.trim().is_empty() {
@@ -264,9 +295,10 @@ pub(super) fn worker_loop(
                     store_search(&cache, Some(search.clone()));
                     publish_search(&weak, search);
                 }
-                if let Some((preferences, status)) = preferences {
+                if let Some((preferences, settings, status)) = preferences {
                     store_preferences(&cache, preferences.clone());
-                    publish_preferences(&weak, preferences, status);
+                    store_app_settings(&cache, settings.clone());
+                    publish_preferences(&weak, preferences, settings, status);
                 }
                 store_snapshot(&cache, snapshot.clone());
                 publish_snapshot(&weak, snapshot);
@@ -364,6 +396,53 @@ fn preferences_update_from_form(
     Ok(changed_preferences_update(&next, baseline))
 }
 
+fn app_settings_update_from_form(
+    form: &AppSettingsForm,
+    baseline: &AppSettings,
+) -> Result<AppSettingsUpdate> {
+    let mut next = baseline.clone();
+    next.daemon_runtime.incoming_dir = optional_path_buf(&form.incoming_dir);
+    next.daemon_runtime.p2p_bind_ip = optional_ipv4(&form.p2p_bind_ip, "P2P bind IP")?;
+    next.daemon_runtime.p2p_bind_interface = optional_string(form.p2p_bind_interface.clone());
+    next.ed2k.listen_port = optional_u16(&form.ed2k_listen_port, "eD2K listen port")?;
+    next.ed2k.obfuscation_enabled = form.ed2k_obfuscation_enabled;
+    next.ed2k.connect_timeout_secs =
+        parse_u64(&form.ed2k_connect_timeout_secs, "eD2K connect timeout")?;
+    next.ed2k.reconnect_interval_secs = parse_u64(
+        &form.ed2k_reconnect_interval_secs,
+        "eD2K reconnect interval",
+    )?;
+    next.ed2k.enable_udp_reask = form.ed2k_enable_udp_reask;
+    next.ed2k.publish_emule_rust_identity = form.ed2k_publish_emule_rust_identity;
+    next.kad.listen_port = optional_u16(&form.kad_listen_port, "Kad listen port")?;
+    next.kad.bootstrap_min_routing_contacts = parse_usize(
+        &form.kad_bootstrap_min_routing_contacts,
+        "Kad bootstrap minimum routing contacts",
+    )?;
+    next.kad.publish_shared_files_enabled = form.kad_publish_shared_files_enabled;
+    next.kad.routing_maintenance_enabled = form.kad_routing_maintenance_enabled;
+    next.nat.enabled = form.nat_enabled;
+    next.nat.require_initial_mapping = form.nat_require_initial_mapping;
+    next.nat.bind_ip = optional_string(form.nat_bind_ip.clone());
+    next.nat.external_ip_override = optional_string(form.nat_external_ip_override.clone());
+    next.vpn_guard.enabled = form.vpn_guard_enabled;
+    next.vpn_guard.mode = form.vpn_guard_mode.trim().to_string();
+    next.vpn_guard.allowed_public_ip_cidrs =
+        form.vpn_guard_allowed_public_ip_cidrs.trim().to_string();
+    next.ip_filter.enabled = form.ip_filter_enabled;
+    next.ip_filter.path = optional_path_buf(&form.ip_filter_path);
+    next.ip_filter.level = parse_u32(&form.ip_filter_level, "IP filter level")?;
+
+    Ok(AppSettingsUpdate {
+        daemon_runtime: changed_section(&next.daemon_runtime, &baseline.daemon_runtime),
+        ed2k: changed_section(&next.ed2k, &baseline.ed2k),
+        kad: changed_section(&next.kad, &baseline.kad),
+        nat: changed_section(&next.nat, &baseline.nat),
+        vpn_guard: changed_section(&next.vpn_guard, &baseline.vpn_guard),
+        ip_filter: changed_section(&next.ip_filter, &baseline.ip_filter),
+    })
+}
+
 fn parse_u16(value: &str, name: &str) -> Result<u16> {
     value
         .trim()
@@ -371,7 +450,62 @@ fn parse_u16(value: &str, name: &str) -> Result<u16> {
         .with_context(|| format!("{name} must be a TCP port"))
 }
 
+fn optional_u16(value: &str, name: &str) -> Result<Option<u16>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u16>()
+        .map(Some)
+        .with_context(|| format!("{name} must be a TCP port"))
+}
+
+fn parse_u64(value: &str, name: &str) -> Result<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be an unsigned number"))
+}
+
+fn parse_usize(value: &str, name: &str) -> Result<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("{name} must be an unsigned number"))
+}
+
+fn parse_u32(value: &str, name: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("{name} must be an unsigned number"))
+}
+
+fn optional_ipv4(value: &str, name: &str) -> Result<Option<std::net::Ipv4Addr>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<std::net::Ipv4Addr>()
+        .map(Some)
+        .with_context(|| format!("{name} must be an IPv4 address"))
+}
+
+fn optional_path_buf(value: &str) -> Option<std::path::PathBuf> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| std::path::PathBuf::from(value))
+}
+
 fn optional_string(value: String) -> Option<String> {
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn changed_section<T>(next: &T, baseline: &T) -> Option<T>
+where
+    T: Clone + PartialEq,
+{
+    (next != baseline).then(|| next.clone())
 }
