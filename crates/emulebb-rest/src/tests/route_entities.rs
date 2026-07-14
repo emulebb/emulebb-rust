@@ -47,6 +47,42 @@ async fn servers_use_canonical_crud_routes() {
     assert_eq!(value["data"]["name"], "renamed");
     assert_eq!(value["data"]["priority"], "high");
 
+    let disable = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/servers/192.0.2.20:4661")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disable.status(), StatusCode::OK);
+    let body = to_bytes(disable.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+
+    let enable = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/servers/192.0.2.20:4661")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enable.status(), StatusCode::OK);
+    let body = to_bytes(enable.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], true);
+
     let delete = app
         .clone()
         .oneshot(

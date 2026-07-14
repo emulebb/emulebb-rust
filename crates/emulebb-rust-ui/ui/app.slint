@@ -210,6 +210,7 @@ export component MainWindow inherits Window {
     in-out property <string> server-name;
     in-out property <string> server-priority;
     in-out property <bool> server-static;
+    in-out property <bool> server-enabled;
     in-out property <bool> server-connect-after-add;
     in-out property <string> server-import-url;
     in-out property <[TransferItem]> transfers;
@@ -565,6 +566,7 @@ export component MainWindow inherits Window {
                                 LineEdit { text <=> root.server-name; placeholder-text: "Name"; min-width: 180px; }
                                 LineEdit { text <=> root.server-priority; placeholder-text: "low, normal, high"; min-width: 130px; }
                                 CheckBox { text: "Static"; checked <=> root.server-static; }
+                                CheckBox { text: "Enabled"; checked <=> root.server-enabled; }
                                 CheckBox { text: "Connect"; checked <=> root.server-connect-after-add; }
                                 Button { text: "Add"; enabled: !root.is-refreshing; clicked => { root.server-add-requested(); } }
                                 Button {
@@ -610,6 +612,7 @@ export component MainWindow inherits Window {
                                 root.server-name = root.servers[row].name;
                                 root.server-priority = root.servers[row].priority;
                                 root.server-static = root.servers[row].static-server;
+                                root.server-enabled = root.servers[row].enabled;
                                 root.selected-server-enabled = root.servers[row].enabled;
                                 root.selected-server-connected = root.servers[row].connected;
                                 root.selected-server-connecting = root.servers[row].connecting;

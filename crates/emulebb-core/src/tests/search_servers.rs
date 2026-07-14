@@ -252,6 +252,46 @@ async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
 }
 
 #[tokio::test]
+async fn server_update_reenables_disabled_runtime_servers() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.add_server(ServerCreate {
+        address: "203.0.113.21".to_string(),
+        port: 4661,
+        name: None,
+        priority: None,
+        static_server: Some(false),
+        connect: None,
+    })
+    .await
+    .unwrap();
+    core.remove_server("203.0.113.21:4661").await.unwrap();
+
+    let updated = core
+        .update_server(
+            "203.0.113.21:4661",
+            ServerUpdate {
+                enabled: Some(true),
+                ..ServerUpdate::default()
+            },
+        )
+        .await
+        .unwrap()
+        .expect("server is visible while disabled");
+
+    assert!(updated.enabled);
+    let config = core
+        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        config
+            .server_entries
+            .iter()
+            .any(|entry| entry.host == "203.0.113.21" && entry.port == 4661)
+    );
+}
+
+#[tokio::test]
 async fn effective_ed2k_config_honors_reconnect_preference() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     core.update_preferences(PreferencesUpdate {

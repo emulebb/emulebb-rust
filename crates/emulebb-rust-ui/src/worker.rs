@@ -322,6 +322,7 @@ fn server_update_request(form: ServerForm) -> ServerUpdateRequest {
         name: optional_string(form.name),
         priority: optional_string(form.priority),
         static_server: Some(form.static_server),
+        enabled: Some(form.enabled),
     }
 }
 

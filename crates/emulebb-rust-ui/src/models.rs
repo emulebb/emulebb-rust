@@ -260,6 +260,7 @@ pub(super) struct ServerForm {
     pub(super) name: String,
     pub(super) priority: String,
     pub(super) static_server: bool,
+    pub(super) enabled: bool,
     pub(super) connect: bool,
 }
 
@@ -287,6 +288,8 @@ pub(super) struct ServerUpdateRequest {
     pub(super) priority: Option<String>,
     #[serde(rename = "static", skip_serializing_if = "Option::is_none")]
     pub(super) static_server: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

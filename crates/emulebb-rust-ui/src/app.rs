@@ -156,6 +156,7 @@ pub(crate) fn run() -> Result<()> {
     ui.set_server_port("4661".into());
     ui.set_server_name("".into());
     ui.set_server_priority("normal".into());
+    ui.set_server_enabled(true);
     ui.set_server_import_url("".into());
     ui.set_transfers(empty_model());
     ui.set_search_results(empty_model());
@@ -446,6 +447,7 @@ fn server_form(ui: &MainWindow) -> ServerForm {
         name: ui.get_server_name().to_string(),
         priority: ui.get_server_priority().to_string(),
         static_server: ui.get_server_static(),
+        enabled: ui.get_server_enabled(),
         connect: ui.get_server_connect_after_add(),
     }
 }

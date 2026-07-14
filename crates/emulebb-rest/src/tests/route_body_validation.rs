@@ -764,7 +764,10 @@ async fn server_patch_body_uses_canonical_validation() {
     let app = test_router();
     let uri = "/api/v1/servers/127.0.0.1:4661";
     let cases = [
-        (r#"{}"#, "server PATCH requires name, priority, or static"),
+        (
+            r#"{}"#,
+            "server PATCH requires name, priority, static, or enabled",
+        ),
         (r#"{"name":1}"#, "name must be a string when provided"),
         (r#"{"priority":1}"#, "priority must be a string"),
         (
@@ -772,6 +775,7 @@ async fn server_patch_body_uses_canonical_validation() {
             "priority must be one of low, normal, high",
         ),
         (r#"{"static":"true"}"#, "static must be a boolean"),
+        (r#"{"enabled":"true"}"#, "enabled must be a boolean"),
     ];
 
     for (body, expected_message) in cases {

@@ -84,6 +84,7 @@ async fn profile_state_survives_core_restart() {
                 name: Some("Server Renamed".to_string()),
                 priority: Some("low".to_string()),
                 static_server: Some(false),
+                enabled: None,
             },
         )
         .await

@@ -46,15 +46,28 @@ impl EmulebbCore {
         validate_server_update(&request)?;
         apply_server_update(&mut server, Some(&request));
         let mut state = self.state.lock().await;
-        let enabled = !state.disabled_servers.contains(&server.endpoint);
+        let enabled = request
+            .enabled
+            .unwrap_or_else(|| !state.disabled_servers.contains(&server.endpoint));
         server.enabled = enabled;
         profile_state::persist_server(&self.metadata_store, &server, enabled)?;
+        if enabled {
+            state.disabled_servers.remove(&server.endpoint);
+        } else {
+            state.disabled_servers.insert(server.endpoint.clone());
+        }
         state
             .servers
             .insert(server.endpoint.clone(), server.clone());
         state
             .server_overrides
             .insert(server.endpoint.clone(), request);
+        let disconnect_current = !enabled && server.current;
+        drop(state);
+        if disconnect_current {
+            self.disconnect_ed2k().await;
+            return Ok(self.server(&server.endpoint).await);
+        }
         Ok(Some(server))
     }
 

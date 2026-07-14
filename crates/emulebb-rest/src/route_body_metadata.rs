@@ -181,7 +181,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];
     const SERVER_CREATE: &[&str] = &["address", "port", "name", "priority", "static", "connect"];
-    const SERVER_PATCH: &[&str] = &["name", "priority", "static"];
+    const SERVER_PATCH: &[&str] = &["name", "priority", "static", "enabled"];
     const CATEGORY: &[&str] = &["name", "path", "comment", "color", "priority"];
     const FRIEND_CREATE: &[&str] = &["userHash", "name"];
     const SEARCH_CREATE: &[&str] = &[

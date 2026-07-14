@@ -251,9 +251,10 @@ pub(super) fn validate_server_patch_body_fields(object: &JsonObject) -> Result<(
     if !object.contains_key("name")
         && !object.contains_key("priority")
         && !object.contains_key("static")
+        && !object.contains_key("enabled")
     {
         return Err(invalid_body_error(
-            "server PATCH requires name, priority, or static",
+            "server PATCH requires name, priority, static, or enabled",
         ));
     }
     validate_optional_server_body_fields(object, false)
@@ -393,6 +394,12 @@ fn validate_optional_server_body_fields(
         .is_some_and(|value| !value.is_boolean())
     {
         return Err(invalid_body_error("static must be a boolean"));
+    }
+    if object
+        .get("enabled")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid_body_error("enabled must be a boolean"));
     }
     if allow_connect
         && object

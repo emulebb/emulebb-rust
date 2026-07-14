@@ -129,6 +129,8 @@ pub struct ServerUpdate {
     pub priority: Option<String>,
     #[serde(default, rename = "static")]
     pub static_server: Option<bool>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

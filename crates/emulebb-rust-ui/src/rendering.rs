@@ -307,6 +307,7 @@ fn restore_selection(ui: &MainWindow, selected: Selection) {
                 ui.set_selected_id(item.endpoint_id.clone());
                 ui.set_inspector_title(item.name.clone());
                 ui.set_inspector_detail(item.detail.clone());
+                ui.set_server_enabled(item.enabled);
                 ui.set_selected_server_enabled(item.enabled);
                 ui.set_selected_server_connected(item.connected);
                 ui.set_selected_server_connecting(item.connecting);
