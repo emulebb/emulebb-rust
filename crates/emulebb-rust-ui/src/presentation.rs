@@ -692,13 +692,17 @@ pub(super) fn network_line(stats: &Stats, kad: &KadDto) -> String {
             "low-id"
         },
         kad_mode,
-        if kad.firewalled || stats.kad_firewalled {
-            "firewalled"
-        } else {
-            "open"
-        },
+        kad_firewall_label(kad.firewalled.or(stats.kad_firewalled)),
         kad.contact_count.unwrap_or(0)
     )
+}
+
+fn kad_firewall_label(firewalled: Option<bool>) -> &'static str {
+    match firewalled {
+        Some(true) => "firewalled",
+        Some(false) => "open",
+        None => "unknown",
+    }
 }
 
 pub(super) fn speed_line(stats: &Stats) -> String {

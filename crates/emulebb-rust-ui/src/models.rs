@@ -77,7 +77,7 @@ pub(super) struct Stats {
     pub(super) ed2k_high_id: bool,
     pub(super) kad_running: bool,
     pub(super) kad_connected: bool,
-    pub(super) kad_firewalled: bool,
+    pub(super) kad_firewalled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -85,7 +85,7 @@ pub(super) struct Stats {
 pub(super) struct KadDto {
     pub(super) running: bool,
     pub(super) connected: bool,
-    pub(super) firewalled: bool,
+    pub(super) firewalled: Option<bool>,
     pub(super) bootstrapping: bool,
     pub(super) contact_count: Option<u64>,
     pub(super) users: Option<u64>,
@@ -283,4 +283,70 @@ pub(super) struct ServerUpdateRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct UrlImportRequest {
     pub(super) url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_accepts_unknown_kad_firewall_state() {
+        let raw = r#"{
+            "data": {
+                "app": {
+                    "name": "eMuleBB Rust",
+                    "version": "0.1.0",
+                    "lifecycle": {
+                        "state": "running",
+                        "startupComplete": true,
+                        "acceptingRest": true,
+                        "acceptingMutations": true
+                    }
+                },
+                "status": {
+                    "lifecycle": {
+                        "state": "running",
+                        "startupComplete": true,
+                        "acceptingRest": true,
+                        "acceptingMutations": true
+                    },
+                    "stats": {
+                        "connected": false,
+                        "downloadSpeedKiBps": 0.0,
+                        "uploadSpeedKiBps": 0.0,
+                        "sessionDownloadedBytes": 0,
+                        "sessionUploadedBytes": 0,
+                        "activeUploads": 0,
+                        "waitingUploads": 0,
+                        "downloadCount": 0,
+                        "ed2kConnected": false,
+                        "ed2kHighId": false,
+                        "kadRunning": false,
+                        "kadConnected": false,
+                        "kadFirewalled": null
+                    }
+                },
+                "transfers": [],
+                "sharedFiles": [],
+                "uploads": [],
+                "uploadQueue": [],
+                "servers": [],
+                "kad": {
+                    "running": false,
+                    "connected": false,
+                    "firewalled": null,
+                    "bootstrapping": false,
+                    "contactCount": 0,
+                    "users": null,
+                    "files": null
+                },
+                "logs": []
+            }
+        }"#;
+
+        let envelope: Envelope<Snapshot> = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(envelope.data.status.stats.kad_firewalled, None);
+        assert_eq!(envelope.data.kad.firewalled, None);
+    }
 }
