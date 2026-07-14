@@ -51,7 +51,7 @@ pub struct DaemonProfile {
     pub kad_bootstrap_endpoints: Vec<String>,
     pub ed2k: Ed2kRuntimeConfig,
     pub nat: NatConfig,
-    pub rest: RestListenerConfig,
+    pub rest: RestBootstrapSettings,
     pub vpn_guard: VpnGuardSettings,
     pub ip_filter: IpFilterSettings,
 }
@@ -59,12 +59,12 @@ pub struct DaemonProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct DaemonBootstrapSettings {
-    pub rest: RestListenerConfig,
+    pub rest: RestBootstrapSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct RestListenerConfig {
+pub struct RestBootstrapSettings {
     pub bind_addr: Option<SocketAddr>,
     pub api_key: String,
 }
@@ -82,7 +82,7 @@ impl Default for DaemonProfile {
             kad_bootstrap_endpoints: Vec::new(),
             ed2k: Ed2kRuntimeConfig::default(),
             nat: NatConfig::default(),
-            rest: RestListenerConfig::default(),
+            rest: RestBootstrapSettings::default(),
             vpn_guard: VpnGuardSettings::default(),
             ip_filter: IpFilterSettings::default(),
         }
@@ -92,12 +92,12 @@ impl Default for DaemonProfile {
 impl Default for DaemonBootstrapSettings {
     fn default() -> Self {
         Self {
-            rest: RestListenerConfig::default(),
+            rest: RestBootstrapSettings::default(),
         }
     }
 }
 
-impl Default for RestListenerConfig {
+impl Default for RestBootstrapSettings {
     fn default() -> Self {
         Self {
             bind_addr: None,

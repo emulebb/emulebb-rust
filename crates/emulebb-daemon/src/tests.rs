@@ -54,9 +54,9 @@ fn profile_with_server(profile_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> D
 fn profile_with_rest_bind(profile_dir: PathBuf, bind_addr: Option<SocketAddr>) -> DaemonProfile {
     DaemonProfile {
         profile_dir,
-        rest: RestListenerConfig {
+        rest: RestBootstrapSettings {
             bind_addr,
-            ..RestListenerConfig::default()
+            ..RestBootstrapSettings::default()
         },
         ..DaemonProfile::default()
     }
