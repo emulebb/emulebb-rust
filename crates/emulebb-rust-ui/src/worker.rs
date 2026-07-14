@@ -91,18 +91,24 @@ pub(super) fn worker_loop(
             Some(UiCommand::PreferencesApply { form }) => runtime.block_on(async {
                 let baseline = cached_preferences(&cache);
                 let patch = preferences_update_from_form(&form, baseline.as_ref())?;
-                let preferences = if preferences_update_is_empty(&patch) {
-                    publish_settings_status(&weak, "No settings changes to apply".to_string());
-                    fetch_preferences(&client, &config_for_command).await?
+                let (preferences, status) = if preferences_update_is_empty(&patch) {
+                    let preferences = match baseline {
+                        Some(preferences) => preferences,
+                        None => fetch_preferences(&client, &config_for_command).await?,
+                    };
+                    (preferences, "No settings changes to apply".to_string())
                 } else {
-                    update_preferences(&client, &config_for_command, &patch).await?
+                    (
+                        update_preferences(&client, &config_for_command, &patch).await?,
+                        "Settings applied".to_string(),
+                    )
                 };
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((
                     snapshot,
                     None,
                     None,
-                    Some((preferences, "Settings applied".to_string())),
+                    Some((preferences, status)),
                 ))
             }),
             Some(UiCommand::TransferAction { hash, action }) => runtime.block_on(async {

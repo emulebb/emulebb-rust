@@ -57,15 +57,6 @@ pub(super) fn publish_preferences(
     });
 }
 
-pub(super) fn publish_settings_status(weak: &slint::Weak<MainWindow>, status: String) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            ui.set_settings_status_line(status.into());
-        }
-    });
-}
-
 pub(super) fn publish_empty_search(weak: &slint::Weak<MainWindow>, status: &str) {
     let status = status.to_string();
     let weak = weak.clone();
