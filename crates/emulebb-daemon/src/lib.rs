@@ -321,9 +321,9 @@ fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettin
         ed2k: ed2k_runtime_config_from_settings(ed2k_settings),
         nat: nat_config_from_settings(nat_settings),
         vpn_guard: load_section_settings(metadata, SECTION_VPN_GUARD)
-            .context("failed to load vpn_guard settings")?,
+            .context("failed to load vpn.guard settings")?,
         ip_filter: load_section_settings(metadata, SECTION_IP_FILTER)
-            .context("failed to load ip_filter settings")?,
+            .context("failed to load ip.filter settings")?,
     })
 }
 

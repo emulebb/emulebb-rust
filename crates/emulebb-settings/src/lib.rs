@@ -8,8 +8,8 @@ pub const SECTION_DAEMON_RUNTIME: &str = "daemon.runtime";
 pub const SECTION_ED2K: &str = "ed2k";
 pub const SECTION_KAD: &str = "kad";
 pub const SECTION_NAT: &str = "nat";
-pub const SECTION_VPN_GUARD: &str = "vpn_guard";
-pub const SECTION_IP_FILTER: &str = "ip_filter";
+pub const SECTION_VPN_GUARD: &str = "vpn.guard";
+pub const SECTION_IP_FILTER: &str = "ip.filter";
 
 pub const DEFAULT_IP_FILTER_LEVEL: u32 = 127;
 pub const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
