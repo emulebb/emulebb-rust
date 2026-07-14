@@ -56,7 +56,7 @@ pub struct DaemonProfile {
     pub ip_filter: IpFilterSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct DaemonBootstrapSettings {
     pub rest: RestBootstrapSettings,
@@ -85,14 +85,6 @@ impl Default for DaemonProfile {
             rest: RestBootstrapSettings::default(),
             vpn_guard: VpnGuardSettings::default(),
             ip_filter: IpFilterSettings::default(),
-        }
-    }
-}
-
-impl Default for DaemonBootstrapSettings {
-    fn default() -> Self {
-        Self {
-            rest: RestBootstrapSettings::default(),
         }
     }
 }
