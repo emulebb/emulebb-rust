@@ -68,7 +68,8 @@ CREATE TABLE known_files (
     md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
-    upload_priority TEXT NOT NULL DEFAULT 'normal',
+    upload_priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(upload_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'release')),
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
@@ -90,7 +91,7 @@ CREATE TABLE file_names (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
-    source_kind TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('index')),
     seen_count INTEGER NOT NULL DEFAULT 1,
     first_seen_ms INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL,
@@ -143,7 +144,7 @@ CREATE TABLE verified_ranges (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL,
     end_offset INTEGER NOT NULL,
-    source_kind TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('ed2k_transfer')),
     created_at_ms INTEGER NOT NULL,
     CHECK(end_offset >= start_offset)
 );
@@ -200,10 +201,11 @@ CREATE TABLE unshared_files (
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    visible_state TEXT NOT NULL,
-    control_state TEXT,
+    visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'controlled', 'downloading', 'queued')),
+    control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
     category_id INTEGER REFERENCES categories(id),
-    priority TEXT NOT NULL DEFAULT 'normal',
+    priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
     -- Absolute path identity for the completed payload materialized under a
@@ -252,7 +254,7 @@ CREATE TABLE transfer_pieces (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     piece_index INTEGER NOT NULL,
-    state TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('Missing', 'Requested', 'Written', 'Verified')),
     bytes_written INTEGER NOT NULL DEFAULT 0,
     block_bitmap TEXT,
     ich_corrupted INTEGER NOT NULL DEFAULT 0,
@@ -266,7 +268,7 @@ CREATE TABLE servers (
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     name TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
-    priority TEXT NOT NULL DEFAULT 'normal',
+    priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low', 'normal', 'high')),
     static_server INTEGER NOT NULL DEFAULT 0 CHECK(static_server IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     failed_count INTEGER NOT NULL DEFAULT 0,
@@ -342,7 +344,7 @@ CREATE TABLE kad_keyword_publishes (
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
     raw_tags BLOB NOT NULL,
-    load INTEGER,
+    load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
     observed_at_ms INTEGER NOT NULL
 );
@@ -356,7 +358,7 @@ CREATE TABLE kad_source_publishes (
     source_tcp_port INTEGER NOT NULL,
     source_udp_port INTEGER NOT NULL,
     raw_tags BLOB NOT NULL,
-    load INTEGER,
+    load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
     observed_at_ms INTEGER NOT NULL
 );
@@ -368,7 +370,7 @@ CREATE TABLE kad_note_publishes (
     publisher_ip TEXT NOT NULL,
     file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
     raw_tags BLOB NOT NULL,
-    load INTEGER,
+    load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
     observed_at_ms INTEGER NOT NULL
 );
@@ -388,9 +390,9 @@ CREATE TABLE search_sessions (
     public_id TEXT NOT NULL UNIQUE,
     query TEXT NOT NULL,
     normalized_query TEXT NOT NULL,
-    method TEXT NOT NULL,
+    method TEXT NOT NULL CHECK(method IN ('automatic', 'server', 'global', 'kad')),
     search_type TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     completed_at_ms INTEGER
@@ -400,7 +402,7 @@ CREATE TABLE search_results (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
-    source_method TEXT NOT NULL,
+    source_method TEXT NOT NULL CHECK(source_method IN ('automatic', 'server', 'global', 'kad')),
     file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
     name TEXT NOT NULL,
     size_bytes INTEGER,
