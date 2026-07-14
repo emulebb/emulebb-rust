@@ -409,7 +409,7 @@ pub struct Ed2kUploadQueueSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct KadListenerConfig {
+pub struct KadSettings {
     pub listen_port: Option<u16>,
     pub bootstrap_min_routing_contacts: usize,
     pub local_store_enabled: bool,
@@ -573,7 +573,7 @@ impl Default for Ed2kUploadQueueSettings {
     }
 }
 
-impl Default for KadListenerConfig {
+impl Default for KadSettings {
     fn default() -> Self {
         Self {
             listen_port: None,

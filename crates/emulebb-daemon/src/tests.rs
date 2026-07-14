@@ -35,9 +35,9 @@ fn config_with_ed2k_network(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>)
     DaemonConfig {
         runtime_dir,
         p2p_bind_ip,
-        kad: KadListenerConfig {
+        kad: KadSettings {
             listen_port: Some(41002),
-            ..KadListenerConfig::default()
+            ..KadSettings::default()
         },
         ed2k,
         ..DaemonConfig::default()
@@ -521,7 +521,7 @@ autoConnect = false
 #[test]
 fn kad_local_store_config_is_config_driven_and_clamped() {
     let config = DaemonConfig {
-        kad: KadListenerConfig {
+        kad: KadSettings {
             listen_port: Some(41002),
             local_store_enabled: false,
             local_store_keyword_ttl_secs: 0,
@@ -530,7 +530,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
             local_store_keyword_capacity: 0,
             local_store_source_capacity: 0,
             local_store_notes_capacity: 0,
-            ..KadListenerConfig::default()
+            ..KadSettings::default()
         },
         ..DaemonConfig::default()
     };
@@ -549,7 +549,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
 #[test]
 fn kad_local_store_defaults_follow_index_defaults() {
     let defaults = KadLocalStoreConfig::default();
-    let config = kad_local_store_config(&KadListenerConfig::default());
+    let config = kad_local_store_config(&KadSettings::default());
 
     assert_eq!(config.keyword_capacity, defaults.keyword_capacity);
     assert_eq!(config.source_capacity, defaults.source_capacity);
@@ -567,7 +567,7 @@ fn kad_local_store_defaults_follow_index_defaults() {
 #[test]
 fn kad_snoop_queue_config_is_config_driven_and_clamped() {
     let config = DaemonConfig {
-        kad: KadListenerConfig {
+        kad: KadSettings {
             listen_port: Some(41002),
             snoop_queue_dedup_window_secs: 0,
             snoop_queue_general_max_queries_per_600s: 0,
@@ -575,7 +575,7 @@ fn kad_snoop_queue_config_is_config_driven_and_clamped() {
             snoop_queue_source_max_queries_per_600s: 0,
             snoop_queue_source_drain_cooldown_secs: 0,
             snoop_queue_source_stop_after_results: 0,
-            ..KadListenerConfig::default()
+            ..KadSettings::default()
         },
         ..DaemonConfig::default()
     };

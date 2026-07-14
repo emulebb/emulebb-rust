@@ -19,9 +19,9 @@ use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
 use emulebb_rest::{RestConfig, router_with_shutdown};
 use emulebb_settings::{
-    DaemonRuntimeSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings,
-    KadListenerConfig, NatSettings, SECTION_DAEMON_RUNTIME, SECTION_ED2K, SECTION_IP_FILTER,
-    SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, VpnGuardSettings,
+    DaemonRuntimeSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
+    NatSettings, SECTION_DAEMON_RUNTIME, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
+    SECTION_VPN_GUARD, VpnGuardSettings,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -44,7 +44,7 @@ pub struct DaemonConfig {
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
-    pub kad: KadListenerConfig,
+    pub kad: KadSettings,
     pub kad_bootstrap_nodes: Vec<String>,
     pub ed2k: Ed2kRuntimeConfig,
     pub nat: NatConfig,
@@ -76,7 +76,7 @@ impl Default for DaemonConfig {
             p2p_bind_ip: runtime.p2p_bind_ip,
             p2p_bind_interface: runtime.p2p_bind_interface,
             ed2k_user_hash: runtime.ed2k_user_hash,
-            kad: KadListenerConfig::default(),
+            kad: KadSettings::default(),
             kad_bootstrap_nodes: Vec::new(),
             ed2k: Ed2kRuntimeConfig::default(),
             nat: NatConfig::default(),
@@ -137,9 +137,6 @@ impl DaemonConfig {
             vpn_guard: runtime.vpn_guard,
             ip_filter: runtime.ip_filter,
         };
-        config
-            .validate_no_inline_servers()
-            .context("invalid runtime server config in metadata store")?;
         config
             .nat
             .validate()
@@ -233,15 +230,6 @@ impl DaemonConfig {
         }))
     }
 
-    fn validate_no_inline_servers(&self) -> Result<()> {
-        if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
-            return Ok(());
-        }
-        bail!(
-            "ed2k.serverEndpoints and ed2k.serverEntries are no longer accepted in daemon runtime config; add/import servers into the SQLite profile instead"
-        )
-    }
-
     fn has_network_bootstrap(&self, metadata: &MetadataStore) -> Result<bool> {
         if !self.kad_bootstrap_nodes.is_empty() {
             return Ok(true);
@@ -306,7 +294,7 @@ impl DaemonConfig {
 
 struct LoadedRuntimeSettings {
     daemon: DaemonRuntimeSettings,
-    kad: KadListenerConfig,
+    kad: KadSettings,
     kad_bootstrap_nodes: Vec<String>,
     ed2k: Ed2kRuntimeConfig,
     nat: NatConfig,
@@ -424,7 +412,7 @@ fn nat_config_from_settings(settings: NatSettings) -> NatConfig {
     }
 }
 
-fn kad_local_store_config(settings: &KadListenerConfig) -> KadLocalStoreConfig {
+fn kad_local_store_config(settings: &KadSettings) -> KadLocalStoreConfig {
     KadLocalStoreConfig {
         enabled: settings.local_store_enabled,
         keyword_ttl: std::time::Duration::from_secs(settings.local_store_keyword_ttl_secs.max(1)),
@@ -438,7 +426,7 @@ fn kad_local_store_config(settings: &KadListenerConfig) -> KadLocalStoreConfig {
     }
 }
 
-fn kad_snoop_queue_config(settings: &KadListenerConfig) -> SnoopQueueConfig {
+fn kad_snoop_queue_config(settings: &KadSettings) -> SnoopQueueConfig {
     SnoopQueueConfig {
         dedup_window_secs: settings.snoop_queue_dedup_window_secs.max(1),
         general_max_queries_per_600s: settings.snoop_queue_general_max_queries_per_600s.max(1),
