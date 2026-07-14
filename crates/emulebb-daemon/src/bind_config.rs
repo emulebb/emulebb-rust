@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use emulebb_core::vpn_guard::binding_confirmed;
 use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface};
 
-use crate::DaemonConfig;
+use crate::DaemonProfile;
 
-impl DaemonConfig {
+impl DaemonProfile {
     pub(crate) fn resolve_p2p_bind_ip_from_interfaces(
         &self,
         interfaces: &[NetworkInterface],

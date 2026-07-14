@@ -38,8 +38,8 @@ pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct DaemonConfig {
-    pub runtime_dir: PathBuf,
+pub struct DaemonProfile {
+    pub profile_dir: PathBuf,
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
     /// by its canonical name. Defaults to `<profile>/incoming` when unset.
@@ -69,11 +69,11 @@ pub struct RestListenerConfig {
     pub api_key: String,
 }
 
-impl Default for DaemonConfig {
+impl Default for DaemonProfile {
     fn default() -> Self {
         let runtime = DaemonRuntimeSettings::default();
         Self {
-            runtime_dir: PathBuf::from("runtime"),
+            profile_dir: PathBuf::from("runtime"),
             incoming_dir: runtime.incoming_dir,
             p2p_bind_ip: runtime.p2p_bind_ip,
             p2p_bind_interface: runtime.p2p_bind_interface,
@@ -106,11 +106,11 @@ impl Default for RestListenerConfig {
     }
 }
 
-impl DaemonConfig {
+impl DaemonProfile {
     pub fn load(profile_dir: Option<PathBuf>) -> Result<Self> {
-        let runtime_dir =
+        let profile_dir =
             profile_dir.context("--profile is required; profile directory owns settings and DB")?;
-        let settings_path = runtime_dir.join(PROFILE_SETTINGS_FILE);
+        let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
         if !settings_path.exists() {
             bail!(
                 "profile settings file does not exist: {}",
@@ -122,15 +122,15 @@ impl DaemonConfig {
         let bootstrap: DaemonBootstrapSettings = toml::from_str(&text)
             .with_context(|| format!("failed to parse settings {}", settings_path.display()))?;
         let metadata =
-            MetadataStore::open(runtime_dir.join(PROFILE_METADATA_FILE)).with_context(|| {
+            MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).with_context(|| {
                 format!(
                     "failed to open metadata store under {}",
-                    runtime_dir.display()
+                    profile_dir.display()
                 )
             })?;
         let runtime = load_runtime_settings(&metadata)?;
         let config = Self {
-            runtime_dir,
+            profile_dir,
             incoming_dir: runtime.daemon.incoming_dir,
             p2p_bind_ip: runtime.daemon.p2p_bind_ip,
             p2p_bind_interface: runtime.daemon.p2p_bind_interface,
@@ -151,11 +151,11 @@ impl DaemonConfig {
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        self.runtime_dir.join(PROFILE_METADATA_FILE)
+        self.profile_dir.join(PROFILE_METADATA_FILE)
     }
 
     pub fn transfer_root(&self) -> PathBuf {
-        self.runtime_dir.join("transfers")
+        self.profile_dir.join("transfers")
     }
 
     /// Resolve the finished-file delivery directory: the configured
@@ -163,7 +163,7 @@ impl DaemonConfig {
     pub fn incoming_dir(&self) -> PathBuf {
         self.incoming_dir
             .clone()
-            .unwrap_or_else(|| self.runtime_dir.join("incoming"))
+            .unwrap_or_else(|| self.profile_dir.join("incoming"))
     }
 
     pub fn ed2k_network_config(
@@ -529,24 +529,24 @@ async fn graceful_teardown(core: &Arc<EmulebbCore>) {
     }
 }
 
-pub async fn run(config: DaemonConfig) -> Result<()> {
-    fs::create_dir_all(&config.runtime_dir)
-        .with_context(|| format!("failed to create {}", config.runtime_dir.display()))?;
-    let index = FileIndex::open(config.metadata_path())?;
+pub async fn run(profile: DaemonProfile) -> Result<()> {
+    fs::create_dir_all(&profile.profile_dir)
+        .with_context(|| format!("failed to create {}", profile.profile_dir.display()))?;
+    let index = FileIndex::open(profile.metadata_path())?;
     let metadata_store = index.metadata_store();
-    let ed2k_network = config.ed2k_network_config(&metadata_store)?;
+    let ed2k_network = profile.ed2k_network_config(&metadata_store)?;
     let ed2k_network_configured = ed2k_network.is_some();
     let vpn_guard_monitor = ed2k_network
         .as_ref()
         .and_then(vpn_guard_monitor::monitor_config);
-    let incoming_dir = config.incoming_dir();
+    let incoming_dir = profile.incoming_dir();
     fs::create_dir_all(&incoming_dir)
         .with_context(|| format!("failed to create incoming dir {}", incoming_dir.display()))?;
     let core = Arc::new(
         EmulebbCore::new_with_network(
             env!("CARGO_PKG_VERSION"),
             index,
-            config.transfer_root(),
+            profile.transfer_root(),
             ed2k_network,
         )?
         .with_incoming_dir(incoming_dir),
@@ -556,11 +556,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let app = router_with_shutdown(
         Arc::clone(&core),
         RestConfig {
-            api_key: config.rest.api_key.clone(),
+            api_key: profile.rest.api_key.clone(),
         },
         Some(shutdown_tx.clone()),
     );
-    let rest_bind_addr = config.rest_bind_addr()?;
+    let rest_bind_addr = profile.rest_bind_addr()?;
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
 

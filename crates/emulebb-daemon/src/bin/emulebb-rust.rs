@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use emulebb_daemon::{DaemonConfig, LogBufferLayer, run};
+use emulebb_daemon::{DaemonProfile, LogBufferLayer, run};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -23,5 +23,5 @@ async fn main() -> Result<()> {
         .with(LogBufferLayer.with_filter(LevelFilter::INFO))
         .init();
     let cli = Cli::parse();
-    run(DaemonConfig::load(cli.profile)?).await
+    run(DaemonProfile::load(cli.profile)?).await
 }
