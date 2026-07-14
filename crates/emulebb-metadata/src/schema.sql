@@ -8,8 +8,8 @@ CREATE TABLE profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uuid TEXT NOT NULL UNIQUE,
     created_by TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
 );
 
 CREATE TABLE local_identities (
@@ -18,7 +18,7 @@ CREATE TABLE local_identities (
     public_identity BLOB,
     private_secret BLOB,
     created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     CHECK (public_identity IS NULL OR length(public_identity) IN (16, 20))
 );
 
@@ -40,9 +40,9 @@ CREATE TABLE categories (
     comment TEXT NOT NULL DEFAULT '',
     priority INTEGER NOT NULL DEFAULT 0,
     color INTEGER,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
 );
 
 CREATE TABLE friends (
@@ -50,20 +50,20 @@ CREATE TABLE friends (
     user_hash BLOB NOT NULL UNIQUE CHECK(length(user_hash) = 16),
     name TEXT NOT NULL,
     last_address TEXT,
-    last_port INTEGER NOT NULL DEFAULT 0,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER,
-    deleted_at_ms INTEGER
+    last_port INTEGER NOT NULL DEFAULT 0 CHECK(last_port BETWEEN 0 AND 65535),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER CHECK(last_seen_ms IS NULL OR last_seen_ms >= 0),
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0)
 );
 
 CREATE TABLE known_files (
     id INTEGER PRIMARY KEY,
     ed2k_hash BLOB NOT NULL UNIQUE CHECK(length(ed2k_hash) = 16),
-    size_bytes INTEGER NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
     display_name TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
-    part_size INTEGER,
-    part_count INTEGER,
+    part_size INTEGER CHECK(part_size IS NULL OR part_size > 0),
+    part_count INTEGER CHECK(part_count IS NULL OR part_count >= 0),
     completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
     md4_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(md4_hashset_acquired IN (0, 1)),
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
@@ -73,17 +73,17 @@ CREATE TABLE known_files (
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
-    availability_score INTEGER NOT NULL DEFAULT 0,
+    availability_score INTEGER NOT NULL DEFAULT 0 CHECK(availability_score >= 0),
     -- Lifetime bytes we have uploaded to other peers for this file (eMule
     -- CStatisticFile all-time transferred), used to derive the all-time upload
     -- ratio that feeds the upload-queue low-ratio score bonus.
-    all_time_uploaded_bytes INTEGER NOT NULL DEFAULT 0,
-    all_time_upload_requests INTEGER NOT NULL DEFAULT 0,
-    all_time_upload_accepts INTEGER NOT NULL DEFAULT 0,
-    last_upload_request_ms INTEGER NOT NULL DEFAULT 0,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    all_time_uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(all_time_uploaded_bytes >= 0),
+    all_time_upload_requests INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_requests >= 0),
+    all_time_upload_accepts INTEGER NOT NULL DEFAULT 0 CHECK(all_time_upload_accepts >= 0),
+    last_upload_request_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_upload_request_ms >= 0),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
 );
 
 CREATE TABLE file_names (
@@ -92,9 +92,9 @@ CREATE TABLE file_names (
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
     source_kind TEXT NOT NULL CHECK(source_kind IN ('index')),
-    seen_count INTEGER NOT NULL DEFAULT 1,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
+    seen_count INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     UNIQUE(known_file_id, normalized_name, source_kind)
 );
 
@@ -126,7 +126,7 @@ END;
 CREATE TABLE ed2k_part_hashes (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    part_index INTEGER NOT NULL,
+    part_index INTEGER NOT NULL CHECK(part_index >= 0),
     md4_hash BLOB NOT NULL CHECK(length(md4_hash) = 16),
     UNIQUE(known_file_id, part_index)
 );
@@ -134,7 +134,7 @@ CREATE TABLE ed2k_part_hashes (
 CREATE TABLE aich_part_hashes (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    part_index INTEGER NOT NULL,
+    part_index INTEGER NOT NULL CHECK(part_index >= 0),
     aich_hash BLOB NOT NULL CHECK(length(aich_hash) = 20),
     UNIQUE(known_file_id, part_index)
 );
@@ -142,7 +142,7 @@ CREATE TABLE aich_part_hashes (
 CREATE TABLE verified_ranges (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    start_offset INTEGER NOT NULL,
+    start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
     source_kind TEXT NOT NULL CHECK(source_kind IN ('ed2k_transfer')),
     created_at_ms INTEGER NOT NULL,
@@ -158,9 +158,9 @@ CREATE TABLE local_paths (
     platform TEXT NOT NULL,
     file_identity_kind TEXT,
     file_identity BLOB,
-    size_bytes INTEGER,
-    mtime_ms INTEGER,
-    last_stat_ms INTEGER,
+    size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+    mtime_ms INTEGER CHECK(mtime_ms IS NULL OR mtime_ms >= 0),
+    last_stat_ms INTEGER CHECK(last_stat_ms IS NULL OR last_stat_ms >= 0),
     UNIQUE(platform, normalized_key)
 );
 
@@ -172,9 +172,9 @@ CREATE TABLE shared_directory_roots (
     shareable INTEGER NOT NULL DEFAULT 1 CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL DEFAULT 1 CHECK(accessible IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
-    last_scan_ms INTEGER,
-    created_at_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER,
+    last_scan_ms INTEGER CHECK(last_scan_ms IS NULL OR last_scan_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
     UNIQUE(path_id)
 );
 
@@ -184,9 +184,9 @@ CREATE TABLE shared_file_memberships (
     root_id INTEGER NOT NULL REFERENCES shared_directory_roots(id),
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
     relative_path TEXT NOT NULL,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
-    removed_at_ms INTEGER,
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
     UNIQUE(known_file_id, root_id, path_id)
 );
 
@@ -194,7 +194,7 @@ CREATE TABLE unshared_files (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     reason TEXT NOT NULL DEFAULT '',
-    created_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     UNIQUE(known_file_id)
 );
 
@@ -220,11 +220,11 @@ CREATE TABLE transfers (
     -- from this row instead of being re-hashed. NULL for a real download or a
     -- share-in-place row written before this column existed (treated as a miss,
     -- so the file is re-hashed once and the mtime is then recorded).
-    source_mtime_ms INTEGER,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    completed_at_ms INTEGER,
-    removed_at_ms INTEGER,
+    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
     UNIQUE(known_file_id)
 );
 
@@ -232,33 +232,33 @@ CREATE TABLE shared_file_sources (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
-    file_size INTEGER NOT NULL,
-    source_mtime_ms INTEGER,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    file_size INTEGER NOT NULL CHECK(file_size >= 0),
+    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     UNIQUE(path_id)
 );
 
 CREATE TABLE shared_file_scan_failures (
     id INTEGER PRIMARY KEY,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
-    file_size INTEGER NOT NULL,
-    source_mtime_ms INTEGER,
+    file_size INTEGER NOT NULL CHECK(file_size >= 0),
+    source_mtime_ms INTEGER CHECK(source_mtime_ms IS NULL OR source_mtime_ms >= 0),
     reason TEXT NOT NULL DEFAULT '',
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     UNIQUE(path_id)
 );
 
 CREATE TABLE transfer_pieces (
     id INTEGER PRIMARY KEY,
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
-    piece_index INTEGER NOT NULL,
+    piece_index INTEGER NOT NULL CHECK(piece_index >= 0),
     state TEXT NOT NULL CHECK(state IN ('Missing', 'Requested', 'Written', 'Verified')),
-    bytes_written INTEGER NOT NULL DEFAULT 0,
+    bytes_written INTEGER NOT NULL DEFAULT 0 CHECK(bytes_written >= 0),
     block_bitmap TEXT,
-    ich_corrupted INTEGER NOT NULL DEFAULT 0,
-    updated_at_ms INTEGER NOT NULL,
+    ich_corrupted INTEGER NOT NULL DEFAULT 0 CHECK(ich_corrupted IN (0, 1)),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     UNIQUE(transfer_id, piece_index)
 );
 
@@ -271,18 +271,18 @@ CREATE TABLE servers (
     priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low', 'normal', 'high')),
     static_server INTEGER NOT NULL DEFAULT 0 CHECK(static_server IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    ping_ms INTEGER,
-    users INTEGER,
-    files INTEGER,
-    soft_files INTEGER,
-    hard_files INTEGER,
+    failed_count INTEGER NOT NULL DEFAULT 0 CHECK(failed_count >= 0),
+    ping_ms INTEGER CHECK(ping_ms IS NULL OR ping_ms >= 0),
+    users INTEGER CHECK(users IS NULL OR users >= 0),
+    files INTEGER CHECK(files IS NULL OR files >= 0),
+    soft_files INTEGER CHECK(soft_files IS NULL OR soft_files >= 0),
+    hard_files INTEGER CHECK(hard_files IS NULL OR hard_files >= 0),
     version TEXT NOT NULL DEFAULT '',
-    obfuscation_tcp_port INTEGER,
-    udp_flags INTEGER,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER,
+    obfuscation_tcp_port INTEGER CHECK(obfuscation_tcp_port IS NULL OR obfuscation_tcp_port BETWEEN 1 AND 65535),
+    udp_flags INTEGER CHECK(udp_flags IS NULL OR udp_flags >= 0),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    deleted_at_ms INTEGER CHECK(deleted_at_ms IS NULL OR deleted_at_ms >= 0),
     UNIQUE(address, port)
 );
 
@@ -294,8 +294,8 @@ CREATE TABLE peers (
     client_software TEXT NOT NULL DEFAULT '',
     client_mod TEXT NOT NULL DEFAULT '',
     last_address TEXT,
-    last_tcp_port INTEGER,
-    last_udp_port INTEGER,
+    last_tcp_port INTEGER CHECK(last_tcp_port IS NULL OR last_tcp_port BETWEEN 1 AND 65535),
+    last_udp_port INTEGER CHECK(last_udp_port IS NULL OR last_udp_port BETWEEN 1 AND 65535),
     low_id INTEGER NOT NULL DEFAULT 0 CHECK(low_id IN (0, 1)),
     secure_ident_state TEXT NOT NULL DEFAULT '',
     -- Verified secure-identification public key bound to this peer on the first
@@ -304,13 +304,13 @@ CREATE TABLE peers (
     -- for the same user hash wipes this peer's credits (anti-takeover,
     -- ClientCredits.cpp:338-356 CClientCredits::Verified).
     secure_ident_pubkey BLOB,
-    secure_ident_pubkey_len INTEGER NOT NULL DEFAULT 0,
+    secure_ident_pubkey_len INTEGER NOT NULL DEFAULT 0 CHECK(secure_ident_pubkey_len BETWEEN 0 AND 80),
     friend INTEGER NOT NULL DEFAULT 0 CHECK(friend IN (0, 1)),
     banned INTEGER NOT NULL DEFAULT 0 CHECK(banned IN (0, 1)),
-    uploaded_bytes INTEGER NOT NULL DEFAULT 0,
-    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
+    uploaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_bytes >= 0),
+    downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(downloaded_bytes >= 0),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     UNIQUE(user_hash)
 );
 
@@ -319,11 +319,11 @@ CREATE TABLE transfer_sources (
     transfer_id INTEGER NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
     peer_id INTEGER REFERENCES peers(id),
     ip TEXT NOT NULL,
-    tcp_port INTEGER NOT NULL,
-    udp_port INTEGER,
+    tcp_port INTEGER NOT NULL CHECK(tcp_port BETWEEN 1 AND 65535),
+    udp_port INTEGER CHECK(udp_port IS NULL OR udp_port BETWEEN 1 AND 65535),
     user_hash BLOB CHECK(user_hash IS NULL OR length(user_hash) = 16),
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
     last_outcome TEXT NOT NULL DEFAULT ''
 );
 
@@ -333,7 +333,7 @@ ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
 CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,
     endpoint TEXT NOT NULL UNIQUE,
-    updated_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     CHECK(position >= 0),
     CHECK(length(trim(endpoint)) > 0)
 );
@@ -346,7 +346,7 @@ CREATE TABLE kad_keyword_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
 );
 
 CREATE TABLE kad_source_publishes (
@@ -355,12 +355,12 @@ CREATE TABLE kad_source_publishes (
     publisher_id BLOB NOT NULL CHECK(length(publisher_id) = 16),
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     source_ip TEXT NOT NULL,
-    source_tcp_port INTEGER NOT NULL,
-    source_udp_port INTEGER NOT NULL,
+    source_tcp_port INTEGER NOT NULL CHECK(source_tcp_port BETWEEN 0 AND 65535),
+    source_udp_port INTEGER NOT NULL CHECK(source_udp_port BETWEEN 0 AND 65535),
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
 );
 
 CREATE TABLE kad_note_publishes (
@@ -372,7 +372,7 @@ CREATE TABLE kad_note_publishes (
     raw_tags BLOB NOT NULL,
     load INTEGER CHECK(load IS NULL OR load BETWEEN 0 AND 255),
     valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
-    observed_at_ms INTEGER NOT NULL
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
 );
 
 CREATE TABLE kad_outbound_publish_schedule (
@@ -380,8 +380,8 @@ CREATE TABLE kad_outbound_publish_schedule (
     file_hash BLOB NOT NULL CHECK(length(file_hash) = 16),
     publish_kind TEXT NOT NULL CHECK(publish_kind IN ('keyword', 'source', 'notes')),
     keyword TEXT NOT NULL DEFAULT '',
-    published_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    published_at_ms INTEGER NOT NULL CHECK(published_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     UNIQUE(file_hash, publish_kind, keyword)
 );
 
@@ -393,9 +393,9 @@ CREATE TABLE search_sessions (
     method TEXT NOT NULL CHECK(method IN ('automatic', 'server', 'global', 'kad')),
     search_type TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error')),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    completed_at_ms INTEGER
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0)
 );
 
 CREATE TABLE search_results (
@@ -405,15 +405,15 @@ CREATE TABLE search_results (
     source_method TEXT NOT NULL CHECK(source_method IN ('automatic', 'server', 'global', 'kad')),
     file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
     name TEXT NOT NULL,
-    size_bytes INTEGER,
-    source_count INTEGER NOT NULL DEFAULT 0,
-    complete_source_count INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
+    source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0),
+    complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count >= 0),
     file_type TEXT NOT NULL DEFAULT '',
     complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
     known_type TEXT NOT NULL DEFAULT '',
     directory TEXT NOT NULL DEFAULT '',
     raw_metadata BLOB,
-    observed_at_ms INTEGER NOT NULL
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)
 );
 
 CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
