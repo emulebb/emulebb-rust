@@ -292,11 +292,11 @@ async fn server_update_reenables_disabled_runtime_servers() {
 }
 
 #[tokio::test]
-async fn effective_ed2k_config_honors_reconnect_preference() {
+async fn effective_ed2k_config_honors_reconnect_core_setting() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         reconnect: Some(false),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();
@@ -310,11 +310,11 @@ async fn effective_ed2k_config_honors_reconnect_preference() {
 }
 
 #[tokio::test]
-async fn effective_ed2k_config_honors_safe_server_connect_preference() {
+async fn effective_ed2k_config_honors_safe_server_connect_core_setting() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         safe_server_connect: Some(false),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();
@@ -521,13 +521,13 @@ async fn merge_discovered_servers_adds_new_dedups_existing() {
 }
 
 #[tokio::test]
-async fn merge_discovered_servers_respects_add_servers_from_server_preference() {
+async fn merge_discovered_servers_respects_add_servers_from_server_core_setting() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     // eMule GetAddServersFromServer default is on; turning it off must stop
     // OP_SERVERLIST auto-add.
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         add_servers_from_server: Some(false),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();

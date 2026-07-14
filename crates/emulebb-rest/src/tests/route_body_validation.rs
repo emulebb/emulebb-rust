@@ -239,62 +239,62 @@ async fn search_create_body_uses_canonical_validation() {
 }
 
 #[tokio::test]
-async fn preferences_patch_body_uses_canonical_validation() {
+async fn core_settings_patch_body_uses_canonical_validation() {
     let app = test_router();
-    let uri = "/api/v1/app/preferences";
+    let uri = "/api/v1/app/settings";
     let cases = [
         (
-            r#"{}"#,
-            "preferences PATCH requires at least one preference",
+            r#"{"core":{}}"#,
+            "settings.core PATCH requires at least one core setting",
         ),
         (
-            r#"{"uploadLimitKiBps":0}"#,
+            r#"{"core":{"uploadLimitKiBps":0}}"#,
             "uploadLimitKiBps must be an unsigned number in the range 1..4294967294",
         ),
         (
-            r#"{"downloadLimitKiBps":4294967295}"#,
+            r#"{"core":{"downloadLimitKiBps":4294967295}}"#,
             "downloadLimitKiBps must be an unsigned number in the range 1..4294967294",
         ),
         (
-            r#"{"maxConnections":"1"}"#,
+            r#"{"core":{"maxConnections":"1"}}"#,
             "maxConnections must be an unsigned number in the range 1..2147483647",
         ),
         (
-            r#"{"maxConnectionsPerFiveSeconds":0}"#,
+            r#"{"core":{"maxConnectionsPerFiveSeconds":0}}"#,
             "maxConnectionsPerFiveSeconds must be an unsigned number in the range 1..2147483647",
         ),
         (
-            r#"{"maxSourcesPerFile":2147483648}"#,
+            r#"{"core":{"maxSourcesPerFile":2147483648}}"#,
             "maxSourcesPerFile must be an unsigned number in the range 1..2147483647",
         ),
         (
-            r#"{"uploadClientDataRate":0}"#,
+            r#"{"core":{"uploadClientDataRate":0}}"#,
             "uploadClientDataRate must be an unsigned number in the range 1..4294967295",
         ),
         (
-            r#"{"maxUploadSlots":65}"#,
+            r#"{"core":{"maxUploadSlots":65}}"#,
             "maxUploadSlots must be an unsigned number in the range 1..64",
         ),
         (
-            r#"{"uploadSlotElasticPercent":101}"#,
+            r#"{"core":{"uploadSlotElasticPercent":101}}"#,
             "uploadSlotElasticPercent must be an unsigned number in the range 0..100",
         ),
         (
-            r#"{"queueSize":1999}"#,
+            r#"{"core":{"queueSize":1999}}"#,
             "queueSize must be an unsigned number in the range 2000..10000",
         ),
-        (r#"{"reconnect":1}"#, "reconnect must be a boolean"),
+        (r#"{"core":{"reconnect":1}}"#, "reconnect must be a boolean"),
         (
-            r#"{"addServersFromServer":1}"#,
+            r#"{"core":{"addServersFromServer":1}}"#,
             "addServersFromServer must be a boolean",
         ),
         (
-            r#"{"networkEd2k":"false"}"#,
+            r#"{"core":{"networkEd2k":"false"}}"#,
             "networkEd2k must be a boolean",
         ),
         (
-            r#"{"unsupportedPreference":1}"#,
-            "unknown JSON field: unsupportedPreference",
+            r#"{"core":{"unsupportedSetting":1}}"#,
+            "unknown settings.core field: unsupportedSetting",
         ),
     ];
 

@@ -421,23 +421,23 @@ mod tests {
         let store = super::super::MetadataStore::in_memory().unwrap();
 
         store
-            .put_setting_json("core.preferences", "networkEd2k", "true")
+            .put_setting_json("core.core_settings", "networkEd2k", "true")
             .unwrap();
         assert_eq!(
             store
-                .load_setting_json("core.preferences", "networkEd2k")
+                .load_setting_json("core.core_settings", "networkEd2k")
                 .unwrap(),
             Some("true".to_string())
         );
-        assert!(store.has_settings_section("core.preferences").unwrap());
+        assert!(store.has_settings_section("core.core_settings").unwrap());
         store
             .replace_settings_section(
-                "core.preferences",
+                "core.core_settings",
                 [("networkEd2k", "false"), ("downloadLimitKiBps", "2048")],
             )
             .unwrap();
         assert_eq!(
-            store.load_settings_section("core.preferences").unwrap(),
+            store.load_settings_section("core.core_settings").unwrap(),
             vec![
                 ("downloadLimitKiBps".to_string(), "2048".to_string()),
                 ("networkEd2k".to_string(), "false".to_string())

@@ -1,37 +1,39 @@
-//! App-preferences PATCH request-body validation.
+//! Nested app settings core-section PATCH request-body validation.
 
 use axum::response::Response;
-use emulebb_core::{PreferenceFieldKind, preference_field};
+use emulebb_core::{CoreSettingFieldKind, core_setting_field};
 
 use super::super::{JsonObject, invalid_body_error};
 
-pub(super) fn validate_preferences_patch_body_fields(
+pub(super) fn validate_core_settings_patch_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
     if object.is_empty() {
         return Err(invalid_body_error(
-            "preferences PATCH requires at least one preference",
+            "settings.core PATCH requires at least one core setting",
         ));
     }
 
     for (field_name, value) in object {
-        let Some(field) = preference_field(field_name) else {
-            continue;
+        let Some(field) = core_setting_field(field_name) else {
+            return Err(invalid_body_error(format!(
+                "unknown settings.core field: {field_name}"
+            )));
         };
         match field.kind {
-            PreferenceFieldKind::Number => validate_unsigned_preference(field_name, value)?,
-            PreferenceFieldKind::Boolean => validate_boolean_preference(field_name, value)?,
+            CoreSettingFieldKind::Number => validate_unsigned_core_setting(field_name, value)?,
+            CoreSettingFieldKind::Boolean => validate_boolean_core_setting(field_name, value)?,
         }
     }
 
     Ok(())
 }
 
-fn validate_unsigned_preference(
+fn validate_unsigned_core_setting(
     field: &str,
     value: &serde_json::Value,
 ) -> Result<(), Box<Response>> {
-    let Some(spec) = preference_field(field) else {
+    let Some(spec) = core_setting_field(field) else {
         return Ok(());
     };
     let min = spec.min.unwrap_or(0);
@@ -46,7 +48,7 @@ fn validate_unsigned_preference(
     Ok(())
 }
 
-fn validate_boolean_preference(
+fn validate_boolean_core_setting(
     field: &str,
     value: &serde_json::Value,
 ) -> Result<(), Box<Response>> {

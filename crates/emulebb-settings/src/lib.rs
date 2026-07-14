@@ -3,7 +3,7 @@ use std::{error::Error, fmt, net::Ipv4Addr, path::PathBuf};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
-pub const SECTION_CORE_PREFERENCES: &str = "core.preferences";
+pub const SECTION_CORE: &str = "core";
 pub const SECTION_DAEMON_RUNTIME: &str = "daemon.runtime";
 pub const SECTION_ED2K: &str = "ed2k";
 pub const SECTION_KAD: &str = "kad";
@@ -34,14 +34,14 @@ pub const FIELD_NETWORK_ED2K: &str = "networkEd2k";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum PreferenceFieldKind {
+pub enum CoreSettingFieldKind {
     Number,
     Boolean,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum PreferenceGroup {
+pub enum CoreSettingGroup {
     Network,
     Transfers,
     Server,
@@ -51,32 +51,32 @@ pub enum PreferenceGroup {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum PreferenceDefaultValue {
+pub enum CoreSettingDefaultValue {
     Number(u32),
     Boolean(bool),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PreferenceSpec {
+pub struct CoreSettingSpec {
     pub key: &'static str,
     pub label: &'static str,
-    pub group: PreferenceGroup,
-    pub kind: PreferenceFieldKind,
+    pub group: CoreSettingGroup,
+    pub kind: CoreSettingFieldKind,
     pub min: Option<u32>,
     pub max: Option<u32>,
     pub unit: Option<&'static str>,
-    pub default_value: PreferenceDefaultValue,
+    pub default_value: CoreSettingDefaultValue,
     pub restart_required: bool,
     pub advanced: bool,
     pub description: &'static str,
 }
 
-pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
+pub const CORE_SETTING_SPECS: &[CoreSettingSpec] = &[
     number(
         FIELD_UPLOAD_LIMIT_KIBPS,
         "Upload limit",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         1,
         u32::MAX - 1,
         Some("KiB/s"),
@@ -88,7 +88,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_DOWNLOAD_LIMIT_KIBPS,
         "Download limit",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         1,
         u32::MAX - 1,
         Some("KiB/s"),
@@ -100,7 +100,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_MAX_CONNECTIONS,
         "Maximum connections",
-        PreferenceGroup::Network,
+        CoreSettingGroup::Network,
         1,
         i32::MAX as u32,
         Some("connections"),
@@ -112,7 +112,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS,
         "New connections per five seconds",
-        PreferenceGroup::Network,
+        CoreSettingGroup::Network,
         1,
         i32::MAX as u32,
         Some("connections"),
@@ -124,7 +124,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_MAX_SOURCES_PER_FILE,
         "Maximum sources per file",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         1,
         i32::MAX as u32,
         Some("sources"),
@@ -136,7 +136,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_UPLOAD_CLIENT_DATA_RATE,
         "Target upload slot rate",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         1,
         u32::MAX,
         Some("KiB/s"),
@@ -148,7 +148,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_MAX_UPLOAD_SLOTS,
         "Maximum upload slots",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         1,
         64,
         Some("slots"),
@@ -160,7 +160,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
         "Upload slot elasticity",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         0,
         100,
         Some("percent"),
@@ -172,7 +172,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     number(
         FIELD_QUEUE_SIZE,
         "Upload queue size",
-        PreferenceGroup::Transfers,
+        CoreSettingGroup::Transfers,
         2_000,
         10_000,
         Some("clients"),
@@ -184,7 +184,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_AUTO_CONNECT,
         "Auto-connect",
-        PreferenceGroup::Server,
+        CoreSettingGroup::Server,
         false,
         true,
         "Connect to eD2K servers automatically on daemon startup.",
@@ -192,7 +192,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_RECONNECT,
         "Reconnect",
-        PreferenceGroup::Server,
+        CoreSettingGroup::Server,
         true,
         true,
         "Reconnect after an eD2K server session drops.",
@@ -200,7 +200,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_CREDIT_SYSTEM,
         "Credit system",
-        PreferenceGroup::Safety,
+        CoreSettingGroup::Safety,
         true,
         false,
         "Use peer credit history when scoring upload queue clients.",
@@ -208,7 +208,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_SAFE_SERVER_CONNECT,
         "Safe server connect",
-        PreferenceGroup::Server,
+        CoreSettingGroup::Server,
         true,
         false,
         "Limit automatic server connection concurrency.",
@@ -216,7 +216,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_ADD_SERVERS_FROM_SERVER,
         "Add servers from server",
-        PreferenceGroup::Server,
+        CoreSettingGroup::Server,
         true,
         false,
         "Accept servers advertised by the connected eD2K server.",
@@ -224,7 +224,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_NETWORK_KADEMLIA,
         "Kad enabled",
-        PreferenceGroup::Kad,
+        CoreSettingGroup::Kad,
         true,
         true,
         "Enable Kad runtime participation on startup.",
@@ -232,7 +232,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
     boolean(
         FIELD_NETWORK_ED2K,
         "eD2K enabled",
-        PreferenceGroup::Network,
+        CoreSettingGroup::Network,
         true,
         true,
         "Enable eD2K server and peer networking on startup.",
@@ -242,7 +242,7 @@ pub const PREFERENCE_SPECS: &[PreferenceSpec] = &[
 const fn number(
     key: &'static str,
     label: &'static str,
-    group: PreferenceGroup,
+    group: CoreSettingGroup,
     min: u32,
     max: u32,
     unit: Option<&'static str>,
@@ -250,16 +250,16 @@ const fn number(
     restart_required: bool,
     advanced: bool,
     description: &'static str,
-) -> PreferenceSpec {
-    PreferenceSpec {
+) -> CoreSettingSpec {
+    CoreSettingSpec {
         key,
         label,
         group,
-        kind: PreferenceFieldKind::Number,
+        kind: CoreSettingFieldKind::Number,
         min: Some(min),
         max: Some(max),
         unit,
-        default_value: PreferenceDefaultValue::Number(default_value),
+        default_value: CoreSettingDefaultValue::Number(default_value),
         restart_required,
         advanced,
         description,
@@ -269,29 +269,29 @@ const fn number(
 const fn boolean(
     key: &'static str,
     label: &'static str,
-    group: PreferenceGroup,
+    group: CoreSettingGroup,
     default_value: bool,
     restart_required: bool,
     description: &'static str,
-) -> PreferenceSpec {
-    PreferenceSpec {
+) -> CoreSettingSpec {
+    CoreSettingSpec {
         key,
         label,
         group,
-        kind: PreferenceFieldKind::Boolean,
+        kind: CoreSettingFieldKind::Boolean,
         min: None,
         max: None,
         unit: None,
-        default_value: PreferenceDefaultValue::Boolean(default_value),
+        default_value: CoreSettingDefaultValue::Boolean(default_value),
         restart_required,
         advanced: false,
         description,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct Preferences {
+pub struct CoreSettings {
     pub upload_limit_ki_bps: u32,
     pub download_limit_ki_bps: u32,
     pub max_connections: u32,
@@ -312,9 +312,9 @@ pub struct Preferences {
     pub network_ed2k: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PreferencesUpdate {
+pub struct CoreSettingsUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_limit_ki_bps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,6 +473,7 @@ pub struct IpFilterSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettings {
+    pub core: CoreSettings,
     pub daemon_runtime: DaemonRuntimeSettings,
     pub ed2k: Ed2kSettings,
     pub kad: KadSettings,
@@ -484,6 +485,7 @@ pub struct AppSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettingsUpdate {
+    pub core: Option<CoreSettingsUpdate>,
     pub daemon_runtime: Option<DaemonRuntimeSettings>,
     pub ed2k: Option<Ed2kSettings>,
     pub kad: Option<KadSettings>,
@@ -493,11 +495,11 @@ pub struct AppSettingsUpdate {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PreferenceValidationError {
+pub struct CoreSettingValidationError {
     message: String,
 }
 
-impl PreferenceValidationError {
+impl CoreSettingValidationError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -505,16 +507,16 @@ impl PreferenceValidationError {
     }
 }
 
-impl fmt::Display for PreferenceValidationError {
+impl fmt::Display for CoreSettingValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
     }
 }
 
-impl Error for PreferenceValidationError {}
+impl Error for CoreSettingValidationError {}
 
-pub fn default_preferences() -> Preferences {
-    Preferences {
+pub fn default_core_settings() -> CoreSettings {
+    CoreSettings {
         upload_limit_ki_bps: 6200,
         download_limit_ki_bps: 12207,
         max_connections: 500,
@@ -538,6 +540,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             daemon_runtime: DaemonRuntimeSettings::default(),
+            core: default_core_settings(),
             ed2k: Ed2kSettings::default(),
             kad: KadSettings::default(),
             nat: NatSettings::default(),
@@ -669,43 +672,43 @@ impl Default for IpFilterSettings {
     }
 }
 
-pub fn preferences_from_setting_values<'a>(
+pub fn core_settings_from_values<'a>(
     values: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Result<Preferences, PreferenceValidationError> {
+) -> Result<CoreSettings, CoreSettingValidationError> {
     let mut object = Map::new();
     for (key, value_json) in values {
         let value = serde_json::from_str::<Value>(value_json).map_err(|error| {
-            PreferenceValidationError::new(format!("{key} contains invalid JSON: {error}"))
+            CoreSettingValidationError::new(format!("{key} contains invalid JSON: {error}"))
         })?;
         if object.insert(key.to_string(), value).is_some() {
-            return Err(PreferenceValidationError::new(format!(
-                "duplicate preference field: {key}"
+            return Err(CoreSettingValidationError::new(format!(
+                "duplicate core setting field: {key}"
             )));
         }
     }
 
     let update =
-        serde_json::from_value::<PreferencesUpdate>(Value::Object(object)).map_err(|error| {
-            PreferenceValidationError::new(format!("invalid preference settings: {error}"))
+        serde_json::from_value::<CoreSettingsUpdate>(Value::Object(object)).map_err(|error| {
+            CoreSettingValidationError::new(format!("invalid core settings: {error}"))
         })?;
-    let mut preferences = default_preferences();
-    apply_preferences_update(&mut preferences, update)?;
-    Ok(preferences)
+    let mut core_settings = default_core_settings();
+    apply_core_settings_update(&mut core_settings, update)?;
+    Ok(core_settings)
 }
 
-pub fn preferences_to_setting_values(
-    preferences: &Preferences,
+pub fn core_settings_to_values(
+    core_settings: &CoreSettings,
 ) -> Result<Vec<(&'static str, String)>, serde_json::Error> {
-    let values = serde_json::to_value(preferences)?;
+    let values = serde_json::to_value(core_settings)?;
     let object = values
         .as_object()
-        .expect("Preferences serializes as object");
-    PREFERENCE_SPECS
+        .expect("CoreSettings serializes as object");
+    CORE_SETTING_SPECS
         .iter()
         .map(|field| {
             let value = object
                 .get(field.key)
-                .expect("preference spec must match Preferences serialization");
+                .expect("core setting spec must match CoreSettings serialization");
             serde_json::to_string(value).map(|value_json| (field.key, value_json))
         })
         .collect()
@@ -714,19 +717,19 @@ pub fn preferences_to_setting_values(
 pub fn section_settings_from_values<'a, T>(
     section: &str,
     values: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Result<T, PreferenceValidationError>
+) -> Result<T, CoreSettingValidationError>
 where
     T: Default + DeserializeOwned,
 {
     let mut object = Map::new();
     for (key, value_json) in values {
         let value = serde_json::from_str::<Value>(value_json).map_err(|error| {
-            PreferenceValidationError::new(format!(
+            CoreSettingValidationError::new(format!(
                 "{section}.{key} contains invalid JSON: {error}"
             ))
         })?;
         if object.insert(key.to_string(), value).is_some() {
-            return Err(PreferenceValidationError::new(format!(
+            return Err(CoreSettingValidationError::new(format!(
                 "duplicate setting field: {section}.{key}"
             )));
         }
@@ -735,7 +738,7 @@ where
         return Ok(T::default());
     }
     serde_json::from_value::<T>(Value::Object(object)).map_err(|error| {
-        PreferenceValidationError::new(format!("invalid settings section {section}: {error}"))
+        CoreSettingValidationError::new(format!("invalid settings section {section}: {error}"))
     })
 }
 
@@ -760,7 +763,8 @@ where
 }
 
 pub fn app_settings_update_is_empty(update: &AppSettingsUpdate) -> bool {
-    update.daemon_runtime.is_none()
+    update.core.is_none()
+        && update.daemon_runtime.is_none()
         && update.ed2k.is_none()
         && update.kad.is_none()
         && update.nat.is_none()
@@ -768,7 +772,7 @@ pub fn app_settings_update_is_empty(update: &AppSettingsUpdate) -> bool {
         && update.ip_filter.is_none()
 }
 
-pub fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
+pub fn core_settings_update_is_empty(update: &CoreSettingsUpdate) -> bool {
     update.upload_limit_ki_bps.is_none()
         && update.download_limit_ki_bps.is_none()
         && update.max_connections.is_none()
@@ -787,77 +791,78 @@ pub fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
         && update.network_ed2k.is_none()
 }
 
-pub fn apply_preferences_update(
-    preferences: &mut Preferences,
-    update: PreferencesUpdate,
-) -> Result<(), PreferenceValidationError> {
+pub fn apply_core_settings_update(
+    core_settings: &mut CoreSettings,
+    update: CoreSettingsUpdate,
+) -> Result<(), CoreSettingValidationError> {
     if let Some(value) = update.upload_limit_ki_bps {
         validate_u32(FIELD_UPLOAD_LIMIT_KIBPS, value)?;
-        preferences.upload_limit_ki_bps = value;
+        core_settings.upload_limit_ki_bps = value;
     }
     if let Some(value) = update.download_limit_ki_bps {
         validate_u32(FIELD_DOWNLOAD_LIMIT_KIBPS, value)?;
-        preferences.download_limit_ki_bps = value;
+        core_settings.download_limit_ki_bps = value;
     }
     if let Some(value) = update.max_connections {
         validate_u32(FIELD_MAX_CONNECTIONS, value)?;
-        preferences.max_connections = value;
+        core_settings.max_connections = value;
     }
     if let Some(value) = update.max_connections_per_five_seconds {
         validate_u32(FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS, value)?;
-        preferences.max_connections_per_five_seconds = value;
+        core_settings.max_connections_per_five_seconds = value;
     }
     if let Some(value) = update.max_sources_per_file {
         validate_u32(FIELD_MAX_SOURCES_PER_FILE, value)?;
-        preferences.max_sources_per_file = value;
+        core_settings.max_sources_per_file = value;
     }
     if let Some(value) = update.upload_client_data_rate {
         validate_u32(FIELD_UPLOAD_CLIENT_DATA_RATE, value)?;
-        preferences.upload_client_data_rate = value;
-        preferences.max_upload_slots = derive_upload_slots(preferences.upload_limit_ki_bps, value);
+        core_settings.upload_client_data_rate = value;
+        core_settings.max_upload_slots =
+            derive_upload_slots(core_settings.upload_limit_ki_bps, value);
     }
     if let Some(value) = update.max_upload_slots {
         validate_u32(FIELD_MAX_UPLOAD_SLOTS, value)?;
-        preferences.max_upload_slots = value;
+        core_settings.max_upload_slots = value;
     }
     if let Some(value) = update.upload_slot_elastic_percent {
         validate_u32(FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, value)?;
-        preferences.upload_slot_elastic_percent = value;
+        core_settings.upload_slot_elastic_percent = value;
     }
     if let Some(value) = update.queue_size {
         validate_u32(FIELD_QUEUE_SIZE, value)?;
-        preferences.queue_size = value;
+        core_settings.queue_size = value;
     }
     if let Some(value) = update.auto_connect {
-        preferences.auto_connect = value;
+        core_settings.auto_connect = value;
     }
     if let Some(value) = update.reconnect {
-        preferences.reconnect = value;
+        core_settings.reconnect = value;
     }
     if let Some(value) = update.credit_system {
-        preferences.credit_system = value;
+        core_settings.credit_system = value;
     }
     if let Some(value) = update.safe_server_connect {
-        preferences.safe_server_connect = value;
+        core_settings.safe_server_connect = value;
     }
     if let Some(value) = update.add_servers_from_server {
-        preferences.add_servers_from_server = value;
+        core_settings.add_servers_from_server = value;
     }
     if let Some(value) = update.network_kademlia {
-        preferences.network_kademlia = value;
+        core_settings.network_kademlia = value;
     }
     if let Some(value) = update.network_ed2k {
-        preferences.network_ed2k = value;
+        core_settings.network_ed2k = value;
     }
     Ok(())
 }
 
-pub fn changed_preferences_update(
-    next: &Preferences,
-    baseline: Option<&Preferences>,
-) -> PreferencesUpdate {
+pub fn changed_core_settings_update(
+    next: &CoreSettings,
+    baseline: Option<&CoreSettings>,
+) -> CoreSettingsUpdate {
     let Some(baseline) = baseline else {
-        return PreferencesUpdate {
+        return CoreSettingsUpdate {
             upload_limit_ki_bps: Some(next.upload_limit_ki_bps),
             download_limit_ki_bps: Some(next.download_limit_ki_bps),
             max_connections: Some(next.max_connections),
@@ -876,7 +881,7 @@ pub fn changed_preferences_update(
             network_ed2k: Some(next.network_ed2k),
         };
     };
-    PreferencesUpdate {
+    CoreSettingsUpdate {
         upload_limit_ki_bps: changed(next.upload_limit_ki_bps, baseline.upload_limit_ki_bps),
         download_limit_ki_bps: changed(next.download_limit_ki_bps, baseline.download_limit_ki_bps),
         max_connections: changed(next.max_connections, baseline.max_connections),
@@ -908,42 +913,42 @@ pub fn changed_preferences_update(
     }
 }
 
-pub fn parse_u32_preference(
+pub fn parse_u32_core_setting(
     field_name: &str,
     value: &str,
-) -> Result<u32, PreferenceValidationError> {
+) -> Result<u32, CoreSettingValidationError> {
     let parsed = value.trim().parse::<u32>().map_err(|_| {
-        PreferenceValidationError::new(format!("{field_name} must be an unsigned number"))
+        CoreSettingValidationError::new(format!("{field_name} must be an unsigned number"))
     })?;
     validate_u32(field_name, parsed)?;
     Ok(parsed)
 }
 
-pub fn validate_u32(field_name: &str, value: u32) -> Result<(), PreferenceValidationError> {
-    let field = preference_field(field_name).ok_or_else(|| {
-        PreferenceValidationError::new(format!("unknown preference field: {field_name}"))
+pub fn validate_u32(field_name: &str, value: u32) -> Result<(), CoreSettingValidationError> {
+    let field = core_setting_field(field_name).ok_or_else(|| {
+        CoreSettingValidationError::new(format!("unknown core setting field: {field_name}"))
     })?;
-    if field.kind != PreferenceFieldKind::Number {
-        return Err(PreferenceValidationError::new(format!(
-            "{field_name} is not a numeric preference"
+    if field.kind != CoreSettingFieldKind::Number {
+        return Err(CoreSettingValidationError::new(format!(
+            "{field_name} is not a numeric core setting"
         )));
     }
     let min = field.min.unwrap_or(0);
     let max = field.max.unwrap_or(u32::MAX);
     if !(min..=max).contains(&value) {
-        return Err(PreferenceValidationError::new(format!(
+        return Err(CoreSettingValidationError::new(format!(
             "{field_name} must be an unsigned number in the range {min}..{max}"
         )));
     }
     Ok(())
 }
 
-pub fn preference_schema() -> &'static [PreferenceSpec] {
-    PREFERENCE_SPECS
+pub fn core_settings_schema() -> &'static [CoreSettingSpec] {
+    CORE_SETTING_SPECS
 }
 
-pub fn preference_field(field_name: &str) -> Option<&'static PreferenceSpec> {
-    PREFERENCE_SPECS
+pub fn core_setting_field(field_name: &str) -> Option<&'static CoreSettingSpec> {
+    CORE_SETTING_SPECS
         .iter()
         .find(|field| field.key == field_name)
 }
@@ -971,48 +976,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_preferences_include_current_rest_fields() {
-        let value = serde_json::to_value(default_preferences()).unwrap();
+    fn default_core_settings_include_current_rest_fields() {
+        let value = serde_json::to_value(default_core_settings()).unwrap();
 
         assert_eq!(value[FIELD_UPLOAD_LIMIT_KIBPS], 6200);
         assert_eq!(value[FIELD_RECONNECT], true);
-        assert_eq!(value.as_object().unwrap().len(), PREFERENCE_SPECS.len());
+        assert_eq!(value.as_object().unwrap().len(), CORE_SETTING_SPECS.len());
     }
 
     #[test]
-    fn preference_schema_matches_default_values() {
-        let defaults = serde_json::to_value(default_preferences()).unwrap();
+    fn core_settings_schema_matches_default_values() {
+        let defaults = serde_json::to_value(default_core_settings()).unwrap();
 
-        for field in preference_schema() {
+        for field in core_settings_schema() {
             let expected_default = match field.default_value {
-                PreferenceDefaultValue::Number(value) => serde_json::json!(value),
-                PreferenceDefaultValue::Boolean(value) => serde_json::json!(value),
+                CoreSettingDefaultValue::Number(value) => serde_json::json!(value),
+                CoreSettingDefaultValue::Boolean(value) => serde_json::json!(value),
             };
             assert_eq!(defaults[field.key], expected_default);
         }
     }
 
     #[test]
-    fn preference_settings_roundtrip_as_scalar_rows() {
-        let mut preferences = default_preferences();
-        preferences.download_limit_ki_bps = 2048;
-        preferences.reconnect = false;
+    fn core_settings_roundtrip_as_scalar_rows() {
+        let mut core_settings = default_core_settings();
+        core_settings.download_limit_ki_bps = 2048;
+        core_settings.reconnect = false;
 
-        let rows = preferences_to_setting_values(&preferences).unwrap();
-        assert_eq!(rows.len(), PREFERENCE_SPECS.len());
+        let rows = core_settings_to_values(&core_settings).unwrap();
+        assert_eq!(rows.len(), CORE_SETTING_SPECS.len());
         assert!(rows.contains(&(FIELD_RECONNECT, "false".to_string())));
 
-        let decoded = preferences_from_setting_values(
+        let decoded = core_settings_from_values(
             rows.iter()
                 .map(|(key, value_json)| (*key, value_json.as_str())),
         )
         .unwrap();
-        assert_eq!(decoded, preferences);
+        assert_eq!(decoded, core_settings);
     }
 
     #[test]
-    fn preference_settings_reject_unknown_keys() {
-        let error = preferences_from_setting_values([("hiddenLegacySetting", "true")]).unwrap_err();
+    fn core_settings_reject_unknown_keys() {
+        let error = core_settings_from_values([("hiddenLegacySetting", "true")]).unwrap_err();
 
         assert!(
             error.to_string().contains("unknown field"),
@@ -1067,13 +1072,13 @@ mod tests {
     }
 
     #[test]
-    fn changed_preferences_update_only_sets_changed_fields() {
-        let baseline = default_preferences();
+    fn changed_core_settings_update_only_sets_changed_fields() {
+        let baseline = default_core_settings();
         let mut next = baseline.clone();
         next.upload_limit_ki_bps = 2048;
         next.network_ed2k = false;
 
-        let update = changed_preferences_update(&next, Some(&baseline));
+        let update = changed_core_settings_update(&next, Some(&baseline));
 
         assert_eq!(update.upload_limit_ki_bps, Some(2048));
         assert_eq!(update.network_ed2k, Some(false));

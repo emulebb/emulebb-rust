@@ -11,8 +11,8 @@ impl EmulebbCore {
         // The Kademlia network must be enabled (eMule thePrefs.GetNetworkKademlia());
         // when off, Kad is refused / not started.
         ensure!(
-            self.state.lock().await.preferences.network_kademlia,
-            "Kademlia network is disabled in preferences (networkKademlia=false)"
+            self.state.lock().await.core_settings.network_kademlia,
+            "Kademlia network is disabled in core_settings (networkKademlia=false)"
         );
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {

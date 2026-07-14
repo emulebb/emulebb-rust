@@ -41,14 +41,13 @@ pub(super) fn publish_search(weak: &slint::Weak<MainWindow>, search: SearchDto) 
     });
 }
 
-pub(super) fn publish_preferences(
+pub(super) fn publish_settings(
     weak: &slint::Weak<MainWindow>,
-    preferences: Preferences,
     settings: AppSettings,
     status: String,
 ) {
     let update = move |ui: MainWindow| {
-        render_preferences(&ui, &preferences, &status);
+        render_core_settings(&ui, &settings.core, &status);
         render_app_settings(&ui, &settings);
     };
     let weak = weak.clone();
@@ -122,12 +121,6 @@ pub(super) fn store_search(cache: &Arc<Mutex<DataCache>>, search: Option<SearchD
     }
 }
 
-pub(super) fn store_preferences(cache: &Arc<Mutex<DataCache>>, preferences: Preferences) {
-    if let Ok(mut cache) = cache.lock() {
-        cache.preferences = Some(preferences);
-    }
-}
-
 pub(super) fn store_app_settings(cache: &Arc<Mutex<DataCache>>, settings: AppSettings) {
     if let Ok(mut cache) = cache.lock() {
         cache.settings = Some(settings);
@@ -144,36 +137,34 @@ pub(super) fn rerender_from_cache(ui: &MainWindow, cache: &Arc<Mutex<DataCache>>
     if let Some(search) = cache.search.as_ref() {
         render_search_table(ui, search);
     }
-    if let Some(preferences) = cache.preferences.as_ref() {
-        render_preferences(ui, preferences, "Settings restored from cache");
-    }
     if let Some(settings) = cache.settings.as_ref() {
+        render_core_settings(ui, &settings.core, "Settings restored from cache");
         render_app_settings(ui, settings);
     }
 }
 
-pub(super) fn rerender_preferences_from_cache(
+pub(super) fn rerender_core_settings_from_cache(
     ui: &MainWindow,
     cache: &Arc<Mutex<DataCache>>,
 ) -> bool {
     let Ok(cache) = cache.lock() else {
         return false;
     };
-    let Some(preferences) = cache.preferences.as_ref() else {
+    let Some(settings) = cache.settings.as_ref() else {
         return false;
     };
-    render_preferences(ui, preferences, "Settings reverted");
-    if let Some(settings) = cache.settings.as_ref() {
-        render_app_settings(ui, settings);
-    }
+    render_core_settings(ui, &settings.core, "Settings reverted");
+    render_app_settings(ui, settings);
     true
 }
 
-pub(super) fn cached_preferences(cache: &Arc<Mutex<DataCache>>) -> Option<Preferences> {
-    cache
-        .lock()
-        .ok()
-        .and_then(|cache| cache.preferences.as_ref().cloned())
+pub(super) fn cached_core_settings(cache: &Arc<Mutex<DataCache>>) -> Option<CoreSettings> {
+    cache.lock().ok().and_then(|cache| {
+        cache
+            .settings
+            .as_ref()
+            .map(|settings| settings.core.clone())
+    })
 }
 
 pub(super) fn cached_app_settings(cache: &Arc<Mutex<DataCache>>) -> Option<AppSettings> {
@@ -183,28 +174,30 @@ pub(super) fn cached_app_settings(cache: &Arc<Mutex<DataCache>>) -> Option<AppSe
         .and_then(|cache| cache.settings.as_ref().cloned())
 }
 
-pub(super) fn render_preferences(ui: &MainWindow, preferences: &Preferences, status: &str) {
-    ui.set_pref_upload_limit(preferences.upload_limit_ki_bps.to_string().into());
-    ui.set_pref_download_limit(preferences.download_limit_ki_bps.to_string().into());
-    ui.set_pref_max_connections(preferences.max_connections.to_string().into());
-    ui.set_pref_max_connections_per_five(
-        preferences
+pub(super) fn render_core_settings(ui: &MainWindow, core_settings: &CoreSettings, status: &str) {
+    ui.set_core_upload_limit(core_settings.upload_limit_ki_bps.to_string().into());
+    ui.set_core_download_limit(core_settings.download_limit_ki_bps.to_string().into());
+    ui.set_core_max_connections(core_settings.max_connections.to_string().into());
+    ui.set_core_max_connections_per_five(
+        core_settings
             .max_connections_per_five_seconds
             .to_string()
             .into(),
     );
-    ui.set_pref_max_sources(preferences.max_sources_per_file.to_string().into());
-    ui.set_pref_upload_client_rate(preferences.upload_client_data_rate.to_string().into());
-    ui.set_pref_max_upload_slots(preferences.max_upload_slots.to_string().into());
-    ui.set_pref_upload_elastic_percent(preferences.upload_slot_elastic_percent.to_string().into());
-    ui.set_pref_queue_size(preferences.queue_size.to_string().into());
-    ui.set_pref_auto_connect(preferences.auto_connect);
-    ui.set_pref_reconnect(preferences.reconnect);
-    ui.set_pref_credit_system(preferences.credit_system);
-    ui.set_pref_safe_server_connect(preferences.safe_server_connect);
-    ui.set_pref_add_servers_from_server(preferences.add_servers_from_server);
-    ui.set_pref_network_kademlia(preferences.network_kademlia);
-    ui.set_pref_network_ed2k(preferences.network_ed2k);
+    ui.set_core_max_sources(core_settings.max_sources_per_file.to_string().into());
+    ui.set_core_upload_client_rate(core_settings.upload_client_data_rate.to_string().into());
+    ui.set_core_max_upload_slots(core_settings.max_upload_slots.to_string().into());
+    ui.set_core_upload_elastic_percent(
+        core_settings.upload_slot_elastic_percent.to_string().into(),
+    );
+    ui.set_core_queue_size(core_settings.queue_size.to_string().into());
+    ui.set_core_auto_connect(core_settings.auto_connect);
+    ui.set_core_reconnect(core_settings.reconnect);
+    ui.set_core_credit_system(core_settings.credit_system);
+    ui.set_core_safe_server_connect(core_settings.safe_server_connect);
+    ui.set_core_add_servers_from_server(core_settings.add_servers_from_server);
+    ui.set_core_network_kademlia(core_settings.network_kademlia);
+    ui.set_core_network_ed2k(core_settings.network_ed2k);
     ui.set_settings_status_line(status.into());
 }
 

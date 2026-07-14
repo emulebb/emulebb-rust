@@ -48,11 +48,6 @@ pub fn router_with_shutdown(
             "/api/v1/diagnostics/crash-tests",
             post(trigger_diagnostic_crash_test),
         )
-        .route(
-            "/api/v1/app/preferences",
-            get(preferences).patch(update_preferences),
-        )
-        .route("/api/v1/app/preferences/schema", get(preferences_schema))
         .route("/api/v1/app/settings", get(settings).patch(update_settings))
         .route("/api/v1/status", get(status))
         .route("/api/v1/stats", get(stats))

@@ -8,8 +8,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Category, Friend, Preferences, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot, Transfer,
-    download_source_registry::DownloadSourceRegistry, ed2k_dead_source_list::DeadSourceList,
+    Category, CoreSettings, Friend, Search, ServerInfo, ServerUpdate, SharedDirectoryRoot,
+    Transfer, download_source_registry::DownloadSourceRegistry,
+    ed2k_dead_source_list::DeadSourceList,
 };
 
 #[derive(Debug)]
@@ -17,7 +18,7 @@ pub(crate) struct CoreState {
     pub(crate) searches: HashMap<String, Search>,
     pub(crate) next_search_id: u32,
     pub(crate) transfers: HashMap<String, Transfer>,
-    pub(crate) preferences: Preferences,
+    pub(crate) core_settings: CoreSettings,
     pub(crate) categories: BTreeMap<u32, Category>,
     pub(crate) next_category_id: u32,
     pub(crate) friends: BTreeMap<String, Friend>,

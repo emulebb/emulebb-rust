@@ -63,55 +63,65 @@ impl EmulebbCore {
         })
     }
 
-    pub async fn preferences(&self) -> Preferences {
-        self.state.lock().await.preferences.clone()
+    pub async fn core_settings(&self) -> CoreSettings {
+        self.state.lock().await.core_settings.clone()
     }
 
     pub async fn app_settings(&self) -> Result<AppSettings> {
         profile_state::load_app_settings(&self.metadata_store)
     }
 
-    pub async fn update_app_settings(&self, request: AppSettingsUpdate) -> Result<AppSettings> {
-        profile_state::persist_app_settings_update(&self.metadata_store, request)
+    pub async fn update_app_settings(&self, mut request: AppSettingsUpdate) -> Result<AppSettings> {
+        let core_update = request.core.take();
+        if core_update.is_none() {
+            profile_state::persist_app_settings_update(&self.metadata_store, request)?;
+            return self.app_settings().await;
+        }
+        if !app_settings_update_is_empty(&request) {
+            profile_state::persist_app_settings_update(&self.metadata_store, request)?;
+        }
+        self.update_core_settings(core_update.expect("checked as Some"))
+            .await?;
+        self.app_settings().await
     }
 
-    pub async fn update_preferences(&self, request: PreferencesUpdate) -> Result<Preferences> {
+    pub async fn update_core_settings(&self, request: CoreSettingsUpdate) -> Result<CoreSettings> {
         ensure!(
-            !preferences_update_is_empty(&request),
-            "preferences PATCH requires at least one preference"
+            !core_settings_update_is_empty(&request),
+            "settings.core PATCH requires at least one core setting"
         );
-        let preferences = {
+        let core_settings = {
             let mut state = self.state.lock().await;
-            let mut preferences = state.preferences.clone();
-            apply_preferences_update(&mut preferences, request)?;
-            profile_state::persist_preferences(&self.metadata_store, &preferences)?;
-            state.preferences = preferences.clone();
-            preferences
+            let mut core_settings = state.core_settings.clone();
+            apply_core_settings_update(&mut core_settings, request)?;
+            profile_state::persist_core_settings(&self.metadata_store, &core_settings)?;
+            state.core_settings = core_settings.clone();
+            core_settings
         };
         self.ed2k_transfers
-            .apply_upload_queue_policy(&ed2k_upload_queue_policy_from_preferences(
+            .apply_upload_queue_policy(&ed2k_upload_queue_policy_from_core_settings(
                 self.ed2k_network
                     .as_ref()
                     .map(|network| &network.config.upload_queue),
-                &preferences,
+                &core_settings,
             ))
             .await;
         self.ed2k_transfers
-            .apply_download_limit(ed2k_download_limit_bytes_per_sec_from_preferences(
-                &preferences,
+            .apply_download_limit(ed2k_download_limit_bytes_per_sec_from_core_settings(
+                &core_settings,
             ))
             .await;
         // Apply the global connection budget + per-file source caps live, like
         // the download limit (eMule GetMaxConnections / GetMaxConperFive /
-        // GetConfiguredMaxSourcesPerFile preference changes take effect at once).
+        // GetConfiguredMaxSourcesPerFile core setting changes take effect at once).
         self.ed2k_transfers.apply_download_coordinator_config(
-            ed2k_download_coordinator_config_from_preferences(&preferences),
+            ed2k_download_coordinator_config_from_core_settings(&core_settings),
         );
         // Apply the credit-system toggle live (eMule thePrefs.GetCreditSystem()):
         // when off, upload scoring uses the neutral 1.0 credit ratio for everyone.
         self.ed2k_transfers
-            .set_credit_system_enabled(preferences.credit_system);
-        Ok(preferences)
+            .set_credit_system_enabled(core_settings.credit_system);
+        Ok(core_settings)
     }
 
     pub async fn status(&self) -> Status {

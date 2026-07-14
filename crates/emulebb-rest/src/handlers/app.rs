@@ -1,5 +1,5 @@
-//! App lifecycle, diagnostics, preferences, and dashboard REST handlers
-//! (`/app`, `/app/shutdown`, `/app/preferences`, `/diagnostics/*`, `/status`,
+//! App lifecycle, diagnostics, settings, and dashboard REST handlers
+//! (`/app`, `/app/shutdown`, `/app/settings`, `/diagnostics/*`, `/status`,
 //! `/stats`, `/snapshot`).
 //!
 //! Extracted verbatim from `lib.rs` during the maintainability restructuring;
@@ -13,7 +13,7 @@ use axum::{
 };
 use serde_json::json;
 
-use emulebb_core::{AppSettingsUpdate, PreferencesUpdate, preference_schema};
+use emulebb_core::AppSettingsUpdate;
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
@@ -93,14 +93,6 @@ pub(crate) async fn trigger_diagnostic_crash_test(body: Bytes) -> impl IntoRespo
     api_ok(json!({"ok": true})).into_response()
 }
 
-pub(crate) async fn preferences(State(state): State<RestState>) -> impl IntoResponse {
-    api_ok(state.core.preferences().await)
-}
-
-pub(crate) async fn preferences_schema() -> impl IntoResponse {
-    api_ok(preference_schema())
-}
-
 pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.app_settings().await {
         Ok(settings) => api_ok(settings).into_response(),
@@ -120,22 +112,6 @@ pub(crate) async fn update_settings(
     };
     match state.core.update_app_settings(request).await {
         Ok(settings) => api_ok(settings).into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
-    }
-}
-
-pub(crate) async fn update_preferences(
-    State(state): State<RestState>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let request = match parse_required_json_body::<PreferencesUpdate>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match state.core.update_preferences(request).await {
-        Ok(preferences) => api_ok(preferences).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }

@@ -5,18 +5,16 @@
 
 mod validators;
 
+use crate::envelope::{api_error, json_error_message};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use emulebb_core::preference_field;
-
-use crate::envelope::{api_error, json_error_message};
 use validators::{
     validate_category_create_body_fields, validate_category_patch_body_fields,
-    validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
-    validate_kad_bootstrap_body_fields, validate_optional_boolean_body_field,
-    validate_paused_body_field, validate_preferences_patch_body_fields,
+    validate_core_settings_patch_body_fields, validate_destructive_confirmation_body_field,
+    validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
+    validate_optional_boolean_body_field, validate_paused_body_field,
     validate_search_create_body_fields, validate_server_create_body_fields,
     validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
     validate_shared_file_add_body_fields, validate_shared_file_patch_body_fields,
@@ -55,22 +53,10 @@ fn validate_allowed_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
     let Some(allowed_fields) = route_body_fields(method, path) else {
-        if method == "PATCH" && path == "/api/v1/app/preferences" {
-            return validate_preference_body_fields(object);
-        }
         return Ok(());
     };
     for name in object.keys() {
         if !allowed_fields.contains(&name.as_str()) {
-            return Err(invalid_body_error(format!("unknown JSON field: {name}")));
-        }
-    }
-    Ok(())
-}
-
-fn validate_preference_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
-    for name in object.keys() {
-        if preference_field(name).is_none() {
             return Err(invalid_body_error(format!("unknown JSON field: {name}")));
         }
     }
@@ -131,8 +117,14 @@ fn validate_route_specific_body_fields(
         validate_shared_directories_patch_body_fields(object)?;
         return validate_destructive_confirmation_body(method, path, object);
     }
-    if method == "PATCH" && path == "/api/v1/app/preferences" {
-        return validate_preferences_patch_body_fields(object);
+    if method == "PATCH" && path == "/api/v1/app/settings" {
+        if let Some(core) = object.get("core") {
+            let Some(core) = core.as_object() else {
+                return Err(invalid_body_error("core must be an object"));
+            };
+            validate_core_settings_patch_body_fields(core)?;
+        }
+        return validate_destructive_confirmation_body(method, path, object);
     }
     if method == "POST" && path == "/api/v1/servers" {
         return validate_server_create_body_fields(object);
@@ -179,6 +171,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const APP_SETTINGS: &[&str] = &[
+        "core",
         "daemonRuntime",
         "ed2k",
         "kad",

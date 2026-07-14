@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn upload_queue_policy_uses_preferences_for_slot_and_queue_limits() {
-    let mut preferences = default_preferences();
-    preferences.max_upload_slots = 11;
-    preferences.queue_size = 6_000;
+fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
+    let mut core_settings = default_core_settings();
+    core_settings.max_upload_slots = 11;
+    core_settings.queue_size = 6_000;
     let base = Ed2kUploadQueueRuntimeConfig {
         active_slots: 3,
         elastic_percent: 15,
@@ -19,34 +19,34 @@ fn upload_queue_policy_uses_preferences_for_slot_and_queue_limits() {
         session_time_limit_secs: 1_234,
     };
 
-    let policy = ed2k_upload_queue_policy_from_preferences(Some(&base), &preferences);
+    let policy = ed2k_upload_queue_policy_from_core_settings(Some(&base), &core_settings);
 
     assert_eq!(policy.active_slots, 11);
     assert_eq!(
         policy.elastic_percent,
-        preferences.upload_slot_elastic_percent
+        core_settings.upload_slot_elastic_percent
     );
     assert_eq!(
         policy.upload_limit_bytes_per_sec,
-        u64::from(preferences.upload_limit_ki_bps) * 1024
+        u64::from(core_settings.upload_limit_ki_bps) * 1024
     );
     assert_eq!(
         policy.elastic_underfill_bytes_per_sec,
-        u64::from(preferences.upload_client_data_rate) * 1024
+        u64::from(core_settings.upload_client_data_rate) * 1024
     );
     assert_eq!(policy.waiting_capacity, 6_000);
     assert_eq!(policy.waiting_timeout_secs, 44);
     assert_eq!(policy.granted_timeout_secs, 22);
     assert_eq!(policy.upload_timeout_secs, 88);
-    // Session rotation caps are queue-policy knobs, not preference-derived:
-    // a preferences update must pass them through untouched.
+    // Session rotation caps are queue-policy knobs, not core setting-derived:
+    // a core_settings update must pass them through untouched.
     assert_eq!(policy.session_transfer_percent, 45);
     assert_eq!(policy.session_time_limit_secs, 1_234);
 }
 
 #[test]
 fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
-    let preferences = default_preferences();
+    let core_settings = default_core_settings();
     let base = Ed2kUploadQueueRuntimeConfig {
         active_slots: 3,
         elastic_percent: 15,
@@ -61,19 +61,19 @@ fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
         session_time_limit_secs: 1_234,
     };
 
-    let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &preferences);
+    let policy = initial_ed2k_upload_queue_policy(Some(&base), false, &core_settings);
 
     assert_eq!(policy, base);
 }
 
 #[tokio::test]
-async fn persisted_preferences_configure_upload_queue_on_startup() {
-    let transfer_root = unique_runtime_dir("emulebb-core-upload-queue-startup-preferences");
+async fn persisted_core_settings_configure_upload_queue_on_startup() {
+    let transfer_root = unique_runtime_dir("emulebb-core-upload-queue-startup-core_settings");
     let metadata = MetadataStore::open(transfer_root.join("metadata.sqlite")).unwrap();
-    let mut preferences = default_preferences();
-    preferences.max_upload_slots = 2;
-    preferences.queue_size = 3_000;
-    profile_state::persist_preferences(&metadata, &preferences).unwrap();
+    let mut core_settings = default_core_settings();
+    core_settings.max_upload_slots = 2;
+    core_settings.queue_size = 3_000;
+    profile_state::persist_core_settings(&metadata, &core_settings).unwrap();
     let index = FileIndex::open(transfer_root.join("metadata.sqlite")).unwrap();
 
     let core = EmulebbCore::new("test", index, transfer_root.join("transfers")).unwrap();
@@ -84,60 +84,60 @@ async fn persisted_preferences_configure_upload_queue_on_startup() {
 }
 
 #[tokio::test]
-async fn preferences_update_reconfigures_live_upload_queue() {
+async fn core_settings_update_reconfigures_live_upload_queue() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
 
-    let preferences = core
-        .update_preferences(PreferencesUpdate {
+    let core_settings = core
+        .update_core_settings(CoreSettingsUpdate {
             max_upload_slots: Some(4),
             queue_size: Some(4_000),
-            ..PreferencesUpdate::default()
+            ..CoreSettingsUpdate::default()
         })
         .await
         .unwrap();
     let policy = core.ed2k_transfers.upload_queue_policy_snapshot().await;
 
-    assert_eq!(preferences.max_upload_slots, 4);
-    assert_eq!(preferences.queue_size, 4_000);
+    assert_eq!(core_settings.max_upload_slots, 4);
+    assert_eq!(core_settings.queue_size, 4_000);
     assert_eq!(policy.active_slots, 4);
     assert_eq!(policy.waiting_capacity, 4_000);
 }
 
 #[tokio::test]
-async fn default_preferences_match_the_master() {
-    // FIX 6: defaults aligned to srchybrid/Preferences.cpp +
+async fn default_core_settings_match_the_master() {
+    // FIX 6: defaults aligned to srchybrid/CoreSettings.cpp +
     // PreferenceValidationSeams.h.
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let prefs = core.preferences().await;
-    assert_eq!(prefs.upload_limit_ki_bps, 6200);
-    assert_eq!(prefs.download_limit_ki_bps, 12207);
-    assert_eq!(prefs.max_connections, 500);
-    assert_eq!(prefs.max_connections_per_five_seconds, 50);
-    assert_eq!(prefs.max_sources_per_file, 600);
-    assert_eq!(prefs.max_upload_slots, 12);
-    assert_eq!(prefs.upload_slot_elastic_percent, 80);
-    assert_eq!(prefs.queue_size, 10000);
-    assert!(!prefs.auto_connect);
-    assert!(prefs.reconnect);
+    let core_settings = core.core_settings().await;
+    assert_eq!(core_settings.upload_limit_ki_bps, 6200);
+    assert_eq!(core_settings.download_limit_ki_bps, 12207);
+    assert_eq!(core_settings.max_connections, 500);
+    assert_eq!(core_settings.max_connections_per_five_seconds, 50);
+    assert_eq!(core_settings.max_sources_per_file, 600);
+    assert_eq!(core_settings.max_upload_slots, 12);
+    assert_eq!(core_settings.upload_slot_elastic_percent, 80);
+    assert_eq!(core_settings.queue_size, 10000);
+    assert!(!core_settings.auto_connect);
+    assert!(core_settings.reconnect);
 }
 
 #[test]
-fn preferences_json_without_reconnect_defaults_to_enabled() {
-    let mut value = serde_json::to_value(default_preferences()).unwrap();
+fn core_settings_json_without_reconnect_defaults_to_enabled() {
+    let mut value = serde_json::to_value(default_core_settings()).unwrap();
     value.as_object_mut().unwrap().remove("reconnect");
 
-    let preferences: Preferences = serde_json::from_value(value).unwrap();
+    let core_settings: CoreSettings = serde_json::from_value(value).unwrap();
 
-    assert!(preferences.reconnect);
+    assert!(core_settings.reconnect);
 }
 
 #[tokio::test]
 async fn network_kademlia_disabled_refuses_kad_bootstrap() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     // Disable the Kademlia network (eMule thePrefs.GetNetworkKademlia() == false).
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         network_kademlia: Some(false),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();
@@ -147,9 +147,9 @@ async fn network_kademlia_disabled_refuses_kad_bootstrap() {
         .expect_err("Kad bootstrap must be refused when networkKademlia=false");
     assert!(err.to_string().contains("Kademlia network is disabled"));
     // Re-enabling lets Kad start again.
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         network_kademlia: Some(true),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();
@@ -203,11 +203,11 @@ async fn vpn_guard_allows_kad_start_until_public_ip_disproves_allowed_cidr() {
 async fn network_ed2k_disabled_refuses_server_connect() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     // Disable the eD2k network (eMule thePrefs.GetNetworkED2K() == false): the
-    // server connect is refused on the preference gate (before any network
+    // server connect is refused on the core setting gate (before any network
     // config / VPN-guard checks).
-    core.update_preferences(PreferencesUpdate {
+    core.update_core_settings(CoreSettingsUpdate {
         network_ed2k: Some(false),
-        ..PreferencesUpdate::default()
+        ..CoreSettingsUpdate::default()
     })
     .await
     .unwrap();

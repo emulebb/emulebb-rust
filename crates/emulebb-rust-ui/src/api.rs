@@ -4,21 +4,6 @@ pub(super) async fn fetch_snapshot(client: &Client, config: &ConnectionConfig) -
     get(client, config, &format!("snapshot?limit={SNAPSHOT_LIMIT}")).await
 }
 
-pub(super) async fn fetch_preferences(
-    client: &Client,
-    config: &ConnectionConfig,
-) -> Result<Preferences> {
-    get(client, config, "app/preferences").await
-}
-
-pub(super) async fn update_preferences(
-    client: &Client,
-    config: &ConnectionConfig,
-    request: &PreferencesUpdate,
-) -> Result<Preferences> {
-    patch_json(client, config, "app/preferences", request).await
-}
-
 pub(super) async fn fetch_app_settings(
     client: &Client,
     config: &ConnectionConfig,

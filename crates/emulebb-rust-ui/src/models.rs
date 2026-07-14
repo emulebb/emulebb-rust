@@ -21,7 +21,6 @@ pub(super) struct ApiError {
 pub(super) struct DataCache {
     pub(super) snapshot: Option<Snapshot>,
     pub(super) search: Option<SearchDto>,
-    pub(super) preferences: Option<Preferences>,
     pub(super) settings: Option<AppSettings>,
 }
 
@@ -235,7 +234,7 @@ pub(super) struct SearchResultDownloadRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PreferencesForm {
+pub(super) struct CoreSettingsForm {
     pub(super) upload_limit_ki_bps: String,
     pub(super) download_limit_ki_bps: String,
     pub(super) max_connections: String,

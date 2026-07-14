@@ -103,8 +103,14 @@ impl EmulebbCore {
         }
         // eMule `CServerSocket::ProcessPacket` OP_SERVERLIST adds advertised
         // servers only when `thePrefs.GetAddServersFromServer()` is set (default
-        // on). Honor the same preference so an operator can turn auto-add off.
-        if !self.state.lock().await.preferences.add_servers_from_server {
+        // on). Honor the same core setting so an operator can turn auto-add off.
+        if !self
+            .state
+            .lock()
+            .await
+            .core_settings
+            .add_servers_from_server
+        {
             return;
         }
         let existing: HashSet<String> = self

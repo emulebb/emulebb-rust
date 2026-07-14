@@ -92,6 +92,7 @@ mod callback_tracker;
 mod categories;
 mod category_api;
 mod category_runtime;
+mod core_settings;
 mod core_state;
 mod delivery;
 mod diag_kad_event;
@@ -125,7 +126,6 @@ mod local_search_response;
 mod network_api;
 mod network_binding;
 mod physical_disk;
-mod preferences;
 mod profile_state;
 mod search_api;
 mod search_query;
@@ -146,6 +146,14 @@ mod upload_view;
 mod views;
 pub mod vpn_guard;
 use categories::default_categories;
+#[cfg(test)]
+use core_settings::default_core_settings;
+use core_settings::{
+    apply_core_settings_update, core_settings_update_is_empty,
+    ed2k_download_coordinator_config_from_core_settings,
+    ed2k_download_limit_bytes_per_sec_from_core_settings,
+    ed2k_upload_queue_policy_from_core_settings, initial_ed2k_upload_queue_policy,
+};
 pub(crate) use core_state::CoreState;
 use direct_download_runtime::{parse_server_endpoint, run_ed2k_direct_downloads};
 use download_source_registry::DownloadSourceCandidate;
@@ -209,13 +217,6 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
-#[cfg(test)]
-use preferences::default_preferences;
-use preferences::{
-    apply_preferences_update, ed2k_download_coordinator_config_from_preferences,
-    ed2k_download_limit_bytes_per_sec_from_preferences, ed2k_upload_queue_policy_from_preferences,
-    initial_ed2k_upload_queue_policy, preferences_update_is_empty,
-};
 use search_query::{
     SearchNetworkMethod, apply_search_filters, resolve_search_network_method,
     search_criteria_from_request, search_result_from_ed2k, search_result_from_indexed,
@@ -242,8 +243,9 @@ mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
 pub use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, PREFERENCE_SPECS, PreferenceFieldKind, PreferenceSpec,
-    Preferences, PreferencesUpdate, preference_field, preference_schema,
+    AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
+    CoreSettings, CoreSettingsUpdate, app_settings_update_is_empty, core_setting_field,
+    core_settings_schema,
 };
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
@@ -449,7 +451,8 @@ impl EmulebbCore {
     ) -> Result<Self> {
         let transfer_root = transfer_root.as_ref().to_path_buf();
         let metadata_store = index.metadata_store();
-        let has_persisted_preferences = profile_state::has_persisted_preferences(&metadata_store)?;
+        let has_persisted_core_settings =
+            profile_state::has_persisted_core_settings(&metadata_store)?;
         let shared_directories = index
             .shared_directory_roots()?
             .into_iter()
@@ -460,11 +463,11 @@ impl EmulebbCore {
             ed2k_network
                 .as_ref()
                 .map(|network| &network.config.upload_queue),
-            has_persisted_preferences,
-            &core_state.preferences,
+            has_persisted_core_settings,
+            &core_state.core_settings,
         );
         let download_limit_bytes_per_sec =
-            ed2k_download_limit_bytes_per_sec_from_preferences(&core_state.preferences);
+            ed2k_download_limit_bytes_per_sec_from_core_settings(&core_state.core_settings);
         let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
             &transfer_root,
             metadata_store.clone(),
@@ -474,16 +477,16 @@ impl EmulebbCore {
                 ..Ed2kRuntimeConfig::default()
             },
         )?;
-        // Drive the shared download coordinator from the live REST preferences
+        // Drive the shared download coordinator from the live REST core_settings
         // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
-        // like the download throttle, so REST preference changes apply to the
+        // like the download throttle, so REST core setting changes apply to the
         // global connection budget + per-file source caps.
         ed2k_transfers.apply_download_coordinator_config(
-            ed2k_download_coordinator_config_from_preferences(&core_state.preferences),
+            ed2k_download_coordinator_config_from_core_settings(&core_state.core_settings),
         );
         // Apply the credit-system toggle at startup too (eMule
-        // thePrefs.GetCreditSystem()); update_preferences keeps it live thereafter.
-        ed2k_transfers.set_credit_system_enabled(core_state.preferences.credit_system);
+        // thePrefs.GetCreditSystem()); update_core_settings keeps it live thereafter.
+        ed2k_transfers.set_credit_system_enabled(core_state.core_settings.credit_system);
         let kad_local_store = ed2k_network.as_ref().map(|network| {
             let mut store = KadLocalStore::new(network.kad_local_store);
             match metadata_store
@@ -975,7 +978,7 @@ impl EmulebbCore {
             self.send_kad_buddy_callbacks(network, &transfer, file_hash, &sources)
                 .await;
             // Originate direct UDP callbacks for firewalled type-6 sources
-            // (oracle CCS_DIRECTCALLBACK, the first-preference LowID connect
+            // (oracle CCS_DIRECTCALLBACK, the first-core setting LowID connect
             // path): send OP_DIRECTCALLBACKREQ to the source's Kad UDP endpoint
             // so it TCP-connects back to us. This precedes and excludes the
             // server-callback path below, exactly as MFC's TryToConnect orders
@@ -2328,7 +2331,7 @@ impl EmulebbCore {
     /// Originate `OP_DIRECTCALLBACKREQ` to firewalled type-6 Kad sources (oracle
     /// `BaseClient.cpp` `CCS_DIRECTCALLBACK`): send our TCP port + userhash +
     /// connect options to the source's Kad UDP endpoint so it TCP-connects back
-    /// to us. This is the first-preference LowID connect path, ahead of the
+    /// to us. This is the first-core setting LowID connect path, ahead of the
     /// server/Kad-buddy callbacks. A firewalled requester cannot receive the
     /// connect-back, so it is skipped exactly like the Kad-buddy path.
     async fn send_ed2k_direct_callbacks(

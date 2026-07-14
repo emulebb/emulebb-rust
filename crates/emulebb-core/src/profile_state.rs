@@ -4,23 +4,23 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, SECTION_CORE_PREFERENCES, SECTION_DAEMON_RUNTIME, SECTION_ED2K,
+    AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON_RUNTIME, SECTION_ED2K,
     SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
-    preferences_from_setting_values, preferences_to_setting_values, section_settings_from_values,
+    core_settings_from_values, core_settings_to_values, section_settings_from_values,
     section_settings_to_values,
 };
 
 use crate::{
-    Category, CoreState, Friend, Preferences, ServerInfo, SharedDirectoryRoot, default_categories,
+    Category, CoreSettings, CoreState, Friend, ServerInfo, SharedDirectoryRoot, default_categories,
 };
 
 pub(crate) fn load_core_state(
     metadata: &MetadataStore,
     shared_directories: Vec<SharedDirectoryRoot>,
 ) -> Result<CoreState> {
-    let preference_rows = metadata.load_settings_section(SECTION_CORE_PREFERENCES)?;
-    let preferences = preferences_from_setting_values(
-        preference_rows
+    let core_setting_rows = metadata.load_settings_section(SECTION_CORE)?;
+    let core_settings = core_settings_from_values(
+        core_setting_rows
             .iter()
             .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
     )?;
@@ -62,7 +62,7 @@ pub(crate) fn load_core_state(
         searches,
         next_search_id,
         transfers: HashMap::new(),
-        preferences,
+        core_settings,
         categories,
         next_category_id,
         friends,
@@ -93,17 +93,17 @@ pub(crate) fn load_core_state(
     })
 }
 
-pub(crate) fn has_persisted_preferences(metadata: &MetadataStore) -> Result<bool> {
-    metadata.has_settings_section(SECTION_CORE_PREFERENCES)
+pub(crate) fn has_persisted_core_settings(metadata: &MetadataStore) -> Result<bool> {
+    metadata.has_settings_section(SECTION_CORE)
 }
 
-pub(crate) fn persist_preferences(
+pub(crate) fn persist_core_settings(
     metadata: &MetadataStore,
-    preferences: &Preferences,
+    core_settings: &CoreSettings,
 ) -> Result<()> {
-    let entries = preferences_to_setting_values(preferences)?;
+    let entries = core_settings_to_values(core_settings)?;
     metadata.replace_settings_section(
-        SECTION_CORE_PREFERENCES,
+        SECTION_CORE,
         entries
             .iter()
             .map(|(key, value_json)| (*key, value_json.as_str())),
@@ -113,6 +113,7 @@ pub(crate) fn persist_preferences(
 
 pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
     Ok(AppSettings {
+        core: load_core_settings(metadata)?,
         daemon_runtime: load_settings_section(metadata, SECTION_DAEMON_RUNTIME)?,
         ed2k: load_settings_section(metadata, SECTION_ED2K)?,
         kad: load_settings_section(metadata, SECTION_KAD)?,
@@ -149,6 +150,13 @@ pub(crate) fn persist_app_settings_update(
         persist_settings_section(metadata, SECTION_IP_FILTER, &settings)?;
     }
     load_app_settings(metadata)
+}
+
+pub(crate) fn load_core_settings(metadata: &MetadataStore) -> Result<CoreSettings> {
+    let rows = metadata.load_settings_section(SECTION_CORE)?;
+    Ok(core_settings_from_values(rows.iter().map(
+        |(key, value_json)| (key.as_str(), value_json.as_str()),
+    ))?)
 }
 
 fn load_settings_section<T>(metadata: &MetadataStore, section: &str) -> Result<T>

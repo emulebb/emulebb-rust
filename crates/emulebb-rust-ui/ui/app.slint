@@ -188,15 +188,15 @@ export component MainWindow inherits Window {
     in-out property <string> search-type;
     in-out property <string> search-status-line;
     in-out property <string> settings-status-line;
-    in-out property <string> pref-upload-limit;
-    in-out property <string> pref-download-limit;
-    in-out property <string> pref-max-connections;
-    in-out property <string> pref-max-connections-per-five;
-    in-out property <string> pref-max-sources;
-    in-out property <string> pref-upload-client-rate;
-    in-out property <string> pref-max-upload-slots;
-    in-out property <string> pref-upload-elastic-percent;
-    in-out property <string> pref-queue-size;
+    in-out property <string> core-upload-limit;
+    in-out property <string> core-download-limit;
+    in-out property <string> core-max-connections;
+    in-out property <string> core-max-connections-per-five;
+    in-out property <string> core-max-sources;
+    in-out property <string> core-upload-client-rate;
+    in-out property <string> core-max-upload-slots;
+    in-out property <string> core-upload-elastic-percent;
+    in-out property <string> core-queue-size;
     in-out property <string> settings-incoming-dir;
     in-out property <string> settings-p2p-bind-ip;
     in-out property <string> settings-p2p-bind-interface;
@@ -220,13 +220,13 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-ip-filter-enabled;
     in-out property <string> settings-ip-filter-path;
     in-out property <string> settings-ip-filter-level;
-    in-out property <bool> pref-auto-connect;
-    in-out property <bool> pref-reconnect;
-    in-out property <bool> pref-credit-system;
-    in-out property <bool> pref-safe-server-connect;
-    in-out property <bool> pref-add-servers-from-server;
-    in-out property <bool> pref-network-kademlia;
-    in-out property <bool> pref-network-ed2k;
+    in-out property <bool> core-auto-connect;
+    in-out property <bool> core-reconnect;
+    in-out property <bool> core-credit-system;
+    in-out property <bool> core-safe-server-connect;
+    in-out property <bool> core-add-servers-from-server;
+    in-out property <bool> core-network-kademlia;
+    in-out property <bool> core-network-ed2k;
     in-out property <string> server-address;
     in-out property <string> server-port;
     in-out property <string> server-name;
@@ -889,16 +889,16 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "Live Preferences"; color: #111827; font-size: 13px; font-weight: 700; }
-                                SettingField { label: "Upload limit KiB/s"; value <=> root.pref-upload-limit; }
-                                SettingField { label: "Download limit KiB/s"; value <=> root.pref-download-limit; }
-                                SettingField { label: "Max connections"; value <=> root.pref-max-connections; }
-                                SettingField { label: "Max connections / 5 sec"; value <=> root.pref-max-connections-per-five; }
-                                SettingField { label: "Max sources / file"; value <=> root.pref-max-sources; }
-                                SettingField { label: "Upload client KiB/s"; value <=> root.pref-upload-client-rate; }
-                                SettingField { label: "Max upload slots"; value <=> root.pref-max-upload-slots; }
-                                SettingField { label: "Upload elastic percent"; value <=> root.pref-upload-elastic-percent; }
-                                SettingField { label: "Queue size"; value <=> root.pref-queue-size; }
+                                Text { text: "Live Settings"; color: #111827; font-size: 13px; font-weight: 700; }
+                                SettingField { label: "Upload limit KiB/s"; value <=> root.core-upload-limit; }
+                                SettingField { label: "Download limit KiB/s"; value <=> root.core-download-limit; }
+                                SettingField { label: "Max connections"; value <=> root.core-max-connections; }
+                                SettingField { label: "Max connections / 5 sec"; value <=> root.core-max-connections-per-five; }
+                                SettingField { label: "Max sources / file"; value <=> root.core-max-sources; }
+                                SettingField { label: "Upload client KiB/s"; value <=> root.core-upload-client-rate; }
+                                SettingField { label: "Max upload slots"; value <=> root.core-max-upload-slots; }
+                                SettingField { label: "Upload elastic percent"; value <=> root.core-upload-elastic-percent; }
+                                SettingField { label: "Queue size"; value <=> root.core-queue-size; }
                             }
 
                             VerticalLayout {
@@ -937,13 +937,13 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 spacing: 5px;
                                 Text { text: "Live Toggles"; color: #111827; font-size: 13px; font-weight: 700; }
-                                CheckBox { text: "Auto connect"; checked <=> root.pref-auto-connect; }
-                                CheckBox { text: "Reconnect"; checked <=> root.pref-reconnect; }
-                                CheckBox { text: "Credit system"; checked <=> root.pref-credit-system; }
-                                CheckBox { text: "Safe server connect"; checked <=> root.pref-safe-server-connect; }
-                                CheckBox { text: "Add servers from server"; checked <=> root.pref-add-servers-from-server; }
-                                CheckBox { text: "Kademlia"; checked <=> root.pref-network-kademlia; }
-                                CheckBox { text: "eD2K"; checked <=> root.pref-network-ed2k; }
+                                CheckBox { text: "Auto connect"; checked <=> root.core-auto-connect; }
+                                CheckBox { text: "Reconnect"; checked <=> root.core-reconnect; }
+                                CheckBox { text: "Credit system"; checked <=> root.core-credit-system; }
+                                CheckBox { text: "Safe server connect"; checked <=> root.core-safe-server-connect; }
+                                CheckBox { text: "Add servers from server"; checked <=> root.core-add-servers-from-server; }
+                                CheckBox { text: "Kademlia"; checked <=> root.core-network-kademlia; }
+                                CheckBox { text: "eD2K"; checked <=> root.core-network-ed2k; }
                             }
 
                             VerticalLayout {

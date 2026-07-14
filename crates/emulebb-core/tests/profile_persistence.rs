@@ -5,8 +5,8 @@ use std::{
 };
 
 use emulebb_core::{
-    CategoryCreate, CategoryPriorityValue, EmulebbCore, FriendCreate, LocalShareCreate,
-    NullableStringField, NullableU32Field, PreferencesUpdate, ServerCreate, ServerUpdate,
+    CategoryCreate, CategoryPriorityValue, CoreSettingsUpdate, EmulebbCore, FriendCreate,
+    LocalShareCreate, NullableStringField, NullableU32Field, ServerCreate, ServerUpdate,
     TransferCreate, TransferUpdate,
 };
 use emulebb_index::FileIndex;
@@ -19,11 +19,11 @@ async fn profile_state_survives_core_restart() {
 
     {
         let core = open_core(&metadata_path, &transfer_root);
-        core.update_preferences(PreferencesUpdate {
+        core.update_core_settings(CoreSettingsUpdate {
             download_limit_ki_bps: Some(2048),
             reconnect: Some(false),
             network_kademlia: Some(false),
-            ..PreferencesUpdate::default()
+            ..CoreSettingsUpdate::default()
         })
         .await
         .unwrap();
@@ -57,10 +57,10 @@ async fn profile_state_survives_core_restart() {
     }
 
     let reloaded = open_core(&metadata_path, &transfer_root);
-    let preferences = reloaded.preferences().await;
-    assert_eq!(preferences.download_limit_ki_bps, 2048);
-    assert!(!preferences.reconnect);
-    assert!(!preferences.network_kademlia);
+    let core_settings = reloaded.core_settings().await;
+    assert_eq!(core_settings.download_limit_ki_bps, 2048);
+    assert!(!core_settings.reconnect);
+    assert!(!core_settings.network_kademlia);
 
     let categories = reloaded.categories().await;
     assert_eq!(categories.len(), 2);

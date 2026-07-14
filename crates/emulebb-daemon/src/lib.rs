@@ -592,7 +592,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     if ed2k_network_configured {
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
-            if !connect_core.preferences().await.auto_connect {
+            if !connect_core.core_settings().await.auto_connect {
                 return;
             }
             match connect_core.connect_ed2k().await {

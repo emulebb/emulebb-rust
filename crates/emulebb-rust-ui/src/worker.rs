@@ -30,16 +30,15 @@ pub(super) fn worker_loop(
                 publish_refreshing(&weak, true);
                 let result = runtime.block_on(async {
                     let snapshot = fetch_snapshot(&client, &next_config).await?;
-                    let preferences = fetch_preferences(&client, &next_config).await?;
                     let settings = fetch_app_settings(&client, &next_config).await?;
                     let search = fetch_latest_search(&client, &next_config)
                         .await
                         .ok()
                         .flatten();
-                    Ok::<_, anyhow::Error>((snapshot, preferences, settings, search))
+                    Ok::<_, anyhow::Error>((snapshot, settings, search))
                 });
                 match result {
-                    Ok((snapshot, preferences, settings, search)) => {
+                    Ok((snapshot, settings, search)) => {
                         if let Some(search) = search {
                             active_search_id = Some(search.id.clone());
                             store_search(&cache, Some(search.clone()));
@@ -48,11 +47,9 @@ pub(super) fn worker_loop(
                             store_search(&cache, None);
                             publish_empty_search(&weak, "No active search");
                         }
-                        store_preferences(&cache, preferences.clone());
                         store_app_settings(&cache, settings.clone());
-                        publish_preferences(
+                        publish_settings(
                             &weak,
-                            preferences,
                             settings,
                             "Settings loaded from daemon".to_string(),
                         );
@@ -81,47 +78,42 @@ pub(super) fn worker_loop(
 
         let active_search_id_for_poll = active_search_id.clone();
         let result = match command {
-            Some(UiCommand::PreferencesReload) => runtime.block_on(async {
-                let preferences = fetch_preferences(&client, &config_for_command).await?;
+            Some(UiCommand::CoreSettingsReload) => runtime.block_on(async {
                 let settings = fetch_app_settings(&client, &config_for_command).await?;
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((
                     snapshot,
                     None,
                     None,
-                    Some((preferences, settings, "Settings reloaded".to_string())),
+                    Some((settings, "Settings reloaded".to_string())),
                 ))
             }),
-            Some(UiCommand::PreferencesApply {
+            Some(UiCommand::CoreSettingsApply {
                 form,
                 settings_form,
             }) => runtime.block_on(async {
-                let baseline = cached_preferences(&cache);
                 let settings_baseline = match cached_app_settings(&cache) {
                     Some(settings) => settings,
                     None => fetch_app_settings(&client, &config_for_command).await?,
                 };
-                let patch = preferences_update_from_form(&form, baseline.as_ref())?;
-                let settings_patch =
+                let baseline = cached_core_settings(&cache).unwrap_or_else(|| settings_baseline.core.clone());
+                let core_patch = core_settings_update_from_form(&form, Some(&baseline))?;
+                let mut settings_patch =
                     app_settings_update_from_form(&settings_form, &settings_baseline)?;
-                let preferences_changed = !preferences_update_is_empty(&patch);
-                let settings_changed =
+                let core_settings_changed = !core_settings_update_is_empty(&core_patch);
+                let restart_required =
                     !emulebb_settings::app_settings_update_is_empty(&settings_patch);
-                let preferences = if preferences_changed {
-                    update_preferences(&client, &config_for_command, &patch).await?
-                } else {
-                    match baseline {
-                        Some(preferences) => preferences,
-                        None => fetch_preferences(&client, &config_for_command).await?,
-                    }
-                };
+                if core_settings_changed {
+                    settings_patch.core = Some(core_patch);
+                }
+                let settings_changed = restart_required || core_settings_changed;
                 let settings = if settings_changed {
                     update_app_settings(&client, &config_for_command, &settings_patch).await?
                 } else {
                     settings_baseline
                 };
-                let status = if preferences_changed || settings_changed {
-                    if settings_changed {
+                let status = if core_settings_changed || settings_changed {
+                    if restart_required {
                         "Settings applied; restart daemon for bind, port, NAT, VPN, and filter changes"
                     } else {
                         "Settings applied"
@@ -134,7 +126,7 @@ pub(super) fn worker_loop(
                     snapshot,
                     None,
                     None,
-                    Some((preferences, settings, status.to_string())),
+                    Some((settings, status.to_string())),
                 ))
             }),
             Some(UiCommand::TransferAction { hash, action }) => runtime.block_on(async {
@@ -286,7 +278,7 @@ pub(super) fn worker_loop(
             Some(UiCommand::Connect(_)) => unreachable!("connect commands are handled separately"),
         };
         match result {
-            Ok((snapshot, search, next_active_search_id, preferences)) => {
+            Ok((snapshot, search, next_active_search_id, settings_update)) => {
                 consecutive_failures = 0;
                 if let Some(search_id) = next_active_search_id {
                     active_search_id = Some(search_id);
@@ -295,10 +287,9 @@ pub(super) fn worker_loop(
                     store_search(&cache, Some(search.clone()));
                     publish_search(&weak, search);
                 }
-                if let Some((preferences, settings, status)) = preferences {
-                    store_preferences(&cache, preferences.clone());
+                if let Some((settings, status)) = settings_update {
                     store_app_settings(&cache, settings.clone());
-                    publish_preferences(&weak, preferences, settings, status);
+                    publish_settings(&weak, settings, status);
                 }
                 store_snapshot(&cache, snapshot.clone());
                 publish_snapshot(&weak, snapshot);
@@ -353,38 +344,38 @@ fn server_update_request(form: ServerForm) -> ServerUpdateRequest {
     }
 }
 
-fn preferences_update_from_form(
-    form: &PreferencesForm,
-    baseline: Option<&Preferences>,
-) -> Result<PreferencesUpdate> {
-    let next = Preferences {
-        upload_limit_ki_bps: parse_u32_preference(
+fn core_settings_update_from_form(
+    form: &CoreSettingsForm,
+    baseline: Option<&CoreSettings>,
+) -> Result<CoreSettingsUpdate> {
+    let next = CoreSettings {
+        upload_limit_ki_bps: parse_u32_core_setting(
             FIELD_UPLOAD_LIMIT_KIBPS,
             &form.upload_limit_ki_bps,
         )?,
-        download_limit_ki_bps: parse_u32_preference(
+        download_limit_ki_bps: parse_u32_core_setting(
             FIELD_DOWNLOAD_LIMIT_KIBPS,
             &form.download_limit_ki_bps,
         )?,
-        max_connections: parse_u32_preference(FIELD_MAX_CONNECTIONS, &form.max_connections)?,
-        max_connections_per_five_seconds: parse_u32_preference(
+        max_connections: parse_u32_core_setting(FIELD_MAX_CONNECTIONS, &form.max_connections)?,
+        max_connections_per_five_seconds: parse_u32_core_setting(
             FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS,
             &form.max_connections_per_five_seconds,
         )?,
-        max_sources_per_file: parse_u32_preference(
+        max_sources_per_file: parse_u32_core_setting(
             FIELD_MAX_SOURCES_PER_FILE,
             &form.max_sources_per_file,
         )?,
-        upload_client_data_rate: parse_u32_preference(
+        upload_client_data_rate: parse_u32_core_setting(
             FIELD_UPLOAD_CLIENT_DATA_RATE,
             &form.upload_client_data_rate,
         )?,
-        max_upload_slots: parse_u32_preference(FIELD_MAX_UPLOAD_SLOTS, &form.max_upload_slots)?,
-        upload_slot_elastic_percent: parse_u32_preference(
+        max_upload_slots: parse_u32_core_setting(FIELD_MAX_UPLOAD_SLOTS, &form.max_upload_slots)?,
+        upload_slot_elastic_percent: parse_u32_core_setting(
             FIELD_UPLOAD_SLOT_ELASTIC_PERCENT,
             &form.upload_slot_elastic_percent,
         )?,
-        queue_size: parse_u32_preference(FIELD_QUEUE_SIZE, &form.queue_size)?,
+        queue_size: parse_u32_core_setting(FIELD_QUEUE_SIZE, &form.queue_size)?,
         auto_connect: form.auto_connect,
         reconnect: form.reconnect,
         credit_system: form.credit_system,
@@ -393,7 +384,7 @@ fn preferences_update_from_form(
         network_kademlia: form.network_kademlia,
         network_ed2k: form.network_ed2k,
     };
-    Ok(changed_preferences_update(&next, baseline))
+    Ok(changed_core_settings_update(&next, baseline))
 }
 
 fn app_settings_update_from_form(
@@ -434,6 +425,7 @@ fn app_settings_update_from_form(
     next.ip_filter.level = parse_u32(&form.ip_filter_level, "IP filter level")?;
 
     Ok(AppSettingsUpdate {
+        core: None,
         daemon_runtime: changed_section(&next.daemon_runtime, &baseline.daemon_runtime),
         ed2k: changed_section(&next.ed2k, &baseline.ed2k),
         kad: changed_section(&next.kad, &baseline.kad),

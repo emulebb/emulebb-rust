@@ -358,7 +358,7 @@ fn ed2k_file_type_search_term_matches_oracle_families() {
 }
 
 #[test]
-fn passive_replay_family_preference_follows_deepest_queue_with_stable_tie_breaks() {
+fn passive_replay_family_core_setting_follows_deepest_queue_with_stable_tie_breaks() {
     assert_eq!(
         preferred_passive_replay_families(SnoopQueueFamilyCounts {
             keyword: 1,

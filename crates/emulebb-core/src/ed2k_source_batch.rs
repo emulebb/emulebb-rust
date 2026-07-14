@@ -216,7 +216,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     use super::*;
-    use crate::{CoreState, default_preferences, download_source_registry::DownloadSourceRegistry};
+    use crate::{
+        CoreState, default_core_settings, download_source_registry::DownloadSourceRegistry,
+    };
 
     #[test]
     fn claim_batches_current_and_other_active_scarce_transfers_once() {
@@ -363,7 +365,7 @@ mod tests {
             searches: HashMap::new(),
             next_search_id: 1,
             transfers,
-            preferences: default_preferences(),
+            core_settings: default_core_settings(),
             categories: BTreeMap::new(),
             next_category_id: 1,
             friends: BTreeMap::new(),

@@ -122,133 +122,6 @@ async fn diagnostic_crash_test_requires_confirmation() {
 }
 
 #[tokio::test]
-async fn preferences_use_canonical_get_and_patch_route() {
-    let app = test_router();
-    let read = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/app/preferences")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(read.status(), StatusCode::OK);
-    let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["uploadLimitKiBps"], 6200);
-    assert_eq!(value["data"]["reconnect"], true);
-
-    let schema = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/app/preferences/schema")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(schema.status(), StatusCode::OK);
-    let body = to_bytes(schema.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    let fields = value["data"].as_array().unwrap();
-    assert_eq!(fields.len(), 16);
-    assert_eq!(fields[0]["key"], "uploadLimitKiBps");
-    assert_eq!(fields[0]["label"], "Upload limit");
-    assert_eq!(fields[0]["group"], "transfers");
-    assert_eq!(fields[0]["kind"], "number");
-    assert_eq!(fields[0]["defaultValue"], 6200);
-    assert_eq!(fields[0]["min"], 1);
-    assert_eq!(fields[0]["max"], 4294967294u32);
-    assert_eq!(fields[0]["unit"], "KiB/s");
-    assert_eq!(fields[0]["restartRequired"], false);
-    assert_eq!(fields[0]["advanced"], false);
-    assert_eq!(fields[13]["key"], "addServersFromServer");
-    assert_eq!(fields[13]["kind"], "boolean");
-    assert_eq!(fields[13]["defaultValue"], true);
-
-    let update = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/preferences")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(update.status(), StatusCode::OK);
-    let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["uploadLimitKiBps"], 2048);
-    assert_eq!(value["data"]["uploadClientDataRate"], 64);
-    assert_eq!(value["data"]["maxUploadSlots"], 4);
-    assert_eq!(value["data"]["queueSize"], 3000);
-    assert_eq!(value["data"]["reconnect"], false);
-    assert_eq!(value["data"]["networkEd2k"], false);
-
-    let empty_patch = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/preferences")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(empty_patch.status(), StatusCode::BAD_REQUEST);
-
-    let unknown_key = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/preferences")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"unsupportedPreference":true}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unknown_key.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(unknown_key.into_body(), usize::MAX).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(
-        value["error"]["message"],
-        "unknown JSON field: unsupportedPreference"
-    );
-
-    let invalid_range = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/api/v1/app/preferences")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"queueSize":1999}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(invalid_range.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
 async fn settings_use_typed_get_and_patch_route() {
     let app = test_router();
     let read = app
@@ -265,6 +138,8 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(read.status(), StatusCode::OK);
     let body = to_bytes(read.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 6200);
+    assert_eq!(value["data"]["core"]["reconnect"], true);
     assert_eq!(
         value["data"]["daemonRuntime"]["p2pBindInterface"],
         Value::Null
@@ -284,7 +159,7 @@ async fn settings_use_typed_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"daemonRuntime":{"p2pBindInterface":"hide.me"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemonRuntime":{"p2pBindInterface":"hide.me"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
                 ))
                 .unwrap(),
         )
@@ -293,6 +168,12 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(update.status(), StatusCode::OK);
     let body = to_bytes(update.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 2048);
+    assert_eq!(value["data"]["core"]["uploadClientDataRate"], 64);
+    assert_eq!(value["data"]["core"]["maxUploadSlots"], 4);
+    assert_eq!(value["data"]["core"]["queueSize"], 3000);
+    assert_eq!(value["data"]["core"]["reconnect"], false);
+    assert_eq!(value["data"]["core"]["networkEd2k"], false);
     assert_eq!(
         value["data"]["daemonRuntime"]["p2pBindInterface"],
         "hide.me"
@@ -317,6 +198,7 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(empty_patch.status(), StatusCode::BAD_REQUEST);
 
     let unknown_section = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("PATCH")
@@ -338,6 +220,42 @@ async fn settings_use_typed_get_and_patch_route() {
         value["error"]["message"],
         "unknown JSON field: legacyNetwork"
     );
+
+    let unknown_core_key = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"core":{"unsupportedSetting":true}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_core_key.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(unknown_core_key.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        value["error"]["message"],
+        "unknown settings.core field: unsupportedSetting"
+    );
+
+    let removed_core_route = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app/core_settings")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed_core_route.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

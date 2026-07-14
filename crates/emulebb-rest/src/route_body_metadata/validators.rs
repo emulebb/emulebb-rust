@@ -1,6 +1,6 @@
 //! Route-specific REST JSON body validators.
 
-mod preferences;
+mod core_settings;
 mod search;
 
 use axum::response::Response;
@@ -13,10 +13,10 @@ pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<
     search::validate_search_create_body_fields(object)
 }
 
-pub(super) fn validate_preferences_patch_body_fields(
+pub(super) fn validate_core_settings_patch_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
-    preferences::validate_preferences_patch_body_fields(object)
+    core_settings::validate_core_settings_patch_body_fields(object)
 }
 
 pub(super) fn validate_destructive_confirmation_body_field(

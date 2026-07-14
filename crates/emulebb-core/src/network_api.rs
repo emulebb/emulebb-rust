@@ -93,8 +93,8 @@ impl EmulebbCore {
         // The eD2k network must be enabled (eMule thePrefs.GetNetworkED2K()); when
         // off, the server connect is refused and no eD2k auto-ops run.
         ensure!(
-            self.state.lock().await.preferences.network_ed2k,
-            "eD2k network is disabled in preferences (networkEd2k=false)"
+            self.state.lock().await.core_settings.network_ed2k,
+            "eD2k network is disabled in core_settings (networkEd2k=false)"
         );
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {

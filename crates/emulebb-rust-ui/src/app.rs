@@ -22,11 +22,11 @@ use anyhow::{Context, Result};
 use api::*;
 use clap::Parser;
 use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, FIELD_DOWNLOAD_LIMIT_KIBPS, FIELD_MAX_CONNECTIONS,
-    FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS, FIELD_MAX_SOURCES_PER_FILE, FIELD_MAX_UPLOAD_SLOTS,
-    FIELD_QUEUE_SIZE, FIELD_UPLOAD_CLIENT_DATA_RATE, FIELD_UPLOAD_LIMIT_KIBPS,
-    FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, Preferences, PreferencesUpdate, changed_preferences_update,
-    parse_u32_preference, preferences_update_is_empty,
+    AppSettings, AppSettingsUpdate, CoreSettings, CoreSettingsUpdate, FIELD_DOWNLOAD_LIMIT_KIBPS,
+    FIELD_MAX_CONNECTIONS, FIELD_MAX_CONNECTIONS_PER_FIVE_SECONDS, FIELD_MAX_SOURCES_PER_FILE,
+    FIELD_MAX_UPLOAD_SLOTS, FIELD_QUEUE_SIZE, FIELD_UPLOAD_CLIENT_DATA_RATE,
+    FIELD_UPLOAD_LIMIT_KIBPS, FIELD_UPLOAD_SLOT_ELASTIC_PERCENT, changed_core_settings_update,
+    core_settings_update_is_empty, parse_u32_core_setting,
 };
 use models::*;
 use presentation::*;
@@ -78,9 +78,9 @@ struct ConnectionConfig {
 enum UiCommand {
     Connect(ConnectionConfig),
     Refresh,
-    PreferencesReload,
-    PreferencesApply {
-        form: PreferencesForm,
+    CoreSettingsReload,
+    CoreSettingsApply {
+        form: CoreSettingsForm,
         settings_form: AppSettingsForm,
     },
     SearchStart {
@@ -144,15 +144,15 @@ pub(crate) fn run() -> Result<()> {
     ui.set_search_type("".into());
     ui.set_search_status_line("No active search".into());
     ui.set_settings_status_line("Connect to load settings".into());
-    ui.set_pref_upload_limit("".into());
-    ui.set_pref_download_limit("".into());
-    ui.set_pref_max_connections("".into());
-    ui.set_pref_max_connections_per_five("".into());
-    ui.set_pref_max_sources("".into());
-    ui.set_pref_upload_client_rate("".into());
-    ui.set_pref_max_upload_slots("".into());
-    ui.set_pref_upload_elastic_percent("".into());
-    ui.set_pref_queue_size("".into());
+    ui.set_core_upload_limit("".into());
+    ui.set_core_download_limit("".into());
+    ui.set_core_max_connections("".into());
+    ui.set_core_max_connections_per_five("".into());
+    ui.set_core_max_sources("".into());
+    ui.set_core_upload_client_rate("".into());
+    ui.set_core_max_upload_slots("".into());
+    ui.set_core_upload_elastic_percent("".into());
+    ui.set_core_queue_size("".into());
     ui.set_settings_incoming_dir("".into());
     ui.set_settings_p2p_bind_ip("".into());
     ui.set_settings_p2p_bind_interface("".into());
@@ -352,14 +352,14 @@ pub(crate) fn run() -> Result<()> {
     });
 
     ui.on_settings_reload_requested(move || {
-        let _ = settings_reload_tx.send(UiCommand::PreferencesReload);
+        let _ = settings_reload_tx.send(UiCommand::CoreSettingsReload);
     });
 
     let settings_apply_ui = ui.as_weak();
     ui.on_settings_apply_requested(move || {
         if let Some(ui) = settings_apply_ui.upgrade() {
-            let _ = settings_apply_tx.send(UiCommand::PreferencesApply {
-                form: preferences_form(&ui),
+            let _ = settings_apply_tx.send(UiCommand::CoreSettingsApply {
+                form: core_settings_form(&ui),
                 settings_form: app_settings_form(&ui),
             });
         }
@@ -369,7 +369,7 @@ pub(crate) fn run() -> Result<()> {
     let settings_revert_cache = Arc::clone(&cache);
     ui.on_settings_revert_requested(move || {
         if let Some(ui) = settings_revert_ui.upgrade() {
-            if !rerender_preferences_from_cache(&ui, &settings_revert_cache) {
+            if !rerender_core_settings_from_cache(&ui, &settings_revert_cache) {
                 ui.set_settings_status_line("No settings snapshot is loaded".into());
             }
         }
@@ -435,24 +435,24 @@ pub(crate) fn run() -> Result<()> {
     ui.run().context("Slint event loop failed")
 }
 
-fn preferences_form(ui: &MainWindow) -> PreferencesForm {
-    PreferencesForm {
-        upload_limit_ki_bps: ui.get_pref_upload_limit().to_string(),
-        download_limit_ki_bps: ui.get_pref_download_limit().to_string(),
-        max_connections: ui.get_pref_max_connections().to_string(),
-        max_connections_per_five_seconds: ui.get_pref_max_connections_per_five().to_string(),
-        max_sources_per_file: ui.get_pref_max_sources().to_string(),
-        upload_client_data_rate: ui.get_pref_upload_client_rate().to_string(),
-        max_upload_slots: ui.get_pref_max_upload_slots().to_string(),
-        upload_slot_elastic_percent: ui.get_pref_upload_elastic_percent().to_string(),
-        queue_size: ui.get_pref_queue_size().to_string(),
-        auto_connect: ui.get_pref_auto_connect(),
-        reconnect: ui.get_pref_reconnect(),
-        credit_system: ui.get_pref_credit_system(),
-        safe_server_connect: ui.get_pref_safe_server_connect(),
-        add_servers_from_server: ui.get_pref_add_servers_from_server(),
-        network_kademlia: ui.get_pref_network_kademlia(),
-        network_ed2k: ui.get_pref_network_ed2k(),
+fn core_settings_form(ui: &MainWindow) -> CoreSettingsForm {
+    CoreSettingsForm {
+        upload_limit_ki_bps: ui.get_core_upload_limit().to_string(),
+        download_limit_ki_bps: ui.get_core_download_limit().to_string(),
+        max_connections: ui.get_core_max_connections().to_string(),
+        max_connections_per_five_seconds: ui.get_core_max_connections_per_five().to_string(),
+        max_sources_per_file: ui.get_core_max_sources().to_string(),
+        upload_client_data_rate: ui.get_core_upload_client_rate().to_string(),
+        max_upload_slots: ui.get_core_max_upload_slots().to_string(),
+        upload_slot_elastic_percent: ui.get_core_upload_elastic_percent().to_string(),
+        queue_size: ui.get_core_queue_size().to_string(),
+        auto_connect: ui.get_core_auto_connect(),
+        reconnect: ui.get_core_reconnect(),
+        credit_system: ui.get_core_credit_system(),
+        safe_server_connect: ui.get_core_safe_server_connect(),
+        add_servers_from_server: ui.get_core_add_servers_from_server(),
+        network_kademlia: ui.get_core_network_kademlia(),
+        network_ed2k: ui.get_core_network_ed2k(),
     }
 }
 
