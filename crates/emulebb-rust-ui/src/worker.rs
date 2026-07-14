@@ -104,12 +104,7 @@ pub(super) fn worker_loop(
                     )
                 };
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
-                Ok((
-                    snapshot,
-                    None,
-                    None,
-                    Some((preferences, status)),
-                ))
+                Ok((snapshot, None, None, Some((preferences, status))))
             }),
             Some(UiCommand::TransferAction { hash, action }) => runtime.block_on(async {
                 if hash.trim().is_empty() {
