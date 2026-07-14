@@ -483,7 +483,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
             updated_at_ms: 2,
             completed_at_ms: Some(2),
             results: vec![crate::MetadataSearchResult {
-                source_method: "automatic".to_string(),
+                network: "automatic".to_string(),
                 file_hash: hash.to_string(),
                 name: "Scenario.File.bin".to_string(),
                 size_bytes: 1,
@@ -491,7 +491,6 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
                 complete_source_count: 1,
                 file_type: String::new(),
                 complete: false,
-                known_type: String::new(),
                 directory: String::new(),
                 observed_at_ms: 2,
             }],

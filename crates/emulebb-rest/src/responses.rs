@@ -325,7 +325,6 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
         "fileType": result.file_type,
         "extension": extension,
         "complete": result.complete,
-        "knownType": result.known_type,
         "directory": result.directory,
         "clientIp": "",
         "clientPort": 0,
@@ -359,7 +358,7 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
             "nameEvidence": {
                 "observedNames": [result.name],
                 "observedExtensions": if extension.is_empty() { json!([]) } else { json!([extension]) },
-                "canonicalNames": [result.name],
+                "displayNames": [result.name],
                 "ignoredNameTokens": [],
                 "divergenceGroups": [],
                 "divergent": false
@@ -553,7 +552,6 @@ mod tests {
             complete_sources: 1,
             file_type: "doc".to_string(),
             complete: true,
-            known_type: "unknown".to_string(),
             directory: String::new(),
         };
 

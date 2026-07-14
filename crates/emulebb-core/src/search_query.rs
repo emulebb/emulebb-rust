@@ -128,7 +128,6 @@ pub(crate) fn search_result_from_indexed(
         complete_sources: 0,
         file_type: file.content_type.clone(),
         complete: false,
-        known_type: file.content_type,
         directory: String::new(),
     }
 }
@@ -150,7 +149,6 @@ pub(crate) fn search_result_from_ed2k(
         complete_sources: 0,
         file_type: file_type.clone(),
         complete: false,
-        known_type: file_type,
         directory: String::new(),
     }
 }
@@ -177,7 +175,6 @@ pub(crate) fn search_result_from_kad(
         complete_sources: 0,
         file_type: "unknown".to_string(),
         complete: false,
-        known_type: "unknown".to_string(),
         directory: String::new(),
     }
 }
@@ -199,7 +196,6 @@ mod tests {
             complete_sources: 0,
             file_type: String::new(),
             complete: false,
-            known_type: String::new(),
             directory: String::new(),
         }
     }
@@ -298,6 +294,6 @@ mod tests {
         assert_eq!(result.name, "Sample File.bin");
         assert_eq!(result.size_bytes, 1234);
         assert_eq!(result.sources, 9);
-        assert_eq!(result.known_type, "unknown");
+        assert_eq!(result.file_type, "unknown");
     }
 }

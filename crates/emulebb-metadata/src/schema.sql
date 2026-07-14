@@ -402,7 +402,7 @@ CREATE TABLE search_results (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES search_sessions(id) ON DELETE CASCADE,
     known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
-    source_method TEXT NOT NULL CHECK(source_method IN ('automatic', 'server', 'global', 'kad')),
+    network TEXT NOT NULL CHECK(network IN ('automatic', 'server', 'global', 'kad')),
     file_hash BLOB CHECK(file_hash IS NULL OR length(file_hash) = 16),
     name TEXT NOT NULL,
     size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes >= 0),
@@ -410,7 +410,6 @@ CREATE TABLE search_results (
     complete_source_count INTEGER NOT NULL DEFAULT 0 CHECK(complete_source_count >= 0),
     file_type TEXT NOT NULL DEFAULT '',
     complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
-    known_type TEXT NOT NULL DEFAULT '',
     directory TEXT NOT NULL DEFAULT '',
     raw_metadata BLOB,
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0)

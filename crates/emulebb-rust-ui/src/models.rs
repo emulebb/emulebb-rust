@@ -214,7 +214,6 @@ pub(super) struct SearchResultDto {
     pub(super) complete_sources: u64,
     pub(super) file_type: String,
     pub(super) complete: bool,
-    pub(super) known_type: String,
     pub(super) directory: Option<String>,
 }
 
@@ -388,7 +387,6 @@ mod tests {
                     "completeSources": 1,
                     "fileType": "doc",
                     "complete": true,
-                    "knownType": "unknown",
                     "directory": null
                 }]
             }

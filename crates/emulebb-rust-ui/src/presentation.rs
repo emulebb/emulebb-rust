@@ -57,8 +57,7 @@ pub(super) fn sorted_search_results(
                         display_or(&b.file_type, &b.result_type),
                     ),
                     5 => cmp_text(&a.method, &b.method),
-                    6 => cmp_text(&a.known_type, &b.known_type),
-                    7 => cmp_text(&a.hash, &b.hash),
+                    6 => cmp_text(&a.hash, &b.hash),
                     _ => cmp_text(&a.hash, &b.hash),
                 }
                 .then_with(|| cmp_text(&a.hash, &b.hash)),
@@ -280,7 +279,7 @@ pub(super) fn search_result_items_for(
         .iter()
         .map(|item| {
             let detail = format!(
-                "Search: {} ({})\nHash: {}\nName: {}\nSize: {}\nSources: {} total, {} complete\nMethod: {}\nKnown state: {}\nType: {}\nDirectory: {}",
+                "Search: {} ({})\nHash: {}\nName: {}\nSize: {}\nSources: {} total, {} complete\nMethod: {}\nCompletion: {}\nType: {}\nDirectory: {}",
                 search.id,
                 search.query,
                 item.hash,
@@ -289,7 +288,7 @@ pub(super) fn search_result_items_for(
                 item.sources,
                 item.complete_sources,
                 item.method,
-                item.known_type,
+                if item.complete { "complete" } else { "incomplete" },
                 display_or(&item.file_type, &item.result_type),
                 item.directory.as_deref().unwrap_or("-")
             );
@@ -302,11 +301,6 @@ pub(super) fn search_result_items_for(
                 complete_sources_text: text(item.complete_sources.to_string()),
                 file_type: text(display_or(&item.file_type, &item.result_type)),
                 method: text(&item.method),
-                known_type: text(if item.complete {
-                    "complete"
-                } else {
-                    display_or(&item.known_type, "unknown")
-                }),
                 detail: text(detail),
             }
         })
@@ -479,7 +473,6 @@ pub(super) fn search_result_columns() -> Vec<TableColumn> {
         ("Complete", 86.0, 0.0),
         ("Type", 92.0, 0.0),
         ("Method", 92.0, 0.0),
-        ("Known", 112.0, 0.0),
         ("Hash", 260.0, 1.0),
     ])
 }
@@ -574,7 +567,6 @@ pub(super) fn search_result_table_rows(
                 item.complete_sources_text.clone(),
                 item.file_type.clone(),
                 item.method.clone(),
-                item.known_type.clone(),
                 item.hash.clone(),
             ])
         })

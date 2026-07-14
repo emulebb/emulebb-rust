@@ -14,7 +14,7 @@ pub struct MetadataSearch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSearchResult {
-    pub source_method: String,
+    pub network: String,
     pub file_hash: String,
     pub name: String,
     pub size_bytes: u64,
@@ -22,7 +22,6 @@ pub struct MetadataSearchResult {
     pub complete_source_count: u32,
     pub file_type: String,
     pub complete: bool,
-    pub known_type: String,
     pub directory: String,
     pub observed_at_ms: i64,
 }

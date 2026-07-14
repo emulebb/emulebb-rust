@@ -202,7 +202,6 @@ pub struct SearchResult {
     pub complete_sources: u32,
     pub file_type: String,
     pub complete: bool,
-    pub known_type: String,
     pub directory: String,
 }
 

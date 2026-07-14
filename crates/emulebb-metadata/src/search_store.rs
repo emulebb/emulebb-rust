@@ -64,16 +64,16 @@ impl super::MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO search_results(
-                    session_id, known_file_id, source_method, file_hash, name, size_bytes,
-                    source_count, complete_source_count, file_type, complete, known_type,
-                    directory, observed_at_ms
+                    session_id, known_file_id, network, file_hash, name, size_bytes,
+                    source_count, complete_source_count, file_type, complete, directory,
+                    observed_at_ms
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 "#,
                 params![
                     session_id,
                     known_file_id,
-                    result.source_method,
+                    result.network,
                     file_hash,
                     result.name,
                     result.size_bytes as i64,
@@ -81,7 +81,6 @@ impl super::MetadataStore {
                     i64::from(result.complete_source_count),
                     result.file_type,
                     bool_to_i64(result.complete),
-                    result.known_type,
                     result.directory,
                     if result.observed_at_ms > 0 {
                         result.observed_at_ms
@@ -153,10 +152,10 @@ fn load_search_results(
 ) -> Result<Vec<MetadataSearchResult>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT source_method,
+        SELECT network,
                CASE WHEN file_hash IS NULL THEN '' ELSE lower(hex(file_hash)) END,
                name, size_bytes, source_count, complete_source_count, file_type,
-               complete, known_type, directory, observed_at_ms
+               complete, directory, observed_at_ms
         FROM search_results
         WHERE session_id = ?1
         ORDER BY id
@@ -164,7 +163,7 @@ fn load_search_results(
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
         Ok(MetadataSearchResult {
-            source_method: row.get(0)?,
+            network: row.get(0)?,
             file_hash: row.get(1)?,
             name: row.get(2)?,
             size_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or_default() as u64,
@@ -172,9 +171,8 @@ fn load_search_results(
             complete_source_count: row.get::<_, i64>(5)? as u32,
             file_type: row.get(6)?,
             complete: row.get::<_, i64>(7)? != 0,
-            known_type: row.get(8)?,
-            directory: row.get(9)?,
-            observed_at_ms: row.get(10)?,
+            directory: row.get(8)?,
+            observed_at_ms: row.get(9)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -238,7 +236,7 @@ mod tests {
             updated_at_ms: 2,
             completed_at_ms: Some(2),
             results: vec![MetadataSearchResult {
-                source_method: "automatic".to_string(),
+                network: "automatic".to_string(),
                 file_hash: "00112233445566778899aabbccddeeff".to_string(),
                 name: "Zażółć Sample.bin".to_string(),
                 size_bytes: 123,
@@ -246,7 +244,6 @@ mod tests {
                 complete_source_count: 3,
                 file_type: "video".to_string(),
                 complete: false,
-                known_type: "video".to_string(),
                 directory: String::new(),
                 observed_at_ms: 2,
             }],

@@ -72,7 +72,7 @@ fn search_to_metadata(search: &Search) -> MetadataSearch {
 
 fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> MetadataSearchResult {
     MetadataSearchResult {
-        source_method: result.method.clone(),
+        network: result.method.clone(),
         file_hash: result.hash.clone(),
         name: result.name.clone(),
         size_bytes: result.size_bytes,
@@ -80,7 +80,6 @@ fn search_result_to_metadata(result: &SearchResult, observed_at_ms: i64) -> Meta
         complete_source_count: result.complete_sources,
         file_type: result.file_type.clone(),
         complete: result.complete,
-        known_type: result.known_type.clone(),
         directory: result.directory.clone(),
         observed_at_ms,
     }
@@ -126,7 +125,7 @@ fn search_result_from_metadata(
 ) -> SearchResult {
     SearchResult {
         search_id: search_id.to_string(),
-        method: result.source_method,
+        method: result.network,
         r#type: search_type.to_string(),
         hash: result.file_hash,
         name: result.name,
@@ -135,7 +134,6 @@ fn search_result_from_metadata(
         complete_sources: result.complete_source_count,
         file_type: result.file_type,
         complete: result.complete,
-        known_type: result.known_type,
         directory: result.directory,
     }
 }
