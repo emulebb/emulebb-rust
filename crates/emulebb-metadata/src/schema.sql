@@ -1,7 +1,7 @@
 CREATE TABLE metadata_schema (
     schema_id TEXT PRIMARY KEY,
     schema_version INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
 );
 
 CREATE TABLE profile (
@@ -17,7 +17,7 @@ CREATE TABLE local_identities (
     identity_kind TEXT NOT NULL UNIQUE CHECK(identity_kind IN ('ed2k-user-hash', 'ed2k-secure-ident')),
     public_identity BLOB,
     private_secret BLOB,
-    created_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     CHECK (public_identity IS NULL OR length(public_identity) IN (16, 20))
 );
@@ -26,7 +26,7 @@ CREATE TABLE settings (
     section TEXT NOT NULL,
     key TEXT NOT NULL,
     value_json TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
     PRIMARY KEY(section, key),
     CHECK(length(trim(section)) > 0),
     CHECK(length(trim(key)) > 0),
@@ -143,7 +143,7 @@ CREATE TABLE verified_ranges (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     CHECK(end_offset >= start_offset)
 );
 
