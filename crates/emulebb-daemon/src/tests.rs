@@ -8,7 +8,6 @@ fn metadata_store(config: &DaemonConfig) -> MetadataStore {
 fn persist_test_server(config: &DaemonConfig) {
     metadata_store(config)
         .upsert_server(&emulebb_metadata::MetadataServer {
-            endpoint: "192.0.2.20:4661".to_string(),
             address: "192.0.2.20".to_string(),
             port: 4661,
             name: "test server".to_string(),

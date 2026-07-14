@@ -45,12 +45,11 @@ pub(crate) fn load_core_state(
     let mut servers = HashMap::new();
     let mut disabled_servers = HashSet::new();
     for server in metadata.load_servers()? {
+        let endpoint = server.endpoint();
         if !server.enabled {
-            disabled_servers.insert(server.endpoint.clone());
+            disabled_servers.insert(endpoint.clone());
         }
-        if server.port != 0 && !server.address.is_empty() {
-            servers.insert(server.endpoint.clone(), server_from_metadata(server));
-        }
+        servers.insert(endpoint, server_from_metadata(server));
     }
 
     let searches = crate::search_state::load_searches(metadata)?;
@@ -142,7 +141,6 @@ pub(crate) fn persist_server(
     enabled: bool,
 ) -> Result<()> {
     metadata.upsert_server(&MetadataServer {
-        endpoint: server.endpoint.clone(),
         address: server.address.clone(),
         port: server.port,
         name: server.name.clone(),
@@ -186,10 +184,11 @@ fn friend_from_metadata(friend: MetadataFriend) -> Friend {
 }
 
 fn server_from_metadata(server: MetadataServer) -> ServerInfo {
+    let endpoint = server.endpoint();
     ServerInfo {
         address: server.address,
         port: server.port,
-        endpoint: server.endpoint,
+        endpoint,
         name: server.name,
         priority: server.priority,
         static_server: server.static_server,

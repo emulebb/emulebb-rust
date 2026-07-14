@@ -284,9 +284,8 @@ CREATE TABLE transfer_pieces (
 
 CREATE TABLE servers (
     id INTEGER PRIMARY KEY,
-    endpoint TEXT NOT NULL UNIQUE,
-    address TEXT NOT NULL,
-    port INTEGER NOT NULL,
+    address TEXT NOT NULL CHECK(length(trim(address)) > 0),
+    port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     name TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT 'normal',
@@ -303,7 +302,8 @@ CREATE TABLE servers (
     udp_flags INTEGER,
     first_seen_ms INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER
+    deleted_at_ms INTEGER,
+    UNIQUE(address, port)
 );
 
 CREATE TABLE peers (

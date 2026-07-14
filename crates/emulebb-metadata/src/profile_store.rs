@@ -265,33 +265,32 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT endpoint, address, port, name, description, priority, static_server,
+            SELECT address, port, name, description, priority, static_server,
                    enabled, failed_count, ping_ms, users, files, soft_files, hard_files, version,
                    obfuscation_tcp_port, udp_flags
             FROM servers
             WHERE deleted_at_ms IS NULL
-            ORDER BY endpoint
+            ORDER BY address, port
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(MetadataServer {
-                endpoint: row.get(0)?,
-                address: row.get(1)?,
-                port: row.get::<_, i64>(2)? as u16,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                priority: row.get(5)?,
-                static_server: row.get::<_, i64>(6)? != 0,
-                enabled: row.get::<_, i64>(7)? != 0,
-                failed_count: row.get::<_, i64>(8)? as u32,
-                ping_ms: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
-                users: row.get::<_, Option<i64>>(10)?.unwrap_or_default() as u64,
-                files: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
-                soft_files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
-                hard_files: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
-                version: row.get(14)?,
-                obfuscation_tcp_port: row.get::<_, Option<i64>>(15)?.map(|value| value as u16),
-                udp_flags: row.get::<_, Option<i64>>(16)?.map(|value| value as u32),
+                address: row.get(0)?,
+                port: row.get::<_, i64>(1)? as u16,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                priority: row.get(4)?,
+                static_server: row.get::<_, i64>(5)? != 0,
+                enabled: row.get::<_, i64>(6)? != 0,
+                failed_count: row.get::<_, i64>(7)? as u32,
+                ping_ms: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                users: row.get::<_, Option<i64>>(9)?.unwrap_or_default() as u64,
+                files: row.get::<_, Option<i64>>(10)?.unwrap_or_default() as u64,
+                soft_files: row.get::<_, Option<i64>>(11)?.unwrap_or_default() as u64,
+                hard_files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
+                version: row.get(13)?,
+                obfuscation_tcp_port: row.get::<_, Option<i64>>(14)?.map(|value| value as u16),
+                udp_flags: row.get::<_, Option<i64>>(15)?.map(|value| value as u32),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -303,14 +302,12 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             INSERT INTO servers(
-                endpoint, address, port, name, description, priority, static_server,
+                address, port, name, description, priority, static_server,
                 enabled, failed_count, ping_ms, users, files, soft_files, hard_files,
                 version, obfuscation_tcp_port, udp_flags, first_seen_ms, last_seen_ms, deleted_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, NULL)
-            ON CONFLICT(endpoint) DO UPDATE SET
-                address = excluded.address,
-                port = excluded.port,
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, NULL)
+            ON CONFLICT(address, port) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
                 priority = excluded.priority,
@@ -329,7 +326,6 @@ impl super::MetadataStore {
                 deleted_at_ms = NULL
             "#,
             params![
-                server.endpoint,
                 server.address,
                 i64::from(server.port),
                 server.name,
@@ -348,22 +344,6 @@ impl super::MetadataStore {
                 server.udp_flags.map(i64::from),
                 now,
             ],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_server_enabled(&self, endpoint: &str, enabled: bool) -> Result<()> {
-        let now = unix_ms();
-        self.connection()?.execute(
-            r#"
-            INSERT INTO servers(endpoint, address, port, enabled, first_seen_ms, last_seen_ms)
-            VALUES (?1, '', 0, ?2, ?3, ?3)
-            ON CONFLICT(endpoint) DO UPDATE SET
-                enabled = excluded.enabled,
-                last_seen_ms = excluded.last_seen_ms,
-                deleted_at_ms = NULL
-            "#,
-            params![endpoint, bool_to_i64(enabled), now],
         )?;
         Ok(())
     }
@@ -499,7 +479,6 @@ mod tests {
         let store = super::super::MetadataStore::in_memory().unwrap();
         store
             .upsert_server(&MetadataServer {
-                endpoint: "192.0.2.10:4661".to_string(),
                 address: "192.0.2.10".to_string(),
                 port: 4661,
                 name: "Test Server".to_string(),
@@ -518,11 +497,31 @@ mod tests {
                 udp_flags: Some(0x331),
             })
             .unwrap();
-        store.set_server_enabled("192.0.2.10:4661", false).unwrap();
+        store
+            .upsert_server(&MetadataServer {
+                address: "192.0.2.10".to_string(),
+                port: 4661,
+                name: "Test Server".to_string(),
+                description: "Synthetic".to_string(),
+                priority: "high".to_string(),
+                static_server: true,
+                enabled: false,
+                failed_count: 2,
+                ping_ms: Some(50),
+                users: 10,
+                files: 20,
+                soft_files: 30,
+                hard_files: 40,
+                version: "17.15".to_string(),
+                obfuscation_tcp_port: Some(4665),
+                udp_flags: Some(0x331),
+            })
+            .unwrap();
         let servers = store.load_servers().unwrap();
         assert_eq!(servers.len(), 1);
         assert!(!servers[0].enabled);
         assert_eq!(servers[0].name, "Test Server");
+        assert_eq!(servers[0].endpoint(), "192.0.2.10:4661");
         assert_eq!(servers[0].obfuscation_tcp_port, Some(4665));
         assert_eq!(servers[0].udp_flags, Some(0x331));
 

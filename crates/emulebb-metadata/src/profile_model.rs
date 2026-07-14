@@ -20,7 +20,6 @@ pub struct MetadataFriend {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataServer {
-    pub endpoint: String,
     pub address: String,
     pub port: u16,
     pub name: String,
@@ -37,4 +36,11 @@ pub struct MetadataServer {
     pub version: String,
     pub obfuscation_tcp_port: Option<u16>,
     pub udp_flags: Option<u32>,
+}
+
+impl MetadataServer {
+    #[must_use]
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
 }
