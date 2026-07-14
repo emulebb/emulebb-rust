@@ -270,7 +270,7 @@ pub struct Ed2kTransferRuntime {
     /// `thePrefs.GetCreditSystem()`). When false, every peer gets the neutral 1.0
     /// credit ratio (`DEFAULT_CREDIT_SCORE_PERMILLE`) so stored bytes never alter
     /// the queue order. Set from the upload-queue policy at startup and on every
-    /// preferences update; an atomic so the lock-free credit-score path reads it.
+    /// settings update; an atomic so the lock-free credit-score path reads it.
     credit_system_enabled: AtomicBool,
     /// Whether MD4-only ICH salvage of corrupted parts is enabled (eMule
     /// `thePrefs.IsICHEnabled()`; ini default true, Preferences.cpp:3187).
@@ -513,7 +513,7 @@ impl Ed2kTransferRuntime {
     }
 
     /// Replace the active global download rate limit (0 = unlimited). Threaded
-    /// from the daemon/REST preferences like the upload limit.
+    /// from the daemon/REST settings like the upload limit.
     pub async fn apply_download_limit(&self, limit_bytes_per_sec: u64) {
         self.download_throttle
             .lock()

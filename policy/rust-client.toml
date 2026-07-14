@@ -15,7 +15,7 @@ macos = "compile/test-viable target; runtime deferred pending a macOS CI runner"
 
 [protocol]
 address_family = "ipv4-only"
-compatibility = "eD2K/Kad protocol-operational parity by default; Rust REST/UI/preferences are Rust-native async daemon surfaces, not MFC or legacy GUI mirrors; broadband-oriented async IO is the daemon baseline, not a compatibility toggle; approved permanent protocol drops are explicit review-reporting exclusions"
+compatibility = "eD2K/Kad protocol-operational parity by default; Rust REST/UI/settings are Rust-native async daemon surfaces, not MFC or legacy GUI mirrors; broadband-oriented async IO is the daemon baseline, not a compatibility toggle; approved permanent protocol drops are explicit review-reporting exclusions"
 omission_registry = "policy/rust-client-omissions.toml"
 
 [review_reporting]

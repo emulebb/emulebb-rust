@@ -222,7 +222,7 @@ def check_no_legacy_rust_native_surface() -> list[str]:
     """Keep non-protocol Rust REST/settings/UI surface free of old GUI residue."""
     errors = []
     checked_roots = (
-        "crates/emulebb-preferences",
+        "crates/emulebb-settings",
         "crates/emulebb-rest",
         "crates/emulebb-rust-ui",
         "crates/emulebb-core",
