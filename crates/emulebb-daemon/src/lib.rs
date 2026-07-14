@@ -208,7 +208,7 @@ impl DaemonProfile {
             kad_buddy_enabled: self.kad.buddy_enabled,
             kad_routing_maintenance_enabled: self.kad.routing_maintenance_enabled,
             nat_config: self.nat_config(bind_ip),
-            config: self.ed2k.clone(),
+            ed2k: self.ed2k.clone(),
             p2p_bind_ip: Some(bind_ip),
             p2p_bind_interface: self.p2p_bind_interface.clone(),
             vpn_guard: VpnGuardConfig {

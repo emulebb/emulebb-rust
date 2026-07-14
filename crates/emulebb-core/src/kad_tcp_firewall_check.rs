@@ -133,7 +133,7 @@ async fn run_kad_tcp_firewall_check_round(
         return Ok(());
     }
 
-    let connect_options = emule_connect_options(network.config.obfuscation_enabled);
+    let connect_options = emule_connect_options(network.ed2k.obfuscation_enabled);
     {
         let mut firewall = kad_firewall.lock().await;
         firewall.begin_tcp_recheck(Utc::now());

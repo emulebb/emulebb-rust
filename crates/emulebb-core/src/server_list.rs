@@ -17,7 +17,7 @@ impl EmulebbCore {
         let state = self.state.lock().await;
         let mut server_map = BTreeMap::<String, ServerInfo>::new();
         if let Some(network) = self.ed2k_network.as_ref() {
-            for entry in &network.config.server_entries {
+            for entry in &network.ed2k.server_entries {
                 let endpoint = format!("{}:{}", entry.host, entry.port);
                 let mut server = server_info_from_parts(
                     &entry.host,
@@ -32,7 +32,7 @@ impl EmulebbCore {
                 apply_server_update(&mut server, state.server_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
             }
-            for endpoint in &network.config.server_endpoints {
+            for endpoint in &network.ed2k.server_endpoints {
                 if server_map.contains_key(endpoint) {
                     continue;
                 }

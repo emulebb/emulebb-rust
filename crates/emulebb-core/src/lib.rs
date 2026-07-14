@@ -462,7 +462,7 @@ impl EmulebbCore {
         let upload_queue_policy = initial_ed2k_upload_queue_policy(
             ed2k_network
                 .as_ref()
-                .map(|network| &network.config.upload_queue),
+                .map(|network| &network.ed2k.upload_queue),
             has_persisted_core_settings,
             &core_state.core_settings,
         );
@@ -750,7 +750,7 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Ed2kServerSearchOutcome::Unavailable);
         };
-        let config = self.effective_ed2k_config(&network.config, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(Ed2kServerSearchOutcome::Unavailable);
         }
@@ -853,7 +853,7 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
         };
-        let config = self.effective_ed2k_config(&network.config, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(Some("queued"));
         }
@@ -927,14 +927,14 @@ impl EmulebbCore {
         // Direct peer connect stays conservative (~15s); the LowID callback wait
         // gets eMule's full reach (ClientList.cpp:1059 SEC2MS(45)) so a firewalled
         // source has time to connect back.
-        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
+        let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(10));
         let callback_timeout = Duration::from_secs(
             network
-                .config
+                .ed2k
                 .callback_timeout_secs
-                .max(network.config.connect_timeout_secs),
+                .max(network.ed2k.connect_timeout_secs),
         );
-        let max_peers = network.config.max_parallel_download_peers.max(1);
+        let max_peers = network.ed2k.max_parallel_download_peers.max(1);
         let connected_server_endpoint = self.connected_ed2k_server_endpoint().await;
         let connected_search_handle = self.connected_ed2k_search_handle().await;
 
@@ -1910,7 +1910,7 @@ impl EmulebbCore {
         file_hash: Ed2kHash,
     ) -> Result<Option<LearnedEd2kMetadata>> {
         let cancel = CancellationToken::new();
-        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(15));
+        let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(15));
         let query = hash_only_ed2k_search_query(file_hash);
         let mut learned = LearnedEd2kMetadata::default();
         let background_search = self.connected_ed2k_search_handle().await;
@@ -1976,7 +1976,7 @@ impl EmulebbCore {
         allow_server_source_refresh: bool,
     ) -> Result<Vec<Ed2kFoundSource>> {
         let cancel = CancellationToken::new();
-        let config = self.effective_ed2k_config(&network.config, None).await?;
+        let config = self.effective_ed2k_config(&network.ed2k, None).await?;
         let mut sources = Vec::new();
         let (preferred_endpoint, background_search) =
             if let Some(handle) = self.connected_ed2k_search_handle().await {
@@ -2240,7 +2240,7 @@ impl EmulebbCore {
                 .advertised_udp_port(network.kad_bind_addr.port()),
             server_ip: 0,
             server_port: 0,
-            connect_options: emule_connect_options(network.config.obfuscation_enabled),
+            connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
             direct_udp_callback: false,
         }
     }
@@ -2356,7 +2356,7 @@ impl EmulebbCore {
             .ed2k_reachability
             .advertised_tcp_port(network.listen_port);
         let our_user_hash = network.user_hash;
-        let our_connect_options = emule_connect_options(network.config.obfuscation_enabled);
+        let our_connect_options = emule_connect_options(network.ed2k.obfuscation_enabled);
         for source in sources
             .iter()
             .filter(|source| source.is_direct_callback_source())
@@ -2434,7 +2434,7 @@ impl EmulebbCore {
         if !server_state.read().await.connected {
             return Ok(Ed2kSharedCatalogPublishOutcome::NotConnected);
         }
-        let timeout = Duration::from_secs(network.config.connect_timeout_secs.max(10));
+        let timeout = Duration::from_secs(network.ed2k.connect_timeout_secs.max(10));
         let stats = publish_shared_catalog_via_background_session(
             &handle,
             timeout,
@@ -3443,7 +3443,7 @@ async fn publish_kad_due_shared_files(
     let source_publish_identity = source_publish_client_hash(network.user_hash);
     let source_publish_settings = SourcePublishSettings {
         tcp_port: network.listen_port,
-        obfuscation_enabled: network.config.obfuscation_enabled,
+        obfuscation_enabled: network.ed2k.obfuscation_enabled,
     };
     // Select the oracle STOREFILE publish branch from the live firewall/buddy
     // state (Search.cpp:700-745): open → direct UDP callback → buddy relay.
@@ -5764,7 +5764,7 @@ async fn handle_kad_find_buddy_req(
         // keyless legacy requester gets the 34-byte response with no trailing byte.
         connect_options: find_buddy_res_connect_options(
             requester_has_udp_key,
-            network.config.obfuscation_enabled,
+            network.ed2k.obfuscation_enabled,
         ),
     };
     // The oracle establishes the buddy relationship only as part of replying;
@@ -5912,7 +5912,7 @@ fn buddy_hello_identity(
         udp_port: reachability.advertised_udp_port(network.kad_bind_addr.port()),
         server_ip: 0,
         server_port: 0,
-        connect_options: emule_connect_options(network.config.obfuscation_enabled),
+        connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
         direct_udp_callback: false,
     }
 }

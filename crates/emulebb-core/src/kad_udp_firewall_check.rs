@@ -256,7 +256,7 @@ async fn kad_udp_firewall_check_hello_identity(
         udp_port: internal_udp_port,
         server_ip: 0,
         server_port: 0,
-        connect_options: emule_connect_options(network.config.obfuscation_enabled),
+        connect_options: emule_connect_options(network.ed2k.obfuscation_enabled),
         direct_udp_callback: false,
     };
     enrich_hello_identity(identity, server_state, kad_firewall).await

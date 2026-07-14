@@ -145,7 +145,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         kad_tcp_firewall_check_interval_secs: 600,
         kad_buddy_enabled: true,
         nat_config: NatConfig::default(),
-        config,
+        ed2k: config,
         p2p_bind_ip: Some(Ipv4Addr::new(198, 51, 100, 10)),
         p2p_bind_interface: None,
         vpn_guard: VpnGuardConfig::default(),

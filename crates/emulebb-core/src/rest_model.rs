@@ -645,7 +645,7 @@ pub struct Ed2kNetworkConfig {
     /// and we answer buddy requests from firewalled peers when we are reachable.
     pub kad_buddy_enabled: bool,
     pub nat_config: NatConfig,
-    pub config: Ed2kRuntimeConfig,
+    pub ed2k: Ed2kRuntimeConfig,
     /// Optional configured P2P bind IP. `None` is valid when the bind came from
     /// `p2pBindInterface` only; `bind_ip` carries the resolved runtime address.
     pub p2p_bind_ip: Option<Ipv4Addr>,

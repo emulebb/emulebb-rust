@@ -131,7 +131,7 @@ fn test_network_config_with_store(
         kad_tcp_firewall_check_interval_secs: 600,
         kad_buddy_enabled: true,
         nat_config: NatConfig::default(),
-        config: Ed2kRuntimeConfig::default(),
+        ed2k: Ed2kRuntimeConfig::default(),
         p2p_bind_ip: Some(Ipv4Addr::new(198, 51, 100, 10)),
         p2p_bind_interface: None,
         vpn_guard: VpnGuardConfig::default(),

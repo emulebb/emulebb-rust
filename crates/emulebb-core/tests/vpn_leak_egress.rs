@@ -190,7 +190,7 @@ fn tunnel_network_config(
             enabled: false,
             ..NatConfig::default()
         },
-        config,
+        ed2k: config,
         p2p_bind_ip: Some(ip),
         p2p_bind_interface: None,
         vpn_guard: VpnGuardConfig {

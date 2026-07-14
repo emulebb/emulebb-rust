@@ -361,7 +361,7 @@ async fn explicit_server_connect_targets_running_server_loop() {
         KadLocalStoreConfig::default(),
         SnoopQueueConfig::default(),
     );
-    network.config.server_endpoints = vec![
+    network.ed2k.server_endpoints = vec![
         "203.0.113.10:4661".to_string(),
         "203.0.113.20:4661".to_string(),
     ];
@@ -426,7 +426,7 @@ async fn explicit_server_connect_to_live_endpoint_is_idempotent() {
         KadLocalStoreConfig::default(),
         SnoopQueueConfig::default(),
     );
-    network.config.server_endpoints = vec!["203.0.113.20:4661".to_string()];
+    network.ed2k.server_endpoints = vec!["203.0.113.20:4661".to_string()];
     let core = EmulebbCore::new_with_network(
         "test",
         FileIndex::in_memory().unwrap(),

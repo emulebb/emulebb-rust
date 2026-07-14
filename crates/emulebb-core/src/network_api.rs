@@ -103,9 +103,7 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.clone() else {
             anyhow::bail!("ED2K network is not configured");
         };
-        let config = self
-            .effective_ed2k_config(&network.config, endpoint)
-            .await?;
+        let config = self.effective_ed2k_config(&network.ed2k, endpoint).await?;
         if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             anyhow::bail!("ED2K connect requires at least one configured server");
         }
@@ -235,7 +233,7 @@ impl EmulebbCore {
             emulebb_ed2k::networking::require_bind_if_index(network.bind_ip, "Kad UDP")?;
         let dht = DhtNode::new(DhtConfig {
             bind_addr: Some(network.kad_bind_addr),
-            obfuscation_enabled: network.config.obfuscation_enabled,
+            obfuscation_enabled: network.ed2k.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
             nodes_text: configured_bootstrap_endpoints_text.clone(),

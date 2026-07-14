@@ -102,7 +102,7 @@ impl EmulebbCore {
             .apply_upload_queue_policy(&ed2k_upload_queue_policy_from_core_settings(
                 self.ed2k_network
                     .as_ref()
-                    .map(|network| &network.config.upload_queue),
+                    .map(|network| &network.ed2k.upload_queue),
                 &core_settings,
             ))
             .await;
