@@ -44,6 +44,7 @@ emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-rest = { path = "../emulebb-rest" }
 hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true

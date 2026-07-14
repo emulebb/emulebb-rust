@@ -1,28 +1,5 @@
 runtimeDir = "runtime"
-p2pBindIp = "192.0.2.10"
 
 [rest]
 bindAddr = "192.0.2.10:13301"
 apiKey = "change-me"
-
-[kad]
-listenPort = 41002
-bootstrapNodes = []
-bootstrapMinRoutingContacts = 10
-localStoreEnabled = true
-localStoreKeywordTtlSecs = 86400
-# Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h).
-localStoreSourceTtlSecs = 18000
-localStoreNotesTtlSecs = 86400
-localStoreKeywordCapacity = 60000
-localStoreSourceCapacity = 100000
-localStoreNotesCapacity = 60000
-snoopQueueDedupWindowSecs = 28800
-snoopQueueGeneralMaxQueriesPer600s = 24
-snoopQueueGeneralDrainCooldownSecs = 900
-snoopQueueSourceMaxQueriesPer600s = 60
-snoopQueueSourceDrainCooldownSecs = 300
-snoopQueueSourceStopAfterResults = 2
-
-[ed2k]
-listenPort = 41001

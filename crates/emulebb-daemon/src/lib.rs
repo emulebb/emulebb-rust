@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, PreferencesUpdate, VpnGuardConfig};
+use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent, ipfilter,
     ipfilter::IpFilter,
@@ -26,6 +26,7 @@ mod vpn_guard_monitor;
 
 /// MFC `SEARCHSTORE*_TOTAL`: target STORE responses for keyword/source/notes publishes.
 const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
+const DAEMON_RUNTIME_CONFIG_KEY: &str = "daemon.runtimeConfig";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -42,7 +43,30 @@ pub struct DaemonConfig {
     pub ed2k: Ed2kConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
-    pub preferences: DaemonPreferencesConfig,
+    pub vpn_guard: VpnGuardSettings,
+    pub ip_filter: IpFilterSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct DaemonBootstrapConfig {
+    pub runtime_dir: PathBuf,
+    pub rest: RestListenerConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct DaemonRuntimeConfig {
+    /// Global finished-file delivery directory (eMule Incoming folder). When a
+    /// completed transfer has no category path, its payload is materialized here
+    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
+    pub incoming_dir: Option<PathBuf>,
+    pub p2p_bind_ip: Option<Ipv4Addr>,
+    pub p2p_bind_interface: Option<String>,
+    pub ed2k_user_hash: Option<String>,
+    pub kad: KadListenerConfig,
+    pub ed2k: Ed2kConfig,
+    pub nat: NatConfig,
     pub vpn_guard: VpnGuardSettings,
     pub ip_filter: IpFilterSettings,
 }
@@ -125,19 +149,37 @@ pub struct RestListenerConfig {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct DaemonPreferencesConfig {
-    pub auto_connect: Option<bool>,
-    pub reconnect: Option<bool>,
-    pub network_kademlia: Option<bool>,
-    pub network_ed2k: Option<bool>,
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        let runtime = DaemonRuntimeConfig::default();
+        Self {
+            runtime_dir: PathBuf::from("runtime"),
+            incoming_dir: runtime.incoming_dir,
+            p2p_bind_ip: runtime.p2p_bind_ip,
+            p2p_bind_interface: runtime.p2p_bind_interface,
+            ed2k_user_hash: runtime.ed2k_user_hash,
+            kad: runtime.kad,
+            ed2k: runtime.ed2k,
+            nat: runtime.nat,
+            rest: RestListenerConfig::default(),
+            vpn_guard: runtime.vpn_guard,
+            ip_filter: runtime.ip_filter,
+        }
+    }
 }
 
-impl Default for DaemonConfig {
+impl Default for DaemonBootstrapConfig {
     fn default() -> Self {
         Self {
             runtime_dir: PathBuf::from("runtime"),
+            rest: RestListenerConfig::default(),
+        }
+    }
+}
+
+impl Default for DaemonRuntimeConfig {
+    fn default() -> Self {
+        Self {
             incoming_dir: None,
             p2p_bind_ip: None,
             p2p_bind_interface: None,
@@ -145,8 +187,6 @@ impl Default for DaemonConfig {
             kad: KadListenerConfig::default(),
             ed2k: Ed2kConfig::default(),
             nat: NatConfig::default(),
-            rest: RestListenerConfig::default(),
-            preferences: DaemonPreferencesConfig::default(),
             vpn_guard: VpnGuardSettings::default(),
             ip_filter: IpFilterSettings::default(),
         }
@@ -202,25 +242,6 @@ impl Default for RestListenerConfig {
     }
 }
 
-impl DaemonPreferencesConfig {
-    fn to_update(&self) -> Option<PreferencesUpdate> {
-        if self.auto_connect.is_none()
-            && self.reconnect.is_none()
-            && self.network_kademlia.is_none()
-            && self.network_ed2k.is_none()
-        {
-            return None;
-        }
-        Some(PreferencesUpdate {
-            auto_connect: self.auto_connect,
-            reconnect: self.reconnect,
-            network_kademlia: self.network_kademlia,
-            network_ed2k: self.network_ed2k,
-            ..PreferencesUpdate::default()
-        })
-    }
-}
-
 impl DaemonConfig {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = path.context("--config is required; network bindings must come from config")?;
@@ -229,15 +250,36 @@ impl DaemonConfig {
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let config: Self = toml::from_str(&text)
+        let bootstrap: DaemonBootstrapConfig = toml::from_str(&text)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
+        let metadata = MetadataStore::open(bootstrap.runtime_dir.join("metadata.sqlite"))
+            .with_context(|| {
+                format!(
+                    "failed to open metadata store under {}",
+                    bootstrap.runtime_dir.display()
+                )
+            })?;
+        let runtime = load_or_create_runtime_config(&metadata)?;
+        let config = Self {
+            runtime_dir: bootstrap.runtime_dir,
+            incoming_dir: runtime.incoming_dir,
+            p2p_bind_ip: runtime.p2p_bind_ip,
+            p2p_bind_interface: runtime.p2p_bind_interface,
+            ed2k_user_hash: runtime.ed2k_user_hash,
+            kad: runtime.kad,
+            ed2k: runtime.ed2k,
+            nat: runtime.nat,
+            rest: bootstrap.rest,
+            vpn_guard: runtime.vpn_guard,
+            ip_filter: runtime.ip_filter,
+        };
         config
-            .validate_no_toml_servers()
-            .with_context(|| format!("invalid server config in {}", path.display()))?;
+            .validate_no_inline_servers()
+            .context("invalid runtime server config in metadata store")?;
         config
             .nat
             .validate()
-            .with_context(|| format!("invalid NAT config in {}", path.display()))?;
+            .context("invalid NAT config in metadata store")?;
         Ok(config)
     }
 
@@ -327,12 +369,12 @@ impl DaemonConfig {
         }))
     }
 
-    fn validate_no_toml_servers(&self) -> Result<()> {
+    fn validate_no_inline_servers(&self) -> Result<()> {
         if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
             return Ok(());
         }
         bail!(
-            "ed2k.serverEndpoints and ed2k.serverEntries are no longer accepted in daemon TOML; add/import servers into the SQLite profile instead"
+            "ed2k.serverEndpoints and ed2k.serverEntries are no longer accepted in daemon runtime config; add/import servers into the SQLite profile instead"
         )
     }
 
@@ -395,6 +437,22 @@ impl DaemonConfig {
             bail!("rest.bindAddr is required");
         };
         Ok(candidate)
+    }
+}
+
+pub fn load_or_create_runtime_config(metadata: &MetadataStore) -> Result<DaemonRuntimeConfig> {
+    match metadata.load_preference_json(DAEMON_RUNTIME_CONFIG_KEY)? {
+        Some(value) => {
+            serde_json::from_str(&value).context("failed to parse daemon runtime config")
+        }
+        None => {
+            let config = DaemonRuntimeConfig::default();
+            metadata.put_preference_json(
+                DAEMON_RUNTIME_CONFIG_KEY,
+                &serde_json::to_string_pretty(&config)?,
+            )?;
+            Ok(config)
+        }
     }
 }
 
@@ -533,11 +591,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         )?
         .with_incoming_dir(incoming_dir),
     );
-    if let Some(update) = config.preferences.to_update() {
-        core.update_preferences(update)
-            .await
-            .context("failed to apply daemon preference overrides")?;
-    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Keep an owned handle for the post-serve teardown; the router gets a clone.
     let app = router_with_shutdown(

@@ -86,6 +86,27 @@ fn iface_with_description(name: &str, description: &str, ip: &str) -> NetworkInt
     }
 }
 
+fn write_bootstrap_config(dir: &std::path::Path) -> PathBuf {
+    let config_path = dir.join("emulebb-rust.toml");
+    let runtime_dir = dir.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+runtimeDir = "{runtime_dir_text}"
+
+[rest]
+bindAddr = "192.0.2.10:13301"
+apiKey = "secret"
+"#
+        ),
+    )
+    .unwrap();
+    config_path
+}
+
 #[test]
 fn load_requires_explicit_config_path() {
     let error = DaemonConfig::load(None).unwrap_err().to_string();
@@ -108,87 +129,73 @@ fn load_requires_existing_config_path() {
     clippy::cognitive_complexity,
     reason = "linear protocol orchestration flow"
 )]
-fn load_parses_camel_case_ed2k_config() {
+fn load_parses_bootstrap_toml_and_db_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("emulebb-rust.toml");
-    fs::write(
-        &config_path,
-        r#"
-runtimeDir = "runtime"
-p2pBindIp = "192.0.2.10"
-p2pBindInterface = "Ethernet"
-
-[rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "secret"
-
-[preferences]
-autoConnect = true
-reconnect = true
-networkKademlia = true
-networkEd2k = true
-
-[kad]
-listenPort = 41002
-bootstrapNodes = ["192.0.2.30:41002"]
-bootstrapMinRoutingContacts = 3
-localStoreEnabled = true
-localStoreKeywordTtlSecs = 86400
-localStoreSourceTtlSecs = 21600
-localStoreNotesTtlSecs = 86400
-localStoreKeywordCapacity = 20000
-localStoreSourceCapacity = 20000
-localStoreNotesCapacity = 5000
-publishSharedFilesEnabled = true
-republishIntervalSecs = 120
-publishContactFanout = 5
-snoopQueueDedupWindowSecs = 28800
-snoopQueueGeneralMaxQueriesPer600s = 24
-snoopQueueGeneralDrainCooldownSecs = 900
-snoopQueueSourceMaxQueriesPer600s = 60
-snoopQueueSourceDrainCooldownSecs = 300
-snoopQueueSourceStopAfterResults = 2
-
-[ed2k]
-listenPort = 41001
-connectTimeoutSecs = 1
-reconnectIntervalSecs = 60
-enableUdpReask = true
-publishEmuleRustIdentity = true
-
-[nat]
-enabled = true
-requireInitialMapping = false
-backendOrder = ["upnp_miniupnpc"]
-bindIp = "192.0.2.11"
-igdIp = "192.0.2.1"
-minissdpdSocket = "/var/run/minissdpd.sock"
-ssdpLocalPort = 1901
-discoveryTimeoutSecs = 7
-leaseDurationSecs = 1200
-renewMarginSecs = 120
-externalIpOverride = "203.0.113.10"
+    let config_path = write_bootstrap_config(temp.path());
+    let runtime_dir = temp.path().join("runtime");
+    let metadata = MetadataStore::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    metadata
+        .put_preference_json(
+            DAEMON_RUNTIME_CONFIG_KEY,
+            r#"
+{
+  "p2pBindIp": "192.0.2.10",
+  "p2pBindInterface": "Ethernet",
+  "kad": {
+    "listenPort": 41002,
+    "bootstrapNodes": ["192.0.2.30:41002"],
+    "bootstrapMinRoutingContacts": 3,
+    "localStoreEnabled": true,
+    "localStoreKeywordTtlSecs": 86400,
+    "localStoreSourceTtlSecs": 21600,
+    "localStoreNotesTtlSecs": 86400,
+    "localStoreKeywordCapacity": 20000,
+    "localStoreSourceCapacity": 20000,
+    "localStoreNotesCapacity": 5000,
+    "publishSharedFilesEnabled": true,
+    "republishIntervalSecs": 120,
+    "publishContactFanout": 5,
+    "snoopQueueDedupWindowSecs": 28800,
+    "snoopQueueGeneralMaxQueriesPer600s": 24,
+    "snoopQueueGeneralDrainCooldownSecs": 900,
+    "snoopQueueSourceMaxQueriesPer600s": 60,
+    "snoopQueueSourceDrainCooldownSecs": 300,
+    "snoopQueueSourceStopAfterResults": 2
+  },
+  "ed2k": {
+    "listenPort": 41001,
+    "connectTimeoutSecs": 1,
+    "reconnectIntervalSecs": 60,
+    "enableUdpReask": true,
+    "publishEmuleRustIdentity": true
+  },
+  "nat": {
+    "enabled": true,
+    "requireInitialMapping": false,
+    "backendOrder": ["upnp_miniupnpc"],
+    "bindIp": "192.0.2.11",
+    "igdIp": "192.0.2.1",
+    "minissdpdSocket": "/var/run/minissdpd.sock",
+    "ssdpLocalPort": 1901,
+    "discoveryTimeoutSecs": 7,
+    "leaseDurationSecs": 1200,
+    "renewMarginSecs": 120,
+    "externalIpOverride": "203.0.113.10"
+  }
+}
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let config = DaemonConfig::load(Some(config_path)).unwrap();
 
+    assert_eq!(config.runtime_dir, runtime_dir);
     assert_eq!(config.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
     assert_eq!(config.p2p_bind_interface.as_deref(), Some("Ethernet"));
     assert_eq!(
         config.rest.bind_addr,
         Some("192.0.2.10:13301".parse().unwrap())
     );
-    assert_eq!(config.preferences.auto_connect, Some(true));
-    assert_eq!(config.preferences.reconnect, Some(true));
-    assert_eq!(config.preferences.network_kademlia, Some(true));
-    assert_eq!(config.preferences.network_ed2k, Some(true));
-    let preference_update = config.preferences.to_update().unwrap();
-    assert_eq!(preference_update.auto_connect, Some(true));
-    assert_eq!(preference_update.reconnect, Some(true));
-    assert_eq!(preference_update.network_kademlia, Some(true));
-    assert_eq!(preference_update.network_ed2k, Some(true));
     assert_eq!(config.kad.listen_port, Some(41002));
     assert_eq!(config.kad.bootstrap_nodes, ["192.0.2.30:41002"]);
     assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
@@ -212,11 +219,7 @@ externalIpOverride = "203.0.113.10"
     assert!(config.ed2k.server_endpoints.is_empty());
     assert_eq!(config.ed2k.connect_timeout_secs, 1);
     assert_eq!(config.ed2k.reconnect_interval_secs, 60);
-    // The UDP source-reask flag is config-settable (camelCase), so enabling it
-    // for live validation is a config flip, not a code change (FEAT-001).
     assert!(config.ed2k.enable_udp_reask);
-    // The eD2k identity flag is config-settable: default appears as eMule
-    // Community, this opts in to publishing the real emule-rust identity.
     assert!(config.ed2k.publish_emule_rust_identity);
     assert!(config.nat.enabled);
     assert!(!config.nat.require_initial_mapping);
@@ -238,17 +241,72 @@ externalIpOverride = "203.0.113.10"
 }
 
 #[test]
-fn load_rejects_retired_nat_backend() {
+fn load_creates_default_db_runtime_config_when_missing() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("retired-nat-backend.toml");
+    let config_path = write_bootstrap_config(temp.path());
+
+    let config = DaemonConfig::load(Some(config_path)).unwrap();
+    let metadata = MetadataStore::open(config.metadata_path()).unwrap();
+
+    assert!(
+        metadata
+            .load_preference_json(DAEMON_RUNTIME_CONFIG_KEY)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(config.ed2k.listen_port, None);
+}
+
+#[test]
+fn load_rejects_runtime_fields_in_bootstrap_toml() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("emulebb-rust.toml");
+    let runtime_dir = temp.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
     fs::write(
         &config_path,
-        r#"
-[nat]
-backendOrder = ["upnp_rupnp"]
-"#,
+        format!(
+            r#"
+runtimeDir = "{runtime_dir_text}"
+p2pBindIp = "192.0.2.10"
+
+[rest]
+bindAddr = "192.0.2.10:13301"
+apiKey = "secret"
+
+[ed2k]
+listenPort = 41001
+"#
+        ),
     )
     .unwrap();
+
+    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unknown field"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn load_rejects_retired_nat_backend_from_db_runtime_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_bootstrap_config(temp.path());
+    let metadata =
+        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    metadata
+        .put_preference_json(
+            DAEMON_RUNTIME_CONFIG_KEY,
+            r#"
+{
+  "nat": {
+    "backendOrder": ["upnp_rupnp"]
+  }
+}
+"#,
+        )
+        .unwrap();
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
     assert!(
@@ -262,22 +320,28 @@ backendOrder = ["upnp_rupnp"]
 }
 
 #[test]
-fn load_rejects_toml_server_endpoints() {
+fn load_rejects_db_runtime_server_endpoints() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("emulebb-rust-server-list.toml");
-    fs::write(
-        &config_path,
-        r#"
-[ed2k]
-serverEndpoints = ["192.0.2.20:4661"]
+    let config_path = write_bootstrap_config(temp.path());
+    let metadata =
+        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    metadata
+        .put_preference_json(
+            DAEMON_RUNTIME_CONFIG_KEY,
+            r#"
+{
+  "ed2k": {
+    "serverEndpoints": ["192.0.2.20:4661"]
+  }
+}
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
 
     assert!(
-        error.to_string().contains("invalid server config"),
+        error.to_string().contains("invalid runtime server config"),
         "unexpected error: {error:#}"
     );
     assert!(
@@ -287,44 +351,65 @@ serverEndpoints = ["192.0.2.20:4661"]
 }
 
 #[test]
-fn load_rejects_toml_server_entries() {
+fn load_rejects_db_runtime_server_entries() {
     let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("emulebb-rust-server-entry.toml");
-    fs::write(
-        &config_path,
-        r#"
-runtimeDir = "runtime"
-p2pBindIp = "192.0.2.10"
-
-[rest]
-bindAddr = "192.0.2.10:13301"
-apiKey = "secret"
-
-[kad]
-listenPort = 41002
-
-[ed2k]
-listenPort = 41001
-obfuscationEnabled = false
-
-[[ed2k.serverEntries]]
-host = "192.0.2.20"
-port = 4661
-name = "emulebb-local-e2e"
-description = "local deterministic server"
-udpFlags = 1827
-udpKey = 287454020
-udpKeyIp = 0
-obfuscationPortTcp = 4661
-obfuscationPortUdp = 4665
+    let config_path = write_bootstrap_config(temp.path());
+    let metadata =
+        MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
+    metadata
+        .put_preference_json(
+            DAEMON_RUNTIME_CONFIG_KEY,
+            r#"
+{
+  "ed2k": {
+    "serverEntries": [
+      {
+        "host": "192.0.2.20",
+        "port": 4661,
+        "name": "emulebb-local-e2e"
+      }
+    ]
+  }
+}
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
 
     assert!(
         format!("{error:#}").contains("ed2k.serverEndpoints and ed2k.serverEntries"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn load_rejects_legacy_toml_preferences_instead_of_migrating() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("emulebb-rust.toml");
+    let runtime_dir = temp.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let runtime_dir_text = runtime_dir.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+runtimeDir = "{runtime_dir_text}"
+
+[rest]
+bindAddr = "192.0.2.10:13301"
+apiKey = "secret"
+
+[preferences]
+autoConnect = false
+"#,
+        ),
+    )
+    .unwrap();
+
+    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unknown field"),
         "unexpected error: {error:#}"
     );
 }
