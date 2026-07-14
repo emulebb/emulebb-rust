@@ -201,7 +201,7 @@ CREATE TABLE unshared_files (
 CREATE TABLE transfers (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'controlled', 'downloading', 'queued')),
+    visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'downloading', 'queued')),
     control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
     category_id INTEGER REFERENCES categories(id),
     priority TEXT NOT NULL DEFAULT 'normal'

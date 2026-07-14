@@ -1203,8 +1203,6 @@ fn local_path_id(conn: &rusqlite::Connection, path: &str) -> Result<Option<i64>>
 fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {
     if manifest.completed {
         "completed"
-    } else if manifest.control_state.is_some() {
-        "controlled"
     } else if manifest.pieces.iter().any(|piece| piece.bytes_written != 0) {
         "downloading"
     } else {
