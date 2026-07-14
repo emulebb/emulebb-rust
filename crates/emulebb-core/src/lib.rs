@@ -209,9 +209,10 @@ use local_search_response::send_local_search_response;
 use local_search_response::split_stock_search_responses;
 pub use network_binding::NetworkBindingStatus;
 use network_status_defaults::{ed2k_starting_status, ed2k_stopped_status, kad_starting_status};
+#[cfg(test)]
+use preferences::default_preferences;
 use preferences::{
-    apply_preferences_update, default_preferences,
-    ed2k_download_coordinator_config_from_preferences,
+    apply_preferences_update, ed2k_download_coordinator_config_from_preferences,
     ed2k_download_limit_bytes_per_sec_from_preferences, ed2k_upload_queue_policy_from_preferences,
     initial_ed2k_upload_queue_policy, preferences_update_is_empty,
 };

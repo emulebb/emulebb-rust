@@ -9,13 +9,22 @@ use std::{
 use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
-    NatConfig, config::Ed2kConfig, detect_interfaces, ed2k_tcp::Ed2kSecureIdent, ipfilter,
+    NatConfig,
+    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
+    detect_interfaces,
+    ed2k_tcp::Ed2kSecureIdent,
     ipfilter::IpFilter,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
 use emulebb_rest::{RestConfig, router_with_shutdown};
-use serde::{Deserialize, Serialize};
+use emulebb_settings::{
+    DaemonRuntimeSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings,
+    KadListenerConfig, NatSettings, SECTION_DAEMON_RUNTIME, SECTION_ED2K, SECTION_IP_FILTER,
+    SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, VpnGuardSettings,
+};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Map, Value};
 use tokio::sync::watch;
 use tracing::info;
 
@@ -23,10 +32,6 @@ mod bind_config;
 pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard_monitor;
-
-/// MFC `SEARCHSTORE*_TOTAL`: target STORE responses for keyword/source/notes publishes.
-const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
-const DAEMON_RUNTIME_CONFIG_KEY: &str = "daemon.runtimeConfig";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -40,6 +45,7 @@ pub struct DaemonConfig {
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
     pub kad: KadListenerConfig,
+    pub kad_bootstrap_nodes: Vec<String>,
     pub ed2k: Ed2kConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
@@ -55,94 +61,6 @@ struct DaemonBootstrapConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct DaemonRuntimeConfig {
-    /// Global finished-file delivery directory (eMule Incoming folder). When a
-    /// completed transfer has no category path, its payload is materialized here
-    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
-    pub incoming_dir: Option<PathBuf>,
-    pub p2p_bind_ip: Option<Ipv4Addr>,
-    pub p2p_bind_interface: Option<String>,
-    pub ed2k_user_hash: Option<String>,
-    pub kad: KadListenerConfig,
-    pub ed2k: Ed2kConfig,
-    pub nat: NatConfig,
-    pub vpn_guard: VpnGuardSettings,
-    pub ip_filter: IpFilterSettings,
-}
-
-/// Optional VPN-binding guard configuration (`[vpnGuard]`). Default disabled, so
-/// it never affects startup unless explicitly enabled.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct VpnGuardSettings {
-    pub enabled: bool,
-    pub mode: String,
-    pub allowed_public_ip_cidrs: String,
-}
-
-/// Optional IPv4 range filter configuration (`[ipFilter]`). Default disabled, so
-/// no addresses are filtered unless explicitly enabled with a loadable file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct IpFilterSettings {
-    pub enabled: bool,
-    pub path: Option<PathBuf>,
-    pub level: u32,
-}
-
-impl Default for IpFilterSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            path: None,
-            level: ipfilter::DEFAULT_FILTER_LEVEL,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct KadListenerConfig {
-    pub listen_port: Option<u16>,
-    pub bootstrap_nodes: Vec<String>,
-    pub bootstrap_min_routing_contacts: usize,
-    pub local_store_enabled: bool,
-    pub local_store_keyword_ttl_secs: u64,
-    pub local_store_source_ttl_secs: u64,
-    pub local_store_notes_ttl_secs: u64,
-    pub local_store_keyword_capacity: usize,
-    pub local_store_source_capacity: usize,
-    pub local_store_notes_capacity: usize,
-    /// Per-file source cap (stock KADEMLIAMAXSOURCEPERFILE). Distinct from the
-    /// global `local_store_source_capacity` so per-file and overall limits do
-    /// not conflate.
-    pub local_store_source_per_file_capacity: usize,
-    /// Per-file note cap (stock KADEMLIAMAXNOTESPERFILE), distinct from the
-    /// global `local_store_notes_capacity`.
-    pub local_store_notes_per_file_capacity: usize,
-    pub publish_shared_files_enabled: bool,
-    pub republish_interval_secs: u64,
-    pub publish_contact_fanout: usize,
-    pub udp_firewall_check_enabled: bool,
-    pub udp_firewall_check_interval_secs: u64,
-    /// Requester-side Kad TCP firewall recheck (FIREWALLED2_REQ) driver.
-    pub tcp_firewall_check_enabled: bool,
-    pub tcp_firewall_check_interval_secs: u64,
-    /// Kad LowID buddy/firewalled-callback subsystem (default on).
-    pub buddy_enabled: bool,
-    /// Periodic routing-table maintenance loop (bucket refresh + dead-contact
-    /// expiry + stale-contact re-probe). Default on.
-    pub routing_maintenance_enabled: bool,
-    pub snoop_queue_dedup_window_secs: u64,
-    pub snoop_queue_general_max_queries_per_600s: u32,
-    pub snoop_queue_general_drain_cooldown_secs: u64,
-    pub snoop_queue_source_max_queries_per_600s: u32,
-    pub snoop_queue_source_drain_cooldown_secs: u64,
-    pub snoop_queue_source_stop_after_results: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RestListenerConfig {
     pub bind_addr: Option<SocketAddr>,
@@ -151,19 +69,20 @@ pub struct RestListenerConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        let runtime = DaemonRuntimeConfig::default();
+        let runtime = DaemonRuntimeSettings::default();
         Self {
             runtime_dir: PathBuf::from("runtime"),
             incoming_dir: runtime.incoming_dir,
             p2p_bind_ip: runtime.p2p_bind_ip,
             p2p_bind_interface: runtime.p2p_bind_interface,
             ed2k_user_hash: runtime.ed2k_user_hash,
-            kad: runtime.kad,
-            ed2k: runtime.ed2k,
-            nat: runtime.nat,
+            kad: KadListenerConfig::default(),
+            kad_bootstrap_nodes: Vec::new(),
+            ed2k: Ed2kConfig::default(),
+            nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
-            vpn_guard: runtime.vpn_guard,
-            ip_filter: runtime.ip_filter,
+            vpn_guard: VpnGuardSettings::default(),
+            ip_filter: IpFilterSettings::default(),
         }
     }
 }
@@ -173,62 +92,6 @@ impl Default for DaemonBootstrapConfig {
         Self {
             runtime_dir: PathBuf::from("runtime"),
             rest: RestListenerConfig::default(),
-        }
-    }
-}
-
-impl Default for DaemonRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            incoming_dir: None,
-            p2p_bind_ip: None,
-            p2p_bind_interface: None,
-            ed2k_user_hash: None,
-            kad: KadListenerConfig::default(),
-            ed2k: Ed2kConfig::default(),
-            nat: NatConfig::default(),
-            vpn_guard: VpnGuardSettings::default(),
-            ip_filter: IpFilterSettings::default(),
-        }
-    }
-}
-
-impl Default for KadListenerConfig {
-    fn default() -> Self {
-        Self {
-            listen_port: None,
-            bootstrap_nodes: Vec::new(),
-            bootstrap_min_routing_contacts: 10,
-            local_store_enabled: true,
-            local_store_keyword_ttl_secs: 86_400,
-            // Master inbound source entry lifetime = KADEMLIAREPUBLISHTIMES (5h),
-            // KademliaUDPListener.cpp:1349. Keyword/notes keep 24h.
-            local_store_source_ttl_secs: 18_000,
-            local_store_notes_ttl_secs: 86_400,
-            local_store_keyword_capacity: KadLocalStoreConfig::default().keyword_capacity,
-            local_store_source_capacity: KadLocalStoreConfig::default().source_capacity,
-            local_store_notes_capacity: KadLocalStoreConfig::default().notes_capacity,
-            // Stock per-file caps (Opcodes.h KADEMLIAMAXSOURCEPERFILE /
-            // KADEMLIAMAXNOTESPERFILE), well below the global caps above.
-            local_store_source_per_file_capacity: 1_000,
-            local_store_notes_per_file_capacity: 150,
-            publish_shared_files_enabled: true,
-            republish_interval_secs: 1_800,
-            publish_contact_fanout: DEFAULT_KAD_PUBLISH_CONTACT_FANOUT,
-            udp_firewall_check_enabled: true,
-            // Oracle re-check cadence: CKademlia::Process re-arms
-            // m_tNextFirewallCheck at HR2S(1) — hourly, not every 10 minutes.
-            udp_firewall_check_interval_secs: 3_600,
-            tcp_firewall_check_enabled: true,
-            tcp_firewall_check_interval_secs: 3_600,
-            buddy_enabled: true,
-            routing_maintenance_enabled: true,
-            snoop_queue_dedup_window_secs: 28_800,
-            snoop_queue_general_max_queries_per_600s: 24,
-            snoop_queue_general_drain_cooldown_secs: 900,
-            snoop_queue_source_max_queries_per_600s: 60,
-            snoop_queue_source_drain_cooldown_secs: 300,
-            snoop_queue_source_stop_after_results: 2,
         }
     }
 }
@@ -259,14 +122,15 @@ impl DaemonConfig {
                     bootstrap.runtime_dir.display()
                 )
             })?;
-        let runtime = load_or_create_runtime_config(&metadata)?;
+        let runtime = load_runtime_settings(&metadata)?;
         let config = Self {
             runtime_dir: bootstrap.runtime_dir,
-            incoming_dir: runtime.incoming_dir,
-            p2p_bind_ip: runtime.p2p_bind_ip,
-            p2p_bind_interface: runtime.p2p_bind_interface,
-            ed2k_user_hash: runtime.ed2k_user_hash,
+            incoming_dir: runtime.daemon.incoming_dir,
+            p2p_bind_ip: runtime.daemon.p2p_bind_ip,
+            p2p_bind_interface: runtime.daemon.p2p_bind_interface,
+            ed2k_user_hash: runtime.daemon.ed2k_user_hash,
             kad: runtime.kad,
+            kad_bootstrap_nodes: runtime.kad_bootstrap_nodes,
             ed2k: runtime.ed2k,
             nat: runtime.nat,
             rest: bootstrap.rest,
@@ -335,9 +199,9 @@ impl DaemonConfig {
             listen_port,
             user_hash,
             secure_ident,
-            kad_local_store: self.kad.local_store_config(),
-            kad_snoop_queue: self.kad.snoop_queue_config(),
-            kad_bootstrap_nodes: self.kad.bootstrap_nodes.clone(),
+            kad_local_store: kad_local_store_config(&self.kad),
+            kad_snoop_queue: kad_snoop_queue_config(&self.kad),
+            kad_bootstrap_nodes: self.kad_bootstrap_nodes.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
             kad_republish_interval_secs: self.kad.republish_interval_secs.max(1),
@@ -379,7 +243,7 @@ impl DaemonConfig {
     }
 
     fn has_network_bootstrap(&self, metadata: &MetadataStore) -> Result<bool> {
-        if !self.kad.bootstrap_nodes.is_empty() {
+        if !self.kad_bootstrap_nodes.is_empty() {
             return Ok(true);
         }
         Ok(metadata
@@ -405,11 +269,11 @@ impl DaemonConfig {
     }
 
     pub fn kad_local_store_config(&self) -> KadLocalStoreConfig {
-        self.kad.local_store_config()
+        kad_local_store_config(&self.kad)
     }
 
     pub fn kad_snoop_queue_config(&self) -> SnoopQueueConfig {
-        self.kad.snoop_queue_config()
+        kad_snoop_queue_config(&self.kad)
     }
 
     fn kad_bind_addr(&self, bind_ip: Ipv4Addr) -> Result<SocketAddr> {
@@ -440,46 +304,148 @@ impl DaemonConfig {
     }
 }
 
-pub fn load_or_create_runtime_config(metadata: &MetadataStore) -> Result<DaemonRuntimeConfig> {
-    match metadata.load_preference_json(DAEMON_RUNTIME_CONFIG_KEY)? {
-        Some(value) => {
-            serde_json::from_str(&value).context("failed to parse daemon runtime config")
+struct LoadedRuntimeSettings {
+    daemon: DaemonRuntimeSettings,
+    kad: KadListenerConfig,
+    kad_bootstrap_nodes: Vec<String>,
+    ed2k: Ed2kConfig,
+    nat: NatConfig,
+    vpn_guard: VpnGuardSettings,
+    ip_filter: IpFilterSettings,
+}
+
+fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettings> {
+    let daemon = load_section_settings(metadata, SECTION_DAEMON_RUNTIME)
+        .context("failed to load daemon.runtime settings")?;
+    let kad =
+        load_section_settings(metadata, SECTION_KAD).context("failed to load kad settings")?;
+    let kad_bootstrap_nodes = metadata
+        .load_kad_bootstrap_nodes()
+        .context("failed to load Kad bootstrap nodes")?;
+    let ed2k_settings: Ed2kSettings =
+        load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
+    let nat_settings: NatSettings =
+        load_section_settings(metadata, SECTION_NAT).context("failed to load nat settings")?;
+    Ok(LoadedRuntimeSettings {
+        daemon,
+        kad,
+        kad_bootstrap_nodes,
+        ed2k: ed2k_config_from_settings(ed2k_settings),
+        nat: nat_config_from_settings(nat_settings),
+        vpn_guard: load_section_settings(metadata, SECTION_VPN_GUARD)
+            .context("failed to load vpn_guard settings")?,
+        ip_filter: load_section_settings(metadata, SECTION_IP_FILTER)
+            .context("failed to load ip_filter settings")?,
+    })
+}
+
+fn load_section_settings<T>(metadata: &MetadataStore, section: &str) -> Result<T>
+where
+    T: Default + DeserializeOwned,
+{
+    let mut object = Map::new();
+    for (key, value_json) in metadata.load_settings_section(section)? {
+        let value = serde_json::from_str::<Value>(&value_json)
+            .with_context(|| format!("{section}.{key} contains invalid JSON"))?;
+        if object.insert(key.clone(), value).is_some() {
+            bail!("duplicate setting row for {section}.{key}");
         }
-        None => {
-            let config = DaemonRuntimeConfig::default();
-            metadata.put_preference_json(
-                DAEMON_RUNTIME_CONFIG_KEY,
-                &serde_json::to_string_pretty(&config)?,
-            )?;
-            Ok(config)
-        }
+    }
+    if object.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_value(Value::Object(object))
+        .with_context(|| format!("invalid settings section {section}"))
+}
+
+fn ed2k_config_from_settings(settings: Ed2kSettings) -> Ed2kConfig {
+    Ed2kConfig {
+        listen_port: settings.listen_port,
+        server_entries: Vec::new(),
+        server_endpoints: Vec::new(),
+        obfuscation_enabled: settings.obfuscation_enabled,
+        probe_search_term: settings.probe_search_term,
+        connect_timeout_secs: settings.connect_timeout_secs,
+        server_connect_timeout_secs: settings.server_connect_timeout_secs,
+        callback_timeout_secs: settings.callback_timeout_secs,
+        reconnect_interval_secs: settings.reconnect_interval_secs,
+        reconnect_enabled: settings.reconnect_enabled,
+        safe_server_connect: settings.safe_server_connect,
+        keepalive_secs: settings.keepalive_secs,
+        session_rotation_secs: settings.session_rotation_secs,
+        max_concurrent_downloads: settings.max_concurrent_downloads,
+        max_new_connections_per_five_seconds: settings.max_new_connections_per_five_seconds,
+        max_half_open_connections: settings.max_half_open_connections,
+        max_sources_per_file: settings.max_sources_per_file,
+        max_parallel_download_peers: settings.max_parallel_download_peers,
+        keyword_server_attempt_budget: settings.keyword_server_attempt_budget,
+        exact_hash_keyword_server_attempt_budget: settings.exact_hash_keyword_server_attempt_budget,
+        source_server_attempt_budget: settings.source_server_attempt_budget,
+        upload_queue: ed2k_upload_queue_config_from_settings(settings.upload_queue),
+        download_limit_bytes_per_sec: settings.download_limit_bytes_per_sec,
+        enable_udp_reask: settings.enable_udp_reask,
+        publish_emule_rust_identity: settings.publish_emule_rust_identity,
+        add_servers_from_server: settings.add_servers_from_server,
+        dead_server_retries: settings.dead_server_retries,
     }
 }
 
-impl KadListenerConfig {
-    pub fn local_store_config(&self) -> KadLocalStoreConfig {
-        KadLocalStoreConfig {
-            enabled: self.local_store_enabled,
-            keyword_ttl: std::time::Duration::from_secs(self.local_store_keyword_ttl_secs.max(1)),
-            source_ttl: std::time::Duration::from_secs(self.local_store_source_ttl_secs.max(1)),
-            notes_ttl: std::time::Duration::from_secs(self.local_store_notes_ttl_secs.max(1)),
-            keyword_capacity: self.local_store_keyword_capacity.max(1),
-            source_capacity: self.local_store_source_capacity.max(1),
-            notes_capacity: self.local_store_notes_capacity.max(1),
-            source_per_file_capacity: self.local_store_source_per_file_capacity.max(1),
-            notes_per_file_capacity: self.local_store_notes_per_file_capacity.max(1),
-        }
+fn ed2k_upload_queue_config_from_settings(
+    settings: Ed2kUploadQueueSettings,
+) -> Ed2kUploadQueuePolicyConfig {
+    Ed2kUploadQueuePolicyConfig {
+        active_slots: settings.active_slots,
+        elastic_percent: settings.elastic_percent,
+        upload_limit_bytes_per_sec: settings.upload_limit_bytes_per_sec,
+        elastic_underfill_bytes_per_sec: settings.elastic_underfill_bytes_per_sec,
+        elastic_underfill_secs: settings.elastic_underfill_secs,
+        waiting_capacity: settings.waiting_capacity,
+        waiting_timeout_secs: settings.waiting_timeout_secs,
+        granted_timeout_secs: settings.granted_timeout_secs,
+        upload_timeout_secs: settings.upload_timeout_secs,
+        session_transfer_percent: settings.session_transfer_percent,
+        session_time_limit_secs: settings.session_time_limit_secs,
     }
+}
 
-    pub fn snoop_queue_config(&self) -> SnoopQueueConfig {
-        SnoopQueueConfig {
-            dedup_window_secs: self.snoop_queue_dedup_window_secs.max(1),
-            general_max_queries_per_600s: self.snoop_queue_general_max_queries_per_600s.max(1),
-            general_drain_cooldown_secs: self.snoop_queue_general_drain_cooldown_secs.max(1),
-            source_max_queries_per_600s: self.snoop_queue_source_max_queries_per_600s.max(1),
-            source_drain_cooldown_secs: self.snoop_queue_source_drain_cooldown_secs.max(1),
-            source_stop_after_results: self.snoop_queue_source_stop_after_results.max(1),
-        }
+fn nat_config_from_settings(settings: NatSettings) -> NatConfig {
+    NatConfig {
+        enabled: settings.enabled,
+        require_initial_mapping: settings.require_initial_mapping,
+        backend_order: settings.backend_order,
+        bind_ip: settings.bind_ip,
+        igd_ip: settings.igd_ip,
+        minissdpd_socket: settings.minissdpd_socket,
+        ssdp_local_port: settings.ssdp_local_port,
+        discovery_timeout_secs: settings.discovery_timeout_secs,
+        lease_duration_secs: settings.lease_duration_secs,
+        renew_margin_secs: settings.renew_margin_secs,
+        external_ip_override: settings.external_ip_override,
+    }
+}
+
+fn kad_local_store_config(settings: &KadListenerConfig) -> KadLocalStoreConfig {
+    KadLocalStoreConfig {
+        enabled: settings.local_store_enabled,
+        keyword_ttl: std::time::Duration::from_secs(settings.local_store_keyword_ttl_secs.max(1)),
+        source_ttl: std::time::Duration::from_secs(settings.local_store_source_ttl_secs.max(1)),
+        notes_ttl: std::time::Duration::from_secs(settings.local_store_notes_ttl_secs.max(1)),
+        keyword_capacity: settings.local_store_keyword_capacity.max(1),
+        source_capacity: settings.local_store_source_capacity.max(1),
+        notes_capacity: settings.local_store_notes_capacity.max(1),
+        source_per_file_capacity: settings.local_store_source_per_file_capacity.max(1),
+        notes_per_file_capacity: settings.local_store_notes_per_file_capacity.max(1),
+    }
+}
+
+fn kad_snoop_queue_config(settings: &KadListenerConfig) -> SnoopQueueConfig {
+    SnoopQueueConfig {
+        dedup_window_secs: settings.snoop_queue_dedup_window_secs.max(1),
+        general_max_queries_per_600s: settings.snoop_queue_general_max_queries_per_600s.max(1),
+        general_drain_cooldown_secs: settings.snoop_queue_general_drain_cooldown_secs.max(1),
+        source_max_queries_per_600s: settings.snoop_queue_source_max_queries_per_600s.max(1),
+        source_drain_cooldown_secs: settings.snoop_queue_source_drain_cooldown_secs.max(1),
+        source_stop_after_results: settings.snoop_queue_source_stop_after_results.max(1),
     }
 }
 

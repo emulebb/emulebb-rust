@@ -1,7 +1,19 @@
-use std::error::Error;
-use std::fmt;
+use std::{error::Error, fmt, net::Ipv4Addr, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+pub const SECTION_CORE_PREFERENCES: &str = "core.preferences";
+pub const SECTION_DAEMON_RUNTIME: &str = "daemon.runtime";
+pub const SECTION_ED2K: &str = "ed2k";
+pub const SECTION_KAD: &str = "kad";
+pub const SECTION_NAT: &str = "nat";
+pub const SECTION_VPN_GUARD: &str = "vpn_guard";
+pub const SECTION_IP_FILTER: &str = "ip_filter";
+
+pub const DEFAULT_IP_FILTER_LEVEL: u32 = 127;
+pub const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
+pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
 
 pub const FIELD_UPLOAD_LIMIT_KIBPS: &str = "uploadLimitKiBps";
 pub const FIELD_DOWNLOAD_LIMIT_KIBPS: &str = "downloadLimitKiBps";
@@ -337,6 +349,127 @@ pub struct PreferencesUpdate {
     pub network_ed2k: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct DaemonRuntimeSettings {
+    /// Global finished-file delivery directory (eMule Incoming folder). When a
+    /// completed transfer has no category path, its payload is materialized here
+    /// by its canonical name. Defaults to `<runtimeDir>/incoming` when unset.
+    pub incoming_dir: Option<PathBuf>,
+    pub p2p_bind_ip: Option<Ipv4Addr>,
+    pub p2p_bind_interface: Option<String>,
+    pub ed2k_user_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct Ed2kSettings {
+    pub listen_port: Option<u16>,
+    pub obfuscation_enabled: bool,
+    pub probe_search_term: Option<String>,
+    pub connect_timeout_secs: u64,
+    pub server_connect_timeout_secs: u64,
+    pub callback_timeout_secs: u64,
+    pub reconnect_interval_secs: u64,
+    pub reconnect_enabled: bool,
+    pub safe_server_connect: bool,
+    pub keepalive_secs: u64,
+    pub session_rotation_secs: u64,
+    pub max_concurrent_downloads: usize,
+    pub max_new_connections_per_five_seconds: usize,
+    pub max_half_open_connections: usize,
+    pub max_sources_per_file: usize,
+    pub max_parallel_download_peers: usize,
+    pub keyword_server_attempt_budget: usize,
+    pub exact_hash_keyword_server_attempt_budget: usize,
+    pub source_server_attempt_budget: usize,
+    pub upload_queue: Ed2kUploadQueueSettings,
+    pub download_limit_bytes_per_sec: u64,
+    pub enable_udp_reask: bool,
+    pub publish_emule_rust_identity: bool,
+    pub add_servers_from_server: bool,
+    pub dead_server_retries: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct Ed2kUploadQueueSettings {
+    pub active_slots: usize,
+    pub elastic_percent: u32,
+    pub upload_limit_bytes_per_sec: u64,
+    pub elastic_underfill_bytes_per_sec: u64,
+    pub elastic_underfill_secs: u64,
+    pub waiting_capacity: usize,
+    pub waiting_timeout_secs: u64,
+    pub granted_timeout_secs: u64,
+    pub upload_timeout_secs: u64,
+    pub session_transfer_percent: u32,
+    pub session_time_limit_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct KadListenerConfig {
+    pub listen_port: Option<u16>,
+    pub bootstrap_min_routing_contacts: usize,
+    pub local_store_enabled: bool,
+    pub local_store_keyword_ttl_secs: u64,
+    pub local_store_source_ttl_secs: u64,
+    pub local_store_notes_ttl_secs: u64,
+    pub local_store_keyword_capacity: usize,
+    pub local_store_source_capacity: usize,
+    pub local_store_notes_capacity: usize,
+    pub local_store_source_per_file_capacity: usize,
+    pub local_store_notes_per_file_capacity: usize,
+    pub publish_shared_files_enabled: bool,
+    pub republish_interval_secs: u64,
+    pub publish_contact_fanout: usize,
+    pub udp_firewall_check_enabled: bool,
+    pub udp_firewall_check_interval_secs: u64,
+    pub tcp_firewall_check_enabled: bool,
+    pub tcp_firewall_check_interval_secs: u64,
+    pub buddy_enabled: bool,
+    pub routing_maintenance_enabled: bool,
+    pub snoop_queue_dedup_window_secs: u64,
+    pub snoop_queue_general_max_queries_per_600s: u32,
+    pub snoop_queue_general_drain_cooldown_secs: u64,
+    pub snoop_queue_source_max_queries_per_600s: u32,
+    pub snoop_queue_source_drain_cooldown_secs: u64,
+    pub snoop_queue_source_stop_after_results: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct NatSettings {
+    pub enabled: bool,
+    pub require_initial_mapping: bool,
+    pub backend_order: Vec<String>,
+    pub bind_ip: Option<String>,
+    pub igd_ip: Option<String>,
+    pub minissdpd_socket: Option<String>,
+    pub ssdp_local_port: Option<u16>,
+    pub discovery_timeout_secs: u64,
+    pub lease_duration_secs: u32,
+    pub renew_margin_secs: u64,
+    pub external_ip_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct VpnGuardSettings {
+    pub enabled: bool,
+    pub mode: String,
+    pub allowed_public_ip_cidrs: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct IpFilterSettings {
+    pub enabled: bool,
+    pub path: Option<PathBuf>,
+    pub level: u32,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PreferenceValidationError {
     message: String,
@@ -377,6 +510,170 @@ pub fn default_preferences() -> Preferences {
         network_kademlia: true,
         network_ed2k: true,
     }
+}
+
+impl Default for DaemonRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            incoming_dir: None,
+            p2p_bind_ip: None,
+            p2p_bind_interface: None,
+            ed2k_user_hash: None,
+        }
+    }
+}
+
+impl Default for Ed2kSettings {
+    fn default() -> Self {
+        Self {
+            listen_port: None,
+            obfuscation_enabled: true,
+            probe_search_term: None,
+            connect_timeout_secs: 30,
+            server_connect_timeout_secs: 25,
+            callback_timeout_secs: 45,
+            reconnect_interval_secs: 30,
+            reconnect_enabled: true,
+            safe_server_connect: true,
+            keepalive_secs: 20 * 60,
+            session_rotation_secs: 0,
+            max_concurrent_downloads: 500,
+            max_new_connections_per_five_seconds: 50,
+            max_half_open_connections: 50,
+            max_sources_per_file: 600,
+            max_parallel_download_peers: 2,
+            keyword_server_attempt_budget: 3,
+            exact_hash_keyword_server_attempt_budget: 4,
+            source_server_attempt_budget: 3,
+            upload_queue: Ed2kUploadQueueSettings::default(),
+            download_limit_bytes_per_sec: 0,
+            enable_udp_reask: true,
+            publish_emule_rust_identity: false,
+            add_servers_from_server: false,
+            dead_server_retries: 1,
+        }
+    }
+}
+
+impl Default for Ed2kUploadQueueSettings {
+    fn default() -> Self {
+        Self {
+            active_slots: 3,
+            elastic_percent: 0,
+            upload_limit_bytes_per_sec: 0,
+            elastic_underfill_bytes_per_sec: 0,
+            elastic_underfill_secs: 10,
+            waiting_capacity: 512,
+            waiting_timeout_secs: 60 * 60,
+            granted_timeout_secs: 30,
+            upload_timeout_secs: 90,
+            session_transfer_percent: 90,
+            session_time_limit_secs: 7_200,
+        }
+    }
+}
+
+impl Default for KadListenerConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: None,
+            bootstrap_min_routing_contacts: 10,
+            local_store_enabled: true,
+            local_store_keyword_ttl_secs: 86_400,
+            local_store_source_ttl_secs: 18_000,
+            local_store_notes_ttl_secs: 86_400,
+            local_store_keyword_capacity: 60_000,
+            local_store_source_capacity: 100_000,
+            local_store_notes_capacity: 60_000,
+            local_store_source_per_file_capacity: 1_000,
+            local_store_notes_per_file_capacity: 150,
+            publish_shared_files_enabled: true,
+            republish_interval_secs: 1_800,
+            publish_contact_fanout: DEFAULT_KAD_PUBLISH_CONTACT_FANOUT,
+            udp_firewall_check_enabled: true,
+            udp_firewall_check_interval_secs: 3_600,
+            tcp_firewall_check_enabled: true,
+            tcp_firewall_check_interval_secs: 3_600,
+            buddy_enabled: true,
+            routing_maintenance_enabled: true,
+            snoop_queue_dedup_window_secs: 28_800,
+            snoop_queue_general_max_queries_per_600s: 24,
+            snoop_queue_general_drain_cooldown_secs: 900,
+            snoop_queue_source_max_queries_per_600s: 60,
+            snoop_queue_source_drain_cooldown_secs: 300,
+            snoop_queue_source_stop_after_results: 2,
+        }
+    }
+}
+
+impl Default for NatSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_initial_mapping: true,
+            backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
+            bind_ip: None,
+            igd_ip: None,
+            minissdpd_socket: None,
+            ssdp_local_port: None,
+            discovery_timeout_secs: 5,
+            lease_duration_secs: 3_600,
+            renew_margin_secs: 300,
+            external_ip_override: None,
+        }
+    }
+}
+
+impl Default for IpFilterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            level: DEFAULT_IP_FILTER_LEVEL,
+        }
+    }
+}
+
+pub fn preferences_from_setting_values<'a>(
+    values: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Preferences, PreferenceValidationError> {
+    let mut object = Map::new();
+    for (key, value_json) in values {
+        let value = serde_json::from_str::<Value>(value_json).map_err(|error| {
+            PreferenceValidationError::new(format!("{key} contains invalid JSON: {error}"))
+        })?;
+        if object.insert(key.to_string(), value).is_some() {
+            return Err(PreferenceValidationError::new(format!(
+                "duplicate preference field: {key}"
+            )));
+        }
+    }
+
+    let update =
+        serde_json::from_value::<PreferencesUpdate>(Value::Object(object)).map_err(|error| {
+            PreferenceValidationError::new(format!("invalid preference settings: {error}"))
+        })?;
+    let mut preferences = default_preferences();
+    apply_preferences_update(&mut preferences, update)?;
+    Ok(preferences)
+}
+
+pub fn preferences_to_setting_values(
+    preferences: &Preferences,
+) -> Result<Vec<(&'static str, String)>, serde_json::Error> {
+    let values = serde_json::to_value(preferences)?;
+    let object = values
+        .as_object()
+        .expect("Preferences serializes as object");
+    PREFERENCE_SPECS
+        .iter()
+        .map(|field| {
+            let value = object
+                .get(field.key)
+                .expect("preference spec must match Preferences serialization");
+            serde_json::to_string(value).map(|value_json| (field.key, value_json))
+        })
+        .collect()
 }
 
 pub fn preferences_update_is_empty(update: &PreferencesUpdate) -> bool {
@@ -601,6 +898,34 @@ mod tests {
             };
             assert_eq!(defaults[field.key], expected_default);
         }
+    }
+
+    #[test]
+    fn preference_settings_roundtrip_as_scalar_rows() {
+        let mut preferences = default_preferences();
+        preferences.download_limit_ki_bps = 2048;
+        preferences.reconnect = false;
+
+        let rows = preferences_to_setting_values(&preferences).unwrap();
+        assert_eq!(rows.len(), PREFERENCE_SPECS.len());
+        assert!(rows.contains(&(FIELD_RECONNECT, "false".to_string())));
+
+        let decoded = preferences_from_setting_values(
+            rows.iter()
+                .map(|(key, value_json)| (*key, value_json.as_str())),
+        )
+        .unwrap();
+        assert_eq!(decoded, preferences);
+    }
+
+    #[test]
+    fn preference_settings_reject_unknown_keys() {
+        let error = preferences_from_setting_values([("hiddenLegacySetting", "true")]).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown field"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

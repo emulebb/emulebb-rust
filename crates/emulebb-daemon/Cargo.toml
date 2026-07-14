@@ -42,6 +42,7 @@ emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-rest = { path = "../emulebb-rest" }
+emulebb-settings = { path = "../emulebb-settings" }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

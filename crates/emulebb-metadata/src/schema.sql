@@ -22,10 +22,15 @@ CREATE TABLE local_identities (
     CHECK (public_identity IS NULL OR length(public_identity) IN (16, 20))
 );
 
-CREATE TABLE preferences (
-    key TEXT PRIMARY KEY,
+CREATE TABLE settings (
+    section TEXT NOT NULL,
+    key TEXT NOT NULL,
     value_json TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(section, key),
+    CHECK(length(trim(section)) > 0),
+    CHECK(length(trim(key)) > 0),
+    CHECK(json_valid(value_json))
 );
 
 CREATE TABLE categories (
@@ -411,6 +416,14 @@ CREATE TABLE kad_nodes (
     source_kind TEXT NOT NULL DEFAULT '',
     first_seen_ms INTEGER NOT NULL,
     last_seen_ms INTEGER NOT NULL
+);
+
+CREATE TABLE kad_bootstrap_nodes (
+    position INTEGER PRIMARY KEY,
+    endpoint TEXT NOT NULL UNIQUE,
+    updated_at_ms INTEGER NOT NULL,
+    CHECK(position >= 0),
+    CHECK(length(trim(endpoint)) > 0)
 );
 
 -- RESERVED / UNUSED: no code path writes kad_node_observations yet. Kept as the

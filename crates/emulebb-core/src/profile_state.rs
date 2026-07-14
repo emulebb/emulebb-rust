@@ -3,22 +3,24 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
+use emulebb_settings::{
+    SECTION_CORE_PREFERENCES, preferences_from_setting_values, preferences_to_setting_values,
+};
 
 use crate::{
     Category, CoreState, Friend, Preferences, ServerInfo, SharedDirectoryRoot, default_categories,
-    default_preferences,
 };
-
-const CORE_PREFERENCES_KEY: &str = "core.preferences";
 
 pub(crate) fn load_core_state(
     metadata: &MetadataStore,
     shared_directories: Vec<SharedDirectoryRoot>,
 ) -> Result<CoreState> {
-    let preferences = match metadata.load_preference_json(CORE_PREFERENCES_KEY)? {
-        Some(value) => serde_json::from_str(&value)?,
-        None => default_preferences(),
-    };
+    let preference_rows = metadata.load_settings_section(SECTION_CORE_PREFERENCES)?;
+    let preferences = preferences_from_setting_values(
+        preference_rows
+            .iter()
+            .map(|(key, value_json)| (key.as_str(), value_json.as_str())),
+    )?;
     let mut categories = default_categories();
     for category in metadata.load_categories()? {
         categories.insert(category.id, category_from_metadata(category));
@@ -90,16 +92,20 @@ pub(crate) fn load_core_state(
 }
 
 pub(crate) fn has_persisted_preferences(metadata: &MetadataStore) -> Result<bool> {
-    Ok(metadata
-        .load_preference_json(CORE_PREFERENCES_KEY)?
-        .is_some())
+    metadata.has_settings_section(SECTION_CORE_PREFERENCES)
 }
 
 pub(crate) fn persist_preferences(
     metadata: &MetadataStore,
     preferences: &Preferences,
 ) -> Result<()> {
-    metadata.put_preference_json(CORE_PREFERENCES_KEY, &serde_json::to_string(preferences)?)?;
+    let entries = preferences_to_setting_values(preferences)?;
+    metadata.replace_settings_section(
+        SECTION_CORE_PREFERENCES,
+        entries
+            .iter()
+            .map(|(key, value_json)| (*key, value_json.as_str())),
+    )?;
     Ok(())
 }
 

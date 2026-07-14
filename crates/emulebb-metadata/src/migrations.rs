@@ -2,7 +2,7 @@
 //!
 //! The store is a long-lived on-disk SQLite database that holds the client's
 //! durable state: transfers and resume manifests, MD4/AICH hashsets, peer
-//! credits, servers, categories, preferences, and -- most critically -- the
+//! credits, servers, categories, settings, and -- most critically -- the
 //! persisted secure-ident keypair plus the eD2K user hash (the client's
 //! on-network identity and all accumulated upload credit).
 //!
@@ -47,6 +47,10 @@
 //!   whether the part previously failed its MD4 flush check and is pending
 //!   MD4-only ICH salvage (the rust analog of eMule's persisted
 //!   `FT_CORRUPTEDPARTS` corrupted-parts list, PartFile.cpp:1445-1462).
+//! - v14 -> v15: replace the legacy `preferences(key, value_json)` blob bucket
+//!   with `settings(section, key, value_json)` scalar rows and
+//!   `kad_bootstrap_nodes(position, endpoint)`. Dev-phase setting values are not
+//!   migrated; operators seed the new rows explicitly.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -251,6 +255,35 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
             "ich_corrupted",
             "INTEGER NOT NULL DEFAULT 0",
         ),
+        // v14 -> v15: real settings store. Intentionally no data migration from
+        // the legacy preferences bucket during dev-phase cleanup.
+        15 => {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS settings (
+                    section TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY(section, key),
+                    CHECK(length(trim(section)) > 0),
+                    CHECK(length(trim(key)) > 0),
+                    CHECK(json_valid(value_json))
+                );
+
+                CREATE TABLE IF NOT EXISTS kad_bootstrap_nodes (
+                    position INTEGER PRIMARY KEY,
+                    endpoint TEXT NOT NULL UNIQUE,
+                    updated_at_ms INTEGER NOT NULL,
+                    CHECK(position >= 0),
+                    CHECK(length(trim(endpoint)) > 0)
+                );
+
+                DROP TABLE IF EXISTS preferences;
+                "#,
+            )?;
+            Ok(())
+        }
         other => bail!("no metadata migration defined for schema version v{other}"),
     }
 }
@@ -417,6 +450,9 @@ mod tests {
             ("transfers", "source_mtime_ms"),
             ("share_in_place_sources", "source_path"),
             ("shared_source_failures", "source_path"),
+            ("settings", "section"),
+            ("settings", "key"),
+            ("kad_bootstrap_nodes", "endpoint"),
         ] {
             let tx = conn.transaction().unwrap();
             assert!(

@@ -107,6 +107,13 @@ apiKey = "secret"
     config_path
 }
 
+fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_json::Value) {
+    let value_json = serde_json::to_string(&value).unwrap();
+    metadata
+        .put_setting_json(section, key, &value_json)
+        .unwrap();
+}
+
 #[test]
 fn load_requires_explicit_config_path() {
     let error = DaemonConfig::load(None).unwrap_err().to_string();
@@ -134,58 +141,154 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     let config_path = write_bootstrap_config(temp.path());
     let runtime_dir = temp.path().join("runtime");
     let metadata = MetadataStore::open(runtime_dir.join("metadata.sqlite")).unwrap();
+    put_setting(
+        &metadata,
+        SECTION_DAEMON_RUNTIME,
+        "p2pBindIp",
+        serde_json::json!("192.0.2.10"),
+    );
+    put_setting(
+        &metadata,
+        SECTION_DAEMON_RUNTIME,
+        "p2pBindInterface",
+        serde_json::json!("Ethernet"),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "listenPort",
+        serde_json::json!(41002),
+    );
     metadata
-        .put_preference_json(
-            DAEMON_RUNTIME_CONFIG_KEY,
-            r#"
-{
-  "p2pBindIp": "192.0.2.10",
-  "p2pBindInterface": "Ethernet",
-  "kad": {
-    "listenPort": 41002,
-    "bootstrapNodes": ["192.0.2.30:41002"],
-    "bootstrapMinRoutingContacts": 3,
-    "localStoreEnabled": true,
-    "localStoreKeywordTtlSecs": 86400,
-    "localStoreSourceTtlSecs": 21600,
-    "localStoreNotesTtlSecs": 86400,
-    "localStoreKeywordCapacity": 20000,
-    "localStoreSourceCapacity": 20000,
-    "localStoreNotesCapacity": 5000,
-    "publishSharedFilesEnabled": true,
-    "republishIntervalSecs": 120,
-    "publishContactFanout": 5,
-    "snoopQueueDedupWindowSecs": 28800,
-    "snoopQueueGeneralMaxQueriesPer600s": 24,
-    "snoopQueueGeneralDrainCooldownSecs": 900,
-    "snoopQueueSourceMaxQueriesPer600s": 60,
-    "snoopQueueSourceDrainCooldownSecs": 300,
-    "snoopQueueSourceStopAfterResults": 2
-  },
-  "ed2k": {
-    "listenPort": 41001,
-    "connectTimeoutSecs": 1,
-    "reconnectIntervalSecs": 60,
-    "enableUdpReask": true,
-    "publishEmuleRustIdentity": true
-  },
-  "nat": {
-    "enabled": true,
-    "requireInitialMapping": false,
-    "backendOrder": ["upnp_miniupnpc"],
-    "bindIp": "192.0.2.11",
-    "igdIp": "192.0.2.1",
-    "minissdpdSocket": "/var/run/minissdpd.sock",
-    "ssdpLocalPort": 1901,
-    "discoveryTimeoutSecs": 7,
-    "leaseDurationSecs": 1200,
-    "renewMarginSecs": 120,
-    "externalIpOverride": "203.0.113.10"
-  }
-}
-"#,
-        )
+        .replace_kad_bootstrap_nodes(&["192.0.2.30:41002".to_string()])
         .unwrap();
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "bootstrapMinRoutingContacts",
+        serde_json::json!(3),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "localStoreSourceTtlSecs",
+        serde_json::json!(21600),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "localStoreKeywordCapacity",
+        serde_json::json!(20000),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "localStoreSourceCapacity",
+        serde_json::json!(20000),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "localStoreNotesCapacity",
+        serde_json::json!(5000),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "republishIntervalSecs",
+        serde_json::json!(120),
+    );
+    put_setting(
+        &metadata,
+        SECTION_KAD,
+        "publishContactFanout",
+        serde_json::json!(5),
+    );
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "listenPort",
+        serde_json::json!(41001),
+    );
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "connectTimeoutSecs",
+        serde_json::json!(1),
+    );
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "reconnectIntervalSecs",
+        serde_json::json!(60),
+    );
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "publishEmuleRustIdentity",
+        serde_json::json!(true),
+    );
+    put_setting(&metadata, SECTION_NAT, "enabled", serde_json::json!(true));
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "requireInitialMapping",
+        serde_json::json!(false),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "backendOrder",
+        serde_json::json!(["upnp_miniupnpc"]),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "bindIp",
+        serde_json::json!("192.0.2.11"),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "igdIp",
+        serde_json::json!("192.0.2.1"),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "minissdpdSocket",
+        serde_json::json!("/var/run/minissdpd.sock"),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "ssdpLocalPort",
+        serde_json::json!(1901),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "discoveryTimeoutSecs",
+        serde_json::json!(7),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "leaseDurationSecs",
+        serde_json::json!(1200),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "renewMarginSecs",
+        serde_json::json!(120),
+    );
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "externalIpOverride",
+        serde_json::json!("203.0.113.10"),
+    );
 
     let config = DaemonConfig::load(Some(config_path)).unwrap();
 
@@ -197,7 +300,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
         Some("192.0.2.10:13301".parse().unwrap())
     );
     assert_eq!(config.kad.listen_port, Some(41002));
-    assert_eq!(config.kad.bootstrap_nodes, ["192.0.2.30:41002"]);
+    assert_eq!(config.kad_bootstrap_nodes, ["192.0.2.30:41002"]);
     assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
     assert!(config.kad.local_store_enabled);
     assert_eq!(config.kad.local_store_keyword_ttl_secs, 86_400);
@@ -241,19 +344,14 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
 }
 
 #[test]
-fn load_creates_default_db_runtime_config_when_missing() {
+fn load_uses_default_db_runtime_config_when_missing() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = write_bootstrap_config(temp.path());
 
     let config = DaemonConfig::load(Some(config_path)).unwrap();
     let metadata = MetadataStore::open(config.metadata_path()).unwrap();
 
-    assert!(
-        metadata
-            .load_preference_json(DAEMON_RUNTIME_CONFIG_KEY)
-            .unwrap()
-            .is_some()
-    );
+    assert!(!metadata.has_settings_section(SECTION_ED2K).unwrap());
     assert_eq!(config.ed2k.listen_port, None);
 }
 
@@ -295,18 +393,12 @@ fn load_rejects_retired_nat_backend_from_db_runtime_config() {
     let config_path = write_bootstrap_config(temp.path());
     let metadata =
         MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
-    metadata
-        .put_preference_json(
-            DAEMON_RUNTIME_CONFIG_KEY,
-            r#"
-{
-  "nat": {
-    "backendOrder": ["upnp_rupnp"]
-  }
-}
-"#,
-        )
-        .unwrap();
+    put_setting(
+        &metadata,
+        SECTION_NAT,
+        "backendOrder",
+        serde_json::json!(["upnp_rupnp"]),
+    );
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
     assert!(
@@ -325,27 +417,21 @@ fn load_rejects_db_runtime_server_endpoints() {
     let config_path = write_bootstrap_config(temp.path());
     let metadata =
         MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
-    metadata
-        .put_preference_json(
-            DAEMON_RUNTIME_CONFIG_KEY,
-            r#"
-{
-  "ed2k": {
-    "serverEndpoints": ["192.0.2.20:4661"]
-  }
-}
-"#,
-        )
-        .unwrap();
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "serverEndpoints",
+        serde_json::json!(["192.0.2.20:4661"]),
+    );
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
 
     assert!(
-        error.to_string().contains("invalid runtime server config"),
+        error.to_string().contains("failed to load ed2k settings"),
         "unexpected error: {error:#}"
     );
     assert!(
-        format!("{error:#}").contains("SQLite profile"),
+        format!("{error:#}").contains("unknown field `serverEndpoints`"),
         "unexpected error: {error:#}"
     );
 }
@@ -356,29 +442,23 @@ fn load_rejects_db_runtime_server_entries() {
     let config_path = write_bootstrap_config(temp.path());
     let metadata =
         MetadataStore::open(temp.path().join("runtime").join("metadata.sqlite")).unwrap();
-    metadata
-        .put_preference_json(
-            DAEMON_RUNTIME_CONFIG_KEY,
-            r#"
-{
-  "ed2k": {
-    "serverEntries": [
-      {
-        "host": "192.0.2.20",
-        "port": 4661,
-        "name": "emulebb-local-e2e"
-      }
-    ]
-  }
-}
-"#,
-        )
-        .unwrap();
+    put_setting(
+        &metadata,
+        SECTION_ED2K,
+        "serverEntries",
+        serde_json::json!([
+            {
+                "host": "192.0.2.20",
+                "port": 4661,
+                "name": "emulebb-local-e2e"
+            }
+        ]),
+    );
 
     let error = DaemonConfig::load(Some(config_path)).unwrap_err();
 
     assert!(
-        format!("{error:#}").contains("ed2k.serverEndpoints and ed2k.serverEntries"),
+        format!("{error:#}").contains("unknown field `serverEntries`"),
         "unexpected error: {error:#}"
     );
 }
@@ -445,7 +525,7 @@ fn kad_local_store_config_is_config_driven_and_clamped() {
 #[test]
 fn kad_local_store_defaults_follow_index_defaults() {
     let defaults = KadLocalStoreConfig::default();
-    let config = KadListenerConfig::default().local_store_config();
+    let config = kad_local_store_config(&KadListenerConfig::default());
 
     assert_eq!(config.keyword_capacity, defaults.keyword_capacity);
     assert_eq!(config.source_capacity, defaults.source_capacity);
@@ -1035,7 +1115,7 @@ fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.kad.bootstrap_nodes = vec!["192.0.2.30:41002".to_string()];
+    config.kad_bootstrap_nodes = vec!["192.0.2.30:41002".to_string()];
     config.kad.bootstrap_min_routing_contacts = 0;
     config.kad.republish_interval_secs = 0;
     config.kad.publish_contact_fanout = 0;

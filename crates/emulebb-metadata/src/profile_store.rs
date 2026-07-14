@@ -7,30 +7,134 @@ use crate::{
 };
 
 impl super::MetadataStore {
-    pub fn load_preference_json(&self, key: &str) -> Result<Option<String>> {
+    pub fn load_setting_json(&self, section: &str, key: &str) -> Result<Option<String>> {
+        ensure!(
+            !section.trim().is_empty(),
+            "settings section must not be empty"
+        );
+        ensure!(!key.trim().is_empty(), "settings key must not be empty");
         self.connection()?
             .query_row(
-                "SELECT value_json FROM preferences WHERE key = ?1",
-                params![key],
+                "SELECT value_json FROM settings WHERE section = ?1 AND key = ?2",
+                params![section, key],
                 |row| row.get(0),
             )
             .optional()
             .map_err(Into::into)
     }
 
-    pub fn put_preference_json(&self, key: &str, value_json: &str) -> Result<()> {
-        ensure!(!key.trim().is_empty(), "preference key must not be empty");
+    pub fn load_settings_section(&self, section: &str) -> Result<Vec<(String, String)>> {
+        ensure!(
+            !section.trim().is_empty(),
+            "settings section must not be empty"
+        );
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT key, value_json
+            FROM settings
+            WHERE section = ?1
+            ORDER BY key
+            "#,
+        )?;
+        let rows = stmt.query_map(params![section], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn has_settings_section(&self, section: &str) -> Result<bool> {
+        ensure!(
+            !section.trim().is_empty(),
+            "settings section must not be empty"
+        );
+        let count: i64 = self.connection()?.query_row(
+            "SELECT count(*) FROM settings WHERE section = ?1",
+            params![section],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
+    }
+
+    pub fn put_setting_json(&self, section: &str, key: &str, value_json: &str) -> Result<()> {
+        ensure!(
+            !section.trim().is_empty(),
+            "settings section must not be empty"
+        );
+        ensure!(!key.trim().is_empty(), "settings key must not be empty");
         let now = unix_ms();
         self.connection()?.execute(
             r#"
-            INSERT INTO preferences(key, value_json, updated_at_ms)
-            VALUES (?1, ?2, ?3)
-            ON CONFLICT(key) DO UPDATE SET
+            INSERT INTO settings(section, key, value_json, updated_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(section, key) DO UPDATE SET
                 value_json = excluded.value_json,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-            params![key, value_json, now],
+            params![section, key, value_json, now],
         )?;
+        Ok(())
+    }
+
+    pub fn replace_settings_section<'a>(
+        &self,
+        section: &str,
+        entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<()> {
+        ensure!(
+            !section.trim().is_empty(),
+            "settings section must not be empty"
+        );
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM settings WHERE section = ?1", params![section])?;
+        for (key, value_json) in entries {
+            ensure!(!key.trim().is_empty(), "settings key must not be empty");
+            tx.execute(
+                r#"
+                INSERT INTO settings(section, key, value_json, updated_at_ms)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![section, key, value_json, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_kad_bootstrap_nodes(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT endpoint
+            FROM kad_bootstrap_nodes
+            ORDER BY position
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn replace_kad_bootstrap_nodes(&self, endpoints: &[String]) -> Result<()> {
+        let now = unix_ms();
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM kad_bootstrap_nodes", [])?;
+        for (position, endpoint) in endpoints.iter().enumerate() {
+            ensure!(
+                !endpoint.trim().is_empty(),
+                "Kad bootstrap endpoint must not be empty"
+            );
+            tx.execute(
+                r#"
+                INSERT INTO kad_bootstrap_nodes(position, endpoint, updated_at_ms)
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![position as i64, endpoint, now],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -319,11 +423,37 @@ mod tests {
         let store = super::super::MetadataStore::in_memory().unwrap();
 
         store
-            .put_preference_json("core.preferences", r#"{"networkEd2k":true}"#)
+            .put_setting_json("core.preferences", "networkEd2k", "true")
             .unwrap();
         assert_eq!(
-            store.load_preference_json("core.preferences").unwrap(),
-            Some(r#"{"networkEd2k":true}"#.to_string())
+            store
+                .load_setting_json("core.preferences", "networkEd2k")
+                .unwrap(),
+            Some("true".to_string())
+        );
+        assert!(store.has_settings_section("core.preferences").unwrap());
+        store
+            .replace_settings_section(
+                "core.preferences",
+                [("networkEd2k", "false"), ("downloadLimitKiBps", "2048")],
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_settings_section("core.preferences").unwrap(),
+            vec![
+                ("downloadLimitKiBps".to_string(), "2048".to_string()),
+                ("networkEd2k".to_string(), "false".to_string())
+            ]
+        );
+        store
+            .replace_kad_bootstrap_nodes(&[
+                "192.0.2.10:4672".to_string(),
+                "192.0.2.11:4672".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(
+            store.load_kad_bootstrap_nodes().unwrap(),
+            vec!["192.0.2.10:4672".to_string(), "192.0.2.11:4672".to_string()]
         );
 
         store

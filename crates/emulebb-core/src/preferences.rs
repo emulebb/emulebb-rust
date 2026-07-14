@@ -6,9 +6,9 @@
 
 use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
 use emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig;
-pub(crate) use emulebb_settings::{
-    apply_preferences_update, default_preferences, preferences_update_is_empty,
-};
+#[cfg(test)]
+pub(crate) use emulebb_settings::default_preferences;
+pub(crate) use emulebb_settings::{apply_preferences_update, preferences_update_is_empty};
 
 use crate::Preferences;
 
