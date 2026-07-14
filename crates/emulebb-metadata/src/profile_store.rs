@@ -143,7 +143,7 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT categories.id, categories.name, local_paths.display_path,
-                   categories.comment, categories.priority, categories.color
+                   categories.comment, categories.sort_order, categories.color
             FROM categories
             LEFT JOIN local_paths ON local_paths.id = categories.path_id
             WHERE deleted_at_ms IS NULL
@@ -176,13 +176,13 @@ impl super::MetadataStore {
             .transpose()?;
         tx.execute(
             r#"
-            INSERT INTO categories(id, name, path_id, comment, priority, color, created_at_ms, updated_at_ms, deleted_at_ms)
+            INSERT INTO categories(id, name, path_id, comment, sort_order, color, created_at_ms, updated_at_ms, deleted_at_ms)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 path_id = excluded.path_id,
                 comment = excluded.comment,
-                priority = excluded.priority,
+                sort_order = excluded.sort_order,
                 color = excluded.color,
                 updated_at_ms = excluded.updated_at_ms,
                 deleted_at_ms = NULL
@@ -276,7 +276,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT address, port, name, description, priority, static_server,
+            SELECT address, port, name, description, server_priority, static_server,
                    enabled, failed_count, ping_ms, users, files, soft_files, hard_files, version,
                    obfuscation_tcp_port, udp_flags
             FROM servers
@@ -313,7 +313,7 @@ impl super::MetadataStore {
         self.connection()?.execute(
             r#"
             INSERT INTO servers(
-                address, port, name, description, priority, static_server,
+                address, port, name, description, server_priority, static_server,
                 enabled, failed_count, ping_ms, users, files, soft_files, hard_files,
                 version, obfuscation_tcp_port, udp_flags, first_seen_ms, last_seen_ms, deleted_at_ms
             )
@@ -321,7 +321,7 @@ impl super::MetadataStore {
             ON CONFLICT(address, port) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
-                priority = excluded.priority,
+                server_priority = excluded.server_priority,
                 static_server = excluded.static_server,
                 enabled = excluded.enabled,
                 failed_count = excluded.failed_count,

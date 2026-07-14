@@ -76,7 +76,7 @@ impl super::MetadataStore {
         tx.prepare_cached(
             r#"
             INSERT INTO transfers(
-                known_file_id, visible_state, control_state, priority,
+                known_file_id, visible_state, control_state, download_priority,
                 category_id, payload_directory, delivered_path_id, source_path_id,
                 source_mtime_ms, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms

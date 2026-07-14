@@ -38,7 +38,7 @@ CREATE TABLE categories (
     name TEXT NOT NULL,
     path_id INTEGER REFERENCES local_paths(id),
     comment TEXT NOT NULL DEFAULT '',
-    priority INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
     color INTEGER,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
@@ -202,8 +202,8 @@ CREATE TABLE transfers (
     visible_state TEXT NOT NULL CHECK(visible_state IN ('completed', 'downloading', 'queued')),
     control_state TEXT CHECK(control_state IS NULL OR control_state IN ('paused', 'stopped')),
     category_id INTEGER REFERENCES categories(id),
-    priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
+    download_priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(download_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'veryhigh')),
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
     -- Absolute path identity for the completed payload materialized under a
@@ -266,7 +266,7 @@ CREATE TABLE servers (
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     name TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
-    priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low', 'normal', 'high')),
+    server_priority TEXT NOT NULL DEFAULT 'normal' CHECK(server_priority IN ('low', 'normal', 'high')),
     static_server INTEGER NOT NULL DEFAULT 0 CHECK(static_server IN (0, 1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     failed_count INTEGER NOT NULL DEFAULT 0 CHECK(failed_count >= 0),
