@@ -14,7 +14,7 @@ CREATE TABLE profile (
 
 CREATE TABLE local_identities (
     id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL UNIQUE,
+    identity_kind TEXT NOT NULL UNIQUE CHECK(identity_kind IN ('ed2k-user-hash', 'ed2k-secure-ident')),
     public_identity BLOB,
     private_secret BLOB,
     created_at_ms INTEGER NOT NULL,

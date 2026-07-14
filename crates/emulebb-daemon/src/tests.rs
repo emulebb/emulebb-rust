@@ -839,7 +839,7 @@ fn load_or_create_user_hash_rewrites_markerless_sql_hash() {
     let store = MetadataStore::open(temp.path().join("metadata.sqlite")).unwrap();
     store
         .upsert_local_identity(&MetadataLocalIdentity {
-            kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
+            identity_kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
             public_identity: Some(vec![0xaa; 16]),
             private_secret: None,
         })

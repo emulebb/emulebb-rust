@@ -653,7 +653,7 @@ fn load_or_create_user_hash(metadata: &MetadataStore) -> Result<[u8; 16]> {
 
 fn store_user_hash(metadata: &MetadataStore, user_hash: [u8; 16]) -> Result<()> {
     metadata.upsert_local_identity(&MetadataLocalIdentity {
-        kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
+        identity_kind: ED2K_USER_HASH_IDENTITY_KIND.to_string(),
         public_identity: Some(user_hash.to_vec()),
         private_secret: None,
     })
@@ -668,7 +668,7 @@ fn load_or_create_secure_ident(metadata: &MetadataStore) -> Result<Ed2kSecureIde
     }
     let secure_ident = Ed2kSecureIdent::generate()?;
     metadata.upsert_local_identity(&MetadataLocalIdentity {
-        kind: ED2K_SECURE_IDENT_IDENTITY_KIND.to_string(),
+        identity_kind: ED2K_SECURE_IDENT_IDENTITY_KIND.to_string(),
         public_identity: None,
         private_secret: Some(secure_ident.to_pkcs8_der()?),
     })?;
