@@ -14,14 +14,14 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 #[cfg(test)]
-use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
+use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 use emulebb_ed2k::{
     DirectCallbackArgs, NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_upnp_port_mapping_providers,
-    config::Ed2kConfig,
+    config::Ed2kRuntimeConfig,
     ed2k_server::{
         Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerLoopOptions,
         Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpKeywordSearchOptions,
@@ -468,10 +468,10 @@ impl EmulebbCore {
         let ed2k_transfers = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
             &transfer_root,
             metadata_store.clone(),
-            &Ed2kConfig {
+            &Ed2kRuntimeConfig {
                 upload_queue: upload_queue_policy,
                 download_limit_bytes_per_sec,
-                ..Ed2kConfig::default()
+                ..Ed2kRuntimeConfig::default()
             },
         )?;
         // Drive the shared download coordinator from the live REST preferences
@@ -6243,7 +6243,7 @@ fn rust_test_tmp_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("emulebb-rust-tests"))
 }
 
-fn connected_server_keyword_search_timeout(config: &Ed2kConfig) -> Duration {
+fn connected_server_keyword_search_timeout(config: &Ed2kRuntimeConfig) -> Duration {
     // WHY: eMuleBB MFC arms `TimerServerTimeout` for 50 seconds before a silent
     // connected server search falls through to the global UDP walk.
     Duration::from_secs(

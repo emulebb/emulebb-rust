@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use emulebb_ed2k::config::{Ed2kConfig, Ed2kServerEntry};
+use emulebb_ed2k::config::{Ed2kRuntimeConfig, Ed2kServerEntry};
 
 use super::{
     EmulebbCore, ServerInfo, parse_server_endpoint,
@@ -73,9 +73,9 @@ impl EmulebbCore {
 
     pub(crate) async fn effective_ed2k_config(
         &self,
-        base: &Ed2kConfig,
+        base: &Ed2kRuntimeConfig,
         target_endpoint: Option<&str>,
-    ) -> Result<Ed2kConfig> {
+    ) -> Result<Ed2kRuntimeConfig> {
         if let Some(target) = target_endpoint {
             let _ = parse_server_endpoint(target)?;
         }

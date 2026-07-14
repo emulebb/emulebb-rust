@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use emulebb_ed2k::{
-    config::Ed2kConfig,
+    config::Ed2kRuntimeConfig,
     ed2k_server::{Ed2kFoundSource, Ed2kSearchFile},
     ed2k_transfer::{Ed2kResumeManifest, Ed2kSourceHint},
 };
@@ -114,7 +114,7 @@ pub(crate) fn found_source_from_hint(
     })
 }
 
-pub(crate) fn configured_server_attempts(config: &Ed2kConfig) -> usize {
+pub(crate) fn configured_server_attempts(config: &Ed2kRuntimeConfig) -> usize {
     config
         .server_entries
         .len()
@@ -122,7 +122,7 @@ pub(crate) fn configured_server_attempts(config: &Ed2kConfig) -> usize {
         .max(1)
 }
 
-pub(crate) fn global_udp_source_batch_server_attempts(config: &Ed2kConfig) -> usize {
+pub(crate) fn global_udp_source_batch_server_attempts(config: &Ed2kRuntimeConfig) -> usize {
     // WHY: MFC's UDP source walk uses the server list, not the tiny diagnostic
     // budget. Batched Rust sends selected packets before waiting for replies.
     configured_server_attempts(config)
@@ -142,7 +142,7 @@ pub(crate) fn exact_ed2k_hash_query_token(query: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) fn ed2k_keyword_server_attempts(config: &Ed2kConfig, query: &str) -> usize {
+pub(crate) fn ed2k_keyword_server_attempts(config: &Ed2kRuntimeConfig, query: &str) -> usize {
     let requested_budget = if exact_ed2k_hash_query_token(query).is_some() {
         config.exact_hash_keyword_server_attempt_budget
     } else {

@@ -5,7 +5,7 @@ fn upload_queue_policy_uses_preferences_for_slot_and_queue_limits() {
     let mut preferences = default_preferences();
     preferences.max_upload_slots = 11;
     preferences.queue_size = 6_000;
-    let base = Ed2kUploadQueuePolicyConfig {
+    let base = Ed2kUploadQueueRuntimeConfig {
         active_slots: 3,
         elastic_percent: 15,
         upload_limit_bytes_per_sec: 512 * 1024,
@@ -47,7 +47,7 @@ fn upload_queue_policy_uses_preferences_for_slot_and_queue_limits() {
 #[test]
 fn initial_upload_queue_policy_preserves_config_for_fresh_profiles() {
     let preferences = default_preferences();
-    let base = Ed2kUploadQueuePolicyConfig {
+    let base = Ed2kUploadQueueRuntimeConfig {
         active_slots: 3,
         elastic_percent: 15,
         upload_limit_bytes_per_sec: 512 * 1024,

@@ -9,7 +9,7 @@ use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::config::Ed2kConfig;
+use crate::config::Ed2kRuntimeConfig;
 use emulebb_kad_proto::Ed2kHash;
 
 use super::{
@@ -25,7 +25,7 @@ pub struct Ed2kUdpSourceSearchOptions<'a> {
     /// Local IPv4 address to bind for outbound server UDP traffic.
     pub bind_ip: Ipv4Addr,
     /// ED2K server configuration and search limits.
-    pub config: &'a Ed2kConfig,
+    pub config: &'a Ed2kRuntimeConfig,
     /// Server endpoint to try first when it is present in the configured list.
     pub preferred_endpoint: Option<SocketAddr>,
     /// Server endpoint to skip, usually because another source-search path is already using it.
@@ -57,7 +57,7 @@ pub struct Ed2kUdpSourceBatchSearchOptions<'a> {
     /// Local IPv4 address to bind for outbound server UDP traffic.
     pub bind_ip: Ipv4Addr,
     /// ED2K server configuration and search limits.
-    pub config: &'a Ed2kConfig,
+    pub config: &'a Ed2kRuntimeConfig,
     /// Server endpoint to try first when it is present in the configured list.
     pub preferred_endpoint: Option<SocketAddr>,
     /// Server endpoint to skip, usually because another source-search path is already using it.

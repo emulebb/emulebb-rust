@@ -9,7 +9,7 @@ use std::{
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore};
 use emulebb_ed2k::{
     NatConfig,
-    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
+    config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
     ed2k_tcp::Ed2kSecureIdent,
 };
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
@@ -81,7 +81,7 @@ fn test_network_config(
     publish_shared_files: bool,
 ) -> Ed2kNetworkConfig {
     let dummy_server_port = free_lan_tcp_port(bind_ip);
-    let mut config = Ed2kConfig {
+    let mut config = Ed2kRuntimeConfig {
         server_endpoints: vec![format!("{bind_ip}:{dummy_server_port}")],
         obfuscation_enabled: false,
         connect_timeout_secs: 1,
@@ -89,7 +89,7 @@ fn test_network_config(
         keyword_server_attempt_budget: 1,
         exact_hash_keyword_server_attempt_budget: 1,
         source_server_attempt_budget: 1,
-        upload_queue: Ed2kUploadQueuePolicyConfig {
+        upload_queue: Ed2kUploadQueueRuntimeConfig {
             active_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
@@ -102,7 +102,7 @@ fn test_network_config(
             session_transfer_percent: 0,
             session_time_limit_secs: 0,
         },
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     config.listen_port = Some(listen_port);
     Ed2kNetworkConfig {

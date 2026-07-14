@@ -1,7 +1,7 @@
 //! The client-to-client UDP source-reask runtime loop (`docs/design/udp-source-reask.md`
 //! §4.2-§4.6). Lives in `emulebb-ed2k` because it composes the crate-internal
 //! [`super::ReaskService`] with the shared Kad UDP socket via [`DhtNode`]; core
-//! spawns it (on by default, gated by `Ed2kConfig.enable_udp_reask`).
+//! spawns it (on by default, gated by `Ed2kRuntimeConfig.enable_udp_reask`).
 //!
 //! It registers a foreign-datagram handler on the shared socket (inbound reask
 //! packets that fail Kad decode arrive here) and `select!`s that against a

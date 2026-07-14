@@ -10,7 +10,7 @@ use crate::NatManager;
 use emulebb_kad_proto::Ed2kHash;
 
 use crate::{
-    config::Ed2kConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedCatalog,
+    config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kHelloIdentity, ed2k_transfer::Ed2kSharedCatalog,
     kad_firewall::KadFirewallState,
 };
 
@@ -191,7 +191,7 @@ impl Ed2kFoundSource {
 pub struct Ed2kServerLoopOptions {
     pub bind_ip: Ipv4Addr,
     pub nat: Arc<NatManager>,
-    pub config: Ed2kConfig,
+    pub config: Ed2kRuntimeConfig,
     pub hello_identity: Ed2kHelloIdentity,
     pub shared_catalog: Ed2kSharedCatalog,
     pub state: Arc<RwLock<Ed2kServerState>>,

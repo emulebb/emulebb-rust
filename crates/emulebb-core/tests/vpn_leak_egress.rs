@@ -28,7 +28,7 @@ use std::{
 };
 
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
-use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
+use emulebb_ed2k::{NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent};
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_kad_dht::socket_opts::egress_audit;
 
@@ -159,11 +159,11 @@ fn tunnel_network_config(
     runtime_bound: Option<Arc<AtomicBool>>,
 ) -> Ed2kNetworkConfig {
     let ip = tunnel_ip();
-    let config = Ed2kConfig {
+    let config = Ed2kRuntimeConfig {
         // A configured server so connect_ed2k exercises the real connect path; the
         // VPN-guard bail happens before any server contact when the tunnel is down.
         server_endpoints: vec![format!("{ip}:4661")],
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     Ed2kNetworkConfig {
         bind_ip: ip,

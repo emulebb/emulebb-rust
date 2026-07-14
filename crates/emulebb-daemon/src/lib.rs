@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
 use emulebb_ed2k::{
     NatConfig,
-    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
+    config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
     detect_interfaces,
     ed2k_tcp::Ed2kSecureIdent,
     ipfilter::IpFilter,
@@ -46,7 +46,7 @@ pub struct DaemonConfig {
     pub ed2k_user_hash: Option<String>,
     pub kad: KadListenerConfig,
     pub kad_bootstrap_nodes: Vec<String>,
-    pub ed2k: Ed2kConfig,
+    pub ed2k: Ed2kRuntimeConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
     pub vpn_guard: VpnGuardSettings,
@@ -78,7 +78,7 @@ impl Default for DaemonConfig {
             ed2k_user_hash: runtime.ed2k_user_hash,
             kad: KadListenerConfig::default(),
             kad_bootstrap_nodes: Vec::new(),
-            ed2k: Ed2kConfig::default(),
+            ed2k: Ed2kRuntimeConfig::default(),
             nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
             vpn_guard: VpnGuardSettings::default(),
@@ -308,7 +308,7 @@ struct LoadedRuntimeSettings {
     daemon: DaemonRuntimeSettings,
     kad: KadListenerConfig,
     kad_bootstrap_nodes: Vec<String>,
-    ed2k: Ed2kConfig,
+    ed2k: Ed2kRuntimeConfig,
     nat: NatConfig,
     vpn_guard: VpnGuardSettings,
     ip_filter: IpFilterSettings,
@@ -330,7 +330,7 @@ fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettin
         daemon,
         kad,
         kad_bootstrap_nodes,
-        ed2k: ed2k_config_from_settings(ed2k_settings),
+        ed2k: ed2k_runtime_config_from_settings(ed2k_settings),
         nat: nat_config_from_settings(nat_settings),
         vpn_guard: load_section_settings(metadata, SECTION_VPN_GUARD)
             .context("failed to load vpn_guard settings")?,
@@ -358,8 +358,8 @@ where
         .with_context(|| format!("invalid settings section {section}"))
 }
 
-fn ed2k_config_from_settings(settings: Ed2kSettings) -> Ed2kConfig {
-    Ed2kConfig {
+fn ed2k_runtime_config_from_settings(settings: Ed2kSettings) -> Ed2kRuntimeConfig {
+    Ed2kRuntimeConfig {
         listen_port: settings.listen_port,
         server_entries: Vec::new(),
         server_endpoints: Vec::new(),
@@ -381,7 +381,7 @@ fn ed2k_config_from_settings(settings: Ed2kSettings) -> Ed2kConfig {
         keyword_server_attempt_budget: settings.keyword_server_attempt_budget,
         exact_hash_keyword_server_attempt_budget: settings.exact_hash_keyword_server_attempt_budget,
         source_server_attempt_budget: settings.source_server_attempt_budget,
-        upload_queue: ed2k_upload_queue_config_from_settings(settings.upload_queue),
+        upload_queue: ed2k_upload_queue_runtime_config_from_settings(settings.upload_queue),
         download_limit_bytes_per_sec: settings.download_limit_bytes_per_sec,
         enable_udp_reask: settings.enable_udp_reask,
         publish_emule_rust_identity: settings.publish_emule_rust_identity,
@@ -390,10 +390,10 @@ fn ed2k_config_from_settings(settings: Ed2kSettings) -> Ed2kConfig {
     }
 }
 
-fn ed2k_upload_queue_config_from_settings(
+fn ed2k_upload_queue_runtime_config_from_settings(
     settings: Ed2kUploadQueueSettings,
-) -> Ed2kUploadQueuePolicyConfig {
-    Ed2kUploadQueuePolicyConfig {
+) -> Ed2kUploadQueueRuntimeConfig {
+    Ed2kUploadQueueRuntimeConfig {
         active_slots: settings.active_slots,
         elastic_percent: settings.elastic_percent,
         upload_limit_bytes_per_sec: settings.upload_limit_bytes_per_sec,

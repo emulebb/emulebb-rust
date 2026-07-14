@@ -6,7 +6,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use chrono::{DateTime, Utc};
-use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter};
+use emulebb_ed2k::{
+    NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent, ipfilter::IpFilter,
+};
 use emulebb_index::{KadLocalStoreConfig, SnoopQueueConfig};
 use serde::{Deserialize, Serialize};
 
@@ -642,7 +644,7 @@ pub struct Ed2kNetworkConfig {
     /// and we answer buddy requests from firewalled peers when we are reachable.
     pub kad_buddy_enabled: bool,
     pub nat_config: NatConfig,
-    pub config: Ed2kConfig,
+    pub config: Ed2kRuntimeConfig,
     /// Optional configured P2P bind IP. `None` is valid when the bind came from
     /// `p2pBindInterface` only; `bind_ip` carries the resolved runtime address.
     pub p2p_bind_ip: Option<Ipv4Addr>,

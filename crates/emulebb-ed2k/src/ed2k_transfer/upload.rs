@@ -8,7 +8,7 @@ use std::{
 use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::MetadataPeerCredit;
 
-use crate::config::Ed2kUploadQueuePolicyConfig;
+use crate::config::Ed2kUploadQueueRuntimeConfig;
 
 use super::{
     Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadQueueCapacitySnapshot,
@@ -20,7 +20,7 @@ use super::{
 
 impl Ed2kTransferRuntime {
     /// Apply inbound uploader queue policy to the live runtime.
-    pub async fn apply_upload_queue_policy(&self, policy: &Ed2kUploadQueuePolicyConfig) {
+    pub async fn apply_upload_queue_policy(&self, policy: &Ed2kUploadQueueRuntimeConfig) {
         self.upload_queue
             .lock()
             .await
@@ -28,7 +28,7 @@ impl Ed2kTransferRuntime {
     }
 
     /// Return the currently active inbound uploader queue policy.
-    pub async fn upload_queue_policy_snapshot(&self) -> Ed2kUploadQueuePolicyConfig {
+    pub async fn upload_queue_policy_snapshot(&self) -> Ed2kUploadQueueRuntimeConfig {
         upload_queue_policy_from_config(self.upload_queue.lock().await.config())
     }
 

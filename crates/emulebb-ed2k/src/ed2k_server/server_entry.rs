@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use anyhow::{Context, Result};
 use tokio::net::lookup_host;
 
-use crate::config::{Ed2kConfig, Ed2kServerEntry};
+use crate::config::{Ed2kRuntimeConfig, Ed2kServerEntry};
 
 use super::{SERVER_UDP_FLAG_TCPOBFUSCATION, SERVER_UDP_FLAG_UDPOBFUSCATION};
 
@@ -126,7 +126,9 @@ impl ResolvedServerEntry {
     }
 }
 
-pub(super) fn configured_server_entries(config: &Ed2kConfig) -> Result<Vec<ConfiguredServerEntry>> {
+pub(super) fn configured_server_entries(
+    config: &Ed2kRuntimeConfig,
+) -> Result<Vec<ConfiguredServerEntry>> {
     let metadata_entries = config
         .server_entries
         .iter()
@@ -201,7 +203,7 @@ pub(super) async fn resolve_server_entry(
 }
 
 pub(super) async fn resolve_callback_server_entry(
-    config: &Ed2kConfig,
+    config: &Ed2kRuntimeConfig,
     server_endpoint: SocketAddr,
 ) -> Result<ResolvedServerEntry> {
     let endpoint_v4 = match server_endpoint {
@@ -239,13 +241,13 @@ mod tests {
 
     #[test]
     fn configured_endpoints_are_ordered_before_persisted_metadata() {
-        let config = Ed2kConfig {
+        let config = Ed2kRuntimeConfig {
             server_endpoints: vec!["203.0.113.20:4661".to_string()],
             server_entries: vec![
                 metadata_entry("203.0.113.10", 4661, "persisted-a"),
                 metadata_entry("203.0.113.20", 4661, "configured-with-metadata"),
             ],
-            ..Ed2kConfig::default()
+            ..Ed2kRuntimeConfig::default()
         };
 
         let entries = configured_server_entries(&config).unwrap();
@@ -257,13 +259,13 @@ mod tests {
 
     #[test]
     fn retain_live_servers_skips_dead_server_endpoints() {
-        let config = Ed2kConfig {
+        let config = Ed2kRuntimeConfig {
             server_entries: vec![
                 metadata_entry("203.0.113.10", 4661, "alive"),
                 metadata_entry("203.0.113.20", 4661, "dead"),
                 metadata_entry("203.0.113.30", 5000, "alive-other-port"),
             ],
-            ..Ed2kConfig::default()
+            ..Ed2kRuntimeConfig::default()
         };
         let mut entries = configured_server_entries(&config).unwrap();
 
@@ -284,12 +286,12 @@ mod tests {
 
     #[test]
     fn metadata_entries_are_used_when_no_endpoints_are_configured() {
-        let config = Ed2kConfig {
+        let config = Ed2kRuntimeConfig {
             server_entries: vec![
                 metadata_entry("203.0.113.10", 4661, "persisted-a"),
                 metadata_entry("203.0.113.20", 4661, "persisted-b"),
             ],
-            ..Ed2kConfig::default()
+            ..Ed2kRuntimeConfig::default()
         };
 
         let entries = configured_server_entries(&config).unwrap();

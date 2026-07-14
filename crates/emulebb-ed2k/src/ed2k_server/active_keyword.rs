@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    config::Ed2kConfig,
+    config::Ed2kRuntimeConfig,
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
 };
@@ -29,7 +29,7 @@ use super::{
 /// Inputs for a one-shot ED2K keyword search across configured servers.
 pub struct Ed2kKeywordSearchOptions<'a> {
     pub bind_ip: Ipv4Addr,
-    pub config: &'a Ed2kConfig,
+    pub config: &'a Ed2kRuntimeConfig,
     pub hello_identity: Ed2kHelloIdentity,
     pub shared_catalog: &'a [Ed2kSharedEntry],
     pub preferred_endpoint: Option<SocketAddr>,
@@ -41,7 +41,7 @@ pub struct Ed2kKeywordSearchOptions<'a> {
 /// Inputs for a stock-style global ED2K UDP keyword search.
 pub struct Ed2kUdpKeywordSearchOptions<'a> {
     pub bind_ip: Ipv4Addr,
-    pub config: &'a Ed2kConfig,
+    pub config: &'a Ed2kRuntimeConfig,
     pub excluded_endpoint: Option<SocketAddr>,
     /// Servers at/over the dead-server retry threshold, skipped like eMule's UDP
     /// keyword/stat walk (`GetFailedCount() >= GetDeadServerRetries()`).

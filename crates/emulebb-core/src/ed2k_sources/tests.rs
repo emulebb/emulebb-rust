@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use emulebb_ed2k::config::Ed2kConfig;
+use emulebb_ed2k::config::Ed2kRuntimeConfig;
 use emulebb_ed2k::ed2k_server::Ed2kFoundSource;
 use emulebb_kad_dht::SourceResult;
 use emulebb_kad_proto::Ed2kHash;
@@ -72,14 +72,14 @@ fn kad_source_type_2_is_dropped() {
 
 #[test]
 fn global_udp_source_batch_attempts_cover_effective_server_list() {
-    let mut config = Ed2kConfig {
+    let mut config = Ed2kRuntimeConfig {
         source_server_attempt_budget: 1,
         server_endpoints: vec![
             "192.0.2.10:4661".to_string(),
             "192.0.2.20:4661".to_string(),
             "192.0.2.30:4661".to_string(),
         ],
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
 
     assert_eq!(configured_server_attempts(&config), 3);

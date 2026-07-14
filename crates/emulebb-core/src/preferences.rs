@@ -4,7 +4,7 @@
 //! `emulebb-settings`; this module only derives eD2K runtime policy from the
 //! validated preferences.
 
-use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
+use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 use emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig;
 #[cfg(test)]
 pub(crate) use emulebb_settings::default_preferences;
@@ -13,9 +13,9 @@ pub(crate) use emulebb_settings::{apply_preferences_update, preferences_update_i
 use crate::Preferences;
 
 pub(crate) fn ed2k_upload_queue_policy_from_preferences(
-    base: Option<&Ed2kUploadQueuePolicyConfig>,
+    base: Option<&Ed2kUploadQueueRuntimeConfig>,
     preferences: &Preferences,
-) -> Ed2kUploadQueuePolicyConfig {
+) -> Ed2kUploadQueueRuntimeConfig {
     let mut policy = base.cloned().unwrap_or_default();
     policy.active_slots = preferences.max_upload_slots as usize;
     policy.elastic_percent = preferences.upload_slot_elastic_percent.min(100);
@@ -56,10 +56,10 @@ pub(crate) fn ed2k_download_coordinator_config_from_preferences(
 }
 
 pub(crate) fn initial_ed2k_upload_queue_policy(
-    base: Option<&Ed2kUploadQueuePolicyConfig>,
+    base: Option<&Ed2kUploadQueueRuntimeConfig>,
     has_persisted_preferences: bool,
     preferences: &Preferences,
-) -> Ed2kUploadQueuePolicyConfig {
+) -> Ed2kUploadQueueRuntimeConfig {
     if has_persisted_preferences || base.is_none() {
         ed2k_upload_queue_policy_from_preferences(base, preferences)
     } else {

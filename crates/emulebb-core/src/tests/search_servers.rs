@@ -190,9 +190,9 @@ async fn import_server_met_bytes_adds_servers() {
 #[tokio::test]
 async fn effective_ed2k_config_includes_runtime_servers() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
-    let base = Ed2kConfig {
+    let base = Ed2kRuntimeConfig {
         server_endpoints: vec!["203.0.113.10:4661".to_string()],
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     core.add_server(ServerCreate {
         address: "203.0.113.20".to_string(),
@@ -244,7 +244,7 @@ async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
     assert!(!server.enabled);
 
     let config = core
-        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
         .await
         .unwrap();
     assert!(config.server_entries.is_empty());
@@ -280,7 +280,7 @@ async fn server_update_reenables_disabled_runtime_servers() {
 
     assert!(updated.enabled);
     let config = core
-        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
         .await
         .unwrap();
     assert!(
@@ -302,7 +302,7 @@ async fn effective_ed2k_config_honors_reconnect_preference() {
     .unwrap();
 
     let config = core
-        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
         .await
         .unwrap();
 
@@ -320,7 +320,7 @@ async fn effective_ed2k_config_honors_safe_server_connect_preference() {
     .unwrap();
 
     let config = core
-        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .effective_ed2k_config(&Ed2kRuntimeConfig::default(), None)
         .await
         .unwrap();
 

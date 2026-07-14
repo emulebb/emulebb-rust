@@ -28,9 +28,9 @@ fn persist_test_server(config: &DaemonConfig) {
 }
 
 fn config_with_ed2k_network(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
-    let ed2k = Ed2kConfig {
+    let ed2k = Ed2kRuntimeConfig {
         listen_port: Some(41001),
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     DaemonConfig {
         runtime_dir,
@@ -353,6 +353,30 @@ fn load_uses_default_db_runtime_config_when_missing() {
 
     assert!(!metadata.has_settings_section(SECTION_ED2K).unwrap());
     assert_eq!(config.ed2k.listen_port, None);
+}
+
+#[test]
+fn default_ed2k_settings_match_runtime_config_defaults() {
+    assert_eq!(
+        ed2k_runtime_config_from_settings(Ed2kSettings::default()),
+        Ed2kRuntimeConfig::default()
+    );
+}
+
+#[test]
+fn default_upload_queue_settings_match_runtime_config_defaults() {
+    assert_eq!(
+        ed2k_upload_queue_runtime_config_from_settings(Ed2kUploadQueueSettings::default()),
+        Ed2kUploadQueueRuntimeConfig::default()
+    );
+}
+
+#[test]
+fn default_nat_settings_match_runtime_config_defaults() {
+    assert_eq!(
+        nat_config_from_settings(NatSettings::default()),
+        NatConfig::default()
+    );
 }
 
 #[test]

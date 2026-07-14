@@ -24,7 +24,7 @@ use std::{
 };
 
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
-use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
+use emulebb_ed2k::{NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent};
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 
 #[tokio::test]
@@ -119,9 +119,9 @@ fn build_core(transfer_root: &Path, network: Ed2kNetworkConfig) -> EmulebbCore {
 fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
     // A configured server so connect_ed2k exercises the real connect path; the
     // VPN-guard bail happens before any server contact regardless.
-    let config = Ed2kConfig {
+    let config = Ed2kRuntimeConfig {
         server_endpoints: vec!["198.51.100.20:4661".to_string()],
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     Ed2kNetworkConfig {
         bind_ip: Ipv4Addr::new(198, 51, 100, 10),

@@ -151,7 +151,7 @@ const RUST_MOD_VERSION: &str = "emule-rust";
 
 /// Process-wide identity mode: when true the hello adds a CT_MOD_VERSION tag
 /// publishing the `emule-rust` identity; when false (default) the hello is the
-/// plain eMule tag set. Set once from `Ed2kConfig.publish_emule_rust_identity`.
+/// plain eMule tag set. Set once from `Ed2kRuntimeConfig.publish_emule_rust_identity`.
 static PUBLISH_RUST_IDENTITY: AtomicBool = AtomicBool::new(false);
 
 /// Select the advertised eD2k client identity (plain eMule/Community vs the real

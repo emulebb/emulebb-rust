@@ -20,7 +20,7 @@ fn keyword_target_uses_hash_token_for_exact_ed2k_hash_queries() {
 
 #[test]
 fn exact_ed2k_hash_queries_use_configured_server_budget() {
-    let mut config = Ed2kConfig {
+    let mut config = Ed2kRuntimeConfig {
         server_endpoints: vec![
             "192.0.2.1:4661".to_string(),
             "192.0.2.2:4661".to_string(),
@@ -30,7 +30,7 @@ fn exact_ed2k_hash_queries_use_configured_server_budget() {
         ],
         keyword_server_attempt_budget: 2,
         exact_hash_keyword_server_attempt_budget: 4,
-        ..Ed2kConfig::default()
+        ..Ed2kRuntimeConfig::default()
     };
     let exact_hash = Ed2kHash::from_bytes([0x44; 16]).to_string();
 

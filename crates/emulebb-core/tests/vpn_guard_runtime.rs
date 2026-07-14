@@ -8,7 +8,7 @@ use std::{
 };
 
 use emulebb_core::{Ed2kNetworkConfig, EmulebbCore, VpnGuardConfig};
-use emulebb_ed2k::{NatConfig, config::Ed2kConfig, ed2k_tcp::Ed2kSecureIdent};
+use emulebb_ed2k::{NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIdent};
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 
 #[tokio::test]
@@ -64,7 +64,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         kad_tcp_firewall_check_interval_secs: 600,
         kad_buddy_enabled: true,
         nat_config: NatConfig::default(),
-        config: Ed2kConfig::default(),
+        config: Ed2kRuntimeConfig::default(),
         p2p_bind_ip: Some(Ipv4Addr::new(198, 51, 100, 10)),
         p2p_bind_interface: None,
         vpn_guard: VpnGuardConfig::default(),

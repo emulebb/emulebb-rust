@@ -11,7 +11,7 @@ const DEFAULT_UPLOAD_SESSION_TIME_LIMIT_SECS: u64 = 7_200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct Ed2kConfig {
+pub struct Ed2kRuntimeConfig {
     /// Local ED2K peer TCP listener port, resolved by the daemon from config.
     pub listen_port: Option<u16>,
     /// Ordered ED2K server bootstrap entries mirrored from `server.met`.
@@ -88,7 +88,7 @@ pub struct Ed2kConfig {
     /// requery rounds do not open extra server source probes.
     pub source_server_attempt_budget: usize,
     /// Deterministic inbound upload queue policy for peer download sessions.
-    pub upload_queue: Ed2kUploadQueuePolicyConfig,
+    pub upload_queue: Ed2kUploadQueueRuntimeConfig,
     /// Global (cross-transfer) download payload budget in bytes per second.
     /// Zero (the default) disables throttling: aggregate inbound bandwidth is
     /// unbounded, matching today's behavior. When non-zero, a single shared
@@ -122,7 +122,7 @@ pub struct Ed2kConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct Ed2kUploadQueuePolicyConfig {
+pub struct Ed2kUploadQueueRuntimeConfig {
     pub active_slots: usize,
     pub elastic_percent: u32,
     pub upload_limit_bytes_per_sec: u64,
@@ -160,7 +160,7 @@ pub struct Ed2kServerEntry {
     pub hard_files: u32,
 }
 
-impl Ed2kConfig {
+impl Ed2kRuntimeConfig {
     /// Idle TCP keepalive interval, or `None` when disabled. Mirrors eMule's
     /// `ServerKeepAliveTimeout` gate (`if (dwServerKeepAliveTimeout && ...)`,
     /// ServerConnect.cpp:673): a zero value disables the empty-OP_OFFERFILES
@@ -185,7 +185,7 @@ impl Ed2kConfig {
     }
 }
 
-impl Default for Ed2kConfig {
+impl Default for Ed2kRuntimeConfig {
     fn default() -> Self {
         Self {
             listen_port: None,
@@ -220,7 +220,7 @@ impl Default for Ed2kConfig {
             keyword_server_attempt_budget: 3,
             exact_hash_keyword_server_attempt_budget: 4,
             source_server_attempt_budget: 3,
-            upload_queue: Ed2kUploadQueuePolicyConfig::default(),
+            upload_queue: Ed2kUploadQueueRuntimeConfig::default(),
             download_limit_bytes_per_sec: 0,
             enable_udp_reask: true,
             publish_emule_rust_identity: false,
@@ -235,7 +235,7 @@ impl Default for Ed2kConfig {
     }
 }
 
-impl Default for Ed2kUploadQueuePolicyConfig {
+impl Default for Ed2kUploadQueueRuntimeConfig {
     fn default() -> Self {
         Self {
             active_slots: 3,
@@ -258,8 +258,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_ed2k_config_limits_active_download_fanout() {
-        let config = Ed2kConfig::default();
+    fn default_ed2k_runtime_config_limits_active_download_fanout() {
+        let config = Ed2kRuntimeConfig::default();
 
         // Global download coordinator caps default to the eMule master values:
         // GetRecommendedMaxConnections (500), GetDefaultMaxConperFive (50), and
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn default_keepalive_matches_stock_minutes_scale_posture() {
-        let config = Ed2kConfig::default();
+        let config = Ed2kRuntimeConfig::default();
         // eMule ServerKeepAliveTimeout is minutes-scale (cap 1440 min); the old
         // 60s default was a sub-minute non-stock fingerprint. We hold the soak
         // session with a conservative 20-minute keepalive.
@@ -315,9 +315,9 @@ mod tests {
     fn zero_keepalive_disables_and_nonzero_is_honored_verbatim() {
         // eMule ServerConnect.cpp:673 guards the ping on a non-zero timeout: 0
         // disables the keepalive entirely (no empty-OP_OFFERFILES ping).
-        let mut config = Ed2kConfig {
+        let mut config = Ed2kRuntimeConfig {
             keepalive_secs: 0,
-            ..Ed2kConfig::default()
+            ..Ed2kRuntimeConfig::default()
         };
         assert_eq!(config.keepalive_interval(), None);
         // A non-zero value is honored verbatim, with no sub-minute floor forced
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn default_connect_timeout_budgets_match_emule_reach() {
-        let config = Ed2kConfig::default();
+        let config = Ed2kRuntimeConfig::default();
         // Direct peer connect matches eMule's default ConnectionTimeout.
         assert_eq!(config.connect_timeout_secs, 30);
         // eMule CONSERVTIMEOUT (Opcodes.h:109) = SEC2MS(25) for server connect.

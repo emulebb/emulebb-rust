@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    config::Ed2kConfig,
+    config::Ed2kRuntimeConfig,
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kSharedEntry, IndexedSharedCatalog},
 };
@@ -30,7 +30,7 @@ use super::{
 /// Inputs for a one-shot ED2K source search across configured servers.
 pub struct Ed2kSourceSearchOptions<'a> {
     pub bind_ip: Ipv4Addr,
-    pub config: &'a Ed2kConfig,
+    pub config: &'a Ed2kRuntimeConfig,
     pub hello_identity: Ed2kHelloIdentity,
     pub shared_catalog: &'a [Ed2kSharedEntry],
     pub preferred_endpoint: Option<SocketAddr>,

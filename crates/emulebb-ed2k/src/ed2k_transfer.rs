@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use emulebb_metadata::MetadataStore;
 use tokio::sync::{Mutex, Notify, RwLock};
 
-use crate::config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig};
+use crate::config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig};
 
 mod aich_recovery;
 mod aich_tree;
@@ -334,7 +334,7 @@ impl Ed2kTransferRuntime {
     pub fn load_or_create_with_metadata_and_config(
         root_dir: &Path,
         metadata: MetadataStore,
-        config: &Ed2kConfig,
+        config: &Ed2kRuntimeConfig,
     ) -> Result<Self> {
         Self::load_or_create_with_metadata_and_upload_queue(
             root_dir,
@@ -645,10 +645,10 @@ impl Ed2kTransferRuntime {
 }
 
 /// Build the shared download-coordinator config from the daemon/core
-/// `Ed2kConfig`, mirroring the eMule defaults
+/// `Ed2kRuntimeConfig`, mirroring the eMule defaults
 /// (`GetMaxConnections`/`GetMaxConperFive`/`GetDefaultMaxSourcesPerFile`).
 pub fn download_coordinator_config_from_policy(
-    config: &Ed2kConfig,
+    config: &Ed2kRuntimeConfig,
 ) -> Ed2kDownloadCoordinatorConfig {
     Ed2kDownloadCoordinatorConfig {
         max_connections: config.max_concurrent_downloads,
@@ -661,7 +661,7 @@ pub fn download_coordinator_config_from_policy(
 }
 
 pub(super) fn upload_queue_config_from_policy(
-    policy: &Ed2kUploadQueuePolicyConfig,
+    policy: &Ed2kUploadQueueRuntimeConfig,
 ) -> Ed2kUploadQueueConfig {
     Ed2kUploadQueueConfig {
         active_slots: policy.active_slots.max(1),
@@ -683,8 +683,8 @@ pub(super) fn upload_queue_config_from_policy(
 
 pub(super) fn upload_queue_policy_from_config(
     config: Ed2kUploadQueueConfig,
-) -> Ed2kUploadQueuePolicyConfig {
-    Ed2kUploadQueuePolicyConfig {
+) -> Ed2kUploadQueueRuntimeConfig {
+    Ed2kUploadQueueRuntimeConfig {
         active_slots: config.active_slots,
         elastic_percent: config.elastic_percent,
         upload_limit_bytes_per_sec: config.upload_limit_bytes_per_sec,

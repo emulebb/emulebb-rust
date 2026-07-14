@@ -2,7 +2,7 @@ use emulebb_kad_proto::Ed2kHash;
 use emulebb_metadata::MetadataStore;
 
 use crate::{
-    config::{Ed2kConfig, Ed2kUploadQueuePolicyConfig},
+    config::{Ed2kRuntimeConfig, Ed2kUploadQueueRuntimeConfig},
     ed2k_transfer::{
         Ed2kTransferRuntime, Ed2kUploadRangeAdmission, Ed2kUploadSessionPhaseSnapshot,
         Ed2kUploadSessionStatus,
@@ -19,8 +19,8 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
     let runtime = Ed2kTransferRuntime::load_or_create_with_metadata_and_config(
         &root,
         metadata,
-        &Ed2kConfig {
-            upload_queue: Ed2kUploadQueuePolicyConfig {
+        &Ed2kRuntimeConfig {
+            upload_queue: Ed2kUploadQueueRuntimeConfig {
                 active_slots: 2,
                 elastic_percent: 0,
                 upload_limit_bytes_per_sec: 0,
@@ -33,7 +33,7 @@ async fn upload_queue_uses_configured_active_slot_limit_on_startup() {
                 session_transfer_percent: 0,
                 session_time_limit_secs: 0,
             },
-            ..Ed2kConfig::default()
+            ..Ed2kRuntimeConfig::default()
         },
     )
     .unwrap();
@@ -71,7 +71,7 @@ async fn upload_queue_reconfigures_active_slot_limit_live() {
     assert_eq!(waiting_status, Ed2kUploadSessionStatus::Waiting { rank: 1 });
 
     runtime
-        .apply_upload_queue_policy(&Ed2kUploadQueuePolicyConfig {
+        .apply_upload_queue_policy(&Ed2kUploadQueueRuntimeConfig {
             active_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
@@ -297,7 +297,7 @@ async fn upload_queue_capacity_snapshot_classifies_active_sessions() {
     let root = unique_test_dir("ed2k-upload-queue-capacity-composition");
     let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
     runtime
-        .apply_upload_queue_policy(&Ed2kUploadQueuePolicyConfig {
+        .apply_upload_queue_policy(&Ed2kUploadQueueRuntimeConfig {
             active_slots: 2,
             elastic_percent: 0,
             upload_limit_bytes_per_sec: 0,
