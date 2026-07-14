@@ -272,10 +272,7 @@ pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Va
         "connected": status.ed2k.connected,
         "connecting": connecting,
         "currentServer": current_server,
-        "lowId": status
-            .ed2k
-            .connected
-            .then(|| status.ed2k.firewalled.unwrap_or(false)),
+        "ed2kIdState": ed2k_id_state(status.ed2k.connected, status.ed2k.firewalled),
         "serverCount": servers.len()
     })
 }
@@ -292,6 +289,14 @@ fn firewall_state(firewalled: Option<bool>) -> &'static str {
     match firewalled {
         Some(true) => "firewalled",
         Some(false) => "open",
+        None => "unknown",
+    }
+}
+
+fn ed2k_id_state(connected: bool, firewalled: Option<bool>) -> &'static str {
+    match connected.then_some(firewalled).flatten() {
+        Some(true) => "low",
+        Some(false) => "high",
         None => "unknown",
     }
 }
@@ -661,16 +666,16 @@ mod tests {
         let mut status = core.status().await;
 
         let disconnected = server_status_value(&status, &[]);
-        assert!(disconnected["lowId"].is_null());
+        assert_eq!(disconnected["ed2kIdState"], "unknown");
 
         status.ed2k.connected = true;
         status.ed2k.firewalled = Some(true);
         let low_id = server_status_value(&status, &[]);
-        assert_eq!(low_id["lowId"], true);
+        assert_eq!(low_id["ed2kIdState"], "low");
 
         status.ed2k.firewalled = Some(false);
         let high_id = server_status_value(&status, &[]);
-        assert_eq!(high_id["lowId"], false);
+        assert_eq!(high_id["ed2kIdState"], "high");
     }
 
     #[tokio::test]
@@ -706,6 +711,6 @@ mod tests {
         assert_eq!(value["connecting"], true);
         assert_eq!(value["currentServer"]["connecting"], true);
         assert_eq!(value["currentServer"]["connected"], false);
-        assert!(value["lowId"].is_null());
+        assert_eq!(value["ed2kIdState"], "unknown");
     }
 }
