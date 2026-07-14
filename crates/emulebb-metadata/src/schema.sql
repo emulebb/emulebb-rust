@@ -72,23 +72,6 @@ CREATE TABLE content_objects (
     CHECK (primary_hash IS NULL OR length(primary_hash) IN (16, 20))
 );
 
--- RESERVED / UNUSED: no code path writes content_links yet. Kept in the schema
--- as the forward content-fabric link model (collections/multi-part objects); no
--- INSERT exists, so it is created empty and never grows. Do not remove without a
--- migration step.
-CREATE TABLE content_links (
-    id INTEGER PRIMARY KEY,
-    parent_object_id INTEGER NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
-    child_object_id INTEGER NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
-    link_kind TEXT NOT NULL,
-    ordinal INTEGER NOT NULL DEFAULT 0,
-    display_name TEXT NOT NULL DEFAULT '',
-    raw_metadata BLOB,
-    created_at_ms INTEGER NOT NULL,
-    deleted_at_ms INTEGER,
-    UNIQUE(parent_object_id, child_object_id, link_kind, ordinal)
-);
-
 CREATE TABLE known_files (
     id INTEGER PRIMARY KEY,
     content_object_id INTEGER NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
@@ -367,74 +350,12 @@ CREATE TABLE transfer_sources (
 CREATE UNIQUE INDEX transfer_sources_identity_idx
 ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
 
--- RESERVED / UNUSED: no code path writes peer_observations yet. Kept as the
--- forward per-peer event-log surface; created empty and never grows until a
--- writer is added. Do not remove without a migration step.
-CREATE TABLE peer_observations (
-    id INTEGER PRIMARY KEY,
-    peer_id INTEGER REFERENCES peers(id),
-    endpoint TEXT NOT NULL DEFAULT '',
-    protocol_family TEXT NOT NULL,
-    event_kind TEXT NOT NULL,
-    known_file_id INTEGER REFERENCES known_files(id) ON DELETE SET NULL,
-    raw_payload BLOB,
-    observed_at_ms INTEGER NOT NULL
-);
-
--- RESERVED / UNUSED: no code path writes peer_file_history yet. Kept as the
--- forward per-peer/per-file availability-history surface; created empty and
--- never grows until a writer is added. Do not remove without a migration step.
-CREATE TABLE peer_file_history (
-    id INTEGER PRIMARY KEY,
-    peer_id INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-    known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    availability_parts INTEGER NOT NULL DEFAULT 0,
-    queue_rank INTEGER,
-    observation_count INTEGER NOT NULL DEFAULT 0,
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL,
-    UNIQUE(peer_id, known_file_id)
-);
-
--- RESERVED / UNUSED: no code path writes kad_nodes yet (the live Kad routing
--- table is persisted elsewhere). Kept as the forward durable-contacts surface;
--- created empty and never grows until a writer is added. Do not remove without a
--- migration step.
-CREATE TABLE kad_nodes (
-    id INTEGER PRIMARY KEY,
-    node_id BLOB NOT NULL UNIQUE CHECK(length(node_id) = 16),
-    ip TEXT NOT NULL,
-    tcp_port INTEGER NOT NULL,
-    udp_port INTEGER NOT NULL,
-    kad_version INTEGER,
-    udp_key INTEGER,
-    udp_key_ip TEXT,
-    verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0, 1)),
-    routing_bucket INTEGER,
-    routing_state TEXT NOT NULL DEFAULT '',
-    fail_count INTEGER NOT NULL DEFAULT 0,
-    source_kind TEXT NOT NULL DEFAULT '',
-    first_seen_ms INTEGER NOT NULL,
-    last_seen_ms INTEGER NOT NULL
-);
-
 CREATE TABLE kad_bootstrap_nodes (
     position INTEGER PRIMARY KEY,
     endpoint TEXT NOT NULL UNIQUE,
     updated_at_ms INTEGER NOT NULL,
     CHECK(position >= 0),
     CHECK(length(trim(endpoint)) > 0)
-);
-
--- RESERVED / UNUSED: no code path writes kad_node_observations yet. Kept as the
--- forward per-Kad-node event-log surface; created empty and never grows until a
--- writer is added. Do not remove without a migration step.
-CREATE TABLE kad_node_observations (
-    id INTEGER PRIMARY KEY,
-    kad_node_id INTEGER REFERENCES kad_nodes(id),
-    event_kind TEXT NOT NULL,
-    raw_payload BLOB,
-    observed_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE kad_keyword_publishes (
@@ -484,23 +405,6 @@ CREATE TABLE kad_outbound_publish_schedule (
     UNIQUE(file_hash, publish_kind, keyword)
 );
 
--- RESERVED / UNUSED: no code path writes kad_snoop_requests yet. Kept as the
--- forward Kad snoop/harvest request-tracking surface; created empty and never
--- grows until a writer is added. Do not remove without a migration step.
-CREATE TABLE kad_snoop_requests (
-    id INTEGER PRIMARY KEY,
-    family TEXT NOT NULL,
-    target_hash BLOB CHECK(target_hash IS NULL OR length(target_hash) = 16),
-    dedup_key TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_eligible_ms INTEGER,
-    raw_request_metadata BLOB,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    UNIQUE(family, dedup_key)
-);
-
 CREATE TABLE search_sessions (
     id INTEGER PRIMARY KEY,
     public_id TEXT NOT NULL UNIQUE,
@@ -532,24 +436,10 @@ CREATE TABLE search_results (
     observed_at_ms INTEGER NOT NULL
 );
 
--- RESERVED / UNUSED: no code path writes search_observations yet (search results
--- land in search_results). Kept as the forward raw-search-payload audit surface;
--- created empty and never grows until a writer is added. Do not remove without a
--- migration step.
-CREATE TABLE search_observations (
-    id INTEGER PRIMARY KEY,
-    session_id INTEGER REFERENCES search_sessions(id) ON DELETE CASCADE,
-    source_method TEXT NOT NULL,
-    raw_payload BLOB NOT NULL,
-    observed_at_ms INTEGER NOT NULL
-);
-
 CREATE INDEX known_files_hash_idx ON known_files(ed2k_hash);
 CREATE INDEX file_names_normalized_idx ON file_names(normalized_name);
 CREATE INDEX shared_file_memberships_file_idx ON shared_file_memberships(known_file_id);
 CREATE INDEX transfer_sources_transfer_idx ON transfer_sources(transfer_id);
-CREATE INDEX peer_observations_peer_time_idx ON peer_observations(peer_id, observed_at_ms);
-CREATE INDEX kad_nodes_last_seen_idx ON kad_nodes(last_seen_ms);
 CREATE INDEX kad_keyword_target_idx ON kad_keyword_publishes(target_node_id, observed_at_ms);
 CREATE INDEX kad_source_file_idx ON kad_source_publishes(file_hash, observed_at_ms);
 CREATE INDEX kad_note_file_idx ON kad_note_publishes(file_hash, observed_at_ms);

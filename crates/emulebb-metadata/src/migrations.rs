@@ -51,6 +51,7 @@
 //!   with `settings(section, key, value_json)` scalar rows and
 //!   `kad_bootstrap_nodes(position, endpoint)`. Dev-phase legacy setting values
 //!   are deliberately not migrated; the old table is dropped.
+//! - v15 -> v16: drop unused reserved tables that had no readers or writers.
 //!
 //! Every column-adding step is expressed through [`add_column_if_missing`],
 //! which checks `PRAGMA table_info` first, so the whole ladder is idempotent:
@@ -281,6 +282,22 @@ fn apply_step(tx: &Transaction<'_>, target: i64) -> Result<()> {
                 );
 
                 DROP TABLE IF EXISTS preferences;
+                "#,
+            )?;
+            Ok(())
+        }
+        // v15 -> v16: no forward-reserved empty tables. Add real tables when
+        // there is real owning code for them.
+        16 => {
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS content_links;
+                DROP TABLE IF EXISTS peer_observations;
+                DROP TABLE IF EXISTS peer_file_history;
+                DROP TABLE IF EXISTS kad_node_observations;
+                DROP TABLE IF EXISTS kad_nodes;
+                DROP TABLE IF EXISTS kad_snoop_requests;
+                DROP TABLE IF EXISTS search_observations;
                 "#,
             )?;
             Ok(())
@@ -516,6 +533,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outbound_rows, 0);
+        for table in [
+            "content_links",
+            "peer_observations",
+            "peer_file_history",
+            "kad_nodes",
+            "kad_node_observations",
+            "kad_snoop_requests",
+            "search_observations",
+        ] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 0, "{table} must not exist after migration");
+        }
     }
 
     #[test]
