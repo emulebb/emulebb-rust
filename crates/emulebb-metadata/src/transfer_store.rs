@@ -2,7 +2,8 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    store::{bool_to_i64, decode_fixed_hex, unix_ms},
+    store::{bool_to_i64, current_platform, decode_fixed_hex, unix_ms, upsert_local_path},
+    text::normalize_path_key,
     transfer_model::{
         MetadataDeliveredReuseEntry, MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure,
         MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
@@ -18,6 +19,9 @@ impl super::MetadataStore {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
+        let delivered_path_id =
+            optional_local_path_id(&tx, manifest.delivered_path.as_deref(), now)?;
+        let source_path_id = optional_local_path_id(&tx, manifest.source_path.as_deref(), now)?;
 
         tx.prepare_cached(
             r#"
@@ -73,7 +77,7 @@ impl super::MetadataStore {
             r#"
             INSERT INTO transfers(
                 known_file_id, visible_state, control_state, priority,
-                category_id, payload_directory, delivered_path, source_path,
+                category_id, payload_directory, delivered_path_id, source_path_id,
                 source_mtime_ms, created_at_ms, updated_at_ms,
                 completed_at_ms, removed_at_ms
             )
@@ -83,8 +87,8 @@ impl super::MetadataStore {
                 control_state = excluded.control_state,
                 category_id = excluded.category_id,
                 payload_directory = excluded.payload_directory,
-                delivered_path = excluded.delivered_path,
-                source_path = excluded.source_path,
+                delivered_path_id = excluded.delivered_path_id,
+                source_path_id = excluded.source_path_id,
                 source_mtime_ms = excluded.source_mtime_ms,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms,
@@ -97,7 +101,7 @@ impl super::MetadataStore {
             manifest.control_state,
             (manifest.category_id != 0).then_some(i64::from(manifest.category_id)),
             manifest.file_hash,
-            manifest.delivered_path,
+            delivered_path_id,
             now,
             if manifest.completed { Some(now) } else { None },
             if manifest.transfer_row_removed {
@@ -105,21 +109,21 @@ impl super::MetadataStore {
             } else {
                 None
             },
-            manifest.source_path,
+            source_path_id,
             manifest.source_mtime_ms,
         ])?;
         let transfer_id: i64 = tx
             .prepare_cached("SELECT id FROM transfers WHERE known_file_id = ?1")?
             .query_row(params![known_file_id], |row| row.get(0))?;
-        if let Some(source_path) = manifest.source_path.as_ref() {
+        if let Some(source_path_id) = source_path_id {
             tx.prepare_cached(
                 r#"
-                INSERT INTO share_in_place_sources(
-                    known_file_id, source_path, file_size, source_mtime_ms,
+                INSERT INTO shared_file_sources(
+                    known_file_id, path_id, file_size, source_mtime_ms,
                     created_at_ms, updated_at_ms
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                ON CONFLICT(source_path) DO UPDATE SET
+                ON CONFLICT(path_id) DO UPDATE SET
                     known_file_id = excluded.known_file_id,
                     file_size = excluded.file_size,
                     source_mtime_ms = excluded.source_mtime_ms,
@@ -128,13 +132,13 @@ impl super::MetadataStore {
             )?
             .execute(params![
                 known_file_id,
-                source_path,
+                source_path_id,
                 manifest.file_size as i64,
                 manifest.source_mtime_ms,
                 now,
             ])?;
-            tx.prepare_cached("DELETE FROM shared_source_failures WHERE source_path = ?1")?
-                .execute(params![source_path])?;
+            tx.prepare_cached("DELETE FROM shared_file_scan_failures WHERE path_id = ?1")?
+                .execute(params![source_path_id])?;
         }
 
         replace_transfer_children(&tx, known_file_id, transfer_id, manifest, now)?;
@@ -163,10 +167,12 @@ impl super::MetadataStore {
                        known_files.upload_priority, known_files.auto_upload_priority,
                        known_files.comment, known_files.rating,
                        transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                       transfers.delivered_path, transfers.source_path,
+                       delivered_paths.display_path, source_paths.display_path,
                        transfers.source_mtime_ms
                 FROM known_files
                 JOIN transfers ON transfers.known_file_id = known_files.id
+                LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
+                LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
                 WHERE known_files.ed2k_hash = ?1
                 "#,
             )?
@@ -374,10 +380,12 @@ impl super::MetadataStore {
                    known_files.upload_priority, known_files.auto_upload_priority,
                    known_files.comment, known_files.rating,
                    transfers.category_id, transfers.control_state, transfers.removed_at_ms,
-                   transfers.delivered_path, transfers.source_path,
+                   delivered_paths.display_path, source_paths.display_path,
                    transfers.source_mtime_ms
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             {where_clause}
             ORDER BY known_files.ed2k_hash
             "#
@@ -460,13 +468,14 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT lower(hex(known_files.ed2k_hash)), share_in_place_sources.file_size,
-                   share_in_place_sources.source_path,
-                   share_in_place_sources.source_mtime_ms
-            FROM share_in_place_sources
-            JOIN known_files ON known_files.id = share_in_place_sources.known_file_id
+            SELECT lower(hex(known_files.ed2k_hash)), shared_file_sources.file_size,
+                   local_paths.display_path,
+                   shared_file_sources.source_mtime_ms
+            FROM shared_file_sources
+            JOIN known_files ON known_files.id = shared_file_sources.known_file_id
+            JOIN local_paths ON local_paths.id = shared_file_sources.path_id
             WHERE known_files.completed != 0
-            ORDER BY share_in_place_sources.source_path
+            ORDER BY local_paths.display_path
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -482,25 +491,26 @@ impl super::MetadataStore {
 
     /// Completed downloads whose delivered file can be reused (not re-hashed) if
     /// a shared-directory rescan re-finds it in a configured shared dir. A real
-    /// download has NO `share_in_place_sources` row, so without this it looks
+    /// download has NO `shared_file_sources` row, so without this it looks
     /// brand-new on reload and its whole payload is needlessly re-hashed to
     /// convert it to a share. Only rows that recorded the delivered file's mtime
     /// baseline (`source_mtime_ms`, captured at delivery for a delivered
-    /// download -- `source_path IS NULL` distinguishes it from a share-in-place
+    /// download -- `source_path_id IS NULL` distinguishes it from a share-in-place
     /// source) are returned, so an unchanged delivered file is a reload cache hit.
     pub fn completed_delivered_reuse_entries(&self) -> Result<Vec<MetadataDeliveredReuseEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.size_bytes,
-                   transfers.delivered_path, transfers.source_mtime_ms
+                   delivered_paths.display_path, transfers.source_mtime_ms
             FROM transfers
             JOIN known_files ON known_files.id = transfers.known_file_id
+            JOIN local_paths delivered_paths ON delivered_paths.id = transfers.delivered_path_id
             WHERE known_files.completed != 0
-              AND transfers.delivered_path IS NOT NULL
-              AND transfers.source_path IS NULL
+              AND transfers.delivered_path_id IS NOT NULL
+              AND transfers.source_path_id IS NULL
               AND transfers.source_mtime_ms IS NOT NULL
-            ORDER BY transfers.delivered_path
+            ORDER BY delivered_paths.display_path
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -518,10 +528,12 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT source_path, file_size, source_mtime_ms, reason,
-                   created_at_ms, updated_at_ms
-            FROM shared_source_failures
-            ORDER BY source_path
+            SELECT local_paths.display_path, shared_file_scan_failures.file_size,
+                   shared_file_scan_failures.source_mtime_ms, shared_file_scan_failures.reason,
+                   shared_file_scan_failures.created_at_ms, shared_file_scan_failures.updated_at_ms
+            FROM shared_file_scan_failures
+            JOIN local_paths ON local_paths.id = shared_file_scan_failures.path_id
+            ORDER BY local_paths.display_path
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -545,28 +557,36 @@ impl super::MetadataStore {
         reason: &str,
     ) -> Result<()> {
         let now = unix_ms();
-        self.connection()?.execute(
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let path_id = upsert_local_path(&tx, source_path, now)?;
+        tx.execute(
             r#"
-            INSERT INTO shared_source_failures(
-                source_path, file_size, source_mtime_ms, reason,
+            INSERT INTO shared_file_scan_failures(
+                path_id, file_size, source_mtime_ms, reason,
                 created_at_ms, updated_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-            ON CONFLICT(source_path) DO UPDATE SET
+            ON CONFLICT(path_id) DO UPDATE SET
                 file_size = excluded.file_size,
                 source_mtime_ms = excluded.source_mtime_ms,
                 reason = excluded.reason,
                 updated_at_ms = excluded.updated_at_ms
             "#,
-            params![source_path, file_size as i64, source_mtime_ms, reason, now],
+            params![path_id, file_size as i64, source_mtime_ms, reason, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn clear_shared_source_failure(&self, source_path: &str) -> Result<bool> {
-        let deleted = self.connection()?.execute(
-            "DELETE FROM shared_source_failures WHERE source_path = ?1",
-            params![source_path],
+        let conn = self.connection()?;
+        let Some(path_id) = local_path_id(&conn, source_path)? else {
+            return Ok(false);
+        };
+        let deleted = conn.execute(
+            "DELETE FROM shared_file_scan_failures WHERE path_id = ?1",
+            params![path_id],
         )?;
         Ok(deleted != 0)
     }
@@ -705,11 +725,12 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(transfers.source_path, (
-                       SELECT share_in_place_sources.source_path
-                       FROM share_in_place_sources
-                       WHERE share_in_place_sources.known_file_id = known_files.id
-                       ORDER BY share_in_place_sources.source_path
+                   COALESCE(source_paths.display_path, (
+                       SELECT local_paths.display_path
+                       FROM shared_file_sources
+                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                       WHERE shared_file_sources.known_file_id = known_files.id
+                       ORDER BY local_paths.display_path
                        LIMIT 1
                    )),
                    CASE
@@ -723,6 +744,7 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             WHERE known_files.completed != 0
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -775,11 +797,12 @@ impl super::MetadataStore {
             r#"
             SELECT lower(hex(known_files.ed2k_hash)), known_files.canonical_name,
                    known_files.size_bytes, coalesce(known_files.part_count, 0),
-                   COALESCE(transfers.source_path, (
-                       SELECT share_in_place_sources.source_path
-                       FROM share_in_place_sources
-                       WHERE share_in_place_sources.known_file_id = known_files.id
-                       ORDER BY share_in_place_sources.source_path
+                   COALESCE(source_paths.display_path, (
+                       SELECT local_paths.display_path
+                       FROM shared_file_sources
+                       JOIN local_paths ON local_paths.id = shared_file_sources.path_id
+                       WHERE shared_file_sources.known_file_id = known_files.id
+                       ORDER BY local_paths.display_path
                        LIMIT 1
                    )),
                    CASE
@@ -793,6 +816,7 @@ impl super::MetadataStore {
                    known_files.comment, known_files.rating
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
+            LEFT JOIN local_paths source_paths ON source_paths.id = transfers.source_path_id
             WHERE known_files.completed != 0
               AND NOT EXISTS (
                   SELECT 1 FROM unshared_files
@@ -831,8 +855,8 @@ impl super::MetadataStore {
             FROM known_files
             JOIN transfers ON transfers.known_file_id = known_files.id
             WHERE known_files.completed != 0
-              AND transfers.delivered_path IS NULL
-              AND transfers.source_path IS NULL
+              AND transfers.delivered_path_id IS NULL
+              AND transfers.source_path_id IS NULL
               AND transfers.removed_at_ms IS NULL
             ORDER BY known_files.ed2k_hash
             "#,
@@ -855,13 +879,13 @@ impl super::MetadataStore {
             .optional()?
         {
             tx.execute(
-                "DELETE FROM shared_source_failures WHERE source_path IN (
-                    SELECT source_path FROM share_in_place_sources WHERE known_file_id = ?1
+                "DELETE FROM shared_file_scan_failures WHERE path_id IN (
+                    SELECT path_id FROM shared_file_sources WHERE known_file_id = ?1
                 )",
                 params![known_file_id],
             )?;
             tx.execute(
-                "DELETE FROM share_in_place_sources WHERE known_file_id = ?1",
+                "DELETE FROM shared_file_sources WHERE known_file_id = ?1",
                 params![known_file_id],
             )?;
         }
@@ -1150,6 +1174,30 @@ fn optional_fixed_hex(
         .filter(|value| !value.trim().is_empty())
         .map(|value| decode_fixed_hex(value, byte_len, label))
         .transpose()
+}
+
+fn optional_local_path_id(
+    tx: &rusqlite::Transaction<'_>,
+    path: Option<&str>,
+    now: i64,
+) -> Result<Option<i64>> {
+    path.filter(|path| !path.trim().is_empty())
+        .map(|path| upsert_local_path(tx, path, now))
+        .transpose()
+}
+
+fn local_path_id(conn: &rusqlite::Connection, path: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        r#"
+        SELECT id
+        FROM local_paths
+        WHERE platform = ?1 AND normalized_key = ?2
+        "#,
+        params![current_platform(), normalize_path_key(path)],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn visible_state(manifest: &MetadataTransferManifest) -> &'static str {

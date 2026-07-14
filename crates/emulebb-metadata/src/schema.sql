@@ -206,17 +206,12 @@ CREATE TABLE transfers (
     priority TEXT NOT NULL DEFAULT 'normal',
     target_path_id INTEGER REFERENCES local_paths(id),
     payload_directory TEXT NOT NULL DEFAULT '',
-    -- Absolute path the completed payload was materialized to by its canonical
-    -- name (the operator-facing delivered file under a category path or the
-    -- global incoming dir). NULL until the transfer completes and is delivered;
-    -- set once and used to make delivery idempotent across restarts.
-    delivered_path TEXT,
-    -- Original on-disk path of a shared, already-complete file that is seeded
-    -- IN PLACE (added via a shared directory, never downloaded). NON-NULL marks
-    -- the transfer as a share-in-place: its payload is read directly from this
-    -- path for upload serving, it is NEVER copied into the internal piece store,
-    -- and it is NEVER delivered to the incoming dir. NULL for a real download.
-    source_path TEXT,
+    -- Absolute path identity for the completed payload materialized under a
+    -- category path or the global incoming dir. NULL until delivery completes.
+    delivered_path_id INTEGER REFERENCES local_paths(id),
+    -- Original path identity of a shared, already-complete file seeded in
+    -- place. NON-NULL marks the transfer as share-in-place; NULL is a download.
+    source_path_id INTEGER REFERENCES local_paths(id),
     -- Last-modified time (Unix milliseconds) of the share-in-place source file
     -- captured at ingest. Compared against the on-disk mtime on every reload so
     -- an unchanged shared file (same source_path + size_bytes + mtime) is reused
@@ -231,26 +226,26 @@ CREATE TABLE transfers (
     UNIQUE(known_file_id)
 );
 
-CREATE TABLE share_in_place_sources (
+CREATE TABLE shared_file_sources (
     id INTEGER PRIMARY KEY,
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
-    source_path TEXT NOT NULL,
+    path_id INTEGER NOT NULL REFERENCES local_paths(id),
     file_size INTEGER NOT NULL,
     source_mtime_ms INTEGER,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    UNIQUE(source_path)
+    UNIQUE(path_id)
 );
 
-CREATE TABLE shared_source_failures (
+CREATE TABLE shared_file_scan_failures (
     id INTEGER PRIMARY KEY,
-    source_path TEXT NOT NULL,
+    path_id INTEGER NOT NULL REFERENCES local_paths(id),
     file_size INTEGER NOT NULL,
     source_mtime_ms INTEGER,
     reason TEXT NOT NULL DEFAULT '',
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    UNIQUE(source_path)
+    UNIQUE(path_id)
 );
 
 CREATE TABLE transfer_pieces (
