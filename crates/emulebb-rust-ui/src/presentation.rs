@@ -300,7 +300,7 @@ pub(super) fn search_result_items_for(
                 complete_sources_text: text(item.complete_sources.to_string()),
                 file_type: text(display_or(&item.file_type, &item.result_type)),
                 method: text(&item.method),
-                known_type: text(if item.complete.unwrap_or(false) {
+                known_type: text(if item.complete {
                     "complete"
                 } else {
                     display_or(&item.known_type, "unknown")

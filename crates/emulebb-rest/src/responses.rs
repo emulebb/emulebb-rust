@@ -301,6 +301,10 @@ fn ed2k_id_state(connected: bool, firewalled: Option<bool>) -> &'static str {
     }
 }
 
+fn completion_state(complete: bool) -> &'static str {
+    if complete { "complete" } else { "incomplete" }
+}
+
 pub(crate) fn search_result_response(result: &SearchResult) -> Value {
     let extension = FsPath::new(&result.name)
         .extension()
@@ -344,7 +348,7 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
             "availabilityEvidence": {
                 "sources": result.sources,
                 "completeSources": result.complete_sources,
-                "complete": result.complete,
+                "completionState": completion_state(result.complete),
                 "clientCount": 0,
                 "serverCount": 0,
                 "kadPublishers": 0
@@ -492,13 +496,14 @@ mod tests {
     use std::sync::Arc;
 
     use emulebb_core::{
-        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, ServerInfo,
+        EmulebbCore, LocalShare, NetworkBindingStatus, NetworkStatus, SearchResult, ServerInfo,
         TransferThroughputStats, VpnGuardStatus,
     };
     use emulebb_index::FileIndex;
 
     use super::{
-        kad_response, network_response, server_status_value, shared_file_response, stats_response,
+        kad_response, network_response, search_result_response, server_status_value,
+        shared_file_response, stats_response,
     };
 
     #[test]
@@ -530,6 +535,43 @@ mod tests {
         assert_eq!(response.all_time_transferred, 4096);
         assert_eq!(response.path, "shared/Synthetic.Shared.bin");
         assert_eq!(response.directory, "shared");
+    }
+
+    #[test]
+    fn search_result_response_reports_explicit_completion_state() {
+        let mut result = SearchResult {
+            search_id: "search-1".to_string(),
+            method: "server".to_string(),
+            r#type: "doc".to_string(),
+            hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "sample.bin".to_string(),
+            size_bytes: 1024,
+            sources: 2,
+            complete_sources: 1,
+            file_type: "doc".to_string(),
+            complete: true,
+            known_type: "unknown".to_string(),
+            directory: String::new(),
+        };
+
+        let complete = search_result_response(&result);
+        assert_eq!(complete["complete"], true);
+        assert_eq!(
+            complete["evidence"]["availabilityEvidence"]["completionState"],
+            "complete"
+        );
+        assert!(
+            complete["evidence"]["availabilityEvidence"]
+                .get("complete")
+                .is_none()
+        );
+
+        result.complete = false;
+        let incomplete = search_result_response(&result);
+        assert_eq!(
+            incomplete["evidence"]["availabilityEvidence"]["completionState"],
+            "incomplete"
+        );
     }
 
     #[test]

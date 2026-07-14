@@ -212,7 +212,7 @@ pub(super) struct SearchResultDto {
     pub(super) sources: u64,
     pub(super) complete_sources: u64,
     pub(super) file_type: String,
-    pub(super) complete: Option<bool>,
+    pub(super) complete: bool,
     pub(super) known_type: String,
     pub(super) directory: Option<String>,
 }
@@ -360,5 +360,38 @@ mod tests {
             FirewallState::Unknown
         );
         assert_eq!(envelope.data.kad.firewall_state, FirewallState::Unknown);
+    }
+
+    #[test]
+    fn search_result_requires_concrete_complete_flag() {
+        let raw = r#"{
+            "data": {
+                "id": "search-1",
+                "query": "sample",
+                "method": "server",
+                "type": "doc",
+                "status": "complete",
+                "createdAt": "2026-07-14T00:00:00Z",
+                "updatedAt": "2026-07-14T00:00:00Z",
+                "items": [{
+                    "searchId": "search-1",
+                    "method": "server",
+                    "type": "doc",
+                    "hash": "00112233445566778899aabbccddeeff",
+                    "name": "sample.bin",
+                    "sizeBytes": 1024,
+                    "sources": 2,
+                    "completeSources": 1,
+                    "fileType": "doc",
+                    "complete": true,
+                    "knownType": "unknown",
+                    "directory": null
+                }]
+            }
+        }"#;
+
+        let envelope: Envelope<SearchDto> = serde_json::from_str(raw).unwrap();
+
+        assert!(envelope.data.items[0].complete);
     }
 }
