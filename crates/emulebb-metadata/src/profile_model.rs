@@ -4,7 +4,7 @@ pub struct MetadataCategory {
     pub name: String,
     pub path: Option<String>,
     pub comment: String,
-    pub priority: u32,
+    pub sort_order: u32,
     pub color: Option<u32>,
 }
 
@@ -24,7 +24,7 @@ pub struct MetadataServer {
     pub port: u16,
     pub name: String,
     pub description: String,
-    pub priority: String,
+    pub server_priority: String,
     pub static_server: bool,
     pub enabled: bool,
     pub failed_count: u32,

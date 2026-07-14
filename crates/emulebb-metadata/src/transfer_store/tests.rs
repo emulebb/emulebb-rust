@@ -10,7 +10,7 @@ fn transfer_manifest_roundtrips_sql_tables() {
             name: "Samples".to_string(),
             path: None,
             comment: String::new(),
-            priority: 1,
+            sort_order: 1,
             color: None,
         })
         .unwrap();

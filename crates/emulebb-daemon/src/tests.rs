@@ -12,7 +12,7 @@ fn persist_test_server(config: &DaemonConfig) {
             port: 4661,
             name: "test server".to_string(),
             description: String::new(),
-            priority: "normal".to_string(),
+            server_priority: "normal".to_string(),
             static_server: false,
             enabled: true,
             failed_count: 0,

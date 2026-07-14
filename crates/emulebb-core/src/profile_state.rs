@@ -114,7 +114,7 @@ pub(crate) fn persist_category(metadata: &MetadataStore, category: &Category) ->
         name: category.name.clone(),
         path: category.path.clone(),
         comment: category.comment.clone(),
-        priority: category.priority,
+        sort_order: category.priority,
         color: category.color,
     })
 }
@@ -145,7 +145,7 @@ pub(crate) fn persist_server(
         port: server.port,
         name: server.name.clone(),
         description: server.description.clone(),
-        priority: server.priority.clone(),
+        server_priority: server.priority.clone(),
         static_server: server.static_server,
         enabled,
         failed_count: server.failed_count,
@@ -166,7 +166,7 @@ fn category_from_metadata(category: MetadataCategory) -> Category {
         name: category.name,
         path: category.path,
         comment: category.comment,
-        priority: category.priority,
+        priority: category.sort_order,
         color: category.color,
     }
 }
@@ -190,7 +190,7 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         port: server.port,
         endpoint,
         name: server.name,
-        priority: server.priority,
+        priority: server.server_priority,
         static_server: server.static_server,
         enabled: server.enabled,
         connected: false,
