@@ -27,13 +27,14 @@ Everything below is this repo's local deltas only:
   OpenAPI cleanup. During this development phase, evolve the implementation,
   OpenAPI artifact, first-party Rust UI, and tests together; reserve version
   bumps for deliberate freeze/release boundaries.
-- Until an explicit Rust database-freeze or release-candidate decision, Rust
-  metadata/schema cleanup assumes a fresh profile state. Do not add compatibility
-  shims, legacy aliases, old-name remapping, Rust schema migrations, or version
-  bumps for development-phase schema cleanup. When a local persisted development
-  profile must be preserved, use an explicit one-off SQLite/Python update against
-  that operator-local DB (for example a soak `metadata.sqlite`) instead of
-  encoding the compatibility path in product code.
+- Until an explicit Rust freeze or release-candidate decision, Rust development
+  cleanup assumes clean state for code, settings, metadata/schema, REST, and UI
+  surfaces. Do not add compatibility shims, legacy aliases, old-name remapping,
+  compatibility readers, Rust schema migrations, or version bumps for
+  development-phase cleanup. When a local persisted development profile must be
+  preserved, use an explicit one-off SQLite/Python update against that
+  operator-local DB (for example a soak `metadata.sqlite`) instead of encoding
+  the compatibility path in product code.
 - Follow the responsibility-based source-structure and test-placement policy in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
   Source length is advisory; split by responsibility, keep substantial tests
