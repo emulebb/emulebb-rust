@@ -91,11 +91,10 @@ CREATE TABLE file_names (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
-    source_kind TEXT NOT NULL CHECK(source_kind IN ('index')),
     seen_count INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1),
     first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
     last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
-    UNIQUE(known_file_id, normalized_name, source_kind)
+    UNIQUE(known_file_id, normalized_name)
 );
 
 CREATE VIRTUAL TABLE file_name_fts USING fts5(
@@ -144,7 +143,6 @@ CREATE TABLE verified_ranges (
     known_file_id INTEGER NOT NULL REFERENCES known_files(id) ON DELETE CASCADE,
     start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
     end_offset INTEGER NOT NULL,
-    source_kind TEXT NOT NULL CHECK(source_kind IN ('ed2k_transfer')),
     created_at_ms INTEGER NOT NULL,
     CHECK(end_offset >= start_offset)
 );

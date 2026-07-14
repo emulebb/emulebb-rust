@@ -245,9 +245,9 @@ impl MetadataStore {
 
         tx.execute(
             r#"
-            INSERT INTO file_names(known_file_id, name, normalized_name, source_kind, seen_count, first_seen_ms, last_seen_ms)
-            VALUES (?1, ?2, ?3, 'index', 1, ?4, ?4)
-            ON CONFLICT(known_file_id, normalized_name, source_kind) DO UPDATE SET
+            INSERT INTO file_names(known_file_id, name, normalized_name, seen_count, first_seen_ms, last_seen_ms)
+            VALUES (?1, ?2, ?3, 1, ?4, ?4)
+            ON CONFLICT(known_file_id, normalized_name) DO UPDATE SET
                 name = excluded.name,
                 seen_count = file_names.seen_count + 1,
                 last_seen_ms = excluded.last_seen_ms

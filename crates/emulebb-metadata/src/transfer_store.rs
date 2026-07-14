@@ -988,8 +988,8 @@ fn replace_transfer_children(
     drop(insert_aich);
     let mut insert_range = tx.prepare_cached(
         r#"
-        INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, source_kind, created_at_ms)
-        VALUES (?1, ?2, ?3, 'ed2k_transfer', ?4)
+        INSERT INTO verified_ranges(known_file_id, start_offset, end_offset, created_at_ms)
+        VALUES (?1, ?2, ?3, ?4)
         "#,
     )?;
     for range in &manifest.verified_ranges {
