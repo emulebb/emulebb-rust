@@ -102,12 +102,12 @@ impl super::MetadataStore {
         Ok(())
     }
 
-    pub fn load_kad_bootstrap_nodes(&self) -> Result<Vec<String>> {
+    pub fn load_kad_bootstrap_endpoints(&self) -> Result<Vec<String>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
             SELECT endpoint
-            FROM kad_bootstrap_nodes
+            FROM kad_bootstrap_endpoints
             ORDER BY position
             "#,
         )?;
@@ -116,11 +116,11 @@ impl super::MetadataStore {
             .map_err(Into::into)
     }
 
-    pub fn replace_kad_bootstrap_nodes(&self, endpoints: &[String]) -> Result<()> {
+    pub fn replace_kad_bootstrap_endpoints(&self, endpoints: &[String]) -> Result<()> {
         let now = unix_ms();
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM kad_bootstrap_nodes", [])?;
+        tx.execute("DELETE FROM kad_bootstrap_endpoints", [])?;
         for (position, endpoint) in endpoints.iter().enumerate() {
             ensure!(
                 !endpoint.trim().is_empty(),
@@ -128,7 +128,7 @@ impl super::MetadataStore {
             );
             tx.execute(
                 r#"
-                INSERT INTO kad_bootstrap_nodes(position, endpoint, updated_at_ms)
+                INSERT INTO kad_bootstrap_endpoints(position, endpoint, updated_at_ms)
                 VALUES (?1, ?2, ?3)
                 "#,
                 params![position as i64, endpoint, now],
@@ -446,13 +446,13 @@ mod tests {
             ]
         );
         store
-            .replace_kad_bootstrap_nodes(&[
+            .replace_kad_bootstrap_endpoints(&[
                 "192.0.2.10:4672".to_string(),
                 "192.0.2.11:4672".to_string(),
             ])
             .unwrap();
         assert_eq!(
-            store.load_kad_bootstrap_nodes().unwrap(),
+            store.load_kad_bootstrap_endpoints().unwrap(),
             vec!["192.0.2.10:4672".to_string(), "192.0.2.11:4672".to_string()]
         );
 

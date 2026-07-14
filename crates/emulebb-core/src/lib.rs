@@ -4732,20 +4732,20 @@ fn accumulate_publish_stats(total: &mut PublishAttemptStats, stats: PublishAttem
     total.load_responses += stats.load_responses;
 }
 
-fn configured_kad_bootstrap_nodes_text(nodes: &[String]) -> Option<String> {
-    let valid_nodes = nodes
+fn configured_kad_bootstrap_endpoints_text(endpoints: &[String]) -> Option<String> {
+    let valid_endpoints = endpoints
         .iter()
-        .filter_map(|node| match node.trim().parse::<SocketAddr>() {
+        .filter_map(|endpoint| match endpoint.trim().parse::<SocketAddr>() {
             Ok(addr) if matches!(addr.ip(), IpAddr::V4(_)) && addr.port() != 0 => {
                 Some(addr.to_string())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    if valid_nodes.is_empty() {
+    if valid_endpoints.is_empty() {
         None
     } else {
-        Some(valid_nodes.join("\n"))
+        Some(valid_endpoints.join("\n"))
     }
 }
 

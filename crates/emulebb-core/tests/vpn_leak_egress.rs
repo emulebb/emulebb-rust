@@ -175,7 +175,7 @@ fn tunnel_network_config(
         ),
         kad_local_store: KadLocalStoreConfig::default(),
         kad_snoop_queue: SnoopQueueConfig::default(),
-        kad_bootstrap_nodes: Vec::new(),
+        kad_bootstrap_endpoints: Vec::new(),
         kad_bootstrap_min_routing_contacts: 10,
         kad_publish_shared_files: false,
         kad_republish_interval_secs: 1_800,

@@ -350,7 +350,7 @@ CREATE TABLE transfer_sources (
 CREATE UNIQUE INDEX transfer_sources_identity_idx
 ON transfer_sources(transfer_id, ip, tcp_port, coalesce(udp_port, 0));
 
-CREATE TABLE kad_bootstrap_nodes (
+CREATE TABLE kad_bootstrap_endpoints (
     position INTEGER PRIMARY KEY,
     endpoint TEXT NOT NULL UNIQUE,
     updated_at_ms INTEGER NOT NULL,

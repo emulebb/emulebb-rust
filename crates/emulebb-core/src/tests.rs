@@ -119,7 +119,7 @@ fn test_network_config_with_store(
         ),
         kad_local_store,
         kad_snoop_queue,
-        kad_bootstrap_nodes: Vec::new(),
+        kad_bootstrap_endpoints: Vec::new(),
         kad_bootstrap_min_routing_contacts: 10,
         kad_publish_shared_files: true,
         kad_republish_interval_secs: 1_800,
@@ -321,8 +321,8 @@ fn kad_snoop_entry_builders_preserve_passive_search_shapes() {
 }
 
 #[test]
-fn configured_kad_bootstrap_nodes_text_keeps_only_valid_ipv4_nodes() {
-    let nodes = vec![
+fn configured_kad_bootstrap_endpoints_text_keeps_only_valid_ipv4_endpoints() {
+    let endpoints = vec![
         "192.0.2.20:4665".to_string(),
         " ".to_string(),
         "[2001:db8::1]:4665".to_string(),
@@ -331,11 +331,11 @@ fn configured_kad_bootstrap_nodes_text_keeps_only_valid_ipv4_nodes() {
     ];
 
     assert_eq!(
-        configured_kad_bootstrap_nodes_text(&nodes).as_deref(),
+        configured_kad_bootstrap_endpoints_text(&endpoints).as_deref(),
         Some("192.0.2.20:4665\n192.0.2.21:4666")
     );
     assert_eq!(
-        configured_kad_bootstrap_nodes_text(&["bad".to_string()]),
+        configured_kad_bootstrap_endpoints_text(&["bad".to_string()]),
         None
     );
 }

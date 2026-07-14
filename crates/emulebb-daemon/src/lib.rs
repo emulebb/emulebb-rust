@@ -45,7 +45,7 @@ pub struct DaemonConfig {
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
     pub kad: KadSettings,
-    pub kad_bootstrap_nodes: Vec<String>,
+    pub kad_bootstrap_endpoints: Vec<String>,
     pub ed2k: Ed2kRuntimeConfig,
     pub nat: NatConfig,
     pub rest: RestListenerConfig,
@@ -77,7 +77,7 @@ impl Default for DaemonConfig {
             p2p_bind_interface: runtime.p2p_bind_interface,
             ed2k_user_hash: runtime.ed2k_user_hash,
             kad: KadSettings::default(),
-            kad_bootstrap_nodes: Vec::new(),
+            kad_bootstrap_endpoints: Vec::new(),
             ed2k: Ed2kRuntimeConfig::default(),
             nat: NatConfig::default(),
             rest: RestListenerConfig::default(),
@@ -130,7 +130,7 @@ impl DaemonConfig {
             p2p_bind_interface: runtime.daemon.p2p_bind_interface,
             ed2k_user_hash: runtime.daemon.ed2k_user_hash,
             kad: runtime.kad,
-            kad_bootstrap_nodes: runtime.kad_bootstrap_nodes,
+            kad_bootstrap_endpoints: runtime.kad_bootstrap_endpoints,
             ed2k: runtime.ed2k,
             nat: runtime.nat,
             rest: bootstrap.rest,
@@ -198,7 +198,7 @@ impl DaemonConfig {
             secure_ident,
             kad_local_store: kad_local_store_config(&self.kad),
             kad_snoop_queue: kad_snoop_queue_config(&self.kad),
-            kad_bootstrap_nodes: self.kad_bootstrap_nodes.clone(),
+            kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
             kad_republish_interval_secs: self.kad.republish_interval_secs.max(1),
@@ -231,7 +231,7 @@ impl DaemonConfig {
     }
 
     fn has_network_bootstrap(&self, metadata: &MetadataStore) -> Result<bool> {
-        if !self.kad_bootstrap_nodes.is_empty() {
+        if !self.kad_bootstrap_endpoints.is_empty() {
             return Ok(true);
         }
         Ok(metadata
@@ -295,7 +295,7 @@ impl DaemonConfig {
 struct LoadedRuntimeSettings {
     daemon: DaemonRuntimeSettings,
     kad: KadSettings,
-    kad_bootstrap_nodes: Vec<String>,
+    kad_bootstrap_endpoints: Vec<String>,
     ed2k: Ed2kRuntimeConfig,
     nat: NatConfig,
     vpn_guard: VpnGuardSettings,
@@ -307,9 +307,9 @@ fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettin
         .context("failed to load daemon.runtime settings")?;
     let kad =
         load_section_settings(metadata, SECTION_KAD).context("failed to load kad settings")?;
-    let kad_bootstrap_nodes = metadata
-        .load_kad_bootstrap_nodes()
-        .context("failed to load Kad bootstrap nodes")?;
+    let kad_bootstrap_endpoints = metadata
+        .load_kad_bootstrap_endpoints()
+        .context("failed to load Kad bootstrap endpoints")?;
     let ed2k_settings: Ed2kSettings =
         load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
     let nat_settings: NatSettings =
@@ -317,7 +317,7 @@ fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettin
     Ok(LoadedRuntimeSettings {
         daemon,
         kad,
-        kad_bootstrap_nodes,
+        kad_bootstrap_endpoints,
         ed2k: ed2k_runtime_config_from_settings(ed2k_settings),
         nat: nat_config_from_settings(nat_settings),
         vpn_guard: load_section_settings(metadata, SECTION_VPN_GUARD)

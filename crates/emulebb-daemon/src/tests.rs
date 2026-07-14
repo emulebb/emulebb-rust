@@ -160,7 +160,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
         serde_json::json!(41002),
     );
     metadata
-        .replace_kad_bootstrap_nodes(&["192.0.2.30:41002".to_string()])
+        .replace_kad_bootstrap_endpoints(&["192.0.2.30:41002".to_string()])
         .unwrap();
     put_setting(
         &metadata,
@@ -300,7 +300,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
         Some("192.0.2.10:13301".parse().unwrap())
     );
     assert_eq!(config.kad.listen_port, Some(41002));
-    assert_eq!(config.kad_bootstrap_nodes, ["192.0.2.30:41002"]);
+    assert_eq!(config.kad_bootstrap_endpoints, ["192.0.2.30:41002"]);
     assert_eq!(config.kad.bootstrap_min_routing_contacts, 3);
     assert!(config.kad.local_store_enabled);
     assert_eq!(config.kad.local_store_keyword_ttl_secs, 86_400);
@@ -734,7 +734,7 @@ fn ed2k_network_config_accepts_configured_non_loopback_bind_ip() {
     assert_eq!(network.listen_port, 41001);
     assert_eq!(network.kad_bind_addr, "192.0.2.10:41002".parse().unwrap());
     assert!(network.kad_local_store.enabled);
-    assert_eq!(network.kad_bootstrap_nodes, Vec::<String>::new());
+    assert_eq!(network.kad_bootstrap_endpoints, Vec::<String>::new());
     assert_eq!(network.kad_bootstrap_min_routing_contacts, 10);
     assert!(network.kad_publish_shared_files);
     assert_eq!(network.kad_republish_interval_secs, 1_800);
@@ -1133,13 +1133,13 @@ fn ed2k_network_config_honors_explicit_nat_bind_ip() {
 }
 
 #[test]
-fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
+fn ed2k_network_config_passes_configured_kad_bootstrap_endpoints() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config_with_server(
         temp.path().to_path_buf(),
         Some("192.0.2.10".parse().unwrap()),
     );
-    config.kad_bootstrap_nodes = vec!["192.0.2.30:41002".to_string()];
+    config.kad_bootstrap_endpoints = vec!["192.0.2.30:41002".to_string()];
     config.kad.bootstrap_min_routing_contacts = 0;
     config.kad.republish_interval_secs = 0;
     config.kad.publish_contact_fanout = 0;
@@ -1149,7 +1149,7 @@ fn ed2k_network_config_passes_configured_kad_bootstrap_nodes() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(network.kad_bootstrap_nodes, ["192.0.2.30:41002"]);
+    assert_eq!(network.kad_bootstrap_endpoints, ["192.0.2.30:41002"]);
     assert_eq!(network.kad_bootstrap_min_routing_contacts, 1);
     assert_eq!(network.kad_republish_interval_secs, 1);
     assert_eq!(network.kad_publish_contact_fanout, 1);
