@@ -4,7 +4,7 @@ pub struct MetadataSearch {
     pub query: String,
     pub normalized_query: String,
     pub method: String,
-    pub search_type: String,
+    pub file_type_filter: String,
     pub status: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,

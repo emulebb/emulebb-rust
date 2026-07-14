@@ -477,7 +477,7 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
             query: "scenario file".to_string(),
             normalized_query: "scenario file".to_string(),
             method: "automatic".to_string(),
-            search_type: String::new(),
+            file_type_filter: String::new(),
             status: "completed".to_string(),
             created_at_ms: 1,
             updated_at_ms: 2,

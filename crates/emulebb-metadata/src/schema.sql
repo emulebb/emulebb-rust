@@ -389,7 +389,7 @@ CREATE TABLE search_sessions (
     query TEXT NOT NULL,
     normalized_query TEXT NOT NULL,
     method TEXT NOT NULL CHECK(method IN ('automatic', 'server', 'global', 'kad')),
-    search_type TEXT NOT NULL DEFAULT '',
+    file_type_filter TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'error')),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),

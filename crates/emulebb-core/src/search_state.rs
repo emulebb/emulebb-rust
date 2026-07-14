@@ -57,7 +57,7 @@ fn search_to_metadata(search: &Search) -> MetadataSearch {
         query: search.query.clone(),
         normalized_query: normalized_search_query(&search.query),
         method: search.method.clone(),
-        search_type: search.r#type.clone(),
+        file_type_filter: search.r#type.clone(),
         status: search.status.clone(),
         created_at_ms: search.created_at.timestamp_millis(),
         updated_at_ms,
@@ -103,7 +103,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
         id: search.public_id.clone(),
         query: search.query,
         method: search.method,
-        r#type: search.search_type.clone(),
+        r#type: search.file_type_filter.clone(),
         status,
         status_reason,
         created_at,
@@ -112,7 +112,7 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
             .results
             .into_iter()
             .map(|result| {
-                search_result_from_metadata(&search.public_id, &search.search_type, result)
+                search_result_from_metadata(&search.public_id, &search.file_type_filter, result)
             })
             .collect(),
     })
@@ -120,13 +120,13 @@ fn search_from_metadata(search: MetadataSearch) -> Result<Search> {
 
 fn search_result_from_metadata(
     search_id: &str,
-    search_type: &str,
+    file_type_filter: &str,
     result: MetadataSearchResult,
 ) -> SearchResult {
     SearchResult {
         search_id: search_id.to_string(),
         method: result.network,
-        r#type: search_type.to_string(),
+        r#type: file_type_filter.to_string(),
         hash: result.file_hash,
         name: result.name,
         size_bytes: result.size_bytes,

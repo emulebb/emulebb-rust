@@ -15,7 +15,7 @@ impl super::MetadataStore {
         tx.execute(
             r#"
             INSERT INTO search_sessions(
-                public_id, query, normalized_query, method, search_type, status,
+                public_id, query, normalized_query, method, file_type_filter, status,
                 created_at_ms, updated_at_ms, completed_at_ms
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -23,7 +23,7 @@ impl super::MetadataStore {
                 query = excluded.query,
                 normalized_query = excluded.normalized_query,
                 method = excluded.method,
-                search_type = excluded.search_type,
+                file_type_filter = excluded.file_type_filter,
                 status = excluded.status,
                 updated_at_ms = excluded.updated_at_ms,
                 completed_at_ms = excluded.completed_at_ms
@@ -33,7 +33,7 @@ impl super::MetadataStore {
                 search.query,
                 search.normalized_query,
                 search.method,
-                search.search_type,
+                search.file_type_filter,
                 search.status,
                 search.created_at_ms,
                 search.updated_at_ms,
@@ -98,7 +98,7 @@ impl super::MetadataStore {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, public_id, query, normalized_query, method, search_type,
+            SELECT id, public_id, query, normalized_query, method, file_type_filter,
                    status, created_at_ms, updated_at_ms, completed_at_ms
             FROM search_sessions
             ORDER BY created_at_ms, id
@@ -113,7 +113,7 @@ impl super::MetadataStore {
                         query: row.get(2)?,
                         normalized_query: row.get(3)?,
                         method: row.get(4)?,
-                        search_type: row.get(5)?,
+                        file_type_filter: row.get(5)?,
                         status: row.get(6)?,
                         created_at_ms: row.get(7)?,
                         updated_at_ms: row.get(8)?,
@@ -230,7 +230,7 @@ mod tests {
             query: "zażółć".to_string(),
             normalized_query: normalized_search_query("zażółć"),
             method: "automatic".to_string(),
-            search_type: "video".to_string(),
+            file_type_filter: "video".to_string(),
             status: "completed".to_string(),
             created_at_ms: 1,
             updated_at_ms: 2,
