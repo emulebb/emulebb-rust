@@ -175,10 +175,10 @@ impl Ed2kTransferRuntime {
             }
             let hashes = std::sync::Arc::new(hashes);
             let mut cache = self.servable_shared_hash_cache.lock().unwrap();
-            if cache.generation == current_generation {
-                if let Some(cached) = cache.hashes.as_ref() {
-                    return std::sync::Arc::clone(cached);
-                }
+            if cache.generation == current_generation
+                && let Some(cached) = cache.hashes.as_ref()
+            {
+                return std::sync::Arc::clone(cached);
             }
             cache.generation = current_generation;
             cache.hashes = Some(std::sync::Arc::clone(&hashes));
