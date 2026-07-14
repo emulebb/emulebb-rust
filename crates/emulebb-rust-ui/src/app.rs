@@ -81,7 +81,7 @@ enum UiCommand {
     SettingsReload,
     SettingsApply {
         form: CoreSettingsForm,
-        settings_form: AppSettingsForm,
+        settings_form: Box<AppSettingsForm>,
     },
     SearchStart {
         query: String,
@@ -360,7 +360,7 @@ pub(crate) fn run() -> Result<()> {
         if let Some(ui) = settings_apply_ui.upgrade() {
             let _ = settings_apply_tx.send(UiCommand::SettingsApply {
                 form: core_settings_form(&ui),
-                settings_form: app_settings_form(&ui),
+                settings_form: Box::new(app_settings_form(&ui)),
             });
         }
     });
@@ -368,10 +368,10 @@ pub(crate) fn run() -> Result<()> {
     let settings_revert_ui = ui.as_weak();
     let settings_revert_cache = Arc::clone(&cache);
     ui.on_settings_revert_requested(move || {
-        if let Some(ui) = settings_revert_ui.upgrade() {
-            if !rerender_core_settings_from_cache(&ui, &settings_revert_cache) {
-                ui.set_settings_status_line("No settings snapshot is loaded".into());
-            }
+        if let Some(ui) = settings_revert_ui.upgrade()
+            && !rerender_core_settings_from_cache(&ui, &settings_revert_cache)
+        {
+            ui.set_settings_status_line("No settings snapshot is loaded".into());
         }
     });
 
