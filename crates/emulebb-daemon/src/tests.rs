@@ -5,10 +5,31 @@ fn metadata_store(config: &DaemonConfig) -> MetadataStore {
     MetadataStore::open(config.metadata_path()).unwrap()
 }
 
-fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
+fn persist_test_server(config: &DaemonConfig) {
+    metadata_store(config)
+        .upsert_server(&emulebb_metadata::MetadataServer {
+            endpoint: "192.0.2.20:4661".to_string(),
+            address: "192.0.2.20".to_string(),
+            port: 4661,
+            name: "test server".to_string(),
+            description: String::new(),
+            priority: "normal".to_string(),
+            static_server: false,
+            enabled: true,
+            failed_count: 0,
+            ping_ms: None,
+            users: 0,
+            files: 0,
+            soft_files: 0,
+            hard_files: 0,
+            version: String::new(),
+        })
+        .unwrap();
+}
+
+fn config_with_ed2k_network(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
     let ed2k = Ed2kConfig {
         listen_port: Some(41001),
-        server_endpoints: vec!["192.0.2.20:4661".to_string()],
         ..Ed2kConfig::default()
     };
     DaemonConfig {
@@ -21,6 +42,12 @@ fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> Da
         ed2k,
         ..DaemonConfig::default()
     }
+}
+
+fn config_with_server(runtime_dir: PathBuf, p2p_bind_ip: Option<Ipv4Addr>) -> DaemonConfig {
+    let config = config_with_ed2k_network(runtime_dir, p2p_bind_ip);
+    persist_test_server(&config);
+    config
 }
 
 fn config_with_rest_bind(runtime_dir: PathBuf, bind_addr: Option<SocketAddr>) -> DaemonConfig {
@@ -124,7 +151,6 @@ snoopQueueSourceStopAfterResults = 2
 
 [ed2k]
 listenPort = 41001
-serverEndpoints = ["192.0.2.20:4661"]
 connectTimeoutSecs = 1
 reconnectIntervalSecs = 60
 enableUdpReask = true
@@ -183,7 +209,7 @@ externalIpOverride = "203.0.113.10"
     assert_eq!(config.kad.snoop_queue_source_drain_cooldown_secs, 300);
     assert_eq!(config.kad.snoop_queue_source_stop_after_results, 2);
     assert_eq!(config.ed2k.listen_port, Some(41001));
-    assert_eq!(config.ed2k.server_endpoints, ["192.0.2.20:4661"]);
+    assert!(config.ed2k.server_endpoints.is_empty());
     assert_eq!(config.ed2k.connect_timeout_secs, 1);
     assert_eq!(config.ed2k.reconnect_interval_secs, 60);
     // The UDP source-reask flag is config-settable (camelCase), so enabling it
@@ -236,7 +262,32 @@ backendOrder = ["upnp_rupnp"]
 }
 
 #[test]
-fn load_parses_ed2k_server_entry_obfuscation_metadata() {
+fn load_rejects_toml_server_endpoints() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("emulebb-rust-server-list.toml");
+    fs::write(
+        &config_path,
+        r#"
+[ed2k]
+serverEndpoints = ["192.0.2.20:4661"]
+"#,
+    )
+    .unwrap();
+
+    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
+
+    assert!(
+        error.to_string().contains("invalid server config"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("SQLite profile"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn load_rejects_toml_server_entries() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("emulebb-rust-server-entry.toml");
     fs::write(
@@ -270,24 +321,12 @@ obfuscationPortUdp = 4665
     )
     .unwrap();
 
-    let config = DaemonConfig::load(Some(config_path)).unwrap();
+    let error = DaemonConfig::load(Some(config_path)).unwrap_err();
 
-    assert!(!config.ed2k.obfuscation_enabled);
-    assert!(config.ed2k.server_endpoints.is_empty());
-    assert_eq!(config.ed2k.server_entries.len(), 1);
-    let entry = &config.ed2k.server_entries[0];
-    assert_eq!(entry.host, "192.0.2.20");
-    assert_eq!(entry.port, 4661);
-    assert_eq!(entry.name.as_deref(), Some("emulebb-local-e2e"));
-    assert_eq!(
-        entry.description.as_deref(),
-        Some("local deterministic server")
+    assert!(
+        format!("{error:#}").contains("ed2k.serverEndpoints and ed2k.serverEntries"),
+        "unexpected error: {error:#}"
     );
-    assert_eq!(entry.udp_flags, 1827);
-    assert_eq!(entry.udp_key, 287454020);
-    assert_eq!(entry.udp_key_ip, 0);
-    assert_eq!(entry.obfuscation_port_tcp, 4661);
-    assert_eq!(entry.obfuscation_port_udp, 4665);
 }
 
 #[test]

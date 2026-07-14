@@ -232,6 +232,9 @@ impl DaemonConfig {
         let config: Self = toml::from_str(&text)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         config
+            .validate_no_toml_servers()
+            .with_context(|| format!("invalid server config in {}", path.display()))?;
+        config
             .nat
             .validate()
             .with_context(|| format!("invalid NAT config in {}", path.display()))?;
@@ -268,7 +271,7 @@ impl DaemonConfig {
         metadata: &MetadataStore,
         detected_interfaces: &[emulebb_ed2k::NetworkInterface],
     ) -> Result<Option<Ed2kNetworkConfig>> {
-        if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
+        if !self.has_network_bootstrap(metadata)? {
             return Ok(None);
         }
         let bind_ip = self.resolve_p2p_bind_ip_from_interfaces(detected_interfaces)?;
@@ -322,6 +325,25 @@ impl DaemonConfig {
                 .flatten(),
             ip_filter_level: self.ip_filter.level,
         }))
+    }
+
+    fn validate_no_toml_servers(&self) -> Result<()> {
+        if self.ed2k.server_entries.is_empty() && self.ed2k.server_endpoints.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "ed2k.serverEndpoints and ed2k.serverEntries are no longer accepted in daemon TOML; add/import servers into the SQLite profile instead"
+        )
+    }
+
+    fn has_network_bootstrap(&self, metadata: &MetadataStore) -> Result<bool> {
+        if !self.kad.bootstrap_nodes.is_empty() {
+            return Ok(true);
+        }
+        Ok(metadata
+            .load_servers()?
+            .into_iter()
+            .any(|server| server.enabled && server.port != 0 && !server.address.is_empty()))
     }
 
     /// Loads the configured `ipfilter.dat` into an `IpFilter`. Returns an empty

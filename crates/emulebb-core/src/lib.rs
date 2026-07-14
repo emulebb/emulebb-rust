@@ -849,7 +849,8 @@ impl EmulebbCore {
         let Some(network) = self.ed2k_network.as_ref() else {
             return Ok(Some("queued"));
         };
-        if network.config.server_entries.is_empty() && network.config.server_endpoints.is_empty() {
+        let config = self.effective_ed2k_config(&network.config, None).await?;
+        if config.server_entries.is_empty() && config.server_endpoints.is_empty() {
             return Ok(Some("queued"));
         }
         // Disk free-space floor: pause before engaging sources when the transfer

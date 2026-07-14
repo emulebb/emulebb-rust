@@ -26,4 +26,3 @@ snoopQueueSourceStopAfterResults = 2
 
 [ed2k]
 listenPort = 41001
-serverEndpoints = ["192.0.2.20:4661"]
