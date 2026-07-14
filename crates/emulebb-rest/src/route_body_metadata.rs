@@ -171,13 +171,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     const DIAGNOSTIC_DUMP: &[&str] = &["confirmDump", "fullMemory"];
     const CONFIRM_CRASH: &[&str] = &["confirmCrash"];
     const APP_SETTINGS: &[&str] = &[
-        "core",
-        "daemonRuntime",
-        "ed2k",
-        "kad",
-        "nat",
-        "vpnGuard",
-        "ipFilter",
+        "core", "daemon", "ed2k", "kad", "nat", "vpnGuard", "ipFilter",
     ];
     const CONFIRM_CLEAR_COMPLETED: &[&str] = &["confirmClearCompleted"];
     const CONFIRM_CLEAR_LOGS: &[&str] = &["confirmClearLogs"];

@@ -19,8 +19,8 @@ use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_metadata::{MetadataLocalIdentity, MetadataStore};
 use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
-    DaemonRuntimeSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
-    NatSettings, SECTION_DAEMON_RUNTIME, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
+    DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
+    NatSettings, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
     SECTION_VPN_GUARD, VpnGuardSettings,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -71,13 +71,13 @@ pub struct RestBootstrapSettings {
 
 impl Default for DaemonProfile {
     fn default() -> Self {
-        let runtime = DaemonRuntimeSettings::default();
+        let daemon = DaemonSettings::default();
         Self {
             profile_dir: PathBuf::from("runtime"),
-            incoming_dir: runtime.incoming_dir,
-            p2p_bind_ip: runtime.p2p_bind_ip,
-            p2p_bind_interface: runtime.p2p_bind_interface,
-            ed2k_user_hash: runtime.ed2k_user_hash,
+            incoming_dir: daemon.incoming_dir,
+            p2p_bind_ip: daemon.p2p_bind_ip,
+            p2p_bind_interface: daemon.p2p_bind_interface,
+            ed2k_user_hash: daemon.ed2k_user_hash,
             kad: KadSettings::default(),
             kad_bootstrap_endpoints: Vec::new(),
             ed2k: Ed2kRuntimeConfig::default(),
@@ -120,20 +120,20 @@ impl DaemonProfile {
                     profile_dir.display()
                 )
             })?;
-        let runtime = load_runtime_settings(&metadata)?;
+        let settings = load_settings(&metadata)?;
         let config = Self {
             profile_dir,
-            incoming_dir: runtime.daemon.incoming_dir,
-            p2p_bind_ip: runtime.daemon.p2p_bind_ip,
-            p2p_bind_interface: runtime.daemon.p2p_bind_interface,
-            ed2k_user_hash: runtime.daemon.ed2k_user_hash,
-            kad: runtime.kad,
-            kad_bootstrap_endpoints: runtime.kad_bootstrap_endpoints,
-            ed2k: runtime.ed2k,
-            nat: runtime.nat,
+            incoming_dir: settings.daemon.incoming_dir,
+            p2p_bind_ip: settings.daemon.p2p_bind_ip,
+            p2p_bind_interface: settings.daemon.p2p_bind_interface,
+            ed2k_user_hash: settings.daemon.ed2k_user_hash,
+            kad: settings.kad,
+            kad_bootstrap_endpoints: settings.kad_bootstrap_endpoints,
+            ed2k: settings.ed2k,
+            nat: settings.nat,
             rest: bootstrap.rest,
-            vpn_guard: runtime.vpn_guard,
-            ip_filter: runtime.ip_filter,
+            vpn_guard: settings.vpn_guard,
+            ip_filter: settings.ip_filter,
         };
         config
             .nat
@@ -290,8 +290,8 @@ impl DaemonProfile {
     }
 }
 
-struct LoadedRuntimeSettings {
-    daemon: DaemonRuntimeSettings,
+struct LoadedSettings {
+    daemon: DaemonSettings,
     kad: KadSettings,
     kad_bootstrap_endpoints: Vec<String>,
     ed2k: Ed2kRuntimeConfig,
@@ -300,9 +300,9 @@ struct LoadedRuntimeSettings {
     ip_filter: IpFilterSettings,
 }
 
-fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettings> {
-    let daemon = load_section_settings(metadata, SECTION_DAEMON_RUNTIME)
-        .context("failed to load daemon.runtime settings")?;
+fn load_settings(metadata: &MetadataStore) -> Result<LoadedSettings> {
+    let daemon = load_section_settings(metadata, SECTION_DAEMON)
+        .context("failed to load daemon settings")?;
     let kad =
         load_section_settings(metadata, SECTION_KAD).context("failed to load kad settings")?;
     let kad_bootstrap_endpoints = metadata
@@ -312,7 +312,7 @@ fn load_runtime_settings(metadata: &MetadataStore) -> Result<LoadedRuntimeSettin
         load_section_settings(metadata, SECTION_ED2K).context("failed to load ed2k settings")?;
     let nat_settings: NatSettings =
         load_section_settings(metadata, SECTION_NAT).context("failed to load nat settings")?;
-    Ok(LoadedRuntimeSettings {
+    Ok(LoadedSettings {
         daemon,
         kad,
         kad_bootstrap_endpoints,

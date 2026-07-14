@@ -138,13 +138,13 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
     put_setting(
         &metadata,
-        SECTION_DAEMON_RUNTIME,
+        SECTION_DAEMON,
         "p2pBindIp",
         serde_json::json!("192.0.2.10"),
     );
     put_setting(
         &metadata,
-        SECTION_DAEMON_RUNTIME,
+        SECTION_DAEMON,
         "p2pBindInterface",
         serde_json::json!("Ethernet"),
     );

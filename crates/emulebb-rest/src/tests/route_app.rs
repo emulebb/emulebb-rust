@@ -140,10 +140,7 @@ async fn settings_use_typed_get_and_patch_route() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["core"]["uploadLimitKiBps"], 6200);
     assert_eq!(value["data"]["core"]["reconnect"], true);
-    assert_eq!(
-        value["data"]["daemonRuntime"]["p2pBindInterface"],
-        Value::Null
-    );
+    assert_eq!(value["data"]["daemon"]["p2pBindInterface"], Value::Null);
     assert_eq!(value["data"]["ed2k"]["obfuscationEnabled"], true);
     assert_eq!(value["data"]["kad"]["bootstrapMinRoutingContacts"], 10);
     assert_eq!(value["data"]["nat"]["enabled"], false);
@@ -159,7 +156,7 @@ async fn settings_use_typed_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemonRuntime":{"p2pBindInterface":"hide.me"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
                 ))
                 .unwrap(),
         )
@@ -174,10 +171,7 @@ async fn settings_use_typed_get_and_patch_route() {
     assert_eq!(value["data"]["core"]["queueSize"], 3000);
     assert_eq!(value["data"]["core"]["reconnect"], false);
     assert_eq!(value["data"]["core"]["networkEd2k"], false);
-    assert_eq!(
-        value["data"]["daemonRuntime"]["p2pBindInterface"],
-        "hide.me"
-    );
+    assert_eq!(value["data"]["daemon"]["p2pBindInterface"], "hide.me");
     assert_eq!(value["data"]["vpnGuard"]["enabled"], true);
     assert_eq!(value["data"]["vpnGuard"]["mode"], "block");
     assert_eq!(value["data"]["nat"]["enabled"], true);

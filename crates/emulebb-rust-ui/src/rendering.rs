@@ -202,10 +202,10 @@ pub(super) fn render_core_settings(ui: &MainWindow, core_settings: &CoreSettings
 }
 
 pub(super) fn render_app_settings(ui: &MainWindow, settings: &AppSettings) {
-    ui.set_settings_incoming_dir(optional_path(&settings.daemon_runtime.incoming_dir).into());
+    ui.set_settings_incoming_dir(optional_path(&settings.daemon.incoming_dir).into());
     ui.set_settings_p2p_bind_ip(
         settings
-            .daemon_runtime
+            .daemon
             .p2p_bind_ip
             .map(|value| value.to_string())
             .unwrap_or_default()
@@ -213,7 +213,7 @@ pub(super) fn render_app_settings(ui: &MainWindow, settings: &AppSettings) {
     );
     ui.set_settings_p2p_bind_interface(
         settings
-            .daemon_runtime
+            .daemon
             .p2p_bind_interface
             .clone()
             .unwrap_or_default()

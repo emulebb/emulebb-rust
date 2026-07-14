@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
 pub const SECTION_CORE: &str = "core";
-pub const SECTION_DAEMON_RUNTIME: &str = "daemon.runtime";
+pub const SECTION_DAEMON: &str = "daemon";
 pub const SECTION_ED2K: &str = "ed2k";
 pub const SECTION_KAD: &str = "kad";
 pub const SECTION_NAT: &str = "nat";
@@ -353,7 +353,7 @@ pub struct CoreSettingsUpdate {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct DaemonRuntimeSettings {
+pub struct DaemonSettings {
     /// Global finished-file delivery directory (eMule Incoming folder). When a
     /// completed transfer has no category path, its payload is materialized here
     /// by its canonical name. Defaults to `<profile>/incoming` when unset.
@@ -476,7 +476,7 @@ pub struct IpFilterSettings {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettings {
     pub core: CoreSettings,
-    pub daemon_runtime: DaemonRuntimeSettings,
+    pub daemon: DaemonSettings,
     pub ed2k: Ed2kSettings,
     pub kad: KadSettings,
     pub nat: NatSettings,
@@ -488,7 +488,7 @@ pub struct AppSettings {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettingsUpdate {
     pub core: Option<CoreSettingsUpdate>,
-    pub daemon_runtime: Option<DaemonRuntimeSettings>,
+    pub daemon: Option<DaemonSettings>,
     pub ed2k: Option<Ed2kSettings>,
     pub kad: Option<KadSettings>,
     pub nat: Option<NatSettings>,
@@ -541,7 +541,7 @@ pub fn default_core_settings() -> CoreSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            daemon_runtime: DaemonRuntimeSettings::default(),
+            daemon: DaemonSettings::default(),
             core: default_core_settings(),
             ed2k: Ed2kSettings::default(),
             kad: KadSettings::default(),
@@ -755,7 +755,7 @@ where
 
 pub fn app_settings_update_is_empty(update: &AppSettingsUpdate) -> bool {
     update.core.is_none()
-        && update.daemon_runtime.is_none()
+        && update.daemon.is_none()
         && update.ed2k.is_none()
         && update.kad.is_none()
         && update.nat.is_none()

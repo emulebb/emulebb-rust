@@ -4,8 +4,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 use emulebb_settings::{
-    AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON_RUNTIME, SECTION_ED2K,
-    SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
+    AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER,
+    SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
     core_settings_from_values, core_settings_to_values, section_settings_from_values,
     section_settings_to_values,
 };
@@ -114,7 +114,7 @@ pub(crate) fn persist_core_settings(
 pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
     Ok(AppSettings {
         core: load_core_settings(metadata)?,
-        daemon_runtime: load_settings_section(metadata, SECTION_DAEMON_RUNTIME)?,
+        daemon: load_settings_section(metadata, SECTION_DAEMON)?,
         ed2k: load_settings_section(metadata, SECTION_ED2K)?,
         kad: load_settings_section(metadata, SECTION_KAD)?,
         nat: load_settings_section(metadata, SECTION_NAT)?,
@@ -131,8 +131,8 @@ pub(crate) fn persist_app_settings_update(
         !app_settings_update_is_empty(&update),
         "settings PATCH requires at least one settings section"
     );
-    if let Some(settings) = update.daemon_runtime {
-        persist_settings_section(metadata, SECTION_DAEMON_RUNTIME, &settings)?;
+    if let Some(settings) = update.daemon {
+        persist_settings_section(metadata, SECTION_DAEMON, &settings)?;
     }
     if let Some(settings) = update.ed2k {
         persist_settings_section(metadata, SECTION_ED2K, &settings)?;

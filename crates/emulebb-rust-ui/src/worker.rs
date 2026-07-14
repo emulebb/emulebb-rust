@@ -392,9 +392,9 @@ fn app_settings_update_from_form(
     baseline: &AppSettings,
 ) -> Result<AppSettingsUpdate> {
     let mut next = baseline.clone();
-    next.daemon_runtime.incoming_dir = optional_path_buf(&form.incoming_dir);
-    next.daemon_runtime.p2p_bind_ip = optional_ipv4(&form.p2p_bind_ip, "P2P bind IP")?;
-    next.daemon_runtime.p2p_bind_interface = optional_string(form.p2p_bind_interface.clone());
+    next.daemon.incoming_dir = optional_path_buf(&form.incoming_dir);
+    next.daemon.p2p_bind_ip = optional_ipv4(&form.p2p_bind_ip, "P2P bind IP")?;
+    next.daemon.p2p_bind_interface = optional_string(form.p2p_bind_interface.clone());
     next.ed2k.listen_port = optional_u16(&form.ed2k_listen_port, "eD2K listen port")?;
     next.ed2k.obfuscation_enabled = form.ed2k_obfuscation_enabled;
     next.ed2k.connect_timeout_secs =
@@ -426,7 +426,7 @@ fn app_settings_update_from_form(
 
     Ok(AppSettingsUpdate {
         core: None,
-        daemon_runtime: changed_section(&next.daemon_runtime, &baseline.daemon_runtime),
+        daemon: changed_section(&next.daemon, &baseline.daemon),
         ed2k: changed_section(&next.ed2k, &baseline.ed2k),
         kad: changed_section(&next.kad, &baseline.kad),
         nat: changed_section(&next.nat, &baseline.nat),
