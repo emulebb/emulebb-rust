@@ -1,12 +1,12 @@
 //! Preferences upload/download policy derivation.
 //!
 //! Shared preference DTOs, defaults, and validation live in
-//! `emulebb-preferences`; this module only derives eD2K runtime policy from the
+//! `emulebb-settings`; this module only derives eD2K runtime policy from the
 //! validated preferences.
 
 use emulebb_ed2k::config::Ed2kUploadQueuePolicyConfig;
 use emulebb_ed2k::ed2k_transfer::Ed2kDownloadCoordinatorConfig;
-pub(crate) use emulebb_preferences::{
+pub(crate) use emulebb_settings::{
     apply_preferences_update, default_preferences, preferences_update_is_empty,
 };
 

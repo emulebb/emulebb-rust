@@ -240,7 +240,7 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
-pub use emulebb_preferences::{
+pub use emulebb_settings::{
     PREFERENCE_SPECS, PreferenceFieldKind, PreferenceSpec, Preferences, PreferencesUpdate,
     preference_field, preference_schema,
 };
