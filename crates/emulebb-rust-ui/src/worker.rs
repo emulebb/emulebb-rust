@@ -78,7 +78,7 @@ pub(super) fn worker_loop(
 
         let active_search_id_for_poll = active_search_id.clone();
         let result = match command {
-            Some(UiCommand::CoreSettingsReload) => runtime.block_on(async {
+            Some(UiCommand::SettingsReload) => runtime.block_on(async {
                 let settings = fetch_app_settings(&client, &config_for_command).await?;
                 let snapshot = fetch_snapshot(&client, &config_for_command).await?;
                 Ok((
@@ -88,7 +88,7 @@ pub(super) fn worker_loop(
                     Some((settings, "Settings reloaded".to_string())),
                 ))
             }),
-            Some(UiCommand::CoreSettingsApply {
+            Some(UiCommand::SettingsApply {
                 form,
                 settings_form,
             }) => runtime.block_on(async {

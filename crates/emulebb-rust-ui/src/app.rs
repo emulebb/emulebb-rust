@@ -78,8 +78,8 @@ struct ConnectionConfig {
 enum UiCommand {
     Connect(ConnectionConfig),
     Refresh,
-    CoreSettingsReload,
-    CoreSettingsApply {
+    SettingsReload,
+    SettingsApply {
         form: CoreSettingsForm,
         settings_form: AppSettingsForm,
     },
@@ -352,13 +352,13 @@ pub(crate) fn run() -> Result<()> {
     });
 
     ui.on_settings_reload_requested(move || {
-        let _ = settings_reload_tx.send(UiCommand::CoreSettingsReload);
+        let _ = settings_reload_tx.send(UiCommand::SettingsReload);
     });
 
     let settings_apply_ui = ui.as_weak();
     ui.on_settings_apply_requested(move || {
         if let Some(ui) = settings_apply_ui.upgrade() {
-            let _ = settings_apply_tx.send(UiCommand::CoreSettingsApply {
+            let _ = settings_apply_tx.send(UiCommand::SettingsApply {
                 form: core_settings_form(&ui),
                 settings_form: app_settings_form(&ui),
             });
