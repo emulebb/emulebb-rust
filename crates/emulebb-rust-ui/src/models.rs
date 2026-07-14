@@ -137,6 +137,7 @@ pub(super) struct ServerDto {
     pub(super) priority: String,
     #[serde(rename = "static")]
     pub(super) static_server: bool,
+    pub(super) enabled: bool,
     pub(super) connected: bool,
     pub(super) connecting: bool,
     pub(super) current: bool,

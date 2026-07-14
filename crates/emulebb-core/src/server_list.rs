@@ -19,9 +19,6 @@ impl EmulebbCore {
         if let Some(network) = self.ed2k_network.as_ref() {
             for entry in &network.config.server_entries {
                 let endpoint = format!("{}:{}", entry.host, entry.port);
-                if state.disabled_servers.contains(&endpoint) {
-                    continue;
-                }
                 let mut server = server_info_from_parts(
                     &entry.host,
                     entry.port,
@@ -31,11 +28,12 @@ impl EmulebbCore {
                     connection.0.as_deref(),
                     connection.1.as_deref(),
                 );
+                server.enabled = !state.disabled_servers.contains(&endpoint);
                 apply_server_update(&mut server, state.server_overrides.get(&endpoint));
                 server_map.insert(endpoint, server);
             }
             for endpoint in &network.config.server_endpoints {
-                if state.disabled_servers.contains(endpoint) || server_map.contains_key(endpoint) {
+                if server_map.contains_key(endpoint) {
                     continue;
                 }
                 if let Ok((address, port)) = parse_server_endpoint(endpoint) {
@@ -48,22 +46,22 @@ impl EmulebbCore {
                         connection.0.as_deref(),
                         connection.1.as_deref(),
                     );
+                    server.enabled = !state.disabled_servers.contains(endpoint);
                     apply_server_update(&mut server, state.server_overrides.get(endpoint));
                     server_map.insert(endpoint.clone(), server);
                 }
             }
         }
         for (endpoint, server) in &state.servers {
-            if !state.disabled_servers.contains(endpoint) {
-                let mut server = server.clone();
-                apply_server_update(&mut server, state.server_overrides.get(endpoint));
-                apply_server_connection_flags(
-                    &mut server,
-                    connection.0.as_deref(),
-                    connection.1.as_deref(),
-                );
-                server_map.insert(endpoint.clone(), server);
-            }
+            let mut server = server.clone();
+            server.enabled = !state.disabled_servers.contains(endpoint);
+            apply_server_update(&mut server, state.server_overrides.get(endpoint));
+            apply_server_connection_flags(
+                &mut server,
+                connection.0.as_deref(),
+                connection.1.as_deref(),
+            );
+            server_map.insert(endpoint.clone(), server);
         }
         if let Some(endpoint) = connection.0.as_deref().or(connection.1.as_deref())
             && let Some(server) = server_map.get_mut(endpoint)

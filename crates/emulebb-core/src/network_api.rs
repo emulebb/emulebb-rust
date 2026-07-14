@@ -80,7 +80,10 @@ impl EmulebbCore {
     }
 
     pub async fn connect_ed2k_server(&self, endpoint: &str) -> Result<Option<NetworkStatus>> {
-        if self.server(endpoint).await.is_none() {
+        let Some(server) = self.server(endpoint).await else {
+            return Ok(None);
+        };
+        if !server.enabled {
             return Ok(None);
         }
         self.connect_ed2k_to_server(Some(endpoint)).await.map(Some)

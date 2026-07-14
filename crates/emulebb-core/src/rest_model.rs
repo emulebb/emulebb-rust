@@ -89,6 +89,7 @@ pub struct ServerInfo {
     pub priority: String,
     #[serde(rename = "static")]
     pub static_server: bool,
+    pub enabled: bool,
     pub connected: bool,
     pub connecting: bool,
     pub current: bool,

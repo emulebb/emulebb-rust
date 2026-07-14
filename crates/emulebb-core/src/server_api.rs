@@ -23,6 +23,7 @@ impl EmulebbCore {
         if let Some(priority) = request.priority.as_deref() {
             server.priority = validate_server_priority(priority)?.to_string();
         }
+        server.enabled = true;
         profile_state::persist_server(&self.metadata_store, &server, true)?;
         let mut state = self.state.lock().await;
         state.disabled_servers.remove(&endpoint);
@@ -44,11 +45,13 @@ impl EmulebbCore {
         };
         validate_server_update(&request)?;
         apply_server_update(&mut server, Some(&request));
-        profile_state::persist_server(&self.metadata_store, &server, true)?;
         let mut state = self.state.lock().await;
-        if let Some(dynamic) = state.servers.get_mut(&server.endpoint) {
-            apply_server_update(dynamic, Some(&request));
-        }
+        let enabled = !state.disabled_servers.contains(&server.endpoint);
+        server.enabled = enabled;
+        profile_state::persist_server(&self.metadata_store, &server, enabled)?;
+        state
+            .servers
+            .insert(server.endpoint.clone(), server.clone());
         state
             .server_overrides
             .insert(server.endpoint.clone(), request);
@@ -56,13 +59,16 @@ impl EmulebbCore {
     }
 
     pub async fn remove_server(&self, endpoint: &str) -> Result<Option<ServerInfo>> {
-        let Some(server) = self.server(endpoint).await else {
+        let Some(mut server) = self.server(endpoint).await else {
             return Ok(None);
         };
+        server.enabled = false;
         profile_state::persist_server(&self.metadata_store, &server, false)?;
         {
             let mut state = self.state.lock().await;
-            state.servers.remove(&server.endpoint);
+            state
+                .servers
+                .insert(server.endpoint.clone(), server.clone());
             state.server_overrides.remove(&server.endpoint);
             state.disabled_servers.insert(server.endpoint.clone());
         }
@@ -187,11 +193,13 @@ impl EmulebbCore {
             (fail_count, fail_count >= threshold)
         };
         if reached && !server_info.static_server {
-            // eMule drops a dead non-static server from the list.
+            // eMule drops a dead non-static server from the active list. Keep
+            // the row visible as disabled so operators can inspect or re-enable it.
             server_info.failed_count = fail_count;
+            server_info.enabled = false;
             let _ = profile_state::persist_server(&self.metadata_store, &server_info, false);
             let mut state = self.state.lock().await;
-            state.servers.remove(&stored_endpoint);
+            state.servers.insert(stored_endpoint.clone(), server_info);
             state.server_overrides.remove(&stored_endpoint);
             state.server_fail_counts.remove(&stored_endpoint);
             state.disabled_servers.insert(stored_endpoint.clone());
@@ -238,7 +246,14 @@ impl EmulebbCore {
         if let Some(description) = description {
             server.description = description;
         }
-        let _ = profile_state::persist_server(&self.metadata_store, &server, false);
+        let enabled = !self
+            .state
+            .lock()
+            .await
+            .disabled_servers
+            .contains(&stored_endpoint);
+        server.enabled = enabled;
+        let _ = profile_state::persist_server(&self.metadata_store, &server, enabled);
         self.state
             .lock()
             .await

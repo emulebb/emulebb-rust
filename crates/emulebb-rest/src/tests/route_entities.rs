@@ -26,6 +26,7 @@ async fn servers_use_canonical_crud_routes() {
     assert_eq!(value["data"]["port"], 4661);
     assert_eq!(value["data"]["priority"], "low");
     assert_eq!(value["data"]["static"], true);
+    assert_eq!(value["data"]["enabled"], true);
 
     let update = app
         .clone()
@@ -59,8 +60,11 @@ async fn servers_use_canonical_crud_routes() {
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::OK);
+    let body = to_bytes(delete.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
 
-    let missing = app
+    let disabled = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/servers/192.0.2.20:4661")
@@ -70,7 +74,11 @@ async fn servers_use_canonical_crud_routes() {
         )
         .await
         .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let body = to_bytes(disabled.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+    assert_eq!(value["data"]["name"], "renamed");
 }
 
 #[tokio::test]

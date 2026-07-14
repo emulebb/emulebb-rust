@@ -44,8 +44,7 @@ pub(crate) fn load_core_state(
     let mut disabled_servers = HashSet::new();
     for server in metadata.load_servers()? {
         if !server.enabled {
-            disabled_servers.insert(server.endpoint);
-            continue;
+            disabled_servers.insert(server.endpoint.clone());
         }
         if server.port != 0 && !server.address.is_empty() {
             servers.insert(server.endpoint.clone(), server_from_metadata(server));
@@ -186,6 +185,7 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         name: server.name,
         priority: server.priority,
         static_server: server.static_server,
+        enabled: server.enabled,
         connected: false,
         connecting: false,
         current: false,

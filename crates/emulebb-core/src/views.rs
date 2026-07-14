@@ -484,6 +484,7 @@ pub(crate) fn server_info_from_parts(
         name: name.unwrap_or_default().to_string(),
         priority: "normal".to_string(),
         static_server,
+        enabled: true,
         connected,
         connecting,
         current,

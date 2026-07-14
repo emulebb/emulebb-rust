@@ -222,6 +222,36 @@ async fn effective_ed2k_config_includes_runtime_servers() {
 }
 
 #[tokio::test]
+async fn effective_ed2k_config_excludes_disabled_runtime_servers() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.add_server(ServerCreate {
+        address: "203.0.113.20".to_string(),
+        port: 4661,
+        name: None,
+        priority: None,
+        static_server: Some(false),
+        connect: None,
+    })
+    .await
+    .unwrap();
+    core.remove_server("203.0.113.20:4661").await.unwrap();
+
+    let servers = core.servers().await;
+    let server = servers
+        .iter()
+        .find(|server| server.endpoint == "203.0.113.20:4661")
+        .expect("disabled server remains visible");
+    assert!(!server.enabled);
+
+    let config = core
+        .effective_ed2k_config(&Ed2kConfig::default(), None)
+        .await
+        .unwrap();
+    assert!(config.server_entries.is_empty());
+    assert!(config.server_endpoints.is_empty());
+}
+
+#[tokio::test]
 async fn effective_ed2k_config_honors_reconnect_preference() {
     let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
     core.update_preferences(PreferencesUpdate {
@@ -490,10 +520,34 @@ async fn connect_failed_drops_non_static_dead_server_at_threshold() {
 
     // Default dead_server_retries = 1: first failure drops the server.
     core.note_ed2k_server_connect_failed(endpoint, 1).await;
+    let server = core
+        .server(endpoint)
+        .await
+        .expect("dead server remains visible");
     assert!(
-        core.server(endpoint).await.is_none(),
-        "non-static dead server is dropped at the threshold"
+        !server.enabled,
+        "non-static dead server is disabled at the threshold"
     );
+}
+
+#[tokio::test]
+async fn explicit_server_connect_ignores_disabled_servers() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    core.add_server(ServerCreate {
+        address: "203.0.113.8".to_string(),
+        port: 4661,
+        name: None,
+        priority: None,
+        static_server: Some(false),
+        connect: None,
+    })
+    .await
+    .unwrap();
+    core.remove_server("203.0.113.8:4661").await.unwrap();
+
+    let result = core.connect_ed2k_server("203.0.113.8:4661").await.unwrap();
+
+    assert!(result.is_none());
 }
 
 #[tokio::test]

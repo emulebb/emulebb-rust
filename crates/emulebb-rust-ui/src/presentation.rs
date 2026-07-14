@@ -200,7 +200,9 @@ pub(super) fn server_endpoint(item: &ServerDto) -> String {
 }
 
 pub(super) fn server_status(item: &ServerDto) -> &'static str {
-    if item.connected {
+    if !item.enabled {
+        "disabled"
+    } else if item.connected {
         "connected"
     } else if item.connecting {
         "connecting"
@@ -359,20 +361,15 @@ pub(super) fn server_items(servers: &[ServerDto]) -> Vec<ServerItem> {
         .map(|item| {
             let endpoint = format!("{}:{}", item.address, item.port);
             let detail = format!(
-                "Endpoint: {}\nStatus: {}\nUsers: {}\nFiles: {}\nPing: {}\nPriority: {}\nStatic: {}\nFailed count: {}",
+                "Endpoint: {}\nStatus: {}\nUsers: {}\nFiles: {}\nPing: {}\nPriority: {}\nStatic: {}\nEnabled: {}\nFailed count: {}",
                 endpoint,
-                if item.connected {
-                    "connected"
-                } else if item.connecting {
-                    "connecting"
-                } else {
-                    "known"
-                },
+                server_status(item),
                 item.users,
                 item.files,
                 if item.ping == 0 { "-".to_string() } else { format!("{} ms", item.ping) },
                 item.priority,
                 yes_no(item.static_server),
+                yes_no(item.enabled),
                 item.failed_count
             );
             ServerItem {
@@ -386,13 +383,7 @@ pub(super) fn server_items(servers: &[ServerDto]) -> Vec<ServerItem> {
                 item.port,
                 if item.static_server { " | static" } else { "" }
                 )),
-                status: text(if item.connected {
-                    "connected"
-                } else if item.connecting {
-                    "connecting"
-                } else {
-                    "known"
-                }),
+                status: text(server_status(item)),
                 users_text: text(format_count(item.users, "users")),
                 files_text: text(format_count(item.files, "files")),
                 ping_text: text(if item.ping == 0 {
@@ -755,7 +746,17 @@ pub(super) fn server_summary(snapshot: &Snapshot) -> String {
         .iter()
         .filter(|server| server.connected)
         .count();
-    format!("{} known | {} connected", snapshot.servers.len(), connected)
+    let disabled = snapshot
+        .servers
+        .iter()
+        .filter(|server| !server.enabled)
+        .count();
+    format!(
+        "{} known | {} connected | {} disabled",
+        snapshot.servers.len(),
+        connected,
+        disabled
+    )
 }
 
 pub(super) fn shared_summary(snapshot: &Snapshot) -> String {
