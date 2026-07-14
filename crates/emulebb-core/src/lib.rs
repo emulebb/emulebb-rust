@@ -2661,6 +2661,7 @@ impl EmulebbCore {
             description: state.server_description.clone(),
             users: state.server_users,
             files: state.server_files,
+            udp_flags: state.server_udp_flags,
         };
         (connected, connecting, live)
     }

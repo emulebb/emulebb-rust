@@ -157,6 +157,8 @@ pub(crate) fn persist_server(
         soft_files: server.soft_files,
         hard_files: server.hard_files,
         version: server.version.clone(),
+        obfuscation_tcp_port: server.obfuscation_tcp_port,
+        udp_flags: server.udp_flags,
     })
 }
 
@@ -203,6 +205,8 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         ping: server.ping_ms.unwrap_or_default(),
         soft_files: server.soft_files,
         version: server.version,
+        obfuscation_tcp_port: server.obfuscation_tcp_port,
+        udp_flags: server.udp_flags,
         users: server.users,
         files: server.files,
     }

@@ -35,4 +35,6 @@ pub struct MetadataServer {
     pub soft_files: u64,
     pub hard_files: u64,
     pub version: String,
+    pub obfuscation_tcp_port: Option<u16>,
+    pub udp_flags: Option<u32>,
 }

@@ -103,6 +103,8 @@ pub struct ServerInfo {
     pub ping: u32,
     pub soft_files: u64,
     pub version: String,
+    pub obfuscation_tcp_port: Option<u16>,
+    pub udp_flags: Option<u32>,
     pub users: u64,
     pub files: u64,
 }

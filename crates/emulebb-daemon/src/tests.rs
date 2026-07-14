@@ -23,6 +23,8 @@ fn persist_test_server(config: &DaemonConfig) {
             soft_files: 0,
             hard_files: 0,
             version: String::new(),
+            obfuscation_tcp_port: None,
+            udp_flags: None,
         })
         .unwrap();
 }

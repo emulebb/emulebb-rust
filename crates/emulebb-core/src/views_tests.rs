@@ -66,6 +66,7 @@ fn server_live_details_overlay_protocol_status() {
         description: Some("live description".to_string()),
         users: Some(4242),
         files: Some(99000),
+        udp_flags: Some(0x331),
     };
 
     apply_server_live_details(&mut server, &live);
@@ -74,4 +75,5 @@ fn server_live_details_overlay_protocol_status() {
     assert_eq!(server.description, "live description");
     assert_eq!(server.users, 4242);
     assert_eq!(server.files, 99000);
+    assert_eq!(server.udp_flags, Some(0x331));
 }

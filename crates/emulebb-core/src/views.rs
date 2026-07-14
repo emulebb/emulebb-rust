@@ -496,6 +496,8 @@ pub(crate) fn server_info_from_parts(
         ping: 0,
         soft_files: 0,
         version: String::new(),
+        obfuscation_tcp_port: None,
+        udp_flags: None,
         users: 0,
         files: 0,
     }
@@ -532,6 +534,7 @@ pub(crate) struct ServerLiveDetails {
     pub(crate) description: Option<String>,
     pub(crate) users: Option<u32>,
     pub(crate) files: Option<u32>,
+    pub(crate) udp_flags: Option<u32>,
 }
 
 pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLiveDetails) {
@@ -546,6 +549,9 @@ pub(crate) fn apply_server_live_details(server: &mut ServerInfo, live: &ServerLi
     }
     if let Some(files) = live.files {
         server.files = u64::from(files);
+    }
+    if let Some(udp_flags) = live.udp_flags {
+        server.udp_flags = Some(udp_flags);
     }
 }
 

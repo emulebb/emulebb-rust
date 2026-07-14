@@ -266,7 +266,8 @@ impl super::MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT endpoint, address, port, name, description, priority, static_server,
-                   enabled, failed_count, ping_ms, users, files, soft_files, hard_files, version
+                   enabled, failed_count, ping_ms, users, files, soft_files, hard_files, version,
+                   obfuscation_tcp_port, udp_flags
             FROM servers
             WHERE deleted_at_ms IS NULL
             ORDER BY endpoint
@@ -289,6 +290,8 @@ impl super::MetadataStore {
                 soft_files: row.get::<_, Option<i64>>(12)?.unwrap_or_default() as u64,
                 hard_files: row.get::<_, Option<i64>>(13)?.unwrap_or_default() as u64,
                 version: row.get(14)?,
+                obfuscation_tcp_port: row.get::<_, Option<i64>>(15)?.map(|value| value as u16),
+                udp_flags: row.get::<_, Option<i64>>(16)?.map(|value| value as u32),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -302,9 +305,9 @@ impl super::MetadataStore {
             INSERT INTO servers(
                 endpoint, address, port, name, description, priority, static_server,
                 enabled, failed_count, ping_ms, users, files, soft_files, hard_files,
-                version, first_seen_ms, last_seen_ms, deleted_at_ms
+                version, obfuscation_tcp_port, udp_flags, first_seen_ms, last_seen_ms, deleted_at_ms
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16, NULL)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, NULL)
             ON CONFLICT(endpoint) DO UPDATE SET
                 address = excluded.address,
                 port = excluded.port,
@@ -320,6 +323,8 @@ impl super::MetadataStore {
                 soft_files = excluded.soft_files,
                 hard_files = excluded.hard_files,
                 version = excluded.version,
+                obfuscation_tcp_port = excluded.obfuscation_tcp_port,
+                udp_flags = excluded.udp_flags,
                 last_seen_ms = excluded.last_seen_ms,
                 deleted_at_ms = NULL
             "#,
@@ -339,6 +344,8 @@ impl super::MetadataStore {
                 server.soft_files as i64,
                 server.hard_files as i64,
                 server.version,
+                server.obfuscation_tcp_port.map(i64::from),
+                server.udp_flags.map(i64::from),
                 now,
             ],
         )?;
@@ -507,6 +514,8 @@ mod tests {
                 soft_files: 30,
                 hard_files: 40,
                 version: "17.15".to_string(),
+                obfuscation_tcp_port: Some(4665),
+                udp_flags: Some(0x331),
             })
             .unwrap();
         store.set_server_enabled("192.0.2.10:4661", false).unwrap();
@@ -514,6 +523,8 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert!(!servers[0].enabled);
         assert_eq!(servers[0].name, "Test Server");
+        assert_eq!(servers[0].obfuscation_tcp_port, Some(4665));
+        assert_eq!(servers[0].udp_flags, Some(0x331));
 
         store
             .upsert_transfer_manifest(&crate::MetadataTransferManifest {

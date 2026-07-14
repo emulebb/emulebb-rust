@@ -114,10 +114,10 @@ impl EmulebbCore {
                     name: Some(server.name.clone()).filter(|name| !name.is_empty()),
                     description: Some(server.description.clone())
                         .filter(|description| !description.is_empty()),
-                    udp_flags: 0,
+                    udp_flags: server.udp_flags.unwrap_or_default(),
                     udp_key: 0,
                     udp_key_ip: 0,
-                    obfuscation_port_tcp: 0,
+                    obfuscation_port_tcp: server.obfuscation_tcp_port.unwrap_or_default(),
                     obfuscation_port_udp: 0,
                     soft_files: u32::try_from(server.soft_files).unwrap_or(u32::MAX),
                     hard_files: u32::try_from(server.hard_files).unwrap_or(u32::MAX),

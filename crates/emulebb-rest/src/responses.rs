@@ -248,6 +248,8 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
         "ping": server.ping,
         "softFiles": server.soft_files,
         "version": server.version,
+        "obfuscationTcpPort": server.obfuscation_tcp_port,
+        "udpFlags": server.udp_flags,
         "users": server.users,
         "files": server.files
     })
@@ -745,6 +747,8 @@ mod tests {
             ping: 0,
             soft_files: 0,
             version: String::new(),
+            obfuscation_tcp_port: Some(4665),
+            udp_flags: Some(0x331),
             users: 0,
             files: 0,
         }];
@@ -755,6 +759,8 @@ mod tests {
         assert_eq!(value["connecting"], true);
         assert_eq!(value["currentServer"]["connecting"], true);
         assert_eq!(value["currentServer"]["connected"], false);
+        assert_eq!(value["currentServer"]["obfuscationTcpPort"], 4665);
+        assert_eq!(value["currentServer"]["udpFlags"], 0x331);
         assert_eq!(value["ed2kIdState"], "unknown");
     }
 }
