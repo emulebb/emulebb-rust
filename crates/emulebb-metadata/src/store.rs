@@ -73,25 +73,18 @@ impl MetadataStore {
         }
     }
 
-    /// Bring the on-disk schema to the current version WITHOUT destroying user
-    /// data on an upgrade.
+    /// Ensure the database matches this development build's fresh schema.
     ///
-    /// - A marked database (the `metadata_schema` table exists) is migrated in
-    ///   place via the ordered, idempotent ladder in [`crate::migrations`]:
-    ///   equal version opens as-is, an older version is stepped up to current,
-    ///   and a NEWER-than-this-build version makes [`migrate_to_current`] refuse
-    ///   to open rather than wipe a database it does not understand.
-    /// - An unmarked database that already has user tables is a genuinely
-    ///   foreign/legacy file; resetting it is the only place a destructive
-    ///   recreate is still acceptable.
-    /// - An empty database is created fresh at the current version.
+    /// During the Rust dev phase there is no in-product schema migration path:
+    /// a mismatched or unmarked database is dropped and recreated. Operator-local
+    /// profile preservation belongs in explicit one-off SQLite/Python updates.
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
-            {
-                let mut conn = self.connection()?;
-                crate::migrations::migrate_to_current(&mut conn)?;
+            if self.stored_schema_version()? == Some(SCHEMA_VERSION) {
+                self.prune_transfer_sources()?;
+                return Ok(());
             }
-            self.prune_transfer_sources()?;
+            self.reset_schema()?;
             return Ok(());
         }
         if self.has_user_tables()? {
@@ -99,6 +92,17 @@ impl MetadataStore {
             return Ok(());
         }
         self.create_schema()
+    }
+
+    fn stored_schema_version(&self) -> Result<Option<i64>> {
+        self.connection()?
+            .query_row(
+                "SELECT schema_version FROM metadata_schema WHERE schema_id = ?1",
+                params![SCHEMA_ID],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Bound the `transfer_sources` table on startup. Source rows accumulate per
@@ -110,12 +114,6 @@ impl MetadataStore {
     /// almost certainly no longer have the file. Correctness-neutral: a live
     /// transfer re-learns current sources from the network and rewrites them.
     fn prune_transfer_sources(&self) -> Result<()> {
-        // A database migrated in place from an older version may predate the
-        // transfer_sources table (it only ships in the fresh schema.sql), so the
-        // prune is a no-op when the table is absent.
-        if !self.table_exists("transfer_sources")? {
-            return Ok(());
-        }
         let cutoff = unix_ms().saturating_sub(TRANSFER_SOURCE_TTL_MS);
         let conn = self.connection()?;
         conn.execute(
@@ -543,6 +541,30 @@ mod tests {
         conn.execute("CREATE TABLE files(id INTEGER PRIMARY KEY)", [])
             .unwrap();
         let store = MetadataStore::from_connection(conn).unwrap();
+        assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
+        assert!(!store.table_exists("files").unwrap());
+    }
+
+    #[test]
+    fn resets_marked_database_with_noncurrent_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE metadata_schema (
+                schema_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE files(id INTEGER PRIMARY KEY);
+            INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
+            VALUES ('emulebb.metadata.clean-v2', 1, 0);
+            INSERT INTO files(id) VALUES (7);
+            "#,
+        )
+        .unwrap();
+
+        let store = MetadataStore::from_connection(conn).unwrap();
+
         assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
         assert!(!store.table_exists("files").unwrap());
     }
