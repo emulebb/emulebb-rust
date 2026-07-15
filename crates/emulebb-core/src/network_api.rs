@@ -90,12 +90,14 @@ impl EmulebbCore {
     }
 
     async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
+        let core_settings = self.state.lock().await.core_settings.clone();
         // The eD2k network must be enabled (eMule thePrefs.GetNetworkED2K()); when
         // off, the server connect is refused and no eD2k auto-ops run.
         ensure!(
-            self.state.lock().await.core_settings.network_ed2k,
+            core_settings.network_ed2k,
             "eD2k network is disabled in settings.core (networkEd2k=false)"
         );
+        let kad_network_enabled = core_settings.network_kademlia;
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
@@ -260,7 +262,9 @@ impl EmulebbCore {
             })?);
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
-        tasks.push(dht.clone().start());
+        if kad_network_enabled {
+            tasks.push(dht.clone().start());
+        }
         // "Reconnect now" signal: the advertised-ports sync fires it when the
         // external port changes (UPnP ready / remapped) so the server loop re-logs
         // in with the new HighID callback port instead of waiting for a reconnect.
@@ -285,11 +289,13 @@ impl EmulebbCore {
         // permanently unbootstrapped, so every downstream loop (firewall check,
         // routing maintenance, hello-intro, publish) stayed dormant behind their
         // `is_bootstrapped()` guards and Kad never reached connected.
-        tasks.push(tokio::spawn(run_configured_kad_bootstrap(
-            dht.clone(),
-            Arc::clone(&shutdown),
-        )));
-        if network.kad_publish_shared_files {
+        if kad_network_enabled {
+            tasks.push(tokio::spawn(run_configured_kad_bootstrap(
+                dht.clone(),
+                Arc::clone(&shutdown),
+            )));
+        }
+        if kad_network_enabled && network.kad_publish_shared_files {
             tasks.push(tokio::spawn(run_kad_shared_file_publish_loop(
                 KadPublishLoopRuntime {
                     dht: dht.clone(),
@@ -309,7 +315,7 @@ impl EmulebbCore {
         // Periodic routing-table maintenance (oracle CRoutingZone timers): bucket
         // refresh (OnBigTimer -> RandomLookup) + dead-contact expiry and
         // stale-contact HELLO re-probe (OnSmallTimer).
-        if network.kad_routing_maintenance_enabled {
+        if kad_network_enabled && network.kad_routing_maintenance_enabled {
             tasks.push(tokio::spawn(
                 kad_routing_maintenance::run_kad_routing_maintenance_loop(
                     dht.clone(),
@@ -320,10 +326,12 @@ impl EmulebbCore {
                 ),
             ));
         }
-        if let (Some(kad_local_store), Some(kad_snoop_queue)) = (
-            self.kad_local_store.as_ref().map(Arc::clone),
-            self.kad_snoop_queue.as_ref().map(Arc::clone),
-        ) {
+        if kad_network_enabled
+            && let (Some(kad_local_store), Some(kad_snoop_queue)) = (
+                self.kad_local_store.as_ref().map(Arc::clone),
+                self.kad_snoop_queue.as_ref().map(Arc::clone),
+            )
+        {
             tasks.push(tokio::spawn(run_kad_local_store_loop(
                 KadLocalStoreRuntime {
                     dht: dht.clone(),
@@ -364,7 +372,7 @@ impl EmulebbCore {
         // buddy when we are firewalled; inbound FINDBUDDY/CALLBACK packets are
         // dispatched by the local-store loop above, which owns the same
         // `kad_buddy` state.
-        if network.kad_buddy_enabled {
+        if kad_network_enabled && network.kad_buddy_enabled {
             tasks.push(tokio::spawn(run_kad_buddy_loop(
                 KadBuddyRuntime {
                     dht: dht.clone(),
@@ -434,7 +442,7 @@ impl EmulebbCore {
             dead_server_retries,
             Arc::clone(&shutdown),
         )));
-        if enable_udp_reask {
+        if kad_network_enabled && enable_udp_reask {
             // Off by default; wire-validate before enabling. udp_version 4 matches
             // our advertised hello ET_UDPVER. The handle lets the direct download
             // driver detach queued sources onto the loop over the command channel.
@@ -494,7 +502,8 @@ impl EmulebbCore {
         // Drives FIREWALLED2_REQ-independent OP_FWCHECKUDPREQ rounds against open
         // v6+ helpers and feeds the peer-confirmed external UDP port back into
         // reachability. Off only when the operator disables it.
-        let kad_firewall_recheck = if network.kad_udp_firewall_check_enabled {
+        let kad_firewall_recheck = if kad_network_enabled && network.kad_udp_firewall_check_enabled
+        {
             let recheck_signal = Arc::new(tokio::sync::Notify::new());
             tasks.push(tokio::spawn(
                 kad_udp_firewall_check::run_kad_udp_firewall_check_loop(
@@ -519,7 +528,7 @@ impl EmulebbCore {
         // KADEMLIA2_FIREWALLED2_REQ and derives a TCP-firewalled verdict from the
         // open acks + FIREWALLED_RES, so a pure-Kad node (no eD2k server) still
         // detects LowID and seeks a buddy. Off only when the operator disables it.
-        if network.kad_tcp_firewall_check_enabled {
+        if kad_network_enabled && network.kad_tcp_firewall_check_enabled {
             tasks.push(tokio::spawn(
                 kad_tcp_firewall_check::run_kad_tcp_firewall_check_loop(
                     kad_tcp_firewall_check::KadTcpFirewallCheckOptions {

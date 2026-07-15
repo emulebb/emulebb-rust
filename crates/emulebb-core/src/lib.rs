@@ -2258,6 +2258,9 @@ impl EmulebbCore {
     }
 
     async fn ed2k_dht_node(&self) -> Option<DhtNode> {
+        if !self.state.lock().await.core_settings.network_kademlia {
+            return None;
+        }
         self.ed2k_runtime
             .lock()
             .await
@@ -2699,6 +2702,9 @@ impl EmulebbCore {
     }
 
     async fn kad_status(&self, manual_running: bool) -> NetworkStatus {
+        if !self.state.lock().await.core_settings.network_kademlia {
+            return kad_status_from_running(false);
+        }
         let runtime_snapshot = {
             let Ok(runtime_guard) = self.ed2k_runtime.try_lock() else {
                 return kad_starting_status(manual_running);

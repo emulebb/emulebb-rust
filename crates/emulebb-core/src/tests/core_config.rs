@@ -408,3 +408,46 @@ async fn status_reports_live_dht_runtime_kad_contacts() {
     shutdown.store(true, Ordering::SeqCst);
     let _ = core.disconnect_ed2k().await;
 }
+
+#[tokio::test]
+async fn network_kademlia_disabled_reports_kad_stopped_even_with_ed2k_runtime() {
+    let transfer_root = unique_runtime_dir("emulebb-core-kad-disabled-runtime-status");
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+    core.update_core_settings(CoreSettingsUpdate {
+        network_kademlia: Some(false),
+        ..CoreSettingsUpdate::default()
+    })
+    .await
+    .unwrap();
+    let (search_handle, _search_inbox) = new_ed2k_server_search_channel(1);
+    let dht = DhtNode::new(DhtConfig {
+        bind_addr: Some("0.0.0.0:0".parse().unwrap()),
+        ..DhtConfig::default()
+    })
+    .await
+    .unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let dht_task = dht.start();
+
+    *core.ed2k_runtime.lock().await = Some(Ed2kRuntime {
+        search_handle,
+        server_state: Arc::new(RwLock::new(Ed2kServerState::default())),
+        dht,
+        kad_firewall: Arc::new(Mutex::new(KadFirewallState::default())),
+        nat: Arc::new(NatManager::default()),
+        shutdown: Arc::clone(&shutdown),
+        server_reconnect_signal: Arc::new(tokio::sync::Notify::new()),
+        target_server_endpoint: Arc::new(RwLock::new(None)),
+        kad_firewall_recheck: None,
+        tasks: vec![dht_task],
+        download_tasks: Arc::clone(&core.ed2k_download_tasks),
+    });
+
+    let status = core.status().await;
+
+    assert!(!status.kad.running);
+    assert!(!status.kad.connected);
+    assert_eq!(status.kad.contact_count, None);
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = core.disconnect_ed2k().await;
+}
