@@ -122,7 +122,8 @@ pub(super) fn sorted_servers(items: &[ServerDto], spec: Option<SortSpec>) -> Vec
                     4 => a.files.cmp(&b.files),
                     5 => a.ping.cmp(&b.ping),
                     6 => cmp_text(&a.priority, &b.priority),
-                    7 => a.failed_count.cmp(&b.failed_count),
+                    7 => a.enabled.cmp(&b.enabled),
+                    8 => a.failed_count.cmp(&b.failed_count),
                     _ => cmp_text(&a_endpoint, &b_endpoint),
                 }
                 .then_with(|| cmp_text(&a_endpoint, &b_endpoint)),
@@ -486,6 +487,7 @@ pub(super) fn server_columns() -> Vec<TableColumn> {
         ("Files", 100.0, 0.0),
         ("Ping", 78.0, 0.0),
         ("Priority", 90.0, 0.0),
+        ("Enabled", 86.0, 0.0),
         ("Fails", 82.0, 0.0),
     ])
 }
@@ -585,6 +587,7 @@ pub(super) fn server_table_rows(items: &[ServerItem]) -> Vec<Vec<StandardListVie
                 item.files_text.clone(),
                 item.ping_text.clone(),
                 item.priority.clone(),
+                text(if item.enabled { "enabled" } else { "disabled" }),
                 item.failed_text.clone(),
             ])
         })
@@ -747,7 +750,7 @@ pub(super) fn server_summary(snapshot: &Snapshot) -> String {
         .filter(|server| !server.enabled)
         .count();
     format!(
-        "{} known | {} connected | {} disabled",
+        "{} known | {}/1 active | {} disabled",
         snapshot.servers.len(),
         connected,
         disabled
@@ -888,4 +891,58 @@ pub(super) fn display_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 
 pub(super) fn text(value: impl Into<SharedString>) -> SharedString {
     value.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(name: &str, enabled: bool, connected: bool) -> ServerDto {
+        ServerDto {
+            name: name.to_string(),
+            address: format!("{name}.example.test"),
+            port: 4661,
+            priority: "normal".to_string(),
+            enabled,
+            connected,
+            ..ServerDto::default()
+        }
+    }
+
+    #[test]
+    fn server_summary_reports_single_active_server_slot() {
+        let snapshot = Snapshot {
+            servers: vec![
+                server("active", true, true),
+                server("disabled", false, false),
+            ],
+            ..Snapshot::default()
+        };
+
+        assert_eq!(
+            server_summary(&snapshot),
+            "2 known | 1/1 active | 1 disabled"
+        );
+    }
+
+    #[test]
+    fn server_table_rows_include_enabled_state() {
+        let servers = vec![server("disabled", false, false)];
+        let items = server_items(&servers);
+        let rows = server_table_rows(&items);
+        let column_titles = server_columns()
+            .into_iter()
+            .map(|column| column.title.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            column_titles,
+            vec![
+                "Name", "Endpoint", "Status", "Users", "Files", "Ping", "Priority", "Enabled",
+                "Fails"
+            ]
+        );
+        assert_eq!(rows[0].len(), column_titles.len());
+        assert_eq!(rows[0][7].text.to_string(), "disabled");
+    }
 }

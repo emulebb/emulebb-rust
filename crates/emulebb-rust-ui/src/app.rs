@@ -137,7 +137,7 @@ pub(crate) fn run() -> Result<()> {
     ui.set_counts_line("Waiting for snapshot".into());
     ui.set_transfer_summary("0 transfers".into());
     ui.set_upload_summary("0 active / 0 queued".into());
-    ui.set_server_summary("0 known".into());
+    ui.set_server_summary("0 known | 0/1 active | 0 disabled".into());
     ui.set_shared_summary("0 shared".into());
     ui.set_search_query("".into());
     ui.set_search_method("automatic".into());
