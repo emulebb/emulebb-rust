@@ -77,6 +77,24 @@ export struct SearchResultItem {
     detail: string,
 }
 
+export global ClassicTheme {
+    out property <color> window-face: #d4d0c8;
+    out property <color> panel-face: #dcdad5;
+    out property <color> control-strip: #c8c4bc;
+    out property <color> field-face: #f4f4f0;
+    out property <color> border-shadow: #808080;
+    out property <color> border-light: #ffffff;
+    out property <color> selected-face: #e4e2dc;
+    out property <color> selected-accent: #566d8f;
+    out property <color> text: #101010;
+    out property <color> text-muted: #404040;
+    out property <color> text-soft: #606060;
+    out property <color> connected: #006030;
+    out property <color> warning-text: #7a3d00;
+    out property <color> warning-face: #fff0c0;
+    out property <color> warning-border: #b08000;
+}
+
 component TabButton inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -84,17 +102,17 @@ component TabButton inherits Rectangle {
 
     height: 28px;
     width: max(72px, label.preferred-width + 18px);
-    background: selected ? #1f2937 : transparent;
-    border-color: selected ? #1f2937 : #cbd5e1;
-    border-width: selected ? 1px : 0px;
-    border-radius: 3px;
+    background: selected ? ClassicTheme.selected-face : ClassicTheme.control-strip;
+    border-color: selected ? ClassicTheme.selected-accent : ClassicTheme.border-shadow;
+    border-width: 1px;
+    border-radius: 0px;
 
     label := Text {
         x: 9px;
         y: 0px;
         height: parent.height;
         text: root.text;
-        color: root.selected ? #ffffff : #334155;
+        color: ClassicTheme.text;
         font-size: 12px;
         font-weight: root.selected ? 700 : 500;
         vertical-alignment: center;
@@ -107,24 +125,35 @@ component TabButton inherits Rectangle {
     }
 }
 
-component StatusText inherits Text {
+component StatusText inherits Rectangle {
     in property <string> value;
     in property <length> block-width;
 
-    text: value;
-    color: #334155;
-    font-size: 12px;
     height: 24px;
     width: block-width;
-    vertical-alignment: center;
-    overflow: elide;
+    background: ClassicTheme.field-face;
+    border-color: ClassicTheme.border-shadow;
+    border-width: 1px;
+    border-radius: 0px;
+
+    Text {
+        x: 5px;
+        y: 0px;
+        width: parent.width - 10px;
+        height: parent.height;
+        text: root.value;
+        color: ClassicTheme.text-muted;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
 }
 
 component EmptyState inherits Rectangle {
     in property <string> title;
     in property <string> detail;
 
-    background: #ffffff;
+    background: ClassicTheme.panel-face;
 
     VerticalLayout {
         padding: 28px;
@@ -133,13 +162,13 @@ component EmptyState inherits Rectangle {
 
         Text {
             text: root.title;
-            color: #111827;
+            color: ClassicTheme.text;
             font-size: 15px;
             font-weight: 700;
         }
         Text {
             text: root.detail;
-            color: #64748b;
+            color: ClassicTheme.text-soft;
             font-size: 12px;
             wrap: word-wrap;
         }
@@ -158,7 +187,7 @@ component SettingField inherits Rectangle {
 
         Text {
             text: root.label;
-            color: #334155;
+            color: ClassicTheme.text-muted;
             font-size: 12px;
             vertical-alignment: center;
             min-width: 150px;
@@ -307,7 +336,7 @@ export component MainWindow inherits Window {
     preferred-height: 820px;
     min-width: 980px;
     min-height: 620px;
-    background: #f4f6f9;
+    background: ClassicTheme.window-face;
 
     MenuBar {
         Menu {
@@ -412,10 +441,10 @@ export component MainWindow inherits Window {
 
         Rectangle {
             height: 38px;
-            background: #ffffff;
-            border-color: #cbd5e1;
+            background: ClassicTheme.panel-face;
+            border-color: ClassicTheme.border-shadow;
             border-width: 1px;
-            border-radius: 3px;
+            border-radius: 0px;
 
             HorizontalLayout {
                 padding-left: 10px;
@@ -428,7 +457,7 @@ export component MainWindow inherits Window {
                     text: "eMuleBB Rust";
                     font-size: 16px;
                     font-weight: 700;
-                    color: #111827;
+                    color: ClassicTheme.text;
                     vertical-alignment: center;
                     min-width: 128px;
                 }
@@ -459,7 +488,7 @@ export component MainWindow inherits Window {
 
                 Text {
                     text: root.connection-state;
-                    color: root.connection-state == "Connected" ? #047857 : #9a3412;
+                    color: root.connection-state == "Connected" ? ClassicTheme.connected : ClassicTheme.warning-text;
                     font-size: 12px;
                     font-weight: 700;
                     vertical-alignment: center;
@@ -471,10 +500,10 @@ export component MainWindow inherits Window {
 
         Rectangle {
             height: 30px;
-            background: #ffffff;
-            border-color: #d7dee8;
+            background: ClassicTheme.control-strip;
+            border-color: ClassicTheme.border-shadow;
             border-width: 1px;
-            border-radius: 3px;
+            border-radius: 0px;
 
             HorizontalLayout {
                 padding-left: 8px;
@@ -497,10 +526,10 @@ export component MainWindow inherits Window {
 
         Rectangle {
             height: 28px;
-            background: root.error-message == "" ? #f8fafc : #fff7ed;
-            border-color: root.error-message == "" ? #d7dee8 : #fdba74;
+            background: root.error-message == "" ? ClassicTheme.panel-face : ClassicTheme.warning-face;
+            border-color: root.error-message == "" ? ClassicTheme.border-shadow : ClassicTheme.warning-border;
             border-width: 1px;
-            border-radius: 3px;
+            border-radius: 0px;
 
             HorizontalLayout {
                 padding-left: 8px;
@@ -514,7 +543,7 @@ export component MainWindow inherits Window {
                 StatusText { value: root.speed-line; block-width: 180px; }
                 Text {
                     text: root.error-message == "" ? root.network-line : root.error-message;
-                    color: root.error-message == "" ? #64748b : #9a3412;
+                    color: root.error-message == "" ? ClassicTheme.text-soft : ClassicTheme.warning-text;
                     font-size: 12px;
                     height: 24px;
                     vertical-alignment: center;
@@ -524,15 +553,15 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            background: #ffffff;
-            border-color: #cbd5e1;
+            background: ClassicTheme.panel-face;
+            border-color: ClassicTheme.border-shadow;
             border-width: 1px;
-            border-radius: 3px;
+            border-radius: 0px;
 
             if root.selected-tab == 0 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                background: #ffffff;
+                background: ClassicTheme.panel-face;
 
                 VerticalLayout {
                     padding: 12px;
@@ -540,13 +569,13 @@ export component MainWindow inherits Window {
 
                     Text {
                         text: "Kad";
-                        color: #111827;
+                        color: ClassicTheme.text;
                         font-size: 15px;
                         font-weight: 700;
                     }
                     Text {
                         text: root.network-line;
-                        color: #334155;
+                        color: ClassicTheme.text-muted;
                         font-size: 12px;
                     }
                     HorizontalLayout {
@@ -563,7 +592,7 @@ export component MainWindow inherits Window {
             if root.selected-tab == 1 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                background: #ffffff;
+                background: ClassicTheme.panel-face;
 
                 VerticalLayout {
                     padding: 8px;
@@ -571,10 +600,10 @@ export component MainWindow inherits Window {
 
                     Rectangle {
                         height: 74px;
-                        background: #f8fafc;
-                        border-color: #d7dee8;
+                        background: ClassicTheme.field-face;
+                        border-color: ClassicTheme.border-shadow;
                         border-width: 1px;
-                        border-radius: 3px;
+                        border-radius: 0px;
 
                         VerticalLayout {
                             padding: 6px;
@@ -652,7 +681,7 @@ export component MainWindow inherits Window {
             if root.selected-tab == 2 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                background: #ffffff;
+                background: ClassicTheme.panel-face;
 
                 VerticalLayout {
                     padding: 8px;
@@ -660,10 +689,10 @@ export component MainWindow inherits Window {
 
                     Rectangle {
                         height: 38px;
-                        background: #f8fafc;
-                        border-color: #d7dee8;
+                        background: ClassicTheme.field-face;
+                        border-color: ClassicTheme.border-shadow;
                         border-width: 1px;
-                        border-radius: 3px;
+                        border-radius: 0px;
 
                         HorizontalLayout {
                             padding-left: 8px;
@@ -699,7 +728,7 @@ export component MainWindow inherits Window {
                             }
                             Text {
                                 text: root.search-status-line;
-                                color: #334155;
+                                color: ClassicTheme.text-muted;
                                 font-size: 12px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -852,7 +881,7 @@ export component MainWindow inherits Window {
             if root.selected-tab == 9 : Rectangle {
                 width: parent.width;
                 height: parent.height;
-                background: #ffffff;
+                background: ClassicTheme.panel-face;
 
                 VerticalLayout {
                     padding: 12px;
@@ -863,7 +892,7 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         Text {
                             text: "Settings";
-                            color: #111827;
+                            color: ClassicTheme.text;
                             font-size: 15px;
                             font-weight: 700;
                             vertical-alignment: center;
@@ -874,7 +903,7 @@ export component MainWindow inherits Window {
                         Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
                         Text {
                             text: root.settings-status-line;
-                            color: #334155;
+                            color: ClassicTheme.text-muted;
                             font-size: 12px;
                             vertical-alignment: center;
                             overflow: elide;
@@ -889,7 +918,7 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "Live Settings"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "Live Settings"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 SettingField { label: "Upload limit KiB/s"; value <=> root.core-upload-limit; }
                                 SettingField { label: "Download limit KiB/s"; value <=> root.core-download-limit; }
                                 SettingField { label: "Max connections"; value <=> root.core-max-connections; }
@@ -903,11 +932,11 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "Network Binding"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "Network Binding"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 SettingField { label: "Incoming directory"; value <=> root.settings-incoming-dir; }
                                 SettingField { label: "P2P bind IP"; value <=> root.settings-p2p-bind-ip; }
                                 SettingField { label: "P2P bind interface"; value <=> root.settings-p2p-bind-interface; }
-                                Text { text: "Network"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "Network"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 SettingField { label: "eD2K listen port"; value <=> root.settings-ed2k-listen-port; }
                                 SettingField { label: "eD2K connect timeout sec"; value <=> root.settings-ed2k-connect-timeout-secs; }
                                 SettingField { label: "eD2K reconnect sec"; value <=> root.settings-ed2k-reconnect-interval-secs; }
@@ -917,7 +946,7 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "NAT / VPN Guard"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "NAT / VPN Guard"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 CheckBox { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
                                 CheckBox { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
                                 SettingField { label: "NAT bind IP"; value <=> root.settings-nat-bind-ip; }
@@ -936,7 +965,7 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "Live Toggles"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "Live Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 CheckBox { text: "Auto connect"; checked <=> root.core-auto-connect; }
                                 CheckBox { text: "Reconnect"; checked <=> root.core-reconnect; }
                                 CheckBox { text: "Credit system"; checked <=> root.core-credit-system; }
@@ -948,7 +977,7 @@ export component MainWindow inherits Window {
 
                             VerticalLayout {
                                 spacing: 5px;
-                                Text { text: "Network Toggles"; color: #111827; font-size: 13px; font-weight: 700; }
+                                Text { text: "Network Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                 CheckBox { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
                                 CheckBox { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
                                 CheckBox { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
@@ -963,10 +992,10 @@ export component MainWindow inherits Window {
 
         Rectangle {
             height: 140px;
-            background: #ffffff;
-            border-color: #cbd5e1;
+            background: ClassicTheme.panel-face;
+            border-color: ClassicTheme.border-shadow;
             border-width: 1px;
-            border-radius: 3px;
+            border-radius: 0px;
 
             VerticalLayout {
                 padding: 8px;
@@ -976,7 +1005,7 @@ export component MainWindow inherits Window {
                     spacing: 6px;
                     Text {
                         text: root.inspector-title == "" ? "Inspector" : root.inspector-title;
-                        color: #111827;
+                        color: ClassicTheme.text;
                         font-size: 13px;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -997,7 +1026,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
-                    color: #334155;
+                    color: ClassicTheme.text-muted;
                     font-size: 12px;
                     wrap: word-wrap;
                 }
