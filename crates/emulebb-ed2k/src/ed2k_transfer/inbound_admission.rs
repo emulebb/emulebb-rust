@@ -45,7 +45,7 @@ impl Drop for Ed2kInboundConnectionGuard {
 
 impl Ed2kTransferRuntime {
     /// Concurrent-connection cap (eMule `thePrefs.GetMaxConnections()`) read
-    /// live from the shared coordinator config, so a preference update applies to
+    /// live from the shared coordinator config, so a settings update applies to
     /// the inbound-accept admission gate too. 0 means unlimited.
     fn concurrent_connection_cap(&self) -> usize {
         self.download_coordinator.lock().config().max_connections

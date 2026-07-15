@@ -182,7 +182,7 @@ impl Ed2kDownloadCoordinator {
         self.config
     }
 
-    /// Replace the active configuration (live preference change). Counters are
+    /// Replace the active configuration (live settings update). Counters are
     /// preserved; the new caps take effect on the next decision.
     pub fn set_config(&mut self, config: Ed2kDownloadCoordinatorConfig) {
         self.config = config;

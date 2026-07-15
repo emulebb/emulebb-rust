@@ -38,8 +38,8 @@ fn upload_queue_policy_uses_core_settings_for_slot_and_queue_limits() {
     assert_eq!(policy.waiting_timeout_secs, 44);
     assert_eq!(policy.granted_timeout_secs, 22);
     assert_eq!(policy.upload_timeout_secs, 88);
-    // Session rotation caps are queue-policy knobs, not core setting-derived:
-    // a core_settings update must pass them through untouched.
+    // Session rotation caps are queue-policy knobs, not settings.core-derived:
+    // a core settings update must pass them through untouched.
     assert_eq!(policy.session_transfer_percent, 45);
     assert_eq!(policy.session_time_limit_secs, 1_234);
 }

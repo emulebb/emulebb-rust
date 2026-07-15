@@ -617,8 +617,8 @@ impl Ed2kTransferRuntime {
             .next_reask_slot(file_count, Instant::now())
     }
 
-    /// Replace the active download coordinator configuration (live preference
-    /// change). Counters are preserved; the new caps apply on the next decision.
+    /// Replace the active download coordinator configuration (live settings
+    /// update). Counters are preserved; the new caps apply on the next decision.
     pub fn apply_download_coordinator_config(&self, config: Ed2kDownloadCoordinatorConfig) {
         self.download_coordinator.lock().set_config(config);
     }

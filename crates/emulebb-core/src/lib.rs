@@ -477,7 +477,7 @@ impl EmulebbCore {
                 ..Ed2kRuntimeConfig::default()
             },
         )?;
-        // Drive the shared download coordinator from the live REST core_settings
+        // Drive the shared download coordinator from live REST settings.core
         // (maxConnections / maxConnectionsPerFiveSeconds / maxSourcesPerFile),
         // like the download throttle, so REST core setting changes apply to the
         // global connection budget + per-file source caps.

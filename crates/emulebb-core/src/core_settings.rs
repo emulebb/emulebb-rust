@@ -42,7 +42,7 @@ pub(crate) fn ed2k_download_limit_bytes_per_sec_from_core_settings(
 /// core_settings (`maxConnections` / `maxConnectionsPerFiveSeconds` /
 /// `maxSourcesPerFile`), mirroring the eMule controls
 /// `GetMaxConnections` / `GetMaxConperFive` / `GetConfiguredMaxSourcesPerFile`.
-/// Applied at startup and on every core_settings update, like the download limit.
+/// Applied at startup and on every settings.core update, like the download limit.
 /// The connection window and reask pacing interval keep their master-derived
 /// defaults (5s window, ~10s reask floor) since the REST surface does not expose
 /// them.
