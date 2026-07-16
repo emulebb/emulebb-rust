@@ -95,27 +95,29 @@ export global ClassicTheme {
     out property <color> warning-border: #b08000;
 }
 
-component TabButton inherits Rectangle {
+component NavButton inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
     callback clicked;
 
-    height: 28px;
-    width: max(72px, label.preferred-width + 18px);
-    background: selected ? ClassicTheme.selected-face : ClassicTheme.control-strip;
+    height: 30px;
+    width: 128px;
+    background: selected ? ClassicTheme.selected-face : ClassicTheme.panel-face;
     border-color: selected ? ClassicTheme.selected-accent : ClassicTheme.border-shadow;
     border-width: 1px;
     border-radius: 0px;
 
-    label := Text {
+    Text {
         x: 9px;
         y: 0px;
+        width: parent.width - 18px;
         height: parent.height;
         text: root.text;
         color: ClassicTheme.text;
         font-size: 12px;
         font-weight: root.selected ? 700 : 500;
         vertical-alignment: center;
+        overflow: elide;
     }
 
     TouchArea {
@@ -332,9 +334,9 @@ export component MainWindow inherits Window {
     callback server-import-requested();
 
     title: "eMuleBB Rust UI";
-    preferred-width: 1240px;
+    preferred-width: 1320px;
     preferred-height: 820px;
-    min-width: 980px;
+    min-width: 1120px;
     min-height: 620px;
     background: ClassicTheme.window-face;
 
@@ -498,61 +500,126 @@ export component MainWindow inherits Window {
             }
         }
 
-        Rectangle {
-            height: 30px;
-            background: ClassicTheme.control-strip;
-            border-color: ClassicTheme.border-shadow;
-            border-width: 1px;
-            border-radius: 0px;
+        HorizontalLayout {
+            spacing: 4px;
 
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                padding-top: 1px;
-                padding-bottom: 1px;
-                spacing: 6px;
-                TabButton { text: "Kad"; selected: root.selected-tab == 0; clicked => { root.tab-requested(0); } }
-                TabButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.tab-requested(1); } }
-                TabButton { text: "Search"; selected: root.selected-tab == 2; clicked => { root.tab-requested(2); } }
-                TabButton { text: "Downloads"; selected: root.selected-tab == 3; clicked => { root.tab-requested(3); } }
-                TabButton { text: "Uploads"; selected: root.selected-tab == 4; clicked => { root.tab-requested(4); } }
-                TabButton { text: "Queued Clients"; selected: root.selected-tab == 5; clicked => { root.tab-requested(5); } }
-                TabButton { text: "Known Clients"; selected: root.selected-tab == 6; clicked => { root.tab-requested(6); } }
-                TabButton { text: "Shared Files"; selected: root.selected-tab == 7; clicked => { root.tab-requested(7); } }
-                TabButton { text: "Logs"; selected: root.selected-tab == 8; clicked => { root.tab-requested(8); } }
-                TabButton { text: "Settings"; selected: root.selected-tab == 9; clicked => { root.tab-requested(9); } }
-            }
-        }
+            Rectangle {
+                width: 146px;
+                background: ClassicTheme.control-strip;
+                border-color: ClassicTheme.border-shadow;
+                border-width: 1px;
+                border-radius: 0px;
 
-        Rectangle {
-            height: 28px;
-            background: root.error-message == "" ? ClassicTheme.panel-face : ClassicTheme.warning-face;
-            border-color: root.error-message == "" ? ClassicTheme.border-shadow : ClassicTheme.warning-border;
-            border-width: 1px;
-            border-radius: 0px;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 5px;
 
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 12px;
-                StatusText { value: root.lifecycle-line; block-width: 160px; }
-                StatusText { value: root.transfer-summary; block-width: 150px; }
-                StatusText { value: root.server-summary; block-width: 108px; }
-                StatusText { value: root.shared-summary; block-width: 108px; }
-                StatusText { value: root.upload-summary; block-width: 130px; }
-                StatusText { value: root.speed-line; block-width: 180px; }
-                Text {
-                    text: root.error-message == "" ? root.network-line : root.error-message;
-                    color: root.error-message == "" ? ClassicTheme.text-soft : ClassicTheme.warning-text;
-                    font-size: 12px;
-                    height: 24px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                    Text {
+                        text: "Navigation";
+                        color: ClassicTheme.text-muted;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+                    NavButton { text: "Kad"; selected: root.selected-tab == 0; clicked => { root.tab-requested(0); } }
+                    NavButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.tab-requested(1); } }
+                    NavButton { text: "Search"; selected: root.selected-tab == 2; clicked => { root.tab-requested(2); } }
+                    NavButton { text: "Downloads"; selected: root.selected-tab == 3; clicked => { root.tab-requested(3); } }
+                    NavButton { text: "Uploads"; selected: root.selected-tab == 4; clicked => { root.tab-requested(4); } }
+                    NavButton { text: "Queued Clients"; selected: root.selected-tab == 5; clicked => { root.tab-requested(5); } }
+                    NavButton { text: "Known Clients"; selected: root.selected-tab == 6; clicked => { root.tab-requested(6); } }
+                    NavButton { text: "Shared Files"; selected: root.selected-tab == 7; clicked => { root.tab-requested(7); } }
+                    NavButton { text: "Logs"; selected: root.selected-tab == 8; clicked => { root.tab-requested(8); } }
+                    NavButton { text: "Settings"; selected: root.selected-tab == 9; clicked => { root.tab-requested(9); } }
                 }
             }
-        }
 
-        Rectangle {
+            VerticalLayout {
+                spacing: 4px;
+
+                Rectangle {
+                    height: 48px;
+                    background: ClassicTheme.panel-face;
+                    border-color: ClassicTheme.border-shadow;
+                    border-width: 1px;
+                    border-radius: 0px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+
+                        Text {
+                            text: root.selected-tab == 0 ? "Kad" :
+                                root.selected-tab == 1 ? "Servers" :
+                                root.selected-tab == 2 ? "Search" :
+                                root.selected-tab == 3 ? "Downloads" :
+                                root.selected-tab == 4 ? "Uploads" :
+                                root.selected-tab == 5 ? "Queued Clients" :
+                                root.selected-tab == 6 ? "Known Clients" :
+                                root.selected-tab == 7 ? "Shared Files" :
+                                root.selected-tab == 8 ? "Logs" : "Settings";
+                            color: ClassicTheme.text;
+                            font-size: 16px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            min-width: 160px;
+                        }
+                        Text {
+                            text: root.selected-tab == 0 ? root.network-line :
+                                root.selected-tab == 1 ? root.server-summary :
+                                root.selected-tab == 2 ? root.search-status-line :
+                                root.selected-tab == 3 ? root.transfer-summary :
+                                root.selected-tab == 4 ? root.upload-summary :
+                                root.selected-tab == 5 ? root.upload-summary :
+                                root.selected-tab == 6 ? root.counts-line :
+                                root.selected-tab == 7 ? root.shared-summary :
+                                root.selected-tab == 8 ? root.counts-line : root.settings-status-line;
+                            color: ClassicTheme.text-muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 36px;
+                    background: ClassicTheme.field-face;
+                    border-color: ClassicTheme.border-shadow;
+                    border-width: 1px;
+                    border-radius: 0px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        spacing: 6px;
+
+                        Button { text: "Refresh"; enabled: !root.is-refreshing; clicked => { root.refresh-requested(); } }
+                        if root.selected-tab == 0 : Button { text: "Start Kad"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("start"); } }
+                        if root.selected-tab == 0 : Button { text: "Stop Kad"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("stop"); } }
+                        if root.selected-tab == 0 : Button { text: "Bootstrap"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("bootstrap"); } }
+                        if root.selected-tab == 0 : Button { text: "Recheck Firewall"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("recheck-firewall"); } }
+                        if root.selected-tab == 3 && root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
+                        if root.selected-tab == 3 && root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
+                        if root.selected-tab == 3 && root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
+                        if root.selected-tab == 3 && root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
+                        if root.selected-tab == 2 && root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
+                        if root.selected-tab == 2 && root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
+                        if root.selected-tab == 1 && root.selected-kind == "server" : Button {
+                            text: "Connect Server";
+                            enabled: root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
+                            clicked => { root.server-action-requested("connect-selected", root.selected-id); }
+                        }
+                        if root.selected-tab == 1 && root.selected-kind == "server" : Button { text: "Disconnect Server"; clicked => { root.server-action-requested("disconnect", ""); } }
+                        if root.selected-tab == 9 : Button { text: "Reload Settings"; enabled: !root.is-refreshing; clicked => { root.settings-reload-requested(); } }
+                        if root.selected-tab == 9 : Button { text: "Apply"; enabled: !root.is-refreshing; clicked => { root.settings-apply-requested(); } }
+                        if root.selected-tab == 9 : Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
+                    }
+                }
+
+                Rectangle {
             background: ClassicTheme.panel-face;
             border-color: ClassicTheme.border-shadow;
             border-width: 1px;
@@ -599,7 +666,7 @@ export component MainWindow inherits Window {
                     spacing: 8px;
 
                     Rectangle {
-                        height: 74px;
+                        height: 104px;
                         background: ClassicTheme.field-face;
                         border-color: ClassicTheme.border-shadow;
                         border-width: 1px;
@@ -614,8 +681,13 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 LineEdit { text <=> root.server-address; placeholder-text: "Address"; min-width: 170px; }
                                 LineEdit { text <=> root.server-port; placeholder-text: "Port"; min-width: 72px; }
-                                LineEdit { text <=> root.server-name; placeholder-text: "Name"; min-width: 180px; }
-                                LineEdit { text <=> root.server-priority; placeholder-text: "low, normal, high"; min-width: 130px; }
+                                LineEdit { text <=> root.server-name; placeholder-text: "Name"; min-width: 160px; }
+                                LineEdit { text <=> root.server-priority; placeholder-text: "low, normal, high"; min-width: 116px; }
+                            }
+
+                            HorizontalLayout {
+                                height: 28px;
+                                spacing: 6px;
                                 CheckBox { text: "Static"; checked <=> root.server-static; }
                                 CheckBox { text: "Enabled"; checked <=> root.server-enabled; }
                                 CheckBox { text: "Connect"; checked <=> root.server-connect-after-add; }
@@ -635,7 +707,7 @@ export component MainWindow inherits Window {
                             HorizontalLayout {
                                 height: 28px;
                                 spacing: 6px;
-                                LineEdit { text <=> root.server-import-url; placeholder-text: "server.met URL"; min-width: 450px; }
+                                LineEdit { text <=> root.server-import-url; placeholder-text: "server.met URL"; min-width: 300px; }
                                 Button { text: "Import"; enabled: !root.is-refreshing; clicked => { root.server-import-requested(); } }
                                 Button { text: "Disconnect"; enabled: !root.is-refreshing; clicked => { root.server-action-requested("disconnect", ""); } }
                                 Button {
@@ -704,17 +776,17 @@ export component MainWindow inherits Window {
                             LineEdit {
                                 text <=> root.search-query;
                                 placeholder-text: "Search query";
-                                min-width: 360px;
+                                min-width: 240px;
                             }
                             LineEdit {
                                 text <=> root.search-method;
                                 placeholder-text: "automatic, global, server, kad";
-                                min-width: 150px;
+                                min-width: 120px;
                             }
                             LineEdit {
                                 text <=> root.search-type;
                                 placeholder-text: "type";
-                                min-width: 92px;
+                                min-width: 80px;
                             }
                             Button {
                                 text: "Start";
@@ -1001,47 +1073,89 @@ export component MainWindow inherits Window {
                     }
                 }
             }
-        }
+                }
+            }
 
-        Rectangle {
-            height: 140px;
-            background: ClassicTheme.panel-face;
-            border-color: ClassicTheme.border-shadow;
-            border-width: 1px;
-            border-radius: 0px;
+            Rectangle {
+                width: 280px;
+                background: ClassicTheme.panel-face;
+                border-color: ClassicTheme.border-shadow;
+                border-width: 1px;
+                border-radius: 0px;
 
-            VerticalLayout {
-                padding: 8px;
-                spacing: 6px;
-                HorizontalLayout {
-                    height: 28px;
-                    spacing: 6px;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+
                     Text {
                         text: root.inspector-title == "" ? "Inspector" : root.inspector-title;
                         color: ClassicTheme.text;
                         font-size: 13px;
                         font-weight: 700;
-                        vertical-alignment: center;
                         overflow: elide;
                     }
-                    if root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
-                    if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
-                    if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
-                    if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
-                    if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
-                    if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
-                    if root.selected-kind == "server" : Button {
-                        text: "Connect";
-                        enabled: root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
-                        clicked => { root.server-action-requested("connect-selected", root.selected-id); }
+
+                    Rectangle {
+                        background: ClassicTheme.field-face;
+                        border-color: ClassicTheme.border-shadow;
+                        border-width: 1px;
+                        border-radius: 0px;
+
+                        Text {
+                            x: 7px;
+                            y: 7px;
+                            width: parent.width - 14px;
+                            height: parent.height - 14px;
+                            text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
+                            color: ClassicTheme.text-muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
                     }
-                    if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect", ""); } }
+
+                    VerticalLayout {
+                        spacing: 5px;
+                        if root.selected-kind == "transfer" : Button { text: "Pause"; clicked => { root.transfer-action-requested(root.selected-id, "pause"); } }
+                        if root.selected-kind == "transfer" : Button { text: "Resume"; clicked => { root.transfer-action-requested(root.selected-id, "resume"); } }
+                        if root.selected-kind == "transfer" : Button { text: "Stop"; clicked => { root.transfer-action-requested(root.selected-id, "stop"); } }
+                        if root.selected-kind == "transfer" : Button { text: "Recheck"; clicked => { root.transfer-action-requested(root.selected-id, "recheck"); } }
+                        if root.selected-kind == "search-result" : Button { text: "Download"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, false); } }
+                        if root.selected-kind == "search-result" : Button { text: "Download Paused"; clicked => { root.search-download-requested(root.selected-search-id, root.selected-id, true); } }
+                        if root.selected-kind == "server" : Button {
+                            text: "Connect";
+                            enabled: root.selected-server-enabled && !root.selected-server-connected && !root.selected-server-connecting;
+                            clicked => { root.server-action-requested("connect-selected", root.selected-id); }
+                        }
+                        if root.selected-kind == "server" : Button { text: "Disconnect"; clicked => { root.server-action-requested("disconnect", ""); } }
+                    }
                 }
+            }
+        }
+
+        Rectangle {
+            height: 30px;
+            background: root.error-message == "" ? ClassicTheme.panel-face : ClassicTheme.warning-face;
+            border-color: root.error-message == "" ? ClassicTheme.border-shadow : ClassicTheme.warning-border;
+            border-width: 1px;
+            border-radius: 0px;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 12px;
+                StatusText { value: root.lifecycle-line; block-width: 160px; }
+                StatusText { value: root.transfer-summary; block-width: 150px; }
+                StatusText { value: root.server-summary; block-width: 108px; }
+                StatusText { value: root.shared-summary; block-width: 108px; }
+                StatusText { value: root.upload-summary; block-width: 130px; }
+                StatusText { value: root.speed-line; block-width: 180px; }
                 Text {
-                    text: root.inspector-detail == "" ? root.counts-line : root.inspector-detail;
-                    color: ClassicTheme.text-muted;
+                    text: root.error-message == "" ? root.network-line : root.error-message;
+                    color: root.error-message == "" ? ClassicTheme.text-soft : ClassicTheme.warning-text;
                     font-size: 12px;
-                    wrap: word-wrap;
+                    height: 24px;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }
