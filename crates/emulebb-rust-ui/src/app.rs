@@ -233,6 +233,11 @@ pub(crate) fn run() -> Result<()> {
     ui.set_selected_server_connecting(false);
     ui.set_inspector_title("Inspector".into());
     ui.set_inspector_detail("Select a row to inspect details and actions.".into());
+    let initially_maximized = saved_state
+        .window
+        .as_ref()
+        .map(|window| window.maximized)
+        .unwrap_or(true);
     apply_saved_state(&ui, &saved_state);
 
     let (tx, rx) = mpsc::channel::<UiCommand>();
@@ -440,6 +445,8 @@ pub(crate) fn run() -> Result<()> {
         }
     });
 
+    schedule_initial_window_refresh(&ui, initially_maximized)
+        .context("failed to schedule initial Slint window refresh")?;
     ui.run().context("Slint event loop failed")
 }
 
@@ -532,7 +539,17 @@ fn apply_saved_state(ui: &MainWindow, state: &ui_state::UiState) {
         ui.window()
             .set_position(PhysicalPosition::new(window.x, window.y));
     }
-    ui.window().set_maximized(true);
+}
+
+fn schedule_initial_window_refresh(ui: &MainWindow, maximized: bool) -> Result<()> {
+    ui.as_weak()
+        .upgrade_in_event_loop(move |ui| {
+            if maximized {
+                ui.window().set_maximized(true);
+            }
+            ui.window().request_redraw();
+        })
+        .context("failed to enqueue initial Slint window refresh")
 }
 
 fn apply_saved_table_sort(ui: &MainWindow, state: &ui_state::UiState, table: &str) {
@@ -576,6 +593,7 @@ fn reset_layout(ui: &MainWindow) {
     set_table_sort(ui, TABLE_LOGS, -1, false);
     ui.window().set_size(PhysicalSize::new(1240, 820));
     ui.window().set_maximized(true);
+    ui.window().request_redraw();
 }
 
 fn save_current_ui_state(ui: &MainWindow) {
