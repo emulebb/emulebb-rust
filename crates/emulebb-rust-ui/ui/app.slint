@@ -1,4 +1,4 @@
-import { Button, CheckBox, LineEdit, StandardTableView } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ScrollView, StandardTableView } from "std-widgets.slint";
 
 export struct TransferItem {
     hash: string,
@@ -883,106 +883,119 @@ export component MainWindow inherits Window {
                 height: parent.height;
                 background: ClassicTheme.panel-face;
 
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 10px;
+                settings-scroll := ScrollView {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-width: max(parent.width, 940px);
+                    viewport-height: 640px;
 
-                    HorizontalLayout {
-                        height: 30px;
-                        spacing: 6px;
-                        Text {
-                            text: "Settings";
-                            color: ClassicTheme.text;
-                            font-size: 15px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                            min-width: 190px;
-                        }
-                        Button { text: "Reload"; enabled: !root.is-refreshing; clicked => { root.settings-reload-requested(); } }
-                        Button { text: "Apply"; enabled: !root.is-refreshing; clicked => { root.settings-apply-requested(); } }
-                        Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
-                        Text {
-                            text: root.settings-status-line;
-                            color: ClassicTheme.text-muted;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
+                    settings-content := Rectangle {
+                        width: parent.viewport-width;
+                        height: parent.viewport-height;
+                        background: ClassicTheme.panel-face;
 
-                    VerticalLayout {
-                        spacing: 12px;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 10px;
 
-                        HorizontalLayout {
-                            spacing: 28px;
-
-                            VerticalLayout {
-                                spacing: 5px;
-                                Text { text: "Live Settings"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                SettingField { label: "Upload limit KiB/s"; value <=> root.core-upload-limit; }
-                                SettingField { label: "Download limit KiB/s"; value <=> root.core-download-limit; }
-                                SettingField { label: "Max connections"; value <=> root.core-max-connections; }
-                                SettingField { label: "Max connections / 5 sec"; value <=> root.core-max-connections-per-five; }
-                                SettingField { label: "Max sources / file"; value <=> root.core-max-sources; }
-                                SettingField { label: "Upload client KiB/s"; value <=> root.core-upload-client-rate; }
-                                SettingField { label: "Max upload slots"; value <=> root.core-max-upload-slots; }
-                                SettingField { label: "Upload elastic percent"; value <=> root.core-upload-elastic-percent; }
-                                SettingField { label: "Queue size"; value <=> root.core-queue-size; }
+                            HorizontalLayout {
+                                height: 30px;
+                                spacing: 6px;
+                                Text {
+                                    text: "Settings";
+                                    color: ClassicTheme.text;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    min-width: 190px;
+                                }
+                                Button { text: "Reload"; enabled: !root.is-refreshing; clicked => { root.settings-reload-requested(); } }
+                                Button { text: "Apply"; enabled: !root.is-refreshing; clicked => { root.settings-apply-requested(); } }
+                                Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
+                                Text {
+                                    text: root.settings-status-line;
+                                    color: ClassicTheme.text-muted;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
                             }
 
                             VerticalLayout {
-                                spacing: 5px;
-                                Text { text: "Network Binding"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                SettingField { label: "Incoming directory"; value <=> root.settings-incoming-dir; }
-                                SettingField { label: "P2P bind IP"; value <=> root.settings-p2p-bind-ip; }
-                                SettingField { label: "P2P bind interface"; value <=> root.settings-p2p-bind-interface; }
-                                Text { text: "Network"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                SettingField { label: "eD2K listen port"; value <=> root.settings-ed2k-listen-port; }
-                                SettingField { label: "eD2K connect timeout sec"; value <=> root.settings-ed2k-connect-timeout-secs; }
-                                SettingField { label: "eD2K reconnect sec"; value <=> root.settings-ed2k-reconnect-interval-secs; }
-                                SettingField { label: "Kad listen port"; value <=> root.settings-kad-listen-port; }
-                                SettingField { label: "Kad bootstrap contacts"; value <=> root.settings-kad-bootstrap-min-routing-contacts; }
-                            }
+                                spacing: 12px;
 
-                            VerticalLayout {
-                                spacing: 5px;
-                                Text { text: "NAT / VPN Guard"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                CheckBox { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
-                                CheckBox { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
-                                SettingField { label: "NAT bind IP"; value <=> root.settings-nat-bind-ip; }
-                                SettingField { label: "External IP override"; value <=> root.settings-nat-external-ip-override; }
-                                CheckBox { text: "VPN Guard enabled"; checked <=> root.settings-vpn-guard-enabled; }
-                                SettingField { label: "VPN Guard mode"; value <=> root.settings-vpn-guard-mode; }
-                                SettingField { label: "Allowed public CIDRs"; value <=> root.settings-vpn-guard-allowed-public-ip-cidrs; }
-                                CheckBox { text: "IP filter enabled"; checked <=> root.settings-ip-filter-enabled; }
-                                SettingField { label: "IP filter path"; value <=> root.settings-ip-filter-path; }
-                                SettingField { label: "IP filter level"; value <=> root.settings-ip-filter-level; }
-                            }
-                        }
+                                HorizontalLayout {
+                                    spacing: 28px;
 
-                        HorizontalLayout {
-                            spacing: 28px;
+                                    VerticalLayout {
+                                        spacing: 5px;
+                                        Text { text: "Live Settings"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        SettingField { label: "Upload limit KiB/s"; value <=> root.core-upload-limit; }
+                                        SettingField { label: "Download limit KiB/s"; value <=> root.core-download-limit; }
+                                        SettingField { label: "Max connections"; value <=> root.core-max-connections; }
+                                        SettingField { label: "Max connections / 5 sec"; value <=> root.core-max-connections-per-five; }
+                                        SettingField { label: "Max sources / file"; value <=> root.core-max-sources; }
+                                        SettingField { label: "Upload client KiB/s"; value <=> root.core-upload-client-rate; }
+                                        SettingField { label: "Max upload slots"; value <=> root.core-max-upload-slots; }
+                                        SettingField { label: "Upload elastic percent"; value <=> root.core-upload-elastic-percent; }
+                                        SettingField { label: "Queue size"; value <=> root.core-queue-size; }
+                                    }
 
-                            VerticalLayout {
-                                spacing: 5px;
-                                Text { text: "Live Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                CheckBox { text: "Auto connect"; checked <=> root.core-auto-connect; }
-                                CheckBox { text: "Reconnect"; checked <=> root.core-reconnect; }
-                                CheckBox { text: "Credit system"; checked <=> root.core-credit-system; }
-                                CheckBox { text: "Safe server connect"; checked <=> root.core-safe-server-connect; }
-                                CheckBox { text: "Add servers from server"; checked <=> root.core-add-servers-from-server; }
-                                CheckBox { text: "Kademlia"; checked <=> root.core-network-kademlia; }
-                                CheckBox { text: "eD2K"; checked <=> root.core-network-ed2k; }
-                            }
+                                    VerticalLayout {
+                                        spacing: 5px;
+                                        Text { text: "Network Binding"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        SettingField { label: "Incoming directory"; value <=> root.settings-incoming-dir; }
+                                        SettingField { label: "P2P bind IP"; value <=> root.settings-p2p-bind-ip; }
+                                        SettingField { label: "P2P bind interface"; value <=> root.settings-p2p-bind-interface; }
+                                        Text { text: "Network"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        SettingField { label: "eD2K listen port"; value <=> root.settings-ed2k-listen-port; }
+                                        SettingField { label: "eD2K connect timeout sec"; value <=> root.settings-ed2k-connect-timeout-secs; }
+                                        SettingField { label: "eD2K reconnect sec"; value <=> root.settings-ed2k-reconnect-interval-secs; }
+                                        SettingField { label: "Kad listen port"; value <=> root.settings-kad-listen-port; }
+                                        SettingField { label: "Kad bootstrap contacts"; value <=> root.settings-kad-bootstrap-min-routing-contacts; }
+                                    }
 
-                            VerticalLayout {
-                                spacing: 5px;
-                                Text { text: "Network Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                CheckBox { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
-                                CheckBox { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
-                                CheckBox { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
-                                CheckBox { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }
-                                CheckBox { text: "Kad routing maintenance"; checked <=> root.settings-kad-routing-maintenance-enabled; }
+                                    VerticalLayout {
+                                        spacing: 5px;
+                                        Text { text: "NAT / VPN Guard"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        CheckBox { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
+                                        CheckBox { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
+                                        SettingField { label: "NAT bind IP"; value <=> root.settings-nat-bind-ip; }
+                                        SettingField { label: "External IP override"; value <=> root.settings-nat-external-ip-override; }
+                                        CheckBox { text: "VPN Guard enabled"; checked <=> root.settings-vpn-guard-enabled; }
+                                        SettingField { label: "VPN Guard mode"; value <=> root.settings-vpn-guard-mode; }
+                                        SettingField { label: "Allowed public CIDRs"; value <=> root.settings-vpn-guard-allowed-public-ip-cidrs; }
+                                        CheckBox { text: "IP filter enabled"; checked <=> root.settings-ip-filter-enabled; }
+                                        SettingField { label: "IP filter path"; value <=> root.settings-ip-filter-path; }
+                                        SettingField { label: "IP filter level"; value <=> root.settings-ip-filter-level; }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 28px;
+
+                                    VerticalLayout {
+                                        spacing: 5px;
+                                        Text { text: "Live Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        CheckBox { text: "Auto connect"; checked <=> root.core-auto-connect; }
+                                        CheckBox { text: "Reconnect"; checked <=> root.core-reconnect; }
+                                        CheckBox { text: "Credit system"; checked <=> root.core-credit-system; }
+                                        CheckBox { text: "Safe server connect"; checked <=> root.core-safe-server-connect; }
+                                        CheckBox { text: "Add servers from server"; checked <=> root.core-add-servers-from-server; }
+                                        CheckBox { text: "Kademlia"; checked <=> root.core-network-kademlia; }
+                                        CheckBox { text: "eD2K"; checked <=> root.core-network-ed2k; }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: 5px;
+                                        Text { text: "Network Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        CheckBox { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
+                                        CheckBox { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
+                                        CheckBox { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
+                                        CheckBox { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }
+                                        CheckBox { text: "Kad routing maintenance"; checked <=> root.settings-kad-routing-maintenance-enabled; }
+                                    }
+                                }
                             }
                         }
                     }
