@@ -122,11 +122,14 @@ enum UiCommand {
 
 pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
+    let saved_state = ui_state::load();
     let initial_config = ConnectionConfig {
-        base_url: cli.base_url.unwrap_or_else(default_base_url),
+        base_url: cli
+            .base_url
+            .or_else(|| saved_state.backend_base_url.clone())
+            .unwrap_or_else(default_base_url),
         api_key: cli.api_key,
     };
-    let saved_state = ui_state::load();
     let ui = MainWindow::new().context("failed to create Slint window")?;
     ui.set_base_url(initial_config.base_url.clone().into());
     ui.set_api_key(initial_config.api_key.clone().into());
@@ -264,11 +267,15 @@ pub(crate) fn run() -> Result<()> {
         CloseRequestResponse::HideWindow
     });
 
+    let connect_ui = ui.as_weak();
     ui.on_connect_requested(move |base_url, api_key| {
         let _ = connect_tx.send(UiCommand::Connect(ConnectionConfig {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
         }));
+        if let Some(ui) = connect_ui.upgrade() {
+            save_current_ui_state(&ui);
+        }
     });
 
     ui.on_refresh_requested(move || {
@@ -300,6 +307,7 @@ pub(crate) fn run() -> Result<()> {
             if let Err(error) = ui_state::reset() {
                 ui.set_error_message(format!("Layout reset failed: {error}").into());
             } else {
+                save_current_ui_state(&ui);
                 ui.set_error_message("Layout reset to defaults".into());
             }
         }
@@ -315,7 +323,7 @@ pub(crate) fn run() -> Result<()> {
             ui.set_selected_server_connecting(false);
             ui.set_inspector_title("eMuleBB Rust UI".into());
             ui.set_inspector_detail(
-                "Native Slint UI for the emulebb-rust REST API.\nLayout state is stored per user and does not persist API keys."
+                "Native Slint UI for the emulebb-rust REST API.\nUI state stores layout and REST base URL only. API keys stay session-only."
                     .into(),
             );
         }
@@ -589,6 +597,7 @@ fn capture_ui_state(ui: &MainWindow) -> ui_state::UiState {
             maximized: ui.window().is_maximized(),
         }),
         selected_tab: Some(ui.get_selected_tab()),
+        backend_base_url: Some(ui.get_base_url().to_string()).filter(|value| !value.is_empty()),
         tables: Default::default(),
     };
     capture_table_state(

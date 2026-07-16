@@ -12,6 +12,8 @@ pub struct UiState {
     pub window: Option<WindowState>,
     pub selected_tab: Option<i32>,
     #[serde(default)]
+    pub backend_base_url: Option<String>,
+    #[serde(default)]
     pub tables: BTreeMap<String, TableState>,
 }
 
@@ -99,5 +101,34 @@ fn config_base_dir() -> Option<PathBuf> {
                     path
                 })
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_state_persists_backend_url_without_secret_fields() {
+        let state = UiState {
+            backend_base_url: Some("http://192.0.2.10:4711/api/v1".to_string()),
+            ..UiState::default()
+        };
+
+        let json = serde_json::to_string(&state).expect("serialize UI state");
+
+        assert!(json.contains("backendBaseUrl"));
+        assert!(json.contains("192.0.2.10"));
+        assert!(!json.contains("apiKey"));
+        assert!(!json.contains("api-key"));
+    }
+
+    #[test]
+    fn ui_state_accepts_older_layout_only_state() {
+        let state: UiState =
+            serde_json::from_str(r#"{"selectedTab":2,"tables":{}}"#).expect("parse UI state");
+
+        assert_eq!(state.selected_tab, Some(2));
+        assert_eq!(state.backend_base_url, None);
     }
 }

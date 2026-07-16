@@ -1,4 +1,4 @@
-import { Button, CheckBox, LineEdit, ScrollView, StandardTableView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, ScrollView, StandardTableView, Switch } from "std-widgets.slint";
 
 export struct TransferItem {
     hash: string,
@@ -100,11 +100,11 @@ component NavButton inherits Rectangle {
     in property <bool> selected;
     callback clicked;
 
-    height: 30px;
-    width: 128px;
-    background: selected ? ClassicTheme.selected-face : ClassicTheme.panel-face;
+    height: 28px;
+    width: 126px;
+    background: selected ? ClassicTheme.selected-face : transparent;
     border-color: selected ? ClassicTheme.selected-accent : ClassicTheme.border-shadow;
-    border-width: 1px;
+    border-width: selected ? 1px : 0px;
     border-radius: 0px;
 
     Text {
@@ -115,7 +115,7 @@ component NavButton inherits Rectangle {
         text: root.text;
         color: ClassicTheme.text;
         font-size: 12px;
-        font-weight: root.selected ? 700 : 500;
+        font-weight: root.selected ? 700 : 400;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -441,85 +441,21 @@ export component MainWindow inherits Window {
         padding: 6px;
         spacing: 4px;
 
-        Rectangle {
-            height: 38px;
-            background: ClassicTheme.panel-face;
-            border-color: ClassicTheme.border-shadow;
-            border-width: 1px;
-            border-radius: 0px;
-
-            HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
-                padding-top: 3px;
-                padding-bottom: 3px;
-                spacing: 8px;
-
-                Text {
-                    text: "eMuleBB Rust";
-                    font-size: 16px;
-                    font-weight: 700;
-                    color: ClassicTheme.text;
-                    vertical-alignment: center;
-                    min-width: 128px;
-                }
-
-                LineEdit {
-                    text <=> root.base-url;
-                    placeholder-text: "REST base URL";
-                    min-width: 340px;
-                }
-
-                LineEdit {
-                    text <=> root.api-key;
-                    placeholder-text: "API key";
-                    min-width: 150px;
-                }
-
-                Button {
-                    text: root.is-refreshing ? "Working" : "Connect";
-                    enabled: !root.is-refreshing;
-                    clicked => { root.connect-requested(root.base-url, root.api-key); }
-                }
-
-                Button {
-                    text: "Refresh";
-                    enabled: !root.is-refreshing;
-                    clicked => { root.refresh-requested(); }
-                }
-
-                Text {
-                    text: root.connection-state;
-                    color: root.connection-state == "Connected" ? ClassicTheme.connected : ClassicTheme.warning-text;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
-                    overflow: elide;
-                }
-            }
-        }
-
         HorizontalLayout {
             spacing: 4px;
 
             Rectangle {
-                width: 146px;
-                background: ClassicTheme.control-strip;
+                width: 142px;
+                background: ClassicTheme.panel-face;
                 border-color: ClassicTheme.border-shadow;
                 border-width: 1px;
                 border-radius: 0px;
 
                 VerticalLayout {
-                    padding: 8px;
-                    spacing: 5px;
+                    padding: 7px;
+                    spacing: 4px;
+                    alignment: start;
 
-                    Text {
-                        text: "Navigation";
-                        color: ClassicTheme.text-muted;
-                        font-size: 12px;
-                        font-weight: 700;
-                    }
                     NavButton { text: "Kad"; selected: root.selected-tab == 0; clicked => { root.tab-requested(0); } }
                     NavButton { text: "Servers"; selected: root.selected-tab == 1; clicked => { root.tab-requested(1); } }
                     NavButton { text: "Search"; selected: root.selected-tab == 2; clicked => { root.tab-requested(2); } }
@@ -537,7 +473,7 @@ export component MainWindow inherits Window {
                 spacing: 4px;
 
                 Rectangle {
-                    height: 48px;
+                    height: 34px;
                     background: ClassicTheme.panel-face;
                     border-color: ClassicTheme.border-shadow;
                     border-width: 1px;
@@ -559,7 +495,7 @@ export component MainWindow inherits Window {
                                 root.selected-tab == 7 ? "Shared Files" :
                                 root.selected-tab == 8 ? "Logs" : "Settings";
                             color: ClassicTheme.text;
-                            font-size: 16px;
+                            font-size: 15px;
                             font-weight: 700;
                             vertical-alignment: center;
                             min-width: 160px;
@@ -583,7 +519,7 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 36px;
+                    height: 32px;
                     background: ClassicTheme.field-face;
                     border-color: ClassicTheme.border-shadow;
                     border-width: 1px;
@@ -592,8 +528,8 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 8px;
-                        padding-top: 3px;
-                        padding-bottom: 3px;
+                        padding-top: 2px;
+                        padding-bottom: 2px;
                         spacing: 6px;
 
                         Button { text: "Refresh"; enabled: !root.is-refreshing; clicked => { root.refresh-requested(); } }
@@ -645,14 +581,6 @@ export component MainWindow inherits Window {
                         color: ClassicTheme.text-muted;
                         font-size: 12px;
                     }
-                    HorizontalLayout {
-                        height: 30px;
-                        spacing: 6px;
-                        Button { text: "Start"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("start"); } }
-                        Button { text: "Stop"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("stop"); } }
-                        Button { text: "Bootstrap"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("bootstrap"); } }
-                        Button { text: "Recheck Firewall"; enabled: !root.is-refreshing; clicked => { root.kad-action-requested("recheck-firewall"); } }
-                    }
                 }
             }
 
@@ -682,7 +610,11 @@ export component MainWindow inherits Window {
                                 LineEdit { text <=> root.server-address; placeholder-text: "Address"; min-width: 170px; }
                                 LineEdit { text <=> root.server-port; placeholder-text: "Port"; min-width: 72px; }
                                 LineEdit { text <=> root.server-name; placeholder-text: "Name"; min-width: 160px; }
-                                LineEdit { text <=> root.server-priority; placeholder-text: "low, normal, high"; min-width: 116px; }
+                                ComboBox {
+                                    current-value <=> root.server-priority;
+                                    model: ["low", "normal", "high"];
+                                    min-width: 116px;
+                                }
                             }
 
                             HorizontalLayout {
@@ -778,9 +710,9 @@ export component MainWindow inherits Window {
                                 placeholder-text: "Search query";
                                 min-width: 240px;
                             }
-                            LineEdit {
-                                text <=> root.search-method;
-                                placeholder-text: "automatic, global, server, kad";
+                            ComboBox {
+                                current-value <=> root.search-method;
+                                model: ["automatic", "global", "server", "kad"];
                                 min-width: 120px;
                             }
                             LineEdit {
@@ -958,8 +890,8 @@ export component MainWindow inherits Window {
                 settings-scroll := ScrollView {
                     width: parent.width;
                     height: parent.height;
-                    viewport-width: max(parent.width, 940px);
-                    viewport-height: 640px;
+                    viewport-width: max(parent.width, 960px);
+                    viewport-height: 720px;
 
                     settings-content := Rectangle {
                         width: parent.viewport-width;
@@ -967,41 +899,44 @@ export component MainWindow inherits Window {
                         background: ClassicTheme.panel-face;
 
                         VerticalLayout {
-                            padding: 12px;
+                            padding: 10px;
                             spacing: 10px;
 
-                            HorizontalLayout {
-                                height: 30px;
-                                spacing: 6px;
-                                Text {
-                                    text: "Settings";
-                                    color: ClassicTheme.text;
-                                    font-size: 15px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    min-width: 190px;
-                                }
-                                Button { text: "Reload"; enabled: !root.is-refreshing; clicked => { root.settings-reload-requested(); } }
-                                Button { text: "Apply"; enabled: !root.is-refreshing; clicked => { root.settings-apply-requested(); } }
-                                Button { text: "Revert"; enabled: !root.is-refreshing; clicked => { root.settings-revert-requested(); } }
-                                Text {
-                                    text: root.settings-status-line;
-                                    color: ClassicTheme.text-muted;
-                                    font-size: 12px;
-                                    vertical-alignment: center;
-                                    overflow: elide;
+                            GroupBox {
+                                title: "Connection";
+                                content-padding: 8px;
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    SettingField { label: "REST base URL"; value <=> root.base-url; }
+                                    SettingField { label: "API key"; value <=> root.api-key; }
+                                    HorizontalLayout {
+                                        height: 28px;
+                                        spacing: 6px;
+                                        Button {
+                                            text: root.is-refreshing ? "Working" : "Connect";
+                                            enabled: !root.is-refreshing;
+                                            clicked => { root.connect-requested(root.base-url, root.api-key); }
+                                        }
+                                        Text {
+                                            text: root.connection-state;
+                                            color: root.connection-state == "Connected" ? ClassicTheme.connected : ClassicTheme.warning-text;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
                                 }
                             }
 
-                            VerticalLayout {
-                                spacing: 12px;
+                            HorizontalLayout {
+                                spacing: 10px;
 
-                                HorizontalLayout {
-                                    spacing: 28px;
-
+                                GroupBox {
+                                    title: "Transfer Limits";
+                                    content-padding: 8px;
                                     VerticalLayout {
-                                        spacing: 5px;
-                                        Text { text: "Live Settings"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        spacing: 4px;
                                         SettingField { label: "Upload limit KiB/s"; value <=> root.core-upload-limit; }
                                         SettingField { label: "Download limit KiB/s"; value <=> root.core-download-limit; }
                                         SettingField { label: "Max connections"; value <=> root.core-max-connections; }
@@ -1012,60 +947,63 @@ export component MainWindow inherits Window {
                                         SettingField { label: "Upload elastic percent"; value <=> root.core-upload-elastic-percent; }
                                         SettingField { label: "Queue size"; value <=> root.core-queue-size; }
                                     }
+                                }
 
+                                GroupBox {
+                                    title: "Network";
+                                    content-padding: 8px;
                                     VerticalLayout {
-                                        spacing: 5px;
-                                        Text { text: "Network Binding"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
+                                        spacing: 4px;
                                         SettingField { label: "Incoming directory"; value <=> root.settings-incoming-dir; }
                                         SettingField { label: "P2P bind IP"; value <=> root.settings-p2p-bind-ip; }
                                         SettingField { label: "P2P bind interface"; value <=> root.settings-p2p-bind-interface; }
-                                        Text { text: "Network"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
                                         SettingField { label: "eD2K listen port"; value <=> root.settings-ed2k-listen-port; }
                                         SettingField { label: "eD2K connect timeout sec"; value <=> root.settings-ed2k-connect-timeout-secs; }
                                         SettingField { label: "eD2K reconnect sec"; value <=> root.settings-ed2k-reconnect-interval-secs; }
                                         SettingField { label: "Kad listen port"; value <=> root.settings-kad-listen-port; }
                                         SettingField { label: "Kad bootstrap contacts"; value <=> root.settings-kad-bootstrap-min-routing-contacts; }
                                     }
+                                }
+                            }
 
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                GroupBox {
+                                    title: "Protection";
+                                    content-padding: 8px;
                                     VerticalLayout {
                                         spacing: 5px;
-                                        Text { text: "NAT / VPN Guard"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                        CheckBox { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
-                                        CheckBox { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
+                                        Switch { text: "NAT enabled"; checked <=> root.settings-nat-enabled; }
+                                        Switch { text: "Require initial NAT mapping"; checked <=> root.settings-nat-require-initial-mapping; }
                                         SettingField { label: "NAT bind IP"; value <=> root.settings-nat-bind-ip; }
                                         SettingField { label: "External IP override"; value <=> root.settings-nat-external-ip-override; }
-                                        CheckBox { text: "VPN Guard enabled"; checked <=> root.settings-vpn-guard-enabled; }
+                                        Switch { text: "VPN Guard enabled"; checked <=> root.settings-vpn-guard-enabled; }
                                         SettingField { label: "VPN Guard mode"; value <=> root.settings-vpn-guard-mode; }
                                         SettingField { label: "Allowed public CIDRs"; value <=> root.settings-vpn-guard-allowed-public-ip-cidrs; }
-                                        CheckBox { text: "IP filter enabled"; checked <=> root.settings-ip-filter-enabled; }
+                                        Switch { text: "IP filter enabled"; checked <=> root.settings-ip-filter-enabled; }
                                         SettingField { label: "IP filter path"; value <=> root.settings-ip-filter-path; }
                                         SettingField { label: "IP filter level"; value <=> root.settings-ip-filter-level; }
                                     }
                                 }
 
-                                HorizontalLayout {
-                                    spacing: 28px;
-
+                                GroupBox {
+                                    title: "Behavior";
+                                    content-padding: 8px;
                                     VerticalLayout {
                                         spacing: 5px;
-                                        Text { text: "Live Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                        CheckBox { text: "Auto connect"; checked <=> root.core-auto-connect; }
-                                        CheckBox { text: "Reconnect"; checked <=> root.core-reconnect; }
-                                        CheckBox { text: "Credit system"; checked <=> root.core-credit-system; }
-                                        CheckBox { text: "Safe server connect"; checked <=> root.core-safe-server-connect; }
-                                        CheckBox { text: "Add servers from server"; checked <=> root.core-add-servers-from-server; }
-                                        CheckBox { text: "Kademlia"; checked <=> root.core-network-kademlia; }
-                                        CheckBox { text: "eD2K"; checked <=> root.core-network-ed2k; }
-                                    }
-
-                                    VerticalLayout {
-                                        spacing: 5px;
-                                        Text { text: "Network Toggles"; color: ClassicTheme.text; font-size: 13px; font-weight: 700; }
-                                        CheckBox { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
-                                        CheckBox { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
-                                        CheckBox { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
-                                        CheckBox { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }
-                                        CheckBox { text: "Kad routing maintenance"; checked <=> root.settings-kad-routing-maintenance-enabled; }
+                                        Switch { text: "Auto connect"; checked <=> root.core-auto-connect; }
+                                        Switch { text: "Reconnect"; checked <=> root.core-reconnect; }
+                                        Switch { text: "Credit system"; checked <=> root.core-credit-system; }
+                                        Switch { text: "Safe server connect"; checked <=> root.core-safe-server-connect; }
+                                        Switch { text: "Add servers from server"; checked <=> root.core-add-servers-from-server; }
+                                        Switch { text: "Kademlia"; checked <=> root.core-network-kademlia; }
+                                        Switch { text: "eD2K"; checked <=> root.core-network-ed2k; }
+                                        Switch { text: "eD2K obfuscation"; checked <=> root.settings-ed2k-obfuscation-enabled; }
+                                        Switch { text: "eD2K UDP reask"; checked <=> root.settings-ed2k-enable-udp-reask; }
+                                        Switch { text: "Publish Rust identity"; checked <=> root.settings-ed2k-publish-emule-rust-identity; }
+                                        Switch { text: "Kad publish shared files"; checked <=> root.settings-kad-publish-shared-files-enabled; }
+                                        Switch { text: "Kad routing maintenance"; checked <=> root.settings-kad-routing-maintenance-enabled; }
                                     }
                                 }
                             }
@@ -1143,6 +1081,7 @@ export component MainWindow inherits Window {
                 padding-left: 8px;
                 padding-right: 8px;
                 spacing: 12px;
+                StatusText { value: root.connection-state; block-width: 170px; }
                 StatusText { value: root.lifecycle-line; block-width: 160px; }
                 StatusText { value: root.transfer-summary; block-width: 150px; }
                 StatusText { value: root.server-summary; block-width: 108px; }
