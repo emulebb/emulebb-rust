@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -26,7 +26,7 @@ use emulebb_settings::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
 mod bind_config;
 pub mod log_layer;
@@ -67,6 +67,7 @@ struct DaemonBootstrapSettings {
 pub struct RestBootstrapSettings {
     pub bind_addr: Option<SocketAddr>,
     pub api_key: String,
+    pub web_root_dir: Option<PathBuf>,
 }
 
 impl Default for DaemonProfile {
@@ -94,6 +95,7 @@ impl Default for RestBootstrapSettings {
         Self {
             bind_addr: None,
             api_key: "change-me".to_string(),
+            web_root_dir: None,
         }
     }
 }
@@ -288,6 +290,46 @@ impl DaemonProfile {
         };
         Ok(candidate)
     }
+
+    pub fn web_root_dir(&self) -> Result<Option<PathBuf>> {
+        if let Some(configured) = &self.rest.web_root_dir {
+            let resolved = if configured.is_absolute() {
+                configured.clone()
+            } else {
+                self.profile_dir.join(configured)
+            };
+            validate_web_root_dir(&resolved, "rest.webRootDir")?;
+            return Ok(Some(resolved));
+        }
+
+        let exe = env::current_exe().context("failed to resolve current executable path")?;
+        let Some(exe_dir) = exe.parent() else {
+            bail!(
+                "failed to resolve executable directory from {}",
+                exe.display()
+            );
+        };
+        let default_root = exe_dir.join("webui");
+        if !default_root.exists() {
+            return Ok(None);
+        }
+        if let Err(error) = validate_web_root_dir(&default_root, "default webui directory") {
+            warn!(%error, "ignoring invalid default WebUI directory");
+            return Ok(None);
+        }
+        Ok(Some(default_root))
+    }
+}
+
+fn validate_web_root_dir(path: &std::path::Path, label: &str) -> Result<()> {
+    if !path.is_dir() {
+        bail!("{label} must be an existing directory: {}", path.display());
+    }
+    let index = path.join("index.html");
+    if !index.is_file() {
+        bail!("{label} must contain index.html: {}", index.display());
+    }
+    Ok(())
 }
 
 struct LoadedSettings {
@@ -549,6 +591,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         Arc::clone(&core),
         RestServerSettings {
             api_key: profile.rest.api_key.clone(),
+            web_root_dir: profile.web_root_dir()?,
         },
         Some(shutdown_tx.clone()),
     );

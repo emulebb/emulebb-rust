@@ -9,6 +9,7 @@ async fn app_shutdown_requires_confirmation_and_signals_daemon() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
         Some(shutdown_tx),
     );
@@ -60,6 +61,7 @@ async fn diagnostic_dump_uses_canonical_route_and_confirmation() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 
@@ -289,6 +291,7 @@ async fn snapshot_returns_bounded_emulebb_polling_shape() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 

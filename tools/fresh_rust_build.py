@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     release_outputs = verify_profile_outputs(target_dir / "release", RELEASE_BINARIES)
     stage_release_outputs(release_outputs, stage_bin_dir)
+    stage_webui(stage_bin_dir / "webui")
     return 0
 
 
@@ -165,6 +166,10 @@ def stage_release_outputs(outputs: dict[str, Path], stage_bin_dir: Path) -> None
         shutil.copyfile(source, destination)
         os.utime(destination, None)
         print(f"staged {destination}", flush=True)
+
+
+def stage_webui(stage_dir: Path) -> None:
+    run([sys.executable, "tools/build_webui.py", "--stage-dir", str(stage_dir)], os.environ.copy())
 
 
 def executable_name(name: str) -> str:

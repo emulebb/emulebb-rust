@@ -26,6 +26,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 
@@ -307,6 +308,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 

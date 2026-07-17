@@ -62,6 +62,17 @@ fn profile_with_rest_bind(profile_dir: PathBuf, bind_addr: Option<SocketAddr>) -
     }
 }
 
+fn profile_with_web_root(profile_dir: PathBuf, web_root_dir: Option<PathBuf>) -> DaemonProfile {
+    DaemonProfile {
+        profile_dir,
+        rest: RestBootstrapSettings {
+            web_root_dir,
+            ..RestBootstrapSettings::default()
+        },
+        ..DaemonProfile::default()
+    }
+}
+
 fn iface(name: &str, ip: &str) -> NetworkInterface {
     iface_with_vpn(name, ip, false)
 }
@@ -623,6 +634,43 @@ fn rest_bind_addr_accepts_configured_non_loopback_address() {
         profile.rest_bind_addr().unwrap(),
         "192.0.2.10:13301".parse::<SocketAddr>().unwrap()
     );
+}
+
+#[test]
+fn web_root_dir_accepts_configured_relative_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profile");
+    let web_root = profile_dir.join("webui");
+    fs::create_dir_all(&web_root).unwrap();
+    fs::write(web_root.join("index.html"), "<!doctype html>").unwrap();
+    let profile = profile_with_web_root(profile_dir.clone(), Some(PathBuf::from("webui")));
+
+    assert_eq!(profile.web_root_dir().unwrap(), Some(web_root));
+}
+
+#[test]
+fn web_root_dir_rejects_configured_missing_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = profile_with_web_root(
+        temp.path().to_path_buf(),
+        Some(PathBuf::from("missing-webui")),
+    );
+
+    let error = profile.web_root_dir().unwrap_err().to_string();
+
+    assert!(error.contains("rest.webRootDir must be an existing directory"));
+}
+
+#[test]
+fn web_root_dir_rejects_configured_directory_without_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let web_root = temp.path().join("webui");
+    fs::create_dir_all(&web_root).unwrap();
+    let profile = profile_with_web_root(temp.path().to_path_buf(), Some(web_root));
+
+    let error = profile.web_root_dir().unwrap_err().to_string();
+
+    assert!(error.contains("rest.webRootDir must contain index.html"));
 }
 
 #[test]

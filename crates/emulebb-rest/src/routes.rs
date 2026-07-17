@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use emulebb_core::EmulebbCore;
 use serde_json::json;
@@ -23,6 +23,7 @@ use tokio::sync::watch;
 use crate::envelope::api_error;
 use crate::handlers::*;
 use crate::route_metadata::validate_route_metadata;
+use crate::webui::mount_webui;
 use crate::{RestServerSettings, RestState};
 
 pub fn router(core: Arc<EmulebbCore>, config: RestServerSettings) -> Router {
@@ -39,7 +40,7 @@ pub fn router_with_shutdown(
         api_key: Arc::new(config.api_key),
         shutdown,
     };
-    Router::new()
+    let api_router = Router::new()
         .route("/api/v1/app", get(app))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/app/shutdown", post(shutdown_app))
@@ -252,14 +253,17 @@ pub fn router_with_shutdown(
         )
         .route("/api/v1/logs", get(logs))
         .route("/api/v1/logs/operations/clear", post(clear_logs))
-        .fallback(fallback)
+        .route("/api/v1", any(fallback))
+        .route("/api/v1/{*path}", any(fallback))
         .layer(middleware::map_response(rewrite_method_not_allowed))
         .layer(middleware::from_fn(validate_route_metadata))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
         ))
-        .with_state(state)
+        .with_state(state);
+
+    mount_webui(api_router, config.web_root_dir)
 }
 
 async fn require_api_key(

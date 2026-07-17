@@ -19,6 +19,7 @@ async fn server_connect_reports_core_failures() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 
@@ -65,6 +66,7 @@ async fn snapshot_limit_does_not_truncate_servers() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 

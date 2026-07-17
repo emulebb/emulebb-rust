@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use emulebb_core::EmulebbCore;
 use tokio::sync::watch;
@@ -14,6 +14,7 @@ mod route_body_metadata;
 mod route_metadata;
 mod routes;
 pub use routes::{router, router_with_shutdown};
+mod webui;
 
 #[cfg(test)]
 #[path = "tests/app.rs"]
@@ -33,6 +34,7 @@ pub(crate) use handlers::without_score_breakdown;
 #[derive(Debug, Clone)]
 pub struct RestServerSettings {
     pub api_key: String,
+    pub web_root_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]

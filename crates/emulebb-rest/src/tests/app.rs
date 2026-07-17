@@ -19,6 +19,7 @@ fn test_router() -> axum::Router {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     )
 }
@@ -234,6 +235,7 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 

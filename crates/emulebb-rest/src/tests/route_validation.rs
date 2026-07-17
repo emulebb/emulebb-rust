@@ -387,6 +387,81 @@ async fn rejects_missing_api_key() {
 }
 
 #[tokio::test]
+async fn webui_serves_static_files_without_api_key() {
+    let web_root = unique_test_dir("webui-static");
+    std::fs::write(
+        web_root.join("index.html"),
+        "<!doctype html><title>eMuleBB</title>",
+    )
+    .unwrap();
+    std::fs::create_dir_all(web_root.join("assets")).unwrap();
+    std::fs::write(
+        web_root.join("assets").join("app.js"),
+        "console.log('webui');",
+    )
+    .unwrap();
+
+    let index = test_router_with_webui(web_root.clone())
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    let body = to_bytes(index.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("eMuleBB"));
+
+    let asset = test_router_with_webui(web_root)
+        .oneshot(
+            Request::builder()
+                .uri("/assets/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    let body = to_bytes(asset.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("webui"));
+}
+
+#[tokio::test]
+async fn webui_history_fallback_does_not_capture_api_routes() {
+    let web_root = unique_test_dir("webui-history");
+    std::fs::write(
+        web_root.join("index.html"),
+        "<!doctype html><title>eMuleBB</title>",
+    )
+    .unwrap();
+
+    let history = test_router_with_webui(web_root.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/transfers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.status(), StatusCode::OK);
+    let body = to_bytes(history.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("eMuleBB"));
+
+    let api_unknown = test_router_with_webui(web_root)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/unknown")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api_unknown.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(api_unknown.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["message"], "API route not found");
+}
+
+#[tokio::test]
 async fn method_not_allowed_sets_allow_header_and_error_envelope() {
     let response = test_router()
         .oneshot(

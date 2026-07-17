@@ -29,7 +29,7 @@ The repo-local `docs` directory is only a pointer.
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
 - `emulebb-rest`: Rust-native `/api/v1` routes, envelopes, and API-key
-  auth.
+  auth plus the packaged browser WebUI static surface.
 - `emulebb-core`: local app state, capabilities, searches, and transfer
   summaries.
 - `emulebb-index`: SQLite + FTS5 local file index plus Kad harvest/store
@@ -70,7 +70,8 @@ python tools\rust_quality_gate.py policy
 Run the build gate after code changes. It runs normal Cargo debug and release
 builds for the daemon and UI, builds the release diagnostics binary, and stages
 freshly copied release executables under
-`%EMULEBB_WORKSPACE_OUTPUT_ROOT%\tools\emulebb-rust\bin`.
+`%EMULEBB_WORKSPACE_OUTPUT_ROOT%\tools\emulebb-rust\bin`. The browser WebUI is
+staged beside the executable as `webui`.
 
 ```powershell
 python tools\rust_quality_gate.py build
@@ -91,6 +92,12 @@ from `<dir>\emulebb-rust-settings.toml` and opens its SQLite repository at
 `<dir>\emulebb-rust-metadata.db`. The TOML file is control-plane bootstrap only:
 REST `bindAddr` is required there, while runtime/network settings live in the
 database and are exposed through `/api/v1/app/settings`.
+
+The daemon serves the browser WebUI from a `webui` directory beside
+`emulebb-rust.exe` when that directory exists. Set `[rest].webRootDir` to an
+explicit asset directory to override that default; relative override paths are
+resolved from the profile directory. Browser API calls use the existing
+`X-API-Key` header.
 
 Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.

@@ -43,5 +43,30 @@ class TestExternalReleasePaths(unittest.TestCase):
             )
 
 
+class TestWebuiPackaging(unittest.TestCase):
+    def test_collect_webui_files_requires_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            webui = Path(temp_dir) / "webui"
+            webui.mkdir()
+
+            with self.assertRaisesRegex(SystemExit, "index.html not found"):
+                PACKAGER.collect_webui_files(webui)
+
+    def test_collect_webui_files_preserves_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            webui = Path(temp_dir) / "webui"
+            assets = webui / "assets"
+            assets.mkdir(parents=True)
+            (webui / "index.html").write_text("<!doctype html>", encoding="utf-8")
+            (assets / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+            files = PACKAGER.collect_webui_files(webui)
+
+            self.assertEqual(
+                [relative.as_posix() for relative, _ in files],
+                ["assets/app.js", "index.html"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

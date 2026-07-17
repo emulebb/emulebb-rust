@@ -67,6 +67,7 @@ jobs:
         run: >-
           python tools/package_release_zip.py
           --target-dir "$CARGO_TARGET_DIR/release"
+          --webui-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin/webui"
           --out "$RELEASE_OUT_DIR"
 
       - name: Publish to the GitHub release

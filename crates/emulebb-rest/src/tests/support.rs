@@ -20,6 +20,19 @@ pub(crate) fn test_router() -> Router {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    )
+}
+
+pub(crate) fn test_router_with_webui(web_root_dir: std::path::PathBuf) -> Router {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    router(
+        core,
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: Some(web_root_dir),
         },
     )
 }

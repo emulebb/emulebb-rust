@@ -25,8 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN_NAME = "emulebb-rust.exe"
 # Files staged into the zip alongside the binary (repo-relative).
 DOC_FILES = (
-    "emulebb-rust.example.toml",
-    "docs/RELEASE-SCOPE.md",
+    "emulebb-rust-settings.example.toml",
     "LICENSE",
     "README.md",
     "THIRD-PARTY-LICENSES.md",
@@ -89,14 +88,20 @@ def main() -> int:
         required=True,
         help="output directory for the zip + SHA256SUMS",
     )
+    parser.add_argument(
+        "--webui-dir",
+        help="built WebUI directory containing index.html; defaults to <target-dir>/webui",
+    )
     args = parser.parse_args()
 
     version = workspace_version()
     target_dir = external_path(args.target_dir, "--target-dir")
     out_dir = external_path(args.out, "--out")
+    webui_dir = external_path(args.webui_dir or target_dir / "webui", "--webui-dir")
     binary = target_dir / BIN_NAME
     if not binary.is_file():
         raise SystemExit(f"release binary not found: {binary} (run cargo build --release first)")
+    webui_files = collect_webui_files(webui_dir)
 
     release_files = []
     for rel in DOC_FILES:
@@ -113,6 +118,8 @@ def main() -> int:
     root_in_zip = f"emulebb-rust-v{version}"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(binary, f"{root_in_zip}/{BIN_NAME}")
+        for rel, source in webui_files:
+            archive.write(source, f"{root_in_zip}/webui/{rel.as_posix()}")
         for rel, source in release_files:
             archive.write(source, f"{root_in_zip}/{Path(rel).name}")
 
@@ -122,6 +129,21 @@ def main() -> int:
     print(f"packaged {zip_path} ({zip_path.stat().st_size} bytes)")
     print(f"sha256  {digest}")
     return 0
+
+
+def collect_webui_files(webui_dir: Path) -> list[tuple[Path, Path]]:
+    if not webui_dir.is_dir():
+        raise SystemExit(f"built WebUI directory not found: {webui_dir}")
+    if not (webui_dir / "index.html").is_file():
+        raise SystemExit(f"built WebUI index.html not found: {webui_dir / 'index.html'}")
+    files = [
+        (path.relative_to(webui_dir), path)
+        for path in sorted(webui_dir.rglob("*"))
+        if path.is_file()
+    ]
+    if not files:
+        raise SystemExit(f"built WebUI directory contains no files: {webui_dir}")
+    return files
 
 
 if __name__ == "__main__":

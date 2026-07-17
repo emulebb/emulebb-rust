@@ -168,6 +168,7 @@ EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
 CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
 --target-dir "$CARGO_TARGET_DIR/release"
+--webui-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin/webui"
 --out "$RELEASE_OUT_DIR"
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])

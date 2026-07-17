@@ -474,6 +474,7 @@ async fn search_results_use_canonical_paging_query() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
 
@@ -560,6 +561,7 @@ async fn search_to_download_flow_uses_local_index() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
     let response = app
@@ -624,6 +626,7 @@ async fn search_result_download_accepts_paused_request_body() {
         core,
         RestServerSettings {
             api_key: "secret".to_string(),
+            web_root_dir: None,
         },
     );
     let response = app
