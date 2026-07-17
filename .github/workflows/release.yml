@@ -49,6 +49,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
       # Guard: the test-only egress-audit leak-test feature must never reach the
       # release binary. The policy checker asserts it is not a default feature and
       # not referenced by the daemon crate.

@@ -82,6 +82,14 @@ staged beside the executable as `webui`.
 python tools\rust_quality_gate.py build
 ```
 
+Run the WebUI test gate after embedded SPA changes. It installs the locked npm
+dependencies, runs Vitest unit tests, runs the mocked Playwright Chromium smoke
+suite, and verifies the production Vite build.
+
+```powershell
+python tools\rust_quality_gate.py webui-test
+```
+
 Use `--force-rebuild` only when intentionally clearing Cargo state, for example
 after a toolchain or native dependency investigation.
 

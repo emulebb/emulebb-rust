@@ -30,13 +30,14 @@ def main(argv: list[str] | None = None) -> int:
             "fmt",
             "clippy",
             "diagnostics",
+            "webui-test",
             "build",
             "test-workspace",
             "test-kad-swarm",
             "test-vpn-leak",
         ],
         help=(
-            "quick=policy+fmt+clippy+diagnostics; ci=quick+build+tests; "
+            "quick=policy+fmt+clippy+diagnostics+webui-test; ci=quick+build+tests; "
             "ci-test=build+workspace tests+isolated kad_swarm+VPN leak test"
         ),
     )
@@ -144,6 +145,7 @@ def commands_for_gate(
         "fmt": [fmt_step()],
         "clippy": [clippy_step()],
         "diagnostics": [diagnostics_step()],
+        "webui-test": [webui_test_step()],
         "build": [build_step(env, force_rebuild=force_rebuild)],
         "test-workspace": [test_workspace_step()],
         "test-kad-swarm": [test_kad_swarm_step()],
@@ -154,6 +156,7 @@ def commands_for_gate(
             fmt_step(),
             clippy_step(),
             diagnostics_step(),
+            webui_test_step(),
         ],
         "ci-test": [
             build_step(env, force_rebuild=force_rebuild),
@@ -169,6 +172,7 @@ def commands_for_gate(
             fmt_step(),
             clippy_step(),
             diagnostics_step(),
+            webui_test_step(),
             build_step(env, force_rebuild=force_rebuild),
             test_workspace_step(),
             test_kad_swarm_step(),
@@ -224,6 +228,10 @@ def diagnostics_step() -> tuple[str, list[str]]:
             "--locked",
         ],
     )
+
+
+def webui_test_step() -> tuple[str, list[str]]:
+    return ("WebUI SPA tests", [sys.executable, "tools/test_webui.py"])
 
 
 def build_step(env: dict[str, str], *, force_rebuild: bool = False) -> tuple[str, list[str]]:

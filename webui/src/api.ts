@@ -271,12 +271,24 @@ export type Snapshot = {
   [key: string]: unknown;
 };
 
+export type RestClientOptions = {
+  basePath?: string;
+  fetch?: typeof fetch;
+};
+
 export function encodeSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
 export class RestClient {
   private apiKey = "";
+  private readonly basePath: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: RestClientOptions = {}) {
+    this.basePath = normalizeBasePath(options.basePath ?? "/api/v1");
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+  }
 
   setApiKey(apiKey: string): void {
     this.apiKey = apiKey.trim();
@@ -308,13 +320,17 @@ export class RestClient {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const response = await fetch(`/api/v1/${path}`, init);
+    const response = await this.fetchImpl(`${this.basePath}/${path}`, init);
     const text = await response.text();
     const value = text ? (JSON.parse(text) as ApiEnvelope<T> & ApiError) : undefined;
     if (!response.ok) {
-      const message = value?.error?.message ?? `${method} /api/v1/${path} failed`;
+      const message = value?.error?.message ?? `${method} ${this.basePath}/${path} failed`;
       throw new Error(message);
     }
     return value?.data as T;
   }
+}
+
+function normalizeBasePath(basePath: string): string {
+  return basePath.replace(/\/+$/, "");
 }

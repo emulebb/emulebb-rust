@@ -35,6 +35,18 @@ class TestDiagnosticsGate(unittest.TestCase):
         labels = [label for label, _ in QUALITY_GATE.commands_for_gate("quick")]
         self.assertIn("packet diagnostics binary", labels)
 
+    def test_webui_test_gate_is_individually_addressable(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("webui-test")]
+        self.assertEqual(labels, ["WebUI SPA tests"])
+
+    def test_quick_gate_includes_webui_tests(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("quick")]
+        self.assertIn("WebUI SPA tests", labels)
+
+    def test_ci_test_gate_keeps_webui_out_of_multi_os_rust_tests(self) -> None:
+        labels = [label for label, _ in QUALITY_GATE.commands_for_gate("ci-test")]
+        self.assertNotIn("WebUI SPA tests", labels)
+
     def test_clippy_uses_the_committed_lockfile(self) -> None:
         _, command = QUALITY_GATE.clippy_step()
         self.assertIn("--locked", command)
