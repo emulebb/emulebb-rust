@@ -18,7 +18,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -39,8 +40,15 @@ button:hover {
   background: #334356;
 }
 
+button:disabled {
+  background: #9aa5b1;
+  border-color: #9aa5b1;
+  cursor: not-allowed;
+}
+
 input,
-select {
+select,
+textarea {
   background: #ffffff;
   border: 1px solid #c7ced6;
   border-radius: 6px;
@@ -51,9 +59,15 @@ select {
 
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible {
   outline: 2px solid #2f7d80;
   outline-offset: 1px;
+}
+
+textarea {
+  min-height: 78px;
+  resize: vertical;
 }
 
 table {
@@ -177,6 +191,12 @@ td {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.view-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .metric,
 .panel {
   background: #ffffff;
@@ -294,14 +314,132 @@ td {
   flex: 1 1 180px;
 }
 
+.form-row textarea {
+  flex: 1 1 360px;
+}
+
 .form-row select {
   flex: 0 1 150px;
+}
+
+.subtle-row {
+  background: #f7f9fb;
+  border: 1px solid #dde2e7;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.danger-row {
+  border-top: 1px solid #dde2e7;
+  margin-top: 12px;
+  padding-top: 12px;
 }
 
 .icon-button {
   justify-content: center;
   min-width: 34px;
   padding: 7px;
+}
+
+.link-button {
+  background: transparent;
+  border: 0;
+  color: #235f73;
+  justify-content: flex-start;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.link-button:hover {
+  background: transparent;
+  color: #174756;
+  text-decoration: underline;
+}
+
+.selected-row {
+  background: #eef8f6;
+}
+
+.hint {
+  color: #677280;
+  font-size: 0.88rem;
+  margin: 0 0 12px;
+}
+
+.check {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+}
+
+.check input {
+  min-height: 0;
+}
+
+.split {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.json-panel {
+  background: #17202b;
+  border-radius: 6px;
+  color: #dce7f3;
+  font-size: 0.78rem;
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.editor-grid,
+.settings-grid,
+.toggle-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.editor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.toggle-grid {
+  background: #f7f9fb;
+  border: 1px solid #dde2e7;
+  border-radius: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 12px;
+}
+
+.editor-grid label,
+.settings-grid label {
+  color: #5c6672;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.82rem;
+  font-weight: 700;
+  gap: 5px;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
+}
+
+.copy-row {
+  display: flex;
+  gap: 8px;
+}
+
+.copy-row input {
+  flex: 1 1 auto;
 }
 
 .pill {
@@ -381,6 +519,12 @@ td {
   .panel.wide {
     grid-column: span 2;
   }
+
+  .split,
+  .settings-grid,
+  .toggle-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -397,6 +541,7 @@ td {
   .api-key,
   .api-key input,
   .form-row input,
+  .form-row textarea,
   .form-row select,
   .form-row button,
   .top-actions button {
@@ -413,5 +558,16 @@ td {
 
   .log-row {
     grid-template-columns: 1fr;
+  }
+
+  .split,
+  .editor-grid,
+  .settings-grid,
+  .toggle-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .copy-row {
+    flex-direction: column;
   }
 }

@@ -10,24 +10,38 @@ export type ApiError = {
   };
 };
 
+export type Page<T> = {
+  items: T[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+};
+
 export type AppInfo = {
   appName?: string;
   apiVersion?: string;
   contractVersion?: string;
+  name?: string;
   version?: string;
+  [key: string]: unknown;
 };
 
 export type Stats = {
   downloadRateBytesPerSec?: number;
   uploadRateBytesPerSec?: number;
+  downloadSpeedKiBps?: number;
+  uploadSpeedKiBps?: number;
   activeDownloads?: number;
+  activeUploads?: number;
+  waitingUploads?: number;
   totalTransfers?: number;
   sharedFiles?: number;
   sharedBytes?: number;
+  [key: string]: unknown;
 };
 
 export type Status = {
-  lifecycle?: string;
+  lifecycle?: string | { state?: string; [key: string]: unknown };
   connected?: boolean;
   serverConnected?: boolean;
   firewalled?: boolean | null;
@@ -38,14 +52,39 @@ export type Status = {
 export type Transfer = {
   hash: string;
   name?: string;
+  path?: string;
+  deliveredPath?: string | null;
   state?: string;
   sizeBytes?: number;
   completedBytes?: number;
+  progress?: number;
   downloadRateBytesPerSec?: number;
   uploadRateBytesPerSec?: number;
+  downloadSpeedKiBps?: number;
+  uploadSpeedKiBps?: number;
   priority?: string;
   categoryId?: number | null;
+  categoryName?: string | null;
   sources?: number;
+  sourcesTransferring?: number;
+  stopped?: boolean;
+  ed2kLink?: string;
+  [key: string]: unknown;
+};
+
+export type TransferSource = {
+  clientId?: string;
+  userName?: string;
+  userHash?: string | null;
+  state?: string;
+  address?: string;
+  port?: number;
+  downloadRateBytesPerSec?: number;
+  downloadSpeedKiBps?: number;
+  requestedFileName?: string | null;
+  banned?: boolean;
+  friend?: boolean;
+  lowId?: boolean;
   [key: string]: unknown;
 };
 
@@ -54,7 +93,10 @@ export type SearchResult = {
   name?: string;
   sizeBytes?: number;
   sources?: number;
+  completeSources?: number;
   availability?: number;
+  fileType?: string;
+  directory?: string;
   [key: string]: unknown;
 };
 
@@ -62,6 +104,8 @@ export type SearchItem = {
   id: string;
   query?: string;
   state?: string;
+  status?: string;
+  statusReason?: string | null;
   method?: string;
   type?: string;
   results?: SearchResult[];
@@ -103,6 +147,72 @@ export type LogRecord = {
   [key: string]: unknown;
 };
 
+export type Category = {
+  id: number;
+  name: string;
+  path?: string | null;
+  comment?: string;
+  priority?: number | string;
+  color?: number | null;
+  [key: string]: unknown;
+};
+
+export type Friend = {
+  userHash?: string;
+  name?: string;
+  lastSeen?: string | null;
+  address?: string | null;
+  port?: number;
+  [key: string]: unknown;
+};
+
+export type Upload = {
+  clientId?: string;
+  userName?: string;
+  userHash?: string | null;
+  clientSoftware?: string;
+  clientMod?: string;
+  uploadState?: string;
+  uploadSpeedKiBps?: number;
+  uploadedBytes?: number;
+  queueSessionUploaded?: number;
+  waitTimeMs?: number;
+  score?: number;
+  address?: string;
+  port?: number;
+  lowId?: boolean;
+  friendSlot?: boolean;
+  uploading?: boolean;
+  waitingQueue?: boolean;
+  requestedFileHash?: string | null;
+  requestedFileName?: string | null;
+  requestedFileSizeBytes?: number | null;
+  requestedPartsProgressText?: string;
+  queueRank?: number;
+  scoreBreakdown?: Record<string, unknown> | null;
+  [key: string]: unknown;
+};
+
+export type SharedFile = {
+  hash: string;
+  name?: string;
+  sizeBytes?: number;
+  sourcePath?: string | null;
+  path?: string;
+  priority?: string;
+  autoUploadPriority?: boolean;
+  allTimeUploadedBytes?: number;
+  allTimeUploadRequests?: number;
+  allTimeUploadAccepts?: number;
+  requests?: number;
+  acceptedRequests?: number;
+  transferredBytes?: number;
+  comment?: string;
+  rating?: number;
+  ed2kLink?: string;
+  [key: string]: unknown;
+};
+
 export type SharedDirectoryRoot = {
   path: string;
   monitorOwned?: boolean;
@@ -134,6 +244,17 @@ export type SharedDirectories = {
   [key: string]: unknown;
 };
 
+export type AppSettings = {
+  core?: Record<string, unknown>;
+  daemon?: Record<string, unknown>;
+  ed2k?: Record<string, unknown>;
+  kad?: Record<string, unknown>;
+  nat?: Record<string, unknown>;
+  vpnGuard?: Record<string, unknown>;
+  ipFilter?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type Snapshot = {
   app?: AppInfo;
   status?: Status;
@@ -142,11 +263,17 @@ export type Snapshot = {
   searches?: SearchItem[];
   servers?: ServerItem[];
   kad?: KadStatus;
-  uploads?: unknown[];
-  uploadQueue?: unknown[];
-  sharedFiles?: unknown[];
+  uploads?: Upload[];
+  uploadQueue?: Upload[];
+  sharedFiles?: SharedFile[];
+  network?: Record<string, unknown>;
+  logs?: LogRecord[];
   [key: string]: unknown;
 };
+
+export function encodeSegment(value: string): string {
+  return encodeURIComponent(value);
+}
 
 export class RestClient {
   private apiKey = "";
