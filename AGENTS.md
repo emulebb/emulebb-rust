@@ -14,7 +14,7 @@ Everything below is this repo's local deltas only:
   do not treat the frozen emulebb-mfc contract as a forward compatibility
   constraint. Before an explicit Rust API-freeze decision, there is no external
   Rust REST consumer: evolve daemon routes, DTOs, OpenAPI, route/body validators,
-  Rust-native UI models, and tests together when a cleaner contract is useful;
+  embedded SPA WebUI models, and tests together when a cleaner contract is useful;
   do not keep compatibility aliases or awkward legacy shapes for hypothetical
   consumers. Rust is not an MFC, stock GUI, legacy WebServer, or legacy
   preference mirror: preserve eD2K/Kad protocol-operational parity, but design
@@ -25,7 +25,7 @@ Everything below is this repo's local deltas only:
 - Until an explicit Rust API-freeze or release-candidate decision, do not bump
   `apiVersion` or REST `contractVersion` for each route, DTO, validator, or
   OpenAPI cleanup. During this development phase, evolve the implementation,
-  OpenAPI artifact, first-party Rust UI, and tests together; reserve version
+  OpenAPI artifact, embedded SPA WebUI, and tests together; reserve version
   bumps for deliberate freeze/release boundaries.
 - Until an explicit Rust freeze or release-candidate decision, Rust development
   cleanup assumes clean state for code, settings, metadata/schema, REST, and UI

@@ -2,8 +2,8 @@
 
 `emulebb-rust` is the Rust client for the eMuleBB product family and the forward
 eD2K/Kad core. It owns the Rust-forward `/api/v1` contract, runs as a headless
-daemon, and is paired with the Rust-native `emulebb-rust-ui`; it keeps local
-client state plus indexing data in SQLite.
+daemon, and serves the embedded browser SPA WebUI from packaged static assets.
+It keeps local client state plus indexing data in SQLite.
 
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The 0.0.x line does not expose a coordinator API.
@@ -15,7 +15,7 @@ gate; normal development must not float independently on `stable`.
 
 The 0.0.3 scope is eD2K/Kad protocol-operational parity: configured binding,
 interoperability, search, sharing, transfers, uploads, queues, persistence,
-local SQLite/FTS indexing, REST controller visibility, and Rust-native UI
+local SQLite/FTS indexing, REST controller visibility, and embedded SPA WebUI
 operation. Local API, UI, settings, diagnostics, and scheduling surfaces are
 Rust-native async daemon design. Broadband-oriented async IO is the default
 runtime model, not a compatibility toggle.
@@ -30,6 +30,7 @@ The repo-local `docs` directory is only a pointer.
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
 - `emulebb-rest`: Rust-native `/api/v1` routes, envelopes, and API-key
   auth plus the packaged browser WebUI static surface.
+- `webui`: embedded Vite/Preact SPA WebUI packaged beside the daemon.
 - `emulebb-core`: local app state, capabilities, searches, and transfer
   summaries.
 - `emulebb-index`: SQLite + FTS5 local file index plus Kad harvest/store
@@ -38,6 +39,10 @@ The repo-local `docs` directory is only a pointer.
 
 Indexing is a client capability, not a separate public API. It improves
 search results returned through the eMuleBB search resources.
+
+`crates/emulebb-rust-ui` is frozen legacy Slint UI work. It remains in the
+workspace until a later code/build cleanup removes or repurposes it, but it is
+not the forward beta UI target.
 
 ## Rust Client Policy
 
@@ -68,8 +73,8 @@ python tools\rust_quality_gate.py policy
 ```
 
 Run the build gate after code changes. It runs normal Cargo debug and release
-builds for the daemon and UI, builds the release diagnostics binary, and stages
-freshly copied release executables under
+builds for the daemon, builds the release diagnostics binary, and stages freshly
+copied release executables under
 `%EMULEBB_WORKSPACE_OUTPUT_ROOT%\tools\emulebb-rust\bin`. The browser WebUI is
 staged beside the executable as `webui`.
 
@@ -107,5 +112,3 @@ write those fixed files, but the Rust client itself only consumes the profile.
 The emulebb-rust workspace is licensed under `GPL-2.0-only`. Third-party
 components retain their own licenses; see `THIRD-PARTY-LICENSES.md` for the
 dependency policy and required notices.
-
-[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)
