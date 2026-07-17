@@ -557,27 +557,6 @@ async fn shared_file_patch_body_uses_canonical_comment_rating_validation() {
 }
 
 #[tokio::test]
-async fn shared_file_add_body_uses_canonical_path_validation() {
-    let app = test_router();
-    let cases = [
-        (r#"{}"#, "path must be a non-empty string path"),
-        (r#"{"path":1}"#, "path must be a non-empty string path"),
-        (r#"{"path":"   "}"#, "path must not be empty"),
-    ];
-
-    for (body, expected_message) in cases {
-        assert_invalid_json_response(
-            app.clone(),
-            "POST",
-            "/api/v1/shared-files",
-            body.to_string(),
-            expected_message,
-        )
-        .await;
-    }
-}
-
-#[tokio::test]
 async fn shared_directories_patch_body_uses_canonical_root_validation() {
     let app = test_router();
     let uri = "/api/v1/shared-directories";
@@ -599,10 +578,6 @@ async fn shared_directories_patch_body_uses_canonical_root_validation() {
         (
             r#"{"roots":[{"path":1}],"confirmReplaceRoots":true}"#,
             "path must be a non-empty string path",
-        ),
-        (
-            r#"{"roots":[{"path":"C:/Shared","recursive":"true"}],"confirmReplaceRoots":true}"#,
-            "recursive must be a boolean",
         ),
         (
             r#"{"roots":[{"path":"C:/Shared","depth":1}],"confirmReplaceRoots":true}"#,

@@ -165,7 +165,6 @@ CREATE TABLE local_paths (
 CREATE TABLE shared_directory_roots (
     id INTEGER PRIMARY KEY,
     path_id INTEGER NOT NULL REFERENCES local_paths(id),
-    recursive INTEGER NOT NULL DEFAULT 0 CHECK(recursive IN (0, 1)),
     monitor_owned INTEGER NOT NULL DEFAULT 0 CHECK(monitor_owned IN (0, 1)),
     shareable INTEGER NOT NULL DEFAULT 1 CHECK(shareable IN (0, 1)),
     accessible INTEGER NOT NULL DEFAULT 1 CHECK(accessible IN (0, 1)),

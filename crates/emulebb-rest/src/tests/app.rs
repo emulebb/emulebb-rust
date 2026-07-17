@@ -4,7 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use emulebb_core::EmulebbCore;
+use emulebb_core::{EmulebbCore, LocalShareCreate};
 use emulebb_index::FileIndex;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -231,6 +231,12 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
     std::fs::write(&payload_path, b"shared count payload").unwrap();
     let core =
         Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    core.share_local_file(LocalShareCreate {
+        path: payload_path.display().to_string(),
+        name: None,
+    })
+    .await
+    .unwrap();
     let router = router(
         core,
         RestServerSettings {
@@ -238,24 +244,6 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
             web_root_dir: None,
         },
     );
-
-    let create = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"path":"{}"}}"#,
-                    payload_path.display().to_string().replace('\\', "\\\\")
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
 
     let status = router
         .oneshot(

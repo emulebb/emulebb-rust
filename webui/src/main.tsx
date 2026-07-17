@@ -5,6 +5,8 @@ import {
   Ban,
   Download,
   FileText,
+  FolderPlus,
+  FolderTree,
   KeyRound,
   Lock,
   Pause,
@@ -24,6 +26,7 @@ import {
   SearchItem,
   SearchResult,
   ServerItem,
+  SharedDirectories,
   Snapshot,
   Transfer
 } from "./api";
@@ -33,7 +36,7 @@ const API_KEY_STORAGE = "emulebb.webui.apiKey";
 const SNAPSHOT_LIMIT = 250;
 const LOG_LIMIT = 200;
 
-type Tab = "overview" | "transfers" | "search" | "servers" | "kad" | "logs";
+type Tab = "overview" | "transfers" | "search" | "sharing" | "servers" | "kad" | "logs";
 
 const client = new RestClient();
 
@@ -42,6 +45,7 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [tab, setTab] = useState<Tab>("overview");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [latestSearch, setLatestSearch] = useState<SearchItem | null>(null);
   const [message, setMessage] = useState("");
@@ -56,12 +60,14 @@ function App() {
     setRefreshing(true);
     setError("");
     try {
-      const [nextSnapshot, nextLogs] = await Promise.all([
+      const [nextSnapshot, nextLogs, nextSharedDirectories] = await Promise.all([
         client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
-        client.get<{ items?: LogRecord[] } | LogRecord[]>(`logs?limit=${LOG_LIMIT}`)
+        client.get<{ items?: LogRecord[] } | LogRecord[]>(`logs?limit=${LOG_LIMIT}`),
+        client.get<SharedDirectories>("shared-directories")
       ]);
       setSnapshot(nextSnapshot);
       setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
+      setSharedDirectories(nextSharedDirectories);
       const searches = nextSnapshot.searches ?? [];
       const recent = searches[0];
       if (recent?.id !== undefined) {
@@ -155,6 +161,7 @@ function App() {
         <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
         <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
         <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
+        <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
         <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
         <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
         <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
@@ -176,10 +183,132 @@ function App() {
           setLatestSearch={setLatestSearch}
         />
       )}
+      {tab === "sharing" && <SharingView directories={sharedDirectories} run={run} />}
       {tab === "servers" && <ServersView servers={servers} run={run} />}
       {tab === "kad" && <KadView kad={kad} run={run} />}
       {tab === "logs" && <LogsView logs={logs} run={run} />}
     </main>
+  );
+}
+
+function SharingView(props: {
+  directories: SharedDirectories | null;
+  run: (operation: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const [path, setPath] = useState("");
+  const roots = props.directories?.roots ?? [];
+  const items = props.directories?.items ?? [];
+  const reload = props.directories?.reload ?? {};
+
+  const replaceRoots = (paths: string[]) =>
+    client.patch("shared-directories", {
+      roots: paths.map((rootPath) => ({ path: rootPath })),
+      confirmReplaceRoots: true
+    });
+
+  const addRoot = async () => {
+    const nextPath = path.trim();
+    if (!nextPath) {
+      throw new Error("Path is required");
+    }
+    await replaceRoots([...roots.map((root) => root.path), nextPath]);
+    setPath("");
+  };
+
+  const removeRoot = (rootPath: string) =>
+    replaceRoots(roots.filter((root) => root.path !== rootPath).map((root) => root.path));
+
+  return (
+    <section class="view-grid">
+      <Metric label="Roots" value={String(roots.length)} />
+      <Metric label="Folders" value={String(items.length)} />
+      <Metric label="Hashing" value={String(props.directories?.hashingCount ?? 0)} />
+      <Metric label="Reload" value={reload.phase ?? "idle"} />
+
+      <section class="panel wide sharing-panel">
+        <div class="section-title">
+          <h2>Shared Folders</h2>
+          <button
+            type="button"
+            onClick={() => props.run(() => client.post("shared-directories/operations/reload"), "Reload queued")}
+          >
+            <RefreshCw size={15} />
+            Reload
+          </button>
+        </div>
+        <form class="form-row" onSubmit={(event) => {
+          event.preventDefault();
+          void props.run(addRoot, "Folder added");
+        }}>
+          <input
+            value={path}
+            placeholder="Folder path"
+            onInput={(event) => setPath(event.currentTarget.value)}
+          />
+          <button type="submit">
+            <FolderPlus size={16} />
+            Add
+          </button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Folder</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roots.map((root) => (
+                <tr key={root.path}>
+                  <td class="path-cell">{root.path}</td>
+                  <td>Folder tree</td>
+                  <td>
+                    <StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "monitored"} />
+                  </td>
+                  <td>
+                    <Action
+                      title="Remove"
+                      icon={<Trash2 size={15} />}
+                      onClick={() => {
+                        if (window.confirm("Remove this shared folder tree?")) {
+                          void props.run(() => removeRoot(root.path), "Folder removed");
+                        }
+                      }}
+                    />
+                  </td>
+                </tr>
+              ))}
+              {roots.length === 0 && (
+                <tr>
+                  <td colSpan={4} class="empty-cell">No shared folders.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Reload Status</h2>
+        <div class="kv">
+          <span>Running</span>
+          <strong>{reload.running ? "yes" : "no"}</strong>
+          <span>Pending</span>
+          <strong>{reload.pending ? "yes" : "no"}</strong>
+          <span>Scanned</span>
+          <strong>{reload.scannedCount ?? 0}</strong>
+          <span>Queued</span>
+          <strong>{reload.plannedHashCount ?? 0}</strong>
+          <span>Reused</span>
+          <strong>{reload.reusedCount ?? 0}</strong>
+          <span>Pruned</span>
+          <strong>{reload.prunedCount ?? 0}</strong>
+        </div>
+      </section>
+    </section>
   );
 }
 

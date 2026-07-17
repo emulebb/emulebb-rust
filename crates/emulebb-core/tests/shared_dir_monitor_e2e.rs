@@ -81,7 +81,6 @@ async fn live_monitor_auto_shares_and_auto_removes_a_dropped_file() {
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: shared_root.display().to_string(),
-            recursive: true,
         }],
         confirm_replace_roots: true,
     })

@@ -16,9 +16,8 @@
 //!   We run the events through `notify-debouncer-full`, which collapses a burst
 //!   into settled events. The settle window also means we never act on a file
 //!   that is still being written: we only hash it once its events have settled.
-//! * **Recursive per root.** Each configured root is watched with the
-//!   [`RecursiveMode`] that matches `root.recursive` (recursive vs. the
-//!   immediate directory only), exactly like the manual scan's depth handling.
+//! * **Recursive per root.** Each configured root is watched recursively,
+//!   matching the manual full-tree scan.
 //! * **Thread -> channel -> tokio bridge.** The debouncer's event handler is a
 //!   small closure that classifies the settled events into [`MonitorAction`]s
 //!   (the pure decision -- share vs. remove) and forwards them over a
@@ -215,20 +214,14 @@ where
         if !root.accessible {
             continue;
         }
-        let mode = if root.recursive {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
         let path = Path::new(&root.path);
-        match debouncer.watch(path, mode) {
+        match debouncer.watch(path, RecursiveMode::Recursive) {
             Ok(()) => {
                 // notify-debouncer-full 0.7 manages the file-id cache roots
                 // together with the watcher registration.
                 watched_root_count += 1;
                 tracing::info!(
                     root = %root.path,
-                    recursive = root.recursive,
                     "watching shared directory for auto-pickup",
                 );
             }
@@ -315,7 +308,7 @@ fn monitor_shared_key(path: &Path) -> PathBuf {
 
 /// (Re)start the live shared-directory auto-pickup monitor for the configured
 /// roots. Tears down any previous monitor first, then watches each accessible
-/// root (recursive per `root.recursive`). On a settled create/modify the file is
+/// root recursively. On a settled create/modify the file is
 /// auto-shared via [`EmulebbCore::share_local_file`]; on a settled
 /// remove/rename-away it is dropped from the shared catalog. Tolerant of a
 /// per-root watch failure (logged; that root degrades to scan-on-demand).
@@ -595,7 +588,6 @@ mod tests {
                 .unwrap();
         core.state.lock().await.shared_directories = vec![SharedDirectoryRoot {
             path: root.display().to_string(),
-            recursive: true,
             monitor_owned: false,
             shareable: true,
             accessible: true,

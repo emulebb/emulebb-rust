@@ -463,21 +463,4 @@ async fn clear_completed_transfers_requires_confirmation_and_preserves_files() {
     assert!(std::path::Path::new(&first.transfer_dir).is_dir());
     assert!(std::path::Path::new(&second.transfer_dir).is_dir());
     assert_eq!(core.shares().await.len(), 2);
-
-    let delete_shared_file = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!(
-                    "/api/v1/shared-files/{}/file?confirm=true",
-                    first.hash
-                ))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(delete_shared_file.status(), StatusCode::OK);
-    assert!(!std::path::Path::new(&first.transfer_dir).exists());
 }

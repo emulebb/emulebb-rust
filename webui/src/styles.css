@@ -276,6 +276,16 @@ td {
   overflow-x: auto;
 }
 
+.path-cell {
+  max-width: 760px;
+  overflow-wrap: anywhere;
+}
+
+.empty-cell {
+  color: #677280;
+  text-align: center;
+}
+
 .form-row {
   margin-bottom: 12px;
 }

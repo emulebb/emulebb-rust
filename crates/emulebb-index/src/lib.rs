@@ -37,7 +37,6 @@ pub struct IndexedFile {
 #[serde(rename_all = "camelCase")]
 pub struct IndexedSharedDirectoryRoot {
     pub path: String,
-    pub recursive: bool,
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
@@ -102,7 +101,6 @@ impl FileIndex {
             .iter()
             .map(|root| MetadataSharedDirectoryRoot {
                 path: root.path.clone(),
-                recursive: root.recursive,
                 monitor_owned: root.monitor_owned,
                 shareable: root.shareable,
                 accessible: root.accessible,
@@ -118,7 +116,6 @@ impl FileIndex {
             .map(|root| {
                 Ok(IndexedSharedDirectoryRoot {
                     path: root.path,
-                    recursive: root.recursive,
                     monitor_owned: root.monitor_owned,
                     shareable: root.shareable,
                     accessible: root.accessible,
@@ -187,7 +184,6 @@ mod tests {
         index
             .replace_shared_directory_roots(&[IndexedSharedDirectoryRoot {
                 path: "/tmp/sample".to_string(),
-                recursive: true,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,
@@ -197,6 +193,5 @@ mod tests {
         let roots = index.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].path, "/tmp/sample");
-        assert!(roots[0].recursive);
     }
 }

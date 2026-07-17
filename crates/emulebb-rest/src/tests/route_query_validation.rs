@@ -131,10 +131,6 @@ async fn destructive_query_confirmations_use_canonical_validation() {
         ("DELETE", "/api/v1/searches?confirm=false"),
         (
             "DELETE",
-            "/api/v1/shared-files/00112233445566778899aabbccddeeff/file",
-        ),
-        (
-            "DELETE",
             "/api/v1/transfers/00112233445566778899aabbccddeeff/files",
         ),
     ];

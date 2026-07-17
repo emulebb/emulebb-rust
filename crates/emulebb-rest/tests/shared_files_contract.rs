@@ -7,7 +7,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use emulebb_core::EmulebbCore;
+use emulebb_core::{EmulebbCore, LocalShareCreate};
 use emulebb_index::FileIndex;
 use emulebb_rest::{RestServerSettings, router};
 use serde_json::Value;
@@ -22,6 +22,15 @@ async fn shared_files_use_canonical_route_and_envelope() {
     let core = Arc::new(
         EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap(),
     );
+    let share = core
+        .share_local_file(LocalShareCreate {
+            path: payload_path.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let hash = share.hash.clone();
+    let ed2k_link = share.ed2k_link.clone();
     let app = router(
         core,
         RestServerSettings {
@@ -46,48 +55,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         )
         .await
         .unwrap();
-    assert_eq!(create_response.status(), StatusCode::OK);
-    let body = to_bytes(create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["alreadyShared"], false);
-    assert_eq!(value["data"]["queued"], false);
-    assert_eq!(value["data"]["file"]["name"], "Canonical.Shared.bin");
-    assert_eq!(value["data"]["file"]["complete"], true);
-    assert_eq!(value["data"]["file"]["partCount"], 1);
-    let hash = value["data"]["file"]["hash"].as_str().unwrap().to_string();
-    let ed2k_link = value["data"]["file"]["ed2kLink"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let repeat_create_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"path":"{}"}}"#,
-                    payload_path.display().to_string().replace('\\', "\\\\")
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(repeat_create_response.status(), StatusCode::OK);
-    let body = to_bytes(repeat_create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["alreadyShared"], true);
-    assert_eq!(value["data"]["queued"], false);
-    assert_eq!(value["data"]["file"]["hash"], hash);
+    assert_eq!(create_response.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     let list_response = app
         .clone()
@@ -199,15 +167,9 @@ async fn shared_files_use_canonical_route_and_envelope() {
         )
         .await
         .unwrap();
-    assert_eq!(remove_response.status(), StatusCode::OK);
-    let body = to_bytes(remove_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["deletedFiles"], false);
+    assert_eq!(remove_response.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    let missing_response = app
+    let still_shared_response = app
         .clone()
         .oneshot(
             Request::builder()
@@ -218,64 +180,7 @@ async fn shared_files_use_canonical_route_and_envelope() {
         )
         .await
         .unwrap();
-    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
-
-    let recreate_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/shared-files")
-                .header("X-API-Key", "secret")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"path":"{}"}}"#,
-                    payload_path.display().to_string().replace('\\', "\\\\")
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(recreate_response.status(), StatusCode::OK);
-    let body = to_bytes(recreate_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    let hash = value["data"]["file"]["hash"].as_str().unwrap().to_string();
-
-    let delete_without_confirm = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/v1/shared-files/{hash}/file"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(delete_without_confirm.status(), StatusCode::BAD_REQUEST);
-
-    let delete_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/v1/shared-files/{hash}/file?confirm=true"))
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(delete_response.status(), StatusCode::OK);
-    let body = to_bytes(delete_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["ok"], true);
-    assert_eq!(value["data"]["deletedFiles"], true);
+    assert_eq!(still_shared_response.status(), StatusCode::OK);
 
     let retired_route = app
         .oneshot(
@@ -339,7 +244,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"roots":[{{"path":"{}","recursive":true}}],"confirmReplaceRoots":true}}"#,
+                    r#"{{"roots":[{{"path":"{}"}}],"confirmReplaceRoots":true}}"#,
                     shared_root.display().to_string().replace('\\', "\\\\")
                 )))
                 .unwrap(),
@@ -351,8 +256,8 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["data"]["roots"][0]["recursive"], true);
     assert_eq!(value["data"]["roots"][0]["accessible"], true);
+    assert_eq!(value["data"]["roots"][0]["monitorOwned"], false);
     // A PATCH now kicks a detached background scan + hash of the files already
     // present under the new roots, so `hashingCount` reflects that queued work
     // (it drains to 0 in the background; the two files are picked up below). It is
@@ -396,20 +301,6 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ok"], true);
     assert!(value["data"].get("count").is_none());
-
-    let shared_files_reload_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/shared-files/operations/reload")
-                .header("X-API-Key", "secret")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(shared_files_reload_response.status(), StatusCode::OK);
 
     // The reload hashes the library on a detached background task (independent of
     // the request), so the shared-files list fills in asynchronously. Poll until

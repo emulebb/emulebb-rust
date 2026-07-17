@@ -257,10 +257,6 @@ async fn query_routes_use_canonical_error_envelope() {
         ("GET", "/api/v1/searches/1?unsupportedQuery=true"),
         ("DELETE", "/api/v1/searches?unsupportedQuery=true"),
         ("GET", "/api/v1/shared-files?unsupportedQuery=true"),
-        (
-            "DELETE",
-            "/api/v1/shared-files/00112233445566778899aabbccddeeff/file?unsupportedQuery=true",
-        ),
         ("GET", "/api/v1/transfers?unsupportedQuery=true"),
         ("GET", "/api/v1/upload-queue?unsupportedQuery=true"),
         ("GET", "/api/v1/logs?unsupportedQuery=true"),

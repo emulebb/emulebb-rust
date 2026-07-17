@@ -184,12 +184,6 @@ fn validate_shared_file_comment_rating_body_fields(
     Ok(())
 }
 
-pub(super) fn validate_shared_file_add_body_fields(
-    object: &JsonObject,
-) -> Result<(), Box<Response>> {
-    validate_path_text_body_field(object.get("path"), "path")
-}
-
 pub(super) fn validate_shared_directories_patch_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
@@ -205,19 +199,13 @@ pub(super) fn validate_shared_directories_patch_body_fields(
 fn validate_shared_directory_root_body(value: &serde_json::Value) -> Result<(), Box<Response>> {
     if let Some(object) = value.as_object() {
         for name in object.keys() {
-            if !matches!(name.as_str(), "path" | "recursive") {
+            if name.as_str() != "path" {
                 return Err(invalid_body_error(format!(
                     "unknown shared-directory root field: {name}"
                 )));
             }
         }
         validate_path_text_body_field(object.get("path"), "path")?;
-        if object
-            .get("recursive")
-            .is_some_and(|value| !value.is_boolean())
-        {
-            return Err(invalid_body_error("recursive must be a boolean"));
-        }
         return Ok(());
     }
     validate_path_text_body_field(Some(value), "path")

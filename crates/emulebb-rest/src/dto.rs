@@ -58,36 +58,11 @@ pub(crate) struct SharedFileResponse {
     pub(crate) ed2k_link: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SharedFileCreateRequest {
-    pub(crate) path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SharedFileCreateResult {
-    pub(crate) ok: bool,
-    pub(crate) path: String,
-    pub(crate) already_shared: bool,
-    pub(crate) queued: bool,
-    pub(crate) file: SharedFileResponse,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Ed2kLinkResult {
     pub(crate) hash: String,
     pub(crate) link: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SharedFileRemoveResult {
-    pub(crate) ok: bool,
-    pub(crate) deleted_files: bool,
-    pub(crate) path: String,
-    pub(crate) hash: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

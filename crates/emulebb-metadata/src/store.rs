@@ -336,12 +336,11 @@ impl MetadataStore {
             tx.execute(
                 r#"
                 INSERT INTO shared_directory_roots(
-                    path_id, recursive, monitor_owned, shareable, accessible,
+                    path_id, monitor_owned, shareable, accessible,
                     enabled, created_at_ms, deleted_at_ms
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, NULL)
+                VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL)
                 ON CONFLICT(path_id) DO UPDATE SET
-                    recursive = excluded.recursive,
                     monitor_owned = excluded.monitor_owned,
                     shareable = excluded.shareable,
                     accessible = excluded.accessible,
@@ -350,7 +349,6 @@ impl MetadataStore {
                 "#,
                 params![
                     path_id,
-                    bool_to_i64(root.recursive),
                     bool_to_i64(root.monitor_owned),
                     bool_to_i64(root.shareable),
                     bool_to_i64(root.accessible),
@@ -367,7 +365,6 @@ impl MetadataStore {
         let mut stmt = conn.prepare(
             r#"
             SELECT local_paths.display_path,
-                   shared_directory_roots.recursive,
                    shared_directory_roots.monitor_owned,
                    shared_directory_roots.shareable,
                    shared_directory_roots.accessible
@@ -381,10 +378,9 @@ impl MetadataStore {
         let rows = stmt.query_map([], |row| {
             Ok(MetadataSharedDirectoryRoot {
                 path: row.get(0)?,
-                recursive: row.get::<_, i64>(1)? != 0,
-                monitor_owned: row.get::<_, i64>(2)? != 0,
-                shareable: row.get::<_, i64>(3)? != 0,
-                accessible: row.get::<_, i64>(4)? != 0,
+                monitor_owned: row.get::<_, i64>(1)? != 0,
+                shareable: row.get::<_, i64>(2)? != 0,
+                accessible: row.get::<_, i64>(3)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -633,14 +629,12 @@ mod tests {
             .replace_shared_directory_roots(&[
                 MetadataSharedDirectoryRoot {
                     path: "/tmp/alpha".to_string(),
-                    recursive: true,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,
                 },
                 MetadataSharedDirectoryRoot {
                     path: "/tmp/beta".to_string(),
-                    recursive: false,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,
@@ -649,12 +643,11 @@ mod tests {
             .unwrap();
         let roots = store.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 2);
-        assert!(roots[0].recursive);
+        assert_eq!(roots[0].path, "/tmp/alpha");
 
         store
             .replace_shared_directory_roots(&[MetadataSharedDirectoryRoot {
                 path: "/tmp/beta".to_string(),
-                recursive: true,
                 monitor_owned: false,
                 shareable: true,
                 accessible: true,
@@ -663,6 +656,5 @@ mod tests {
         let roots = store.shared_directory_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].path, "/tmp/beta");
-        assert!(roots[0].recursive);
     }
 }

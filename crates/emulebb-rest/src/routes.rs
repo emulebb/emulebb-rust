@@ -98,23 +98,10 @@ pub fn router_with_shutdown(
             "/api/v1/searches/{search_id}",
             get(search).delete(delete_search),
         )
-        .route(
-            "/api/v1/shared-files",
-            get(shared_files).post(create_shared_file),
-        )
-        .route(
-            "/api/v1/shared-files/operations/reload",
-            post(reload_shared_directories),
-        )
+        .route("/api/v1/shared-files", get(shared_files))
         .route(
             "/api/v1/shared-files/{hash}",
-            get(shared_file)
-                .patch(update_shared_file)
-                .delete(delete_shared_file),
-        )
-        .route(
-            "/api/v1/shared-files/{hash}/file",
-            delete(delete_shared_file_payload),
+            get(shared_file).patch(update_shared_file),
         )
         .route(
             "/api/v1/shared-files/{hash}/comments",

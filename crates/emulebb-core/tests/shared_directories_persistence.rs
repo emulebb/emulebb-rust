@@ -25,7 +25,6 @@ async fn shared_directory_roots_survive_core_restart() {
         core.set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate::Object {
                 path: shared_root.display().to_string(),
-                recursive: true,
             }],
             confirm_replace_roots: true,
         })
@@ -47,12 +46,11 @@ async fn shared_directory_roots_survive_core_restart() {
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected_path);
-    assert!(directories.roots[0].recursive);
 }
 
 #[tokio::test]
-async fn shared_directory_reload_honors_recursive_flag() {
-    let runtime_dir = unique_test_dir("shared-directory-recursive");
+async fn shared_directory_reload_always_shares_folder_tree() {
+    let runtime_dir = unique_test_dir("shared-directory-tree");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let shared_root = runtime_dir.join("shared-root");
@@ -70,33 +68,19 @@ async fn shared_directory_reload_honors_recursive_flag() {
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: shared_root.display().to_string(),
-            recursive: false,
         }],
         confirm_replace_roots: true,
     })
     .await
     .unwrap();
 
-    let flat_names = shared_file_names(core.reload_shared_directories().await.unwrap());
-    assert_eq!(flat_names, vec!["top.bin"]);
-
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
-            path: shared_root.display().to_string(),
-            recursive: true,
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .unwrap();
-
-    let recursive_names = shared_file_names(core.reload_shared_directories().await.unwrap());
-    assert_eq!(recursive_names, vec!["nested.bin", "top.bin"]);
+    let names = shared_file_names(core.reload_shared_directories().await.unwrap());
+    assert_eq!(names, vec!["nested.bin", "top.bin"]);
 }
 
 #[tokio::test]
-async fn shared_directory_model_expands_recursive_items_like_mfc() {
-    let runtime_dir = unique_test_dir("shared-directory-recursive-items");
+async fn shared_directory_model_expands_folder_tree_items_like_mfc() {
+    let runtime_dir = unique_test_dir("shared-directory-tree-items");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
     let shared_root = runtime_dir.join("shared-root");
@@ -113,7 +97,6 @@ async fn shared_directory_model_expands_recursive_items_like_mfc() {
         .set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate::Object {
                 path: shared_root.display().to_string(),
-                recursive: true,
             }],
             confirm_replace_roots: true,
         })
@@ -131,7 +114,6 @@ async fn shared_directory_model_expands_recursive_items_like_mfc() {
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected_root);
-    assert!(directories.roots[0].recursive);
     assert!(!directories.roots[0].monitor_owned);
 
     assert_eq!(
@@ -156,8 +138,8 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
     let shared_root = runtime_dir.join("shared-root");
     let nested_root = shared_root.join("nested").join("unicode");
     fs::create_dir_all(&nested_root).unwrap();
-    let first_payload = b"first recursive shared payload";
-    let second_payload = b"second recursive shared payload";
+    let first_payload = b"first folder-tree shared payload";
+    let second_payload = b"second folder-tree shared payload";
     fs::write(nested_root.join("Persisted Unicode äöü.bin"), first_payload).unwrap();
 
     let first_hash = {
@@ -170,7 +152,6 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         core.set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate::Object {
                 path: shared_root.display().to_string(),
-                recursive: true,
             }],
             confirm_replace_roots: true,
         })
@@ -268,7 +249,6 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: shared_root.display().to_string(),
-            recursive: true,
         }],
         confirm_replace_roots: true,
     })
@@ -363,7 +343,6 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: shared_root.display().to_string(),
-            recursive: true,
         }],
         confirm_replace_roots: true,
     })
@@ -445,7 +424,6 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: shared_root.display().to_string(),
-            recursive: true,
         }],
         confirm_replace_roots: true,
     })

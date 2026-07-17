@@ -201,7 +201,6 @@ async fn local_kad_swarm_discovers_shared_tree_sources_and_completes_ed2k_transf
         .set_shared_directories(SharedDirectoriesUpdate {
             roots: vec![SharedDirectoryRootUpdate::Object {
                 path: shared_root.display().to_string(),
-                recursive: true,
             }],
             confirm_replace_roots: true,
         })

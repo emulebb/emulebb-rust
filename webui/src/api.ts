@@ -103,6 +103,37 @@ export type LogRecord = {
   [key: string]: unknown;
 };
 
+export type SharedDirectoryRoot = {
+  path: string;
+  monitorOwned?: boolean;
+  shareable?: boolean;
+  accessible?: boolean;
+  [key: string]: unknown;
+};
+
+export type SharedReloadDiagnostics = {
+  phase?: string;
+  running?: boolean;
+  pending?: boolean;
+  scannedCount?: number;
+  plannedHashCount?: number;
+  reusedCount?: number;
+  newCount?: number;
+  changedCount?: number;
+  skippedIntakeCount?: number;
+  prunedCount?: number;
+  [key: string]: unknown;
+};
+
+export type SharedDirectories = {
+  roots?: SharedDirectoryRoot[];
+  items?: SharedDirectoryRoot[];
+  monitorOwned?: string[];
+  hashingCount?: number;
+  reload?: SharedReloadDiagnostics;
+  [key: string]: unknown;
+};
+
 export type Snapshot = {
   app?: AppInfo;
   status?: Status;

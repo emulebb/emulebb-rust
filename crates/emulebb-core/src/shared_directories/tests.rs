@@ -249,24 +249,7 @@ async fn incremental_reload_keeps_hash_when_duplicate_source_remains_scanned() {
 }
 
 #[test]
-fn non_recursive_collects_only_immediate_files() {
-    let root = scratch_dir("nonrec");
-    fs::write(root.join("top-a.dat"), b"a").unwrap();
-    fs::write(root.join("top-b.dat"), b"b").unwrap();
-    let nested = root.join("nested");
-    fs::create_dir_all(&nested).unwrap();
-    fs::write(nested.join("deep.dat"), b"c").unwrap();
-
-    let mut output = Vec::new();
-    let skipped = collect_shared_directory_files(&root, false, &mut output).unwrap();
-
-    assert_eq!(skipped, 0);
-    assert_eq!(names(output), vec!["top-a.dat", "top-b.dat"]);
-    fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-fn recursive_collects_full_tree_files_only() {
+fn shared_directory_scan_collects_full_tree_files_only() {
     let root = scratch_dir("rec");
     fs::write(root.join("top.dat"), b"a").unwrap();
     let nested = root.join("nested").join("more");
@@ -274,7 +257,7 @@ fn recursive_collects_full_tree_files_only() {
     fs::write(nested.join("deep.dat"), b"b").unwrap();
 
     let mut output = Vec::new();
-    let skipped = collect_shared_directory_files(&root, true, &mut output).unwrap();
+    let skipped = collect_shared_directory_files(&root, &mut output).unwrap();
 
     assert_eq!(skipped, 0);
     // Directories are skipped; only the two files are reported.
@@ -292,7 +275,7 @@ fn unreadable_root_is_skipped_without_aborting() {
     assert!(!missing.exists());
 
     let mut output = Vec::new();
-    let result = collect_shared_directory_files(&missing, true, &mut output);
+    let result = collect_shared_directory_files(&missing, &mut output);
 
     assert_eq!(result.unwrap(), 1);
     assert!(output.is_empty());
@@ -308,7 +291,7 @@ fn shared_scan_ignores_mfc_intake_file_names_and_empty_files() {
     fs::write(root.join("empty.bin"), b"").unwrap();
 
     let mut output = Vec::new();
-    let skipped = collect_shared_directory_files(&root, false, &mut output).unwrap();
+    let skipped = collect_shared_directory_files(&root, &mut output).unwrap();
 
     assert_eq!(skipped, 4);
     assert_eq!(names(output), vec!["alpha.bin"]);
@@ -316,7 +299,7 @@ fn shared_scan_ignores_mfc_intake_file_names_and_empty_files() {
 }
 
 #[test]
-fn recursive_shared_scan_prunes_mfc_ignored_directories() {
+fn folder_tree_shared_scan_prunes_mfc_ignored_directories() {
     let root = scratch_dir("ignored-dirs");
     fs::write(root.join("alpha.bin"), b"a").unwrap();
     let git_dir = root.join(".git");
@@ -327,7 +310,7 @@ fn recursive_shared_scan_prunes_mfc_ignored_directories() {
     fs::write(nested.join("beta.bin"), b"c").unwrap();
 
     let mut output = Vec::new();
-    let skipped = collect_shared_directory_files(&root, true, &mut output).unwrap();
+    let skipped = collect_shared_directory_files(&root, &mut output).unwrap();
 
     assert_eq!(skipped, 1);
     assert_eq!(names(output), vec!["alpha.bin", "beta.bin"]);

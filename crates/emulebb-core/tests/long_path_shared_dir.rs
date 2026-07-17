@@ -7,8 +7,7 @@
 //! regardless of the machine's `LongPathsEnabled` registry state, configures it
 //! as a shared root on a temp `EmulebbCore`, runs the real scan/share, and
 //! asserts the deep files are scanned, ingested, and published into the shared
-//! catalog with a valid hash. It also covers the recursive=true vs.
-//! recursive=false depth contract on the deep tree.
+//! catalog with a valid hash.
 //!
 //! On non-Windows `long_path` is the identity function and a >260 path is
 //! created/used directly; the same assertions hold.
@@ -103,34 +102,34 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     )
     .unwrap();
 
-    // --- recursive = false: top files shared, nested file NOT shared ---
     core.set_shared_directories(SharedDirectoriesUpdate {
         roots: vec![SharedDirectoryRootUpdate::Object {
             path: configured_root.clone(),
-            recursive: false,
         }],
         confirm_replace_roots: true,
     })
     .await
     .expect("configuring the deep (>260) shared root must succeed via the verbatim form");
 
-    let flat = core
+    let shares = core
         .reload_shared_directories()
         .await
-        .expect("scanning the deep (>260) shared root must succeed (long-path boundary)");
-    let mut flat_names = share_names(&flat);
-    flat_names.sort();
+        .expect("scanning the deep (>260) shared tree must succeed (long-path boundary)");
+    let mut names = share_names(&shares);
+    names.sort();
     assert_eq!(
-        flat_names,
-        vec!["deep-top-a.bin", "deep-top-b.bin"],
-        "recursive=false on a >260 root must share only the two top-level files",
+        names,
+        vec!["deep-nested.bin", "deep-top-a.bin", "deep-top-b.bin"],
+        "a >260 shared root must share the full folder tree",
     );
 
-    // Both top files ingested with a valid (32 hex char) MD4 file hash.
-    let share_a = require_share(&flat, "deep-top-a.bin");
-    let share_b = require_share(&flat, "deep-top-b.bin");
+    // Every file is ingested with a valid (32 hex char) MD4 file hash.
+    let share_a = require_share(&shares, "deep-top-a.bin");
+    let share_b = require_share(&shares, "deep-top-b.bin");
+    let nested_share = require_share(&shares, "deep-nested.bin");
     assert_valid_hash(&share_a);
     assert_valid_hash(&share_b);
+    assert_valid_hash(&nested_share);
     assert_ne!(
         share_a.hash, share_b.hash,
         "distinct deep-path payloads must hash differently",
@@ -145,35 +144,11 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
         share_a.hash,
         "deep-top-a.bin must appear in the shared catalog with its ingested hash",
     );
-    assert!(
-        catalog.iter().all(|s| s.name != "deep-nested.bin"),
-        "recursive=false must NOT share the nested deep file",
-    );
-
-    // --- recursive = true: nested deep file is now shared too ---
-    core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
-            path: configured_root.clone(),
-            recursive: true,
-        }],
-        confirm_replace_roots: true,
-    })
-    .await
-    .expect("reconfiguring the deep root recursively must succeed");
-
-    let recursive = core
-        .reload_shared_directories()
-        .await
-        .expect("recursive scan of the deep (>260) tree must succeed");
-    let mut recursive_names = share_names(&recursive);
-    recursive_names.sort();
     assert_eq!(
-        recursive_names,
-        vec!["deep-nested.bin", "deep-top-a.bin", "deep-top-b.bin"],
-        "recursive=true on a >260 tree must share the top-level AND nested files",
+        require_share(&catalog, "deep-nested.bin").hash,
+        nested_share.hash,
+        "deep-nested.bin must appear in the shared catalog with its ingested hash",
     );
-    let nested_share = require_share(&recursive, "deep-nested.bin");
-    assert_valid_hash(&nested_share);
 
     // Clean up the deep tree through the verbatim form (a plain remove_dir_all
     // would fail past MAX_PATH on a machine without LongPathsEnabled).

@@ -10,7 +10,6 @@ pub struct MetadataIndexedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSharedDirectoryRoot {
     pub path: String,
-    pub recursive: bool,
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,

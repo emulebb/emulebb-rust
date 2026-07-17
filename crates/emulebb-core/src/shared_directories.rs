@@ -14,7 +14,6 @@ use walkdir::WalkDir;
 #[serde(rename_all = "camelCase")]
 pub struct SharedDirectoryRoot {
     pub path: String,
-    pub recursive: bool,
     pub monitor_owned: bool,
     pub shareable: bool,
     pub accessible: bool,
@@ -82,29 +81,24 @@ pub struct SharedDirectoriesUpdate {
     pub confirm_replace_roots: bool,
 }
 
-/// Backward-compatible shared-directory root input accepted by the REST API.
+/// Shared-directory root input accepted by the REST API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SharedDirectoryRootUpdate {
     Path(String),
-    Object {
-        path: String,
-        #[serde(default)]
-        recursive: bool,
-    },
+    Object { path: String },
 }
 
-pub(crate) fn shared_directory_update_parts(root: SharedDirectoryRootUpdate) -> (String, bool) {
+pub(crate) fn shared_directory_update_path(root: SharedDirectoryRootUpdate) -> String {
     match root {
-        SharedDirectoryRootUpdate::Path(path) => (path, false),
-        SharedDirectoryRootUpdate::Object { path, recursive } => (path, recursive),
+        SharedDirectoryRootUpdate::Path(path) => path,
+        SharedDirectoryRootUpdate::Object { path } => path,
     }
 }
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
     SharedDirectoryRoot {
         path: root.path,
-        recursive: root.recursive,
         monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -114,7 +108,6 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
 pub(crate) fn shared_directory_to_index(root: &SharedDirectoryRoot) -> IndexedSharedDirectoryRoot {
     IndexedSharedDirectoryRoot {
         path: root.path.clone(),
-        recursive: root.recursive,
         monitor_owned: root.monitor_owned,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -126,7 +119,6 @@ pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> Shared
     let accessible = path.is_dir();
     SharedDirectoryRoot {
         path: root.path.clone(),
-        recursive: root.recursive,
         monitor_owned: root.monitor_owned,
         shareable: accessible,
         accessible,
@@ -156,7 +148,7 @@ fn expand_shared_directory_items(roots: Vec<SharedDirectoryRoot>) -> Vec<SharedD
     for root in roots {
         let refreshed = refresh_shared_directory_row(&root);
         push_shared_directory_item(&mut items, &mut seen, refreshed.clone());
-        if !refreshed.accessible || !refreshed.recursive {
+        if !refreshed.accessible {
             continue;
         }
         let walk_root = long_path(Path::new(&refreshed.path));
@@ -197,7 +189,6 @@ fn expand_shared_directory_items(roots: Vec<SharedDirectoryRoot>) -> Vec<SharedD
                 &mut seen,
                 SharedDirectoryRoot {
                     path,
-                    recursive: false,
                     monitor_owned: true,
                     shareable: true,
                     accessible: true,
@@ -310,22 +301,19 @@ fn ends_with_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
-/// Enumerate the regular files under a shared-directory root.
+/// Enumerate the regular files under a shared-directory root tree.
 ///
 /// This walk is intentionally synchronous and recursive (via `walkdir`), so it
 /// MUST NOT be invoked directly from an async context: async callers wrap it in
 /// `tokio::task::spawn_blocking` so the (potentially large) blocking scan never
 /// stalls a tokio worker thread.
 ///
-/// When `recursive == false` only the immediate directory's files are returned
-/// (`max_depth(1)`); when `recursive == true` the full tree is descended.
-/// `walkdir`'s own loop detection guards against symlink cycles. A single
-/// unreadable entry (permissions, vanished file, broken symlink) is logged and
-/// skipped instead of aborting the whole scan, so the readable files are still
-/// collected.
+/// `walkdir` descends the full tree and uses its own loop detection for symlink
+/// cycles. A single unreadable entry (permissions, vanished file, broken
+/// symlink) is logged and skipped instead of aborting the whole scan, so the
+/// readable files are still collected.
 pub(crate) fn collect_shared_directory_files(
     root: &Path,
-    recursive: bool,
     output: &mut Vec<PathBuf>,
 ) -> Result<usize> {
     // Operator-facing shared-directory boundary: walk the root through the
@@ -335,10 +323,8 @@ pub(crate) fn collect_shared_directory_files(
     // (Operator-rule scope: shared-directory trees -- see long_path.rs.)
     let root = long_path(root);
     let root = root.as_path();
-    let max_depth = if recursive { usize::MAX } else { 1 };
     let skipped_intake_count = Cell::new(0usize);
     for entry in WalkDir::new(root)
-        .max_depth(max_depth)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
@@ -399,12 +385,9 @@ pub(crate) async fn scan_shared_directory_roots(
         let mut file_paths = Vec::new();
         let mut skipped_intake_count = 0;
         for root in roots {
-            skipped_intake_count += collect_shared_directory_files(
-                Path::new(&root.path),
-                root.recursive,
-                &mut file_paths,
-            )
-            .with_context(|| format!("failed to scan shared directory {}", root.path))?;
+            skipped_intake_count +=
+                collect_shared_directory_files(Path::new(&root.path), &mut file_paths)
+                    .with_context(|| format!("failed to scan shared directory {}", root.path))?;
         }
         Ok(SharedScanResult {
             file_paths,

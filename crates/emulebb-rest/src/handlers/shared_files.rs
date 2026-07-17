@@ -12,7 +12,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use emulebb_core::{LocalShareCreate, SharedDirectoriesUpdate, SharedFileUpdate};
+use emulebb_core::{SharedDirectoriesUpdate, SharedFileUpdate};
 
 use crate::handlers::prelude::*;
 
@@ -37,48 +37,6 @@ pub(crate) async fn shared_files(
         "limit": limit
     }))
     .into_response()
-}
-
-pub(crate) async fn create_shared_file(
-    State(state): State<RestState>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let request = match parse_required_json_body::<SharedFileCreateRequest>(&body) {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    let path = request.path.trim().to_string();
-    if path.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required")
-            .into_response();
-    }
-    let existing_hashes = state
-        .core
-        .shares()
-        .await
-        .into_iter()
-        .map(|share| share.hash)
-        .collect::<std::collections::HashSet<_>>();
-    match state
-        .core
-        .share_local_file(LocalShareCreate {
-            path: path.clone(),
-            name: None,
-        })
-        .await
-    {
-        Ok(share) => api_ok(SharedFileCreateResult {
-            ok: true,
-            path,
-            already_shared: existing_hashes.contains(&share.hash),
-            queued: false,
-            file: shared_file_response(&share),
-        })
-        .into_response(),
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
-    }
 }
 
 pub(crate) async fn shared_directories(State(state): State<RestState>) -> impl IntoResponse {
@@ -141,71 +99,6 @@ pub(crate) async fn update_shared_file(
     };
     match state.core.update_shared_file(&hash, request).await {
         Ok(Some(share)) => api_ok(shared_file_response(&share)).into_response(),
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
-        }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
-    }
-}
-
-pub(crate) async fn delete_shared_file(
-    State(state): State<RestState>,
-    Path(hash): Path<String>,
-) -> impl IntoResponse {
-    let Some(share) = state.core.share(&hash).await else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found")
-            .into_response();
-    };
-    let path = managed_shared_file_path(&share);
-    match state.core.unshare_file(&hash).await {
-        Ok(Some(_share)) => api_ok(SharedFileRemoveResult {
-            ok: true,
-            deleted_files: false,
-            path,
-            hash: share.hash,
-        })
-        .into_response(),
-        Ok(None) => {
-            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
-        }
-        Err(error) => {
-            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
-        }
-    }
-}
-
-pub(crate) async fn delete_shared_file_payload(
-    State(state): State<RestState>,
-    Path(hash): Path<String>,
-    RawQuery(raw_query): RawQuery,
-) -> impl IntoResponse {
-    let query = match parse_optional_query::<ConfirmQuery>(raw_query.as_deref()) {
-        Ok(query) => query,
-        Err(response) => return *response,
-    };
-    if query.confirm != Some(true) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "shared file deletion requires confirm=true",
-        )
-        .into_response();
-    }
-    let Some(share) = state.core.share(&hash).await else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found")
-            .into_response();
-    };
-    let path = managed_shared_file_path(&share);
-    match state.core.delete_transfer_files(&hash).await {
-        Ok(Some(_transfer)) => api_ok(SharedFileRemoveResult {
-            ok: true,
-            deleted_files: true,
-            path,
-            hash: share.hash,
-        })
-        .into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "shared file not found").into_response()
         }

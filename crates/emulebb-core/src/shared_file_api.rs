@@ -245,7 +245,7 @@ impl EmulebbCore {
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
         for root in request.roots {
-            let (path, recursive) = shared_directory_update_parts(root);
+            let path = shared_directory_update_path(root);
             let path = path.trim();
             ensure!(!path.is_empty(), "path must not be empty");
             let canonical =
@@ -257,7 +257,6 @@ impl EmulebbCore {
             if seen.insert(canonical_path.clone()) {
                 roots.push(SharedDirectoryRoot {
                     path: canonical_path,
-                    recursive,
                     monitor_owned: false,
                     shareable: true,
                     accessible: true,

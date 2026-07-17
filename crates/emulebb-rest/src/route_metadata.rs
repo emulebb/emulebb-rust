@@ -231,7 +231,7 @@ fn uses_destructive_query_confirmation(method: &str, path: &str) -> bool {
     };
     matches!(
         (method, segments.as_slice()),
-        ("DELETE", ["shared-files", _, "file"]) | ("DELETE", ["transfers", _, "files"])
+        ("DELETE", ["transfers", _, "files"])
     )
 }
 
@@ -302,8 +302,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         | ("POST", ["servers", server_id, "operations", "connect"]) => {
             validate_endpoint_path_token(server_id, "serverId")?
         }
-        ("GET" | "PATCH" | "DELETE", ["shared-files", hash])
-        | ("DELETE", ["shared-files", hash, "file"])
+        ("GET" | "PATCH", ["shared-files", hash])
         | ("GET", ["shared-files", hash, "ed2k-link"])
         | ("GET", ["shared-files", hash, "comments"])
         | ("GET" | "PATCH" | "DELETE", ["transfers", hash])
@@ -491,8 +490,6 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("GET", "/api/v1/shared-directories")
         | ("PATCH", "/api/v1/shared-directories")
         | ("POST", "/api/v1/shared-directories/operations/reload")
-        | ("POST", "/api/v1/shared-files")
-        | ("POST", "/api/v1/shared-files/operations/reload")
         | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
         | ("POST", "/api/v1/transfers")
@@ -536,7 +533,6 @@ fn route_query_fields_for_parameterized(
         | ("DELETE", ["searches", _])
         | ("GET", ["shared-files", _])
         | ("PATCH", ["shared-files", _])
-        | ("DELETE", ["shared-files", _])
         | ("GET", ["shared-files", _, "ed2k-link"])
         | ("GET", ["shared-files", _, "comments"])
         | ("GET", ["transfers", _])
@@ -578,9 +574,7 @@ fn route_query_fields_for_parameterized(
             Some(NONE)
         }
         ("GET", ["searches", _]) => Some(SEARCH),
-        ("DELETE", ["shared-files", _, "file"]) | ("DELETE", ["transfers", _, "files"]) => {
-            Some(CONFIRM)
-        }
+        ("DELETE", ["transfers", _, "files"]) => Some(CONFIRM),
         _ => None,
     }
 }
