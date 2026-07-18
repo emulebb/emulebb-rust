@@ -107,8 +107,14 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = status.transfers.total;
-    let ed2k_publish = state.core.ed2k_publish_diagnostics();
-    let kad_publish = state.core.kad_publish_diagnostics();
+    let runtime_diagnostics = runtime_diagnostics_response_with(
+        state,
+        shared_file_count,
+        download_file_count,
+        shared_hashing_count,
+        shared_directory_reload_progress.clone(),
+        &upload_policy,
+    );
     json!({
         "lifecycle": lifecycle_response(&status.lifecycle),
         "stats": stats_response(&status, &upload_policy, &throughput, shared_hashing_count),
@@ -131,19 +137,45 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "interruptedHashingInvalidatedCache": false,
             "reloadProgress": shared_directory_reload_progress.clone()
         },
-        "runtimeDiagnostics": {
-            "processId": std::process::id(),
-            "knownFileCount": shared_file_count,
-            "sharedFileCount": shared_file_count,
-            "sharedHashingCount": shared_hashing_count,
-            "sharedDirectoryReloadProgress": shared_directory_reload_progress,
-            "ed2kPublish": ed2k_publish,
-            "kadPublish": kad_publish,
-            "downloadFileCount": download_file_count,
-            "activeUploads": upload_policy.active_sessions,
-            "waitingUploads": upload_policy.waiting_sessions,
-            "geolocation": null
-        }
+        "runtimeDiagnostics": runtime_diagnostics
+    })
+}
+
+pub(crate) async fn runtime_diagnostics_response(state: &RestState) -> Value {
+    let status = state.core.status().await;
+    let upload_policy = state.core.upload_policy_metrics().await;
+    let shared_directories = state.core.shared_directories().await;
+    let shared_file_count = state.core.shared_catalog_count().await;
+    runtime_diagnostics_response_with(
+        state,
+        shared_file_count,
+        status.transfers.total,
+        shared_directories.hashing_count,
+        shared_directories.reload_progress,
+        &upload_policy,
+    )
+}
+
+fn runtime_diagnostics_response_with(
+    state: &RestState,
+    shared_file_count: usize,
+    download_file_count: usize,
+    shared_hashing_count: i64,
+    shared_directory_reload_progress: impl serde::Serialize,
+    upload_policy: &UploadPolicyMetrics,
+) -> Value {
+    json!({
+        "processId": std::process::id(),
+        "knownFileCount": shared_file_count,
+        "sharedFileCount": shared_file_count,
+        "sharedHashingCount": shared_hashing_count,
+        "sharedDirectoryReloadProgress": shared_directory_reload_progress,
+        "ed2kPublish": state.core.ed2k_publish_diagnostics(),
+        "kadPublish": state.core.kad_publish_diagnostics(),
+        "downloadFileCount": download_file_count,
+        "activeUploads": upload_policy.active_sessions,
+        "waitingUploads": upload_policy.waiting_sessions,
+        "geolocation": null
     })
 }
 

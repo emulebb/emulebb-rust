@@ -2285,7 +2285,7 @@ function categoryPriorityValue(value: string): string | number {
   return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
 }
 
-export function DiagnosticsView(props: { app: unknown; capabilities: unknown; client: RestClient; run: RunFunction }) {
+export function DiagnosticsView(props: { app: unknown; capabilities: unknown; runtimeDiagnostics: unknown; client: RestClient; run: RunFunction }) {
   const [fullMemory, setFullMemory] = useState(false);
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
@@ -2333,6 +2333,12 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; cl
             Shutdown
           </button>
         </div>
+      </section>
+      <section class="panel card">
+        <div class="section-title">
+          <h2>Runtime</h2>
+        </div>
+        <JsonPanel value={props.runtimeDiagnostics} />
       </section>
       <section class="panel card split">
         <div>

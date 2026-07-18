@@ -383,3 +383,48 @@ async fn status_reports_shared_catalog_count_without_catalog_listing() {
     assert_eq!(value["data"]["runtimeDiagnostics"]["knownFileCount"], 1);
     assert_eq!(value["data"]["runtimeDiagnostics"]["sharedFileCount"], 1);
 }
+
+#[tokio::test]
+async fn diagnostics_returns_runtime_diagnostics_directly() {
+    let router = test_router();
+
+    let create_active = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"links":["ed2k://|file|Diagnostic.Active.bin|1|00112233445566778899aabbccddeeff|/"],"paused":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_active.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/diagnostics")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["downloadFileCount"], 1);
+    assert_eq!(value["data"]["sharedHashingCount"], 0);
+    assert_eq!(
+        value["data"]["sharedDirectoryReloadProgress"]["phase"],
+        "idle"
+    );
+    assert_eq!(value["data"]["ed2kPublish"]["phase"], "idle");
+    assert_eq!(value["data"]["kadPublish"]["phase"], "idle");
+    assert_eq!(value["data"]["geolocation"], Value::Null);
+}

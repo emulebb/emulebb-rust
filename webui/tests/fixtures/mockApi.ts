@@ -245,6 +245,8 @@ function dataFor(method: string, path: string): unknown {
       };
     case "capabilities":
       return { contractVersion: "1.2.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse"] };
+    case "diagnostics":
+      return snapshot.status.runtimeDiagnostics;
     case `transfers/${transferHash}/details`:
       return { hash: transferHash, name: "Sample Transfer.bin" };
     case `transfers/${transferHash}/sources`:

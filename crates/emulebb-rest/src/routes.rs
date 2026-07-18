@@ -45,6 +45,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/events", get(events))
         .route("/api/v1/app/shutdown", post(shutdown_app))
+        .route("/api/v1/diagnostics", get(diagnostics))
         .route("/api/v1/diagnostics/dumps", post(capture_diagnostic_dump))
         .route(
             "/api/v1/diagnostics/crash-tests",

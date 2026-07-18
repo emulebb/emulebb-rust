@@ -52,13 +52,22 @@ export type Status = {
     reloadProgress?: SharedDirectoryReloadProgress;
     [key: string]: unknown;
   };
-  runtimeDiagnostics?: {
-    sharedHashingCount?: number;
-    sharedDirectoryReloadProgress?: SharedDirectoryReloadProgress;
-    ed2kPublish?: Record<string, unknown>;
-    kadPublish?: Record<string, unknown>;
-    [key: string]: unknown;
-  };
+  runtimeDiagnostics?: RuntimeDiagnostics;
+  [key: string]: unknown;
+};
+
+export type RuntimeDiagnostics = {
+  processId?: number;
+  knownFileCount?: number;
+  sharedFileCount?: number;
+  sharedHashingCount?: number;
+  sharedDirectoryReloadProgress?: SharedDirectoryReloadProgress;
+  ed2kPublish?: Record<string, unknown>;
+  kadPublish?: Record<string, unknown>;
+  downloadFileCount?: number;
+  activeUploads?: number;
+  waitingUploads?: number;
+  geolocation?: Record<string, unknown> | null;
   [key: string]: unknown;
 };
 

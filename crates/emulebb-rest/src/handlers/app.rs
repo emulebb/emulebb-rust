@@ -200,6 +200,10 @@ pub(crate) async fn status(State(state): State<RestState>) -> impl IntoResponse 
     api_ok(status_response(&state).await)
 }
 
+pub(crate) async fn diagnostics(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(runtime_diagnostics_response(&state).await)
+}
+
 pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;
