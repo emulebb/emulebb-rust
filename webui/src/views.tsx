@@ -1395,6 +1395,8 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const [importUrl, setImportUrl] = useState("");
   const [filter, setFilter] = useState("");
   const [selectedEndpoint, setSelectedEndpoint] = useState("");
+  const serverAddress = address.trim();
+  const serverAddressError = endpointAddressError(address, "Address");
   const serverPortError = endpointPortError(port, "Port");
   const serverImportUrlError = urlImportError(importUrl, "server.met URL");
 
@@ -1422,11 +1424,11 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
 
   const createServer = () => {
     const parsedPort = parseEndpointPort(port);
-    if (parsedPort === null) {
+    if (!serverAddress || parsedPort === null) {
       return Promise.resolve();
     }
     return props.client.post("servers", {
-      address,
+      address: serverAddress,
       port: parsedPort,
       name: name || undefined,
       priority: "normal",
@@ -1445,15 +1447,16 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        if (!serverPortError) {
+        if (!serverAddressError && !serverPortError) {
           void props.run(createServer, "Server added");
         }
       }}>
-        <input class="form-control" value={address} placeholder="Address" onInput={(event) => setAddress(event.currentTarget.value)} />
+        <input class="form-control" value={address} placeholder="Address" aria-invalid={serverAddressError ? "true" : "false"} onInput={(event) => setAddress(event.currentTarget.value)} />
         <input class="form-control" value={port} placeholder="Port" inputMode="numeric" aria-invalid={serverPortError ? "true" : "false"} onInput={(event) => setPort(event.currentTarget.value)} />
         <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <button class="btn" type="submit" disabled={Boolean(serverPortError)}><Server size={16} />Add</button>
+        <button class="btn" type="submit" disabled={!serverAddress || Boolean(serverAddressError) || Boolean(serverPortError)}><Server size={16} />Add</button>
       </form>
+      {serverAddressError && <p class="field-error">{serverAddressError}</p>}
       {serverPortError && <p class="field-error">{serverPortError}</p>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
@@ -1546,6 +1549,8 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
   const [nodes, setNodes] = useState<KadNode[]>([]);
   const [filter, setFilter] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const bootstrapAddressValue = bootstrapAddress.trim();
+  const bootstrapAddressError = endpointAddressError(bootstrapAddress, "Bootstrap address");
   const bootstrapPortError = endpointPortError(bootstrapPort, "Bootstrap port");
   const kadImportUrlError = urlImportError(importUrl, "nodes.dat URL");
 
@@ -1622,14 +1627,15 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         const parsedPort = parseEndpointPort(bootstrapPort);
-        if (parsedPort !== null) {
-          void props.run(() => props.client.post("kad/operations/bootstrap", { address: bootstrapAddress, port: parsedPort }), "Kad bootstrap started");
+        if (bootstrapAddressValue && !bootstrapAddressError && parsedPort !== null) {
+          void props.run(() => props.client.post("kad/operations/bootstrap", { address: bootstrapAddressValue, port: parsedPort }), "Kad bootstrap started");
         }
       }}>
-        <input class="form-control" value={bootstrapAddress} placeholder="Bootstrap address" onInput={(event) => setBootstrapAddress(event.currentTarget.value)} />
+        <input class="form-control" value={bootstrapAddress} placeholder="Bootstrap address" aria-invalid={bootstrapAddressError ? "true" : "false"} onInput={(event) => setBootstrapAddress(event.currentTarget.value)} />
         <input class="form-control" value={bootstrapPort} inputMode="numeric" placeholder="Port" aria-invalid={bootstrapPortError ? "true" : "false"} onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
-        <button class="btn" type="submit" disabled={Boolean(bootstrapPortError)}><Plug size={16} />Bootstrap</button>
+        <button class="btn" type="submit" disabled={!bootstrapAddressValue || Boolean(bootstrapAddressError) || Boolean(bootstrapPortError)}><Plug size={16} />Bootstrap</button>
       </form>
+      {bootstrapAddressError && <p class="field-error">{bootstrapAddressError}</p>}
       {bootstrapPortError && <p class="field-error">{bootstrapPortError}</p>}
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
@@ -3297,6 +3303,10 @@ function sharedFileRatingError(value: string): string | undefined {
 
 function sharedRootPathError(value: string): string | undefined {
   return value && !value.trim() ? "Folder path must not be empty." : undefined;
+}
+
+function endpointAddressError(value: string, label: string): string | undefined {
+  return value && !value.trim() ? `${label} must not be empty.` : undefined;
 }
 
 function optionalPort(value: string): number | null {
