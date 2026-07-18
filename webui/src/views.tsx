@@ -1370,6 +1370,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const [filter, setFilter] = useState("");
   const [selectedEndpoint, setSelectedEndpoint] = useState("");
   const serverPortError = endpointPortError(port, "Port");
+  const serverImportUrlError = urlImportError(importUrl, "server.met URL");
 
   const filteredServers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1430,11 +1431,15 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
       {serverPortError && <p class="field-error">{serverPortError}</p>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(() => props.client.post("servers/operations/import-met-url", { url: importUrl }), "Server list import started");
+        const url = parseUrlImportText(importUrl);
+        if (url) {
+          void props.run(() => props.client.post("servers/operations/import-met-url", { url }), "Server list import started");
+        }
       }}>
-        <input class="form-control" value={importUrl} placeholder="server.met URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
-        <button class="btn" type="submit"><Download size={16} />Import</button>
+        <input class="form-control" value={importUrl} placeholder="server.met URL" aria-invalid={serverImportUrlError ? "true" : "false"} onInput={(event) => setImportUrl(event.currentTarget.value)} />
+        <button class="btn" type="submit" disabled={!importUrl.trim() || Boolean(serverImportUrlError)}><Download size={16} />Import</button>
       </form>
+      {serverImportUrlError && <p class="field-error">{serverImportUrlError}</p>}
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
@@ -1516,6 +1521,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
   const [filter, setFilter] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const bootstrapPortError = endpointPortError(bootstrapPort, "Bootstrap port");
+  const kadImportUrlError = urlImportError(importUrl, "nodes.dat URL");
 
   const loadNodes = async () => {
     const page = await props.client.get<Page<KadNode>>("kad/nodes?limit=100");
@@ -1578,11 +1584,15 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(() => props.client.post("kad/operations/import-nodes-url", { url: importUrl }), "Kad nodes import started");
+        const url = parseUrlImportText(importUrl);
+        if (url) {
+          void props.run(() => props.client.post("kad/operations/import-nodes-url", { url }), "Kad nodes import started");
+        }
       }}>
-        <input class="form-control" value={importUrl} placeholder="nodes.dat URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
-        <button class="btn" type="submit"><Download size={16} />Import</button>
+        <input class="form-control" value={importUrl} placeholder="nodes.dat URL" aria-invalid={kadImportUrlError ? "true" : "false"} onInput={(event) => setImportUrl(event.currentTarget.value)} />
+        <button class="btn" type="submit" disabled={!importUrl.trim() || Boolean(kadImportUrlError)}><Download size={16} />Import</button>
       </form>
+      {kadImportUrlError && <p class="field-error">{kadImportUrlError}</p>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         const parsedPort = parseEndpointPort(bootstrapPort);
@@ -3136,6 +3146,7 @@ function arrayField(object: Record<string, unknown> | undefined, key: string): s
 }
 
 const TRANSFER_ADD_LINK_TEXT_ERROR = "Each transfer link must start with ed2k://, contain no whitespace, and be at most 2048 characters.";
+const URL_IMPORT_TEXT_ERROR = "must start with http:// or https://, include a host, contain no whitespace, and be at most 2048 characters.";
 
 function transferLinksFromText(value: string): string[] {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -3157,6 +3168,22 @@ function transferLinksValidationError(value: string): string | undefined {
 
 function isTransferAddLinkText(value: string): boolean {
   return value.length <= 2048 && !/[\u0000-\u001f\u007f]/.test(value) && /^[eE][dD]2[kK]:\/\/\S+$/.test(value);
+}
+
+function parseUrlImportText(value: string): string | null {
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+  return normalized.length <= 2048
+    && !/[\u0000-\u001f\u007f]/.test(normalized)
+    && /^[hH][tT][tT][pP][sS]?:\/\/[^\s/?#][^\s]*$/.test(normalized)
+    ? normalized
+    : null;
+}
+
+function urlImportError(value: string, label: string): string | undefined {
+  return value.trim() && parseUrlImportText(value) === null ? `${label} ${URL_IMPORT_TEXT_ERROR}` : undefined;
 }
 
 function optionalPort(value: string): number | null {

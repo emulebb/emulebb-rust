@@ -145,6 +145,50 @@ test("section resource operation forms validate endpoint ports", async ({ page }
   expect(JSON.parse(bootstrapPost?.body ?? "{}").port).toBe(4672);
 });
 
+test("section resource import forms validate HTTP URLs", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Servers" }).click();
+  const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
+  const serverImportButton = serversPanel.getByRole("button", { name: "Import" });
+  const initialServerImportPosts = requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length;
+  const urlImportError = "must start with http:// or https://, include a host, contain no whitespace, and be at most 2048 characters.";
+  const serverUrlError = `server.met URL ${urlImportError}`;
+  const kadUrlError = `nodes.dat URL ${urlImportError}`;
+  await expect(serverImportButton).toBeDisabled();
+  await serversPanel.getByPlaceholder("server.met URL").fill("ftp://example.invalid/server.met");
+  await expect(serversPanel.getByText(serverUrlError)).toBeVisible();
+  await expect(serverImportButton).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length).toBe(initialServerImportPosts);
+  await serversPanel.getByPlaceholder("server.met URL").fill(" HTTPS://example.invalid/server.met ");
+  await expect(serversPanel.getByText(serverUrlError)).toHaveCount(0);
+  await serverImportButton.click();
+  await expect(page.getByText("Server list import started")).toBeVisible();
+  const serverImportPost = requests.find((request) => request.method === "POST" && request.path === "servers/operations/import-met-url");
+  expect(serverImportPost).toBeDefined();
+  expect(JSON.parse(serverImportPost?.body ?? "{}")).toEqual({ url: "HTTPS://example.invalid/server.met" });
+
+  await page.getByRole("button", { name: "Kad" }).click();
+  const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
+  const kadImportButton = kadPanel.getByRole("button", { name: "Import" });
+  const initialKadImportPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length;
+  await expect(kadImportButton).toBeDisabled();
+  await kadPanel.getByPlaceholder("nodes.dat URL").fill("https:///nodes.dat");
+  await expect(kadPanel.getByText(kadUrlError)).toBeVisible();
+  await expect(kadImportButton).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length).toBe(initialKadImportPosts);
+  await kadPanel.getByPlaceholder("nodes.dat URL").fill("http://example.invalid/nodes.dat");
+  await expect(kadPanel.getByText(kadUrlError)).toHaveCount(0);
+  await kadImportButton.click();
+  await expect(page.getByText("Kad nodes import started")).toBeVisible();
+  const kadImportPost = requests.find((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url");
+  expect(kadImportPost).toBeDefined();
+  expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
+});
+
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
