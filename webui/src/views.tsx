@@ -2675,13 +2675,13 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kCallbackTimeoutSecs", "Callback timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
-  validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", {});
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
   validateUnsigned(errors, form, "ed2kSessionRotationSecs", "Session rotation seconds", {});
-  validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", { min: 1 });
-  validateUnsigned(errors, form, "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s", { min: 1 });
-  validateUnsigned(errors, form, "ed2kMaxHalfOpenConnections", "eD2K half-open connections", { min: 1 });
-  validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", { min: 1 });
+  validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", {});
+  validateUnsigned(errors, form, "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s", {});
+  validateUnsigned(errors, form, "ed2kMaxHalfOpenConnections", "eD2K half-open connections", {});
+  validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", {});
   validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
   validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
   validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
