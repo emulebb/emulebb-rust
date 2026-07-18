@@ -1977,6 +1977,8 @@ type SettingsForm = {
   ed2kDeadServerRetries: string;
   ed2kSessionRotationSecs: string;
   ed2kMaxConcurrentDownloads: string;
+  ed2kMaxNewConnectionsPerFiveSeconds: string;
+  ed2kMaxHalfOpenConnections: string;
   ed2kMaxSourcesPerFile: string;
   ed2kMaxParallelDownloadPeers: string;
   ed2kDownloadLimitBytesPerSec: string;
@@ -2068,6 +2070,8 @@ const emptySettingsForm: SettingsForm = {
   ed2kDeadServerRetries: "",
   ed2kSessionRotationSecs: "",
   ed2kMaxConcurrentDownloads: "",
+  ed2kMaxNewConnectionsPerFiveSeconds: "",
+  ed2kMaxHalfOpenConnections: "",
   ed2kMaxSourcesPerFile: "",
   ed2kMaxParallelDownloadPeers: "",
   ed2kDownloadLimitBytesPerSec: "",
@@ -2203,6 +2207,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         keepaliveSecs: parseNumber(form.ed2kKeepaliveSecs),
         sessionRotationSecs: parseNumber(form.ed2kSessionRotationSecs),
         maxConcurrentDownloads: parseNumber(form.ed2kMaxConcurrentDownloads),
+        maxNewConnectionsPerFiveSeconds: parseNumber(form.ed2kMaxNewConnectionsPerFiveSeconds),
+        maxHalfOpenConnections: parseNumber(form.ed2kMaxHalfOpenConnections),
         maxSourcesPerFile: parseNumber(form.ed2kMaxSourcesPerFile),
         maxParallelDownloadPeers: parseNumber(form.ed2kMaxParallelDownloadPeers),
         downloadLimitBytesPerSec: parseNumber(form.ed2kDownloadLimitBytesPerSec),
@@ -2353,6 +2359,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
           "ed2k.listenPort",
           "ed2k.connectTimeoutSecs",
           "ed2k.keepaliveSecs",
+          "ed2k.maxNewConnectionsPerFiveSeconds",
+          "ed2k.maxHalfOpenConnections",
           "kad.listenPort",
           "ed2k.obfuscationEnabled",
           "ed2k.publishEmuleRustIdentity"
@@ -2366,6 +2374,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
               {renderField("ed2k.connectTimeoutSecs", "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds")}
               {renderField("ed2k.keepaliveSecs", "ed2kKeepaliveSecs", "eD2K keepalive seconds")}
+              {renderField("ed2k.maxNewConnectionsPerFiveSeconds", "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s")}
+              {renderField("ed2k.maxHalfOpenConnections", "ed2kMaxHalfOpenConnections", "eD2K half-open connections")}
               {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
               {renderToggle("core.networkEd2k", "networkEd2k", "Network eD2K")}
               {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
@@ -2626,6 +2636,8 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
   validateUnsigned(errors, form, "ed2kSessionRotationSecs", "Session rotation seconds", {});
   validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", { min: 1 });
+  validateUnsigned(errors, form, "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s", { min: 1 });
+  validateUnsigned(errors, form, "ed2kMaxHalfOpenConnections", "eD2K half-open connections", { min: 1 });
   validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", { min: 1 });
   validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
   validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
@@ -2713,6 +2725,8 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kDeadServerRetries: String(numberField(settings.ed2k, "deadServerRetries") ?? ""),
     ed2kSessionRotationSecs: String(numberField(settings.ed2k, "sessionRotationSecs") ?? ""),
     ed2kMaxConcurrentDownloads: String(numberField(settings.ed2k, "maxConcurrentDownloads") ?? ""),
+    ed2kMaxNewConnectionsPerFiveSeconds: String(numberField(settings.ed2k, "maxNewConnectionsPerFiveSeconds") ?? ""),
+    ed2kMaxHalfOpenConnections: String(numberField(settings.ed2k, "maxHalfOpenConnections") ?? ""),
     ed2kMaxSourcesPerFile: String(numberField(settings.ed2k, "maxSourcesPerFile") ?? ""),
     ed2kMaxParallelDownloadPeers: String(numberField(settings.ed2k, "maxParallelDownloadPeers") ?? ""),
     ed2kDownloadLimitBytesPerSec: String(numberField(settings.ed2k, "downloadLimitBytesPerSec") ?? ""),

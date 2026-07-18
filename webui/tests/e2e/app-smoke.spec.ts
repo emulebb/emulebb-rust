@@ -86,6 +86,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByRole("heading", { name: "VPN Guard" })).toBeVisible();
 
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
+  await expect(settingsPanel.getByText("eD2K half-open connections")).toHaveCount(0);
   await expect(settingsPanel.getByText("Concurrent downloads")).toHaveCount(0);
   await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
   await expect(settingsPanel.getByText("Startup upload slots")).toHaveCount(0);
@@ -93,6 +94,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
+  await expect(settingsPanel.getByLabel("eD2K half-open connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Startup upload slots")).toBeVisible();
