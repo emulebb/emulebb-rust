@@ -246,8 +246,9 @@ mod rest_model;
 mod rest_model_serde;
 pub use emulebb_settings::{
     AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
-    CoreSettings, CoreSettingsUpdate, app_settings_update_is_empty, core_setting_field,
-    core_settings_schema,
+    CoreSettings, CoreSettingsUpdate, SettingSurfaceClass, SettingSurfaceSpec,
+    SettingsSectionResourceSpec, app_settings_surface_inventory, app_settings_update_is_empty,
+    core_setting_field, core_settings_schema, settings_section_resource_inventory,
 };
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,

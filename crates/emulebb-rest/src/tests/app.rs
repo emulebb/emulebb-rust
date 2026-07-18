@@ -96,6 +96,40 @@ async fn capabilities_returns_contract_version_and_capability_list() {
 }
 
 #[tokio::test]
+async fn settings_surface_describes_settings_fields_and_section_resources() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app/settings/surface")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let settings = value["data"]["settings"].as_array().unwrap();
+    assert!(settings.iter().any(|entry| {
+        entry["path"] == "core.uploadLimitKiBps"
+            && entry["class"] == "normalControl"
+            && entry["route"] == "/api/v1/app/settings"
+    }));
+    assert!(settings.iter().any(|entry| {
+        entry["path"] == "daemon.ed2kUserHash" && entry["class"] == "notUserFacing"
+    }));
+    assert!(!settings.iter().any(|entry| entry["path"] == "rest.apiKey"));
+
+    let section_resources = value["data"]["sectionResources"].as_array().unwrap();
+    assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "diagnostics"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/diagnostics"
+    }));
+}
+
+#[tokio::test]
 async fn events_endpoint_requires_auth_and_serves_sse() {
     let unauthorized = test_router()
         .oneshot(

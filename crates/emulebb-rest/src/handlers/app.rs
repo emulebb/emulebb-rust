@@ -18,7 +18,10 @@ use futures_util::stream;
 use serde_json::json;
 use std::convert::Infallible;
 
-use emulebb_core::{AppSettingsUpdate, TransferEvent, TransferEventResetReason, TransferEventType};
+use emulebb_core::{
+    AppSettingsUpdate, TransferEvent, TransferEventResetReason, TransferEventType,
+    app_settings_surface_inventory, settings_section_resource_inventory,
+};
 use tokio::sync::broadcast;
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
@@ -178,6 +181,13 @@ pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoRespons
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
     }
+}
+
+pub(crate) async fn settings_surface() -> impl IntoResponse {
+    api_ok(json!({
+        "settings": app_settings_surface_inventory(),
+        "sectionResources": settings_section_resource_inventory(),
+    }))
 }
 
 pub(crate) async fn update_settings(
