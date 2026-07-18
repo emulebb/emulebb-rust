@@ -1975,6 +1975,11 @@ type SettingsForm = {
   ed2kReconnectIntervalSecs: string;
   ed2kKeepaliveSecs: string;
   ed2kDeadServerRetries: string;
+  ed2kSessionRotationSecs: string;
+  ed2kMaxConcurrentDownloads: string;
+  ed2kMaxSourcesPerFile: string;
+  ed2kMaxParallelDownloadPeers: string;
+  ed2kDownloadLimitBytesPerSec: string;
   ed2kUploadQueueActiveSlots: string;
   ed2kUploadQueueElasticPercent: string;
   ed2kUploadQueueUploadLimitBytesPerSec: string;
@@ -2061,6 +2066,11 @@ const emptySettingsForm: SettingsForm = {
   ed2kReconnectIntervalSecs: "",
   ed2kKeepaliveSecs: "",
   ed2kDeadServerRetries: "",
+  ed2kSessionRotationSecs: "",
+  ed2kMaxConcurrentDownloads: "",
+  ed2kMaxSourcesPerFile: "",
+  ed2kMaxParallelDownloadPeers: "",
+  ed2kDownloadLimitBytesPerSec: "",
   ed2kUploadQueueActiveSlots: "",
   ed2kUploadQueueElasticPercent: "",
   ed2kUploadQueueUploadLimitBytesPerSec: "",
@@ -2191,6 +2201,11 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         callbackTimeoutSecs: parseNumber(form.ed2kCallbackTimeoutSecs),
         reconnectIntervalSecs: parseNumber(form.ed2kReconnectIntervalSecs),
         keepaliveSecs: parseNumber(form.ed2kKeepaliveSecs),
+        sessionRotationSecs: parseNumber(form.ed2kSessionRotationSecs),
+        maxConcurrentDownloads: parseNumber(form.ed2kMaxConcurrentDownloads),
+        maxSourcesPerFile: parseNumber(form.ed2kMaxSourcesPerFile),
+        maxParallelDownloadPeers: parseNumber(form.ed2kMaxParallelDownloadPeers),
+        downloadLimitBytesPerSec: parseNumber(form.ed2kDownloadLimitBytesPerSec),
         obfuscationEnabled: form.obfuscationEnabled,
         reconnectEnabled: form.ed2kReconnectEnabled,
         enableUdpReask: form.enableUdpReask,
@@ -2302,6 +2317,11 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
           "core.uploadSlotElasticPercent",
           "core.queueSize",
           "core.creditSystem",
+          "ed2k.sessionRotationSecs",
+          "ed2k.maxConcurrentDownloads",
+          "ed2k.maxSourcesPerFile",
+          "ed2k.maxParallelDownloadPeers",
+          "ed2k.downloadLimitBytesPerSec",
           "ed2k.enableUdpReask"
         ]) && (
           <SettingsControlSection title="Transfers">
@@ -2314,6 +2334,11 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderField("core.uploadSlotElasticPercent", "uploadSlotElasticPercent", "Upload elasticity %")}
               {renderField("core.queueSize", "queueSize", "Queue size")}
               {renderToggle("core.creditSystem", "creditSystem", "Credit system")}
+              {renderField("ed2k.sessionRotationSecs", "ed2kSessionRotationSecs", "Session rotation seconds")}
+              {renderField("ed2k.maxConcurrentDownloads", "ed2kMaxConcurrentDownloads", "Concurrent downloads")}
+              {renderField("ed2k.maxSourcesPerFile", "ed2kMaxSourcesPerFile", "eD2K source cap")}
+              {renderField("ed2k.maxParallelDownloadPeers", "ed2kMaxParallelDownloadPeers", "Parallel download peers")}
+              {renderField("ed2k.downloadLimitBytesPerSec", "ed2kDownloadLimitBytesPerSec", "Download limit B/s")}
               {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
             </div>
           </SettingsControlSection>
@@ -2599,6 +2624,11 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
+  validateUnsigned(errors, form, "ed2kSessionRotationSecs", "Session rotation seconds", {});
+  validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", { min: 1 });
+  validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", { min: 1 });
+  validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
+  validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
   validateUnsigned(errors, form, "ed2kUploadQueueActiveSlots", "Startup upload slots", { min: 1, max: 64 });
   validateUnsigned(errors, form, "ed2kUploadQueueElasticPercent", "Startup upload elasticity %", { max: 100 });
   validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
@@ -2681,6 +2711,11 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kReconnectIntervalSecs: String(numberField(settings.ed2k, "reconnectIntervalSecs") ?? ""),
     ed2kKeepaliveSecs: String(numberField(settings.ed2k, "keepaliveSecs") ?? ""),
     ed2kDeadServerRetries: String(numberField(settings.ed2k, "deadServerRetries") ?? ""),
+    ed2kSessionRotationSecs: String(numberField(settings.ed2k, "sessionRotationSecs") ?? ""),
+    ed2kMaxConcurrentDownloads: String(numberField(settings.ed2k, "maxConcurrentDownloads") ?? ""),
+    ed2kMaxSourcesPerFile: String(numberField(settings.ed2k, "maxSourcesPerFile") ?? ""),
+    ed2kMaxParallelDownloadPeers: String(numberField(settings.ed2k, "maxParallelDownloadPeers") ?? ""),
+    ed2kDownloadLimitBytesPerSec: String(numberField(settings.ed2k, "downloadLimitBytesPerSec") ?? ""),
     ed2kUploadQueueActiveSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "activeSlots") ?? ""),
     ed2kUploadQueueElasticPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticPercent") ?? ""),
     ed2kUploadQueueUploadLimitBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadLimitBytesPerSec") ?? ""),
