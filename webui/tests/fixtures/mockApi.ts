@@ -233,6 +233,14 @@ function dataFor(method: string, path: string): unknown {
       return { items: [{ id: 1, name: "Sample Category", priority: 0 }] };
     case "friends":
       return { items: [] };
+    case "ip-filter":
+      return {
+        configured: true,
+        reloadable: true,
+        path: "C:\\Sample\\ipfilter.dat",
+        level: 127,
+        rangeCount: 3
+      };
     case "app/settings/surface":
       return {
         settings: [
@@ -328,6 +336,7 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category paths and priorities."),
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
+          sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
           sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")
         ]
       };

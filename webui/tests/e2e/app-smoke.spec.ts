@@ -113,6 +113,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("eD2K listen port").fill("4662");
   await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toHaveCount(0);
+  const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
+  await expect(metricValue("Configured")).toHaveText("Yes");
+  await expect(metricValue("Reloadable")).toHaveText("Yes");
+  await expect(metricValue("Ranges")).toHaveText("3");
 
   await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
   await expect(save).toBeEnabled();
@@ -126,10 +130,12 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
   expect(requests.some((request) => request.method === "PATCH" && request.path === "app/settings")).toBe(true);
+  await settingsPanel.getByRole("button", { name: "Reload IP filter" }).click();
+  await expect(page.getByText("IP filter reloaded")).toBeVisible();
+  expect(requests.some((request) => request.method === "POST" && request.path === "ip-filter/operations/reload")).toBe(true);
 
   await settingsPanel.getByRole("button", { name: "Open Diagnostics" }).click();
   await expect(page.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
-  const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
   await expect(metricValue("Hashing")).toHaveText("1");
   await expect(metricValue("Reload")).toHaveText("hashing");
   await expect(metricValue("Hashed")).toHaveText("1/3");

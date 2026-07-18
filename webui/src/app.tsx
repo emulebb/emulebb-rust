@@ -26,6 +26,7 @@ import {
   AppSettings,
   Category,
   Friend,
+  IpFilterStatus,
   KadStatus,
   LogRecord,
   Page,
@@ -89,7 +90,8 @@ const settingsSectionTabs: Record<string, Tab> = {
   categories: "categories",
   servers: "servers",
   kad: "kad",
-  diagnostics: "diagnostics"
+  diagnostics: "diagnostics",
+  ipFilter: "settings"
 };
 
 const pollingEventStreamStatus: EventStreamStatus = {
@@ -109,6 +111,7 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [ipFilterStatus, setIpFilterStatus] = useState<IpFilterStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsSurface, setSettingsSurface] = useState<SettingsSurface | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -145,6 +148,7 @@ export function App() {
         nextAppInfo,
         nextCapabilities,
         nextRuntimeDiagnostics,
+        nextIpFilterStatus,
         nextSettingsSurface
       ] = await Promise.all([
         client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
@@ -159,12 +163,14 @@ export function App() {
         client.get<AppInfo>("app"),
         client.get<unknown>("capabilities"),
         client.get<RuntimeDiagnostics>("diagnostics"),
+        client.get<IpFilterStatus>("ip-filter"),
         client.get<SettingsSurface>("app/settings/surface")
       ]);
       setSnapshot(nextSnapshot);
       setAppInfo(nextAppInfo);
       setCapabilities(nextCapabilities);
       setRuntimeDiagnostics(nextRuntimeDiagnostics);
+      setIpFilterStatus(nextIpFilterStatus);
       setSettingsSurface(nextSettingsSurface);
       setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
       setSharedDirectories(nextSharedDirectories);
@@ -462,6 +468,7 @@ export function App() {
               <SettingsView
                 settings={settings}
                 surface={settingsSurface}
+                ipFilterStatus={ipFilterStatus}
                 client={client}
                 run={run}
                 openSection={(name) => setTab(settingsSectionTabs[name] ?? "settings")}

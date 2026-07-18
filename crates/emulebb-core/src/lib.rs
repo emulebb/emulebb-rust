@@ -253,8 +253,8 @@ pub use emulebb_settings::{
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
-    HostNameResolution, IndexingStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
-    NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
+    HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
+    NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
     Transfer, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
     TransferEventResetReason, TransferEventType, TransferPart, TransferSource, TransferStats,
@@ -734,6 +734,36 @@ impl EmulebbCore {
             next_event_id,
             resume_behavior: "reset".to_string(),
         }
+    }
+
+    pub fn ip_filter_status(&self) -> IpFilterStatus {
+        match self.ed2k_network.as_ref() {
+            Some(network) => {
+                let path = network
+                    .ip_filter_path
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                IpFilterStatus {
+                    configured: path.is_some(),
+                    reloadable: path.is_some(),
+                    path,
+                    level: network.ip_filter_level,
+                    range_count: network.ip_filter.len(),
+                }
+            }
+            None => IpFilterStatus {
+                configured: false,
+                reloadable: false,
+                path: None,
+                level: emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL,
+                range_count: 0,
+            },
+        }
+    }
+
+    pub fn reload_ip_filter_status(&self) -> Result<IpFilterStatus> {
+        let _ = self.reload_ip_filter()?;
+        Ok(self.ip_filter_status())
     }
 
     pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {

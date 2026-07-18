@@ -22,6 +22,7 @@ import {
   AppSettings,
   Category,
   Friend,
+  IpFilterStatus,
   KadNode,
   KadStatus,
   LogRecord,
@@ -2128,7 +2129,14 @@ const emptySettingsForm: SettingsForm = {
   ipFilterLevel: ""
 };
 
-export function SettingsView(props: { settings: AppSettings | null; surface: SettingsSurface | null; client: RestClient; run: RunFunction; openSection: (name: string) => void }) {
+export function SettingsView(props: {
+  settings: AppSettings | null;
+  surface: SettingsSurface | null;
+  ipFilterStatus: IpFilterStatus | null;
+  client: RestClient;
+  run: RunFunction;
+  openSection: (name: string) => void;
+}) {
   const [form, setForm] = useState<SettingsForm>(emptySettingsForm);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -2547,10 +2555,22 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         )}
         {sectionVisible(["ipFilter.enabled", "ipFilter.path", "ipFilter.level"]) && (
           <SettingsControlSection title="IP Filter">
+            <section class="view-grid compact-grid">
+              <Metric label="Configured" value={props.ipFilterStatus?.configured ? "Yes" : "No"} />
+              <Metric label="Reloadable" value={props.ipFilterStatus?.reloadable ? "Yes" : "No"} />
+              <Metric label="Ranges" value={String(props.ipFilterStatus?.rangeCount ?? 0)} />
+              <Metric label="Level" value={String(props.ipFilterStatus?.level ?? "n/a")} />
+            </section>
             <div class="settings-grid">
               {renderToggle("ipFilter.enabled", "ipFilterEnabled", "IP filter")}
               {renderField("ipFilter.path", "ipFilterPath", "IP filter path")}
               {renderField("ipFilter.level", "ipFilterLevel", "IP filter level")}
+            </div>
+            <div class="row-actions">
+              <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("ip-filter/operations/reload"), "IP filter reloaded")}>
+                <RefreshCw size={15} />
+                Reload IP filter
+              </button>
             </div>
           </SettingsControlSection>
         )}

@@ -477,6 +477,8 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/categories")
         | ("GET", "/api/v1/friends")
         | ("POST", "/api/v1/friends")
+        | ("GET", "/api/v1/ip-filter")
+        | ("POST", "/api/v1/ip-filter/operations/reload")
         | ("GET", "/api/v1/kad")
         | ("POST", "/api/v1/kad/operations/import-nodes-url")
         | ("POST", "/api/v1/kad/operations/start")

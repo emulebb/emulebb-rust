@@ -9,6 +9,7 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("POST", "/api/v1/categories"),
         ("PATCH", "/api/v1/categories/1"),
         ("POST", "/api/v1/friends"),
+        ("POST", "/api/v1/ip-filter/operations/reload"),
         ("POST", "/api/v1/servers"),
         ("PATCH", "/api/v1/servers/local:4661"),
         ("POST", "/api/v1/searches"),

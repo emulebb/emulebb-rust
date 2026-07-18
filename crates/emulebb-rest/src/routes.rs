@@ -64,6 +64,11 @@ pub fn router_with_shutdown(
         )
         .route("/api/v1/friends", get(friends).post(create_friend))
         .route("/api/v1/friends/{userHash}", delete(delete_friend))
+        .route("/api/v1/ip-filter", get(ip_filter))
+        .route(
+            "/api/v1/ip-filter/operations/reload",
+            post(reload_ip_filter),
+        )
         .route("/api/v1/kad", get(kad))
         .route("/api/v1/kad/nodes", get(kad_nodes))
         .route(

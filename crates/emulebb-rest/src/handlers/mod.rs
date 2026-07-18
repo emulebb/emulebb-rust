@@ -19,6 +19,7 @@ pub(crate) mod prelude {
 pub(crate) mod app;
 pub(crate) mod categories;
 pub(crate) mod friends;
+pub(crate) mod ip_filter;
 pub(crate) mod kad;
 pub(crate) mod logs;
 pub(crate) mod searches;
@@ -35,6 +36,7 @@ pub(crate) use categories::{
     categories, category, create_category, delete_category, update_category,
 };
 pub(crate) use friends::{create_friend, delete_friend, friends};
+pub(crate) use ip_filter::{ip_filter, reload_ip_filter};
 pub(crate) use kad::{
     kad, kad_bootstrap, kad_import_nodes_url, kad_nodes, kad_recheck_firewall, kad_start, kad_stop,
 };

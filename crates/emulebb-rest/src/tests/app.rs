@@ -131,6 +131,11 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             && entry["class"] == "existingSectionResource"
             && entry["route"] == "/api/v1/diagnostics"
     }));
+    assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "ipFilter"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/ip-filter"
+    }));
 }
 
 #[tokio::test]
@@ -514,4 +519,47 @@ async fn diagnostics_reports_transfer_event_subscribers() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 1);
+}
+
+#[tokio::test]
+async fn ip_filter_reports_default_status_and_reload_shape() {
+    let router = test_router();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ip-filter")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["configured"], false);
+    assert_eq!(value["data"]["reloadable"], false);
+    assert_eq!(value["data"]["level"], 127);
+    assert_eq!(value["data"]["rangeCount"], 0);
+    assert!(value["data"].get("path").is_none());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ip-filter/operations/reload")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["configured"], false);
+    assert_eq!(value["data"]["reloadable"], false);
+    assert_eq!(value["data"]["rangeCount"], 0);
 }

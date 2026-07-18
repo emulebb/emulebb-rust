@@ -103,6 +103,50 @@ async fn core_settings_update_reconfigures_live_upload_queue() {
     assert_eq!(policy.waiting_capacity, 4_000);
 }
 
+#[test]
+fn ip_filter_reload_status_reflects_live_reparsed_ranges() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-ip-filter-reload");
+    let ip_filter_path = runtime_dir.join("ipfilter.dat");
+    std::fs::write(
+        &ip_filter_path,
+        "198.51.100.0 - 198.51.100.255 , 100 , initial\n",
+    )
+    .unwrap();
+    let mut network = test_network_config_with_store(
+        &runtime_dir,
+        KadLocalStoreConfig::default(),
+        SnoopQueueConfig::default(),
+    );
+    network.ip_filter_path = Some(ip_filter_path.clone());
+    network.ip_filter = IpFilter::parse(
+        "198.51.100.0 - 198.51.100.255 , 100 , initial\n",
+        network.ip_filter_level,
+    );
+    let core = EmulebbCore::new_with_network(
+        "test",
+        FileIndex::in_memory().unwrap(),
+        runtime_dir.join("transfers"),
+        Some(network),
+    )
+    .unwrap();
+
+    assert_eq!(core.ip_filter_status().range_count, 1);
+    std::fs::write(
+        &ip_filter_path,
+        "198.51.100.0 - 198.51.100.255 , 100 , first\n203.0.113.0 - 203.0.113.255 , 100 , second\n",
+    )
+    .unwrap();
+
+    let status = core.reload_ip_filter_status().unwrap();
+    let expected_path = ip_filter_path.display().to_string();
+
+    assert!(status.configured);
+    assert!(status.reloadable);
+    assert_eq!(status.path.as_deref(), Some(expected_path.as_str()));
+    assert_eq!(status.level, emulebb_ed2k::ipfilter::DEFAULT_FILTER_LEVEL);
+    assert_eq!(status.range_count, 2);
+}
+
 #[tokio::test]
 async fn default_core_settings_match_the_master() {
     // FIX 6: defaults aligned to srchybrid/CoreSettings.cpp +

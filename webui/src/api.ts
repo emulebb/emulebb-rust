@@ -583,6 +583,15 @@ export type IpFilterSettings = {
   [key: string]: unknown;
 };
 
+export type IpFilterStatus = {
+  configured?: boolean;
+  reloadable?: boolean;
+  path?: string;
+  level?: number;
+  rangeCount?: number;
+  [key: string]: unknown;
+};
+
 export type AppSettings = {
   core?: CoreSettings;
   daemon?: DaemonSettings;

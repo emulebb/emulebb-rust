@@ -560,6 +560,17 @@ pub struct TransferEventDiagnostics {
     pub resume_behavior: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IpFilterStatus {
+    pub configured: bool,
+    pub reloadable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub level: u32,
+    pub range_count: usize,
+}
+
 impl TransferEvent {
     pub fn added(id: u64, transfer: Transfer) -> Self {
         Self::Added { id, transfer }

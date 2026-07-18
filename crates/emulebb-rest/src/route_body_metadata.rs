@@ -185,6 +185,7 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     ];
     const URL_IMPORT: &[&str] = &["url"];
     const KAD_BOOTSTRAP: &[&str] = &["address", "port"];
+    const EMPTY: &[&str] = &[];
 
     if method == "POST" && path == "/api/v1/transfers" {
         return Some(TRANSFER_ADD);
@@ -209,6 +210,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     }
     if method == "POST" && path == "/api/v1/logs/operations/clear" {
         return Some(CONFIRM_CLEAR_LOGS);
+    }
+    if method == "POST" && path == "/api/v1/ip-filter/operations/reload" {
+        return Some(EMPTY);
     }
     if method == "POST" && path == "/api/v1/servers" {
         return Some(SERVER_CREATE);
