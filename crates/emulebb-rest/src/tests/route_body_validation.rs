@@ -382,6 +382,38 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.kad.bootstrapMinRoutingContacts must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"kad":{"localStoreKeywordTtlSecs":0}}"#,
+            "settings.kad.localStoreKeywordTtlSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreSourceTtlSecs":0}}"#,
+            "settings.kad.localStoreSourceTtlSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreNotesTtlSecs":0}}"#,
+            "settings.kad.localStoreNotesTtlSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreKeywordCapacity":0}}"#,
+            "settings.kad.localStoreKeywordCapacity must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreSourceCapacity":0}}"#,
+            "settings.kad.localStoreSourceCapacity must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreNotesCapacity":0}}"#,
+            "settings.kad.localStoreNotesCapacity must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreSourcePerFileCapacity":0}}"#,
+            "settings.kad.localStoreSourcePerFileCapacity must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"localStoreNotesPerFileCapacity":0}}"#,
+            "settings.kad.localStoreNotesPerFileCapacity must be an unsigned number greater than or equal to 1",
+        ),
+        (
             r#"{"kad":{"republishIntervalSecs":0}}"#,
             "settings.kad.republishIntervalSecs must be an unsigned number greater than or equal to 1",
         ),
@@ -396,6 +428,30 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"kad":{"tcpFirewallCheckIntervalSecs":"60"}}"#,
             "settings.kad.tcpFirewallCheckIntervalSecs must be an unsigned number greater than or equal to 60",
+        ),
+        (
+            r#"{"kad":{"snoopQueueDedupWindowSecs":0}}"#,
+            "settings.kad.snoopQueueDedupWindowSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"snoopQueueGeneralMaxQueriesPer600s":0}}"#,
+            "settings.kad.snoopQueueGeneralMaxQueriesPer600s must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"snoopQueueGeneralDrainCooldownSecs":0}}"#,
+            "settings.kad.snoopQueueGeneralDrainCooldownSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"snoopQueueSourceMaxQueriesPer600s":0}}"#,
+            "settings.kad.snoopQueueSourceMaxQueriesPer600s must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"snoopQueueSourceDrainCooldownSecs":0}}"#,
+            "settings.kad.snoopQueueSourceDrainCooldownSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"snoopQueueSourceStopAfterResults":0}}"#,
+            "settings.kad.snoopQueueSourceStopAfterResults must be an unsigned number greater than or equal to 1",
         ),
         (
             r#"{"nat":{"unsupportedSetting":1}}"#,

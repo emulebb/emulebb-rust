@@ -292,6 +292,54 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
     )?;
     validate_unsigned_number_min(
         object,
+        "localStoreKeywordTtlSecs",
+        "settings.kad.localStoreKeywordTtlSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreSourceTtlSecs",
+        "settings.kad.localStoreSourceTtlSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreNotesTtlSecs",
+        "settings.kad.localStoreNotesTtlSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreKeywordCapacity",
+        "settings.kad.localStoreKeywordCapacity",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreSourceCapacity",
+        "settings.kad.localStoreSourceCapacity",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreNotesCapacity",
+        "settings.kad.localStoreNotesCapacity",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreSourcePerFileCapacity",
+        "settings.kad.localStoreSourcePerFileCapacity",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "localStoreNotesPerFileCapacity",
+        "settings.kad.localStoreNotesPerFileCapacity",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
         "republishIntervalSecs",
         "settings.kad.republishIntervalSecs",
         1,
@@ -313,6 +361,42 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
         "tcpFirewallCheckIntervalSecs",
         "settings.kad.tcpFirewallCheckIntervalSecs",
         60,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueDedupWindowSecs",
+        "settings.kad.snoopQueueDedupWindowSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueGeneralMaxQueriesPer600s",
+        "settings.kad.snoopQueueGeneralMaxQueriesPer600s",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueGeneralDrainCooldownSecs",
+        "settings.kad.snoopQueueGeneralDrainCooldownSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueSourceMaxQueriesPer600s",
+        "settings.kad.snoopQueueSourceMaxQueriesPer600s",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueSourceDrainCooldownSecs",
+        "settings.kad.snoopQueueSourceDrainCooldownSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "snoopQueueSourceStopAfterResults",
+        "settings.kad.snoopQueueSourceStopAfterResults",
+        1,
     )
 }
 
