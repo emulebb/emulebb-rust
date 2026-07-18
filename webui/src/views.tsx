@@ -1940,8 +1940,14 @@ function CategoryRow(props: { category: Category; client: RestClient; run: RunFu
 export function FriendsView(props: { friends: Friend[]; client: RestClient; run: RunFunction }) {
   const [userHash, setUserHash] = useState("");
   const [name, setName] = useState("");
+  const userHashError = friendUserHashError(userHash);
+  const nameError = friendNameError(name);
   const create = async () => {
-    await props.client.post("friends", { userHash, name: name || undefined });
+    const normalizedUserHash = userHash.trim();
+    if (!normalizedUserHash || userHashError || nameError) {
+      return;
+    }
+    await props.client.post("friends", { userHash: normalizedUserHash, name: name || undefined });
     setUserHash("");
     setName("");
   };
@@ -1955,10 +1961,12 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
         event.preventDefault();
         void props.run(create, "Friend added");
       }}>
-        <input class="form-control" value={userHash} placeholder="User hash" onInput={(event) => setUserHash(event.currentTarget.value)} />
-        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <button class="btn" type="submit"><UserPlus size={16} />Add</button>
+        <input class="form-control" value={userHash} placeholder="User hash" aria-invalid={userHashError ? "true" : "false"} onInput={(event) => setUserHash(event.currentTarget.value)} />
+        <input class="form-control" value={name} placeholder="Name" aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} />
+        <button class="btn" type="submit" disabled={!userHash.trim() || Boolean(userHashError) || Boolean(nameError)}><UserPlus size={16} />Add</button>
       </form>
+      {userHashError && <p class="field-error">{userHashError}</p>}
+      {nameError && <p class="field-error">{nameError}</p>}
       <div class="table-wrap">
         <table class="table table-vcenter card-table">
           <thead>
@@ -3184,6 +3192,24 @@ function parseUrlImportText(value: string): string | null {
 
 function urlImportError(value: string, label: string): string | undefined {
   return value.trim() && parseUrlImportText(value) === null ? `${label} ${URL_IMPORT_TEXT_ERROR}` : undefined;
+}
+
+function friendUserHashError(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return /^[0-9a-f]{32}$/.test(normalized) ? undefined : "User hash must be a 32-character lowercase hex string.";
+}
+
+function friendNameError(value: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    return "Friend name must not contain control characters.";
+  }
+  return value.length <= 128 ? undefined : "Friend name must be at most 128 characters.";
 }
 
 function optionalPort(value: string): number | null {

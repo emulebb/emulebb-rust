@@ -189,6 +189,39 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   expect(JSON.parse(kadImportPost?.body ?? "{}")).toEqual({ url: "http://example.invalid/nodes.dat" });
 });
 
+test("friend create form validates hash and name", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Friends" }).click();
+  const friendsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Friends" }) });
+  const addFriend = friendsPanel.getByRole("button", { name: "Add" });
+  const initialFriendPosts = requests.filter((request) => request.method === "POST" && request.path === "friends").length;
+  await expect(addFriend).toBeDisabled();
+
+  await friendsPanel.getByPlaceholder("User hash").fill("00112233445566778899AABBCCDDEEFF");
+  await expect(friendsPanel.getByText("User hash must be a 32-character lowercase hex string.")).toBeVisible();
+  await expect(addFriend).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "friends").length).toBe(initialFriendPosts);
+
+  const validHash = "00112233445566778899aabbccddeeff";
+  await friendsPanel.getByPlaceholder("User hash").fill(` ${validHash} `);
+  await friendsPanel.getByPlaceholder("Name").fill("a".repeat(129));
+  await expect(friendsPanel.getByText("Friend name must be at most 128 characters.")).toBeVisible();
+  await expect(addFriend).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "friends").length).toBe(initialFriendPosts);
+
+  await friendsPanel.getByPlaceholder("Name").fill("Harness Peer");
+  await expect(friendsPanel.getByText("User hash must be a 32-character lowercase hex string.")).toHaveCount(0);
+  await expect(friendsPanel.getByText("Friend name must be at most 128 characters.")).toHaveCount(0);
+  await addFriend.click();
+  await expect(page.getByText("Friend added")).toBeVisible();
+  const friendPost = requests.find((request) => request.method === "POST" && request.path === "friends");
+  expect(friendPost).toBeDefined();
+  expect(JSON.parse(friendPost?.body ?? "{}")).toEqual({ userHash: validHash, name: "Harness Peer" });
+});
+
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
