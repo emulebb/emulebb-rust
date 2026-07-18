@@ -228,6 +228,7 @@ pub(super) fn validate_daemon_settings_patch_body_fields(
         validate_path_text_body_field(Some(incoming_dir), "incomingDir")?;
     }
     validate_nullable_ipv4_text(object, "p2pBindIp", "settings.daemon.p2pBindIp")?;
+    validate_nullable_ed2k_user_hash_text(object, "ed2kUserHash", "settings.daemon.ed2kUserHash")?;
     Ok(())
 }
 
@@ -563,6 +564,62 @@ fn validate_nullable_ipv4_text(
 
 fn invalid_ipv4_text_error(path: &str) -> Box<Response> {
     invalid_body_error(format!("{path} must be an IPv4 address string or null"))
+}
+
+fn validate_nullable_ed2k_user_hash_text(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(text) = value.as_str() else {
+        return Err(invalid_ed2k_user_hash_error(path));
+    };
+    let Some(bytes) = decode_lowercase_hex_16(text) else {
+        return Err(invalid_ed2k_user_hash_error(path));
+    };
+    if bytes[5] != 0x0e || bytes[14] != 0x6f || ed2k_user_hash_is_bad(&bytes) {
+        return Err(invalid_ed2k_user_hash_error(path));
+    }
+    Ok(())
+}
+
+fn invalid_ed2k_user_hash_error(path: &str) -> Box<Response> {
+    invalid_body_error(format!(
+        "{path} must be a marker-normalized 32-character lowercase hex eD2K user hash or null"
+    ))
+}
+
+fn decode_lowercase_hex_16(text: &str) -> Option<[u8; 16]> {
+    if text.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0; 16];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let hi = lowercase_hex_nibble(pair[0])?;
+        let lo = lowercase_hex_nibble(pair[1])?;
+        bytes[index] = (hi << 4) | lo;
+    }
+    Some(bytes)
+}
+
+fn lowercase_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn ed2k_user_hash_is_bad(bytes: &[u8; 16]) -> bool {
+    let lo = u64::from_le_bytes(bytes[..8].try_into().expect("slice has 8 bytes"));
+    let hi = u64::from_le_bytes(bytes[8..].try_into().expect("slice has 8 bytes"));
+    (lo & 0xffff_00ff_ffff_ffff) == 0 && (hi & 0xff00_ffff_ffff_ffff) == 0
 }
 
 fn validate_nullable_unsigned_number_min(

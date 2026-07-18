@@ -322,6 +322,22 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.daemon.p2pBindIp must be an IPv4 address string or null",
         ),
         (
+            r#"{"daemon":{"ed2kUserHash":"00112233445566778899aabbccddeeff"}}"#,
+            "settings.daemon.ed2kUserHash must be a marker-normalized 32-character lowercase hex eD2K user hash or null",
+        ),
+        (
+            r#"{"daemon":{"ed2kUserHash":"00112233440E66778899AABBCCDD6FFF"}}"#,
+            "settings.daemon.ed2kUserHash must be a marker-normalized 32-character lowercase hex eD2K user hash or null",
+        ),
+        (
+            r#"{"daemon":{"ed2kUserHash":7}}"#,
+            "settings.daemon.ed2kUserHash must be a marker-normalized 32-character lowercase hex eD2K user hash or null",
+        ),
+        (
+            r#"{"daemon":{"ed2kUserHash":"00000000000e00000000000000006f00"}}"#,
+            "settings.daemon.ed2kUserHash must be a marker-normalized 32-character lowercase hex eD2K user hash or null",
+        ),
+        (
             r#"{"daemon":{"unsupportedSetting":1}}"#,
             "unknown settings.daemon field: unsupportedSetting",
         ),
