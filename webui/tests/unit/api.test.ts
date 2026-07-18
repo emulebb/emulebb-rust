@@ -122,6 +122,18 @@ describe("RestClient", () => {
       }
     ]);
   });
+
+  it("surfaces event stream error envelopes", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        { error: { code: "UNAUTHORIZED", message: "missing API key" } },
+        { status: 401 }
+      )
+    ) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+
+    await expect(client.streamTransferEvents(() => undefined)).rejects.toThrow("missing API key");
+  });
 });
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {

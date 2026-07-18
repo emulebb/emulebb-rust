@@ -521,7 +521,10 @@ export class RestClient {
       signal: options.signal
     });
     if (!response.ok) {
-      throw new Error(`GET ${requestPath} failed`);
+      const text = await response.text();
+      const value = parseApiEnvelope<unknown>("GET", requestPath, response, text);
+      const message = value?.error?.message ?? `GET ${requestPath} failed`;
+      throw new Error(message);
     }
     if (!isEventStreamResponse(response)) {
       throw new Error(`GET ${requestPath} returned ${describeContentType(response)}; expected text/event-stream`);
