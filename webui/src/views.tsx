@@ -30,6 +30,7 @@ import {
   ServerItem,
   SharedDirectories,
   SharedFile,
+  SettingsSectionResourceSpec,
   SettingSurfaceSpec,
   SettingsSurface,
   Snapshot,
@@ -2047,7 +2048,7 @@ const emptySettingsForm: SettingsForm = {
   ipFilterLevel: ""
 };
 
-export function SettingsView(props: { settings: AppSettings | null; surface: SettingsSurface | null; client: RestClient; run: RunFunction }) {
+export function SettingsView(props: { settings: AppSettings | null; surface: SettingsSurface | null; client: RestClient; run: RunFunction; openSection: (name: string) => void }) {
   const [form, setForm] = useState<SettingsForm>(emptySettingsForm);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -2239,7 +2240,36 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         {renderToggle("ipFilter.enabled", "ipFilterEnabled", "IP filter")}
         {renderToggle("daemon.hostnameLookup.enabled", "hostnameLookupEnabled", "Hostname lookup")}
       </div>
+      <SettingsSectionResources resources={props.surface?.sectionResources ?? []} openSection={props.openSection} />
     </section>
+  );
+}
+
+function SettingsSectionResources(props: { resources: SettingsSectionResourceSpec[]; openSection: (name: string) => void }) {
+  if (props.resources.length === 0) {
+    return null;
+  }
+  return (
+    <div class="settings-section-resources">
+      <div class="subsection-title">
+        <h3>Sections</h3>
+      </div>
+      <div class="settings-resource-list">
+        {props.resources.map((resource) => (
+          <div class="settings-resource-row" key={resource.name}>
+            <div>
+              <strong>{resource.uiSection}</strong>
+              <span>{resource.description}</span>
+              <code>{resource.route}</code>
+            </div>
+            <button class="btn" type="button" aria-label={`Open ${resource.uiSection}`} onClick={() => props.openSection(resource.name)}>
+              <Link size={15} />
+              Open
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

@@ -101,4 +101,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
   expect(requests.some((request) => request.method === "PATCH" && request.path === "app/settings")).toBe(true);
+
+  await settingsPanel.getByRole("button", { name: "Open Diagnostics" }).click();
+  await expect(page.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
 });

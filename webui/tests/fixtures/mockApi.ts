@@ -275,7 +275,11 @@ function dataFor(method: string, path: string): unknown {
           setting("ipFilter.level", "normalControl", true)
         ],
         sectionResources: [
-          { name: "diagnostics", class: "existingSectionResource", route: "/api/v1/diagnostics", uiSection: "Diagnostics", description: "Runtime diagnostics." }
+          sectionResource("sharedDirectories", "/api/v1/shared-directories", "Sharing", "Shared root ownership and reload operations."),
+          sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category paths and priorities."),
+          sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
+          sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
+          sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")
         ]
       };
     case "app/settings":
@@ -319,5 +323,15 @@ function setting(path: string, classification: "normalControl" | "advancedContro
     uiSection: "Settings",
     route: "/api/v1/app/settings",
     description: path
+  };
+}
+
+function sectionResource(name: string, route: string, uiSection: string, description: string) {
+  return {
+    name,
+    class: "existingSectionResource",
+    route,
+    uiSection,
+    description
   };
 }

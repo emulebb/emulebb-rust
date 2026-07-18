@@ -81,6 +81,14 @@ type Tab =
 
 const client = new RestClient();
 
+const settingsSectionTabs: Record<string, Tab> = {
+  sharedDirectories: "sharing",
+  categories: "categories",
+  servers: "servers",
+  kad: "kad",
+  diagnostics: "diagnostics"
+};
+
 export function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE) ?? "");
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
@@ -385,7 +393,15 @@ export function App() {
             {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
             {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
             {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}
-            {tab === "settings" && <SettingsView settings={settings} surface={settingsSurface} client={client} run={run} />}
+            {tab === "settings" && (
+              <SettingsView
+                settings={settings}
+                surface={settingsSurface}
+                client={client}
+                run={run}
+                openSection={(name) => setTab(settingsSectionTabs[name] ?? "settings")}
+              />
+            )}
             {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} client={client} run={run} />}
             {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
           </div>
