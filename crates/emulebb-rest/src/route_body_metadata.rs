@@ -221,6 +221,9 @@ fn route_body_fields(method: &str, path: &str) -> Option<&'static [&'static str]
     if method == "POST" && path == "/api/v1/ip-filter/operations/reload" {
         return Some(EMPTY);
     }
+    if method == "POST" && path == "/api/v1/nat/operations/refresh" {
+        return Some(EMPTY);
+    }
     if method == "POST" && path == "/api/v1/vpn-guard/operations/probe" {
         return Some(EMPTY);
     }

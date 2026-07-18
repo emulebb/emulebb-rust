@@ -10,6 +10,7 @@ async fn write_routes_use_canonical_json_error_envelope() {
         ("PATCH", "/api/v1/categories/1"),
         ("POST", "/api/v1/friends"),
         ("POST", "/api/v1/ip-filter/operations/reload"),
+        ("POST", "/api/v1/nat/operations/refresh"),
         ("POST", "/api/v1/vpn-guard/operations/probe"),
         ("POST", "/api/v1/servers"),
         ("PATCH", "/api/v1/servers/local:4661"),
@@ -275,6 +276,10 @@ async fn query_routes_use_canonical_error_envelope() {
         ("GET", "/api/v1/logs?unsupportedQuery=true"),
         ("GET", "/api/v1/app?unsupportedQuery=true"),
         ("GET", "/api/v1/uploads?unsupportedQuery=true"),
+        (
+            "POST",
+            "/api/v1/nat/operations/refresh?unsupportedQuery=true",
+        ),
         (
             "POST",
             "/api/v1/vpn-guard/operations/probe?unsupportedQuery=true",

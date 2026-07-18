@@ -714,6 +714,38 @@ async fn nat_returns_runtime_mapping_status_directly() {
 }
 
 #[tokio::test]
+async fn nat_refresh_returns_runtime_mapping_status() {
+    let router = test_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/nat/operations/refresh")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+    assert_eq!(value["data"]["gatewayDiscovered"], false);
+    assert_eq!(value["data"]["gateway"], Value::Null);
+    assert_eq!(value["data"]["mappings"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        value["data"]["observedExternalAddresses"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn ip_filter_reports_default_status_and_reload_shape() {
     let router = test_router();
 

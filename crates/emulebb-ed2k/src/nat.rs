@@ -406,6 +406,20 @@ impl NatManager {
         .await
     }
 
+    /// Runs one operator-triggered reconcile pass and returns the resulting
+    /// status snapshot. Mapping failures are recorded in `last_error` so REST
+    /// clients can diagnose the NAT state without losing the normal status body.
+    pub async fn refresh_now(&self) -> NatStatus {
+        if !self.config.enabled || self.mappings.is_empty() {
+            self.write_config_status(None).await;
+            return self.status().await;
+        }
+        if let Err(error) = self.reconcile_now().await {
+            self.write_refresh_error(error.to_string()).await;
+        }
+        self.status().await
+    }
+
     /// Stops NAT reconciliation and asks providers to release active mappings.
     pub async fn stop(&self) -> Result<()> {
         self.shutdown.store(true, Ordering::SeqCst);
@@ -452,6 +466,22 @@ impl NatManager {
         status.ssdp_local_port = self.config.ssdp_local_port;
         status.external_ip_override = self.config.external_ip_override.clone();
         status.last_error = last_error;
+    }
+
+    async fn write_refresh_error(&self, last_error: String) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut status = self.status.write().await;
+        status.enabled = self.config.enabled;
+        status.bind_ip = self.config.bind_ip.clone();
+        status.igd_ip = self.config.igd_ip.clone();
+        status.minissdpd_socket = self.config.minissdpd_socket.clone();
+        status.ssdp_local_port = self.config.ssdp_local_port;
+        status.external_ip_override = self.config.external_ip_override.clone();
+        status.last_refresh_unix_secs = Some(now);
+        status.last_error = Some(last_error);
     }
 }
 

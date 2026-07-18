@@ -729,7 +729,7 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         class: SettingSurfaceClass::ExistingSectionResource,
         route: "/api/v1/nat",
         ui_section: "NAT",
-        description: "Live NAT gateway, mapping, external address, and error status.",
+        description: "Live NAT gateway, mapping, external address, error status, and refresh operation.",
     },
     SettingsSectionResourceSpec {
         name: "ipFilter",

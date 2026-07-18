@@ -784,6 +784,13 @@ impl EmulebbCore {
         status.snapshot()
     }
 
+    pub async fn refresh_nat_status(&self) -> NatStatusSnapshot {
+        if let Some(runtime) = self.ed2k_runtime.lock().await.as_ref() {
+            return runtime.nat.refresh_now().await.snapshot();
+        }
+        self.nat_status().await
+    }
+
     pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {
         self.publish_transfer_event(TransferEventType::Updated, Some(transfer), None);
     }

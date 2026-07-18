@@ -2563,6 +2563,12 @@ export function SettingsView(props: {
               <Metric label="Mappings" value={String(props.natStatus?.mappings?.length ?? 0)} />
               <Metric label="NAT Error" value={props.natStatus?.lastError || "None"} />
             </section>
+            <div class="settings-actions">
+              <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("nat/operations/refresh"), "NAT refresh completed")}>
+                <RefreshCw size={15} />
+                Refresh NAT
+              </button>
+            </div>
             <div class="settings-grid">
               {renderToggle("nat.enabled", "natEnabled", "NAT")}
               {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
