@@ -199,7 +199,7 @@ async fn transfer_events_publish_add_update_and_remove() {
         .unwrap();
     let added = events.recv().await.unwrap();
     assert_eq!(added.id, 1);
-    assert_eq!(added.event_type, "transfer.added");
+    assert_eq!(added.event_type, TransferEventType::Added);
     assert_eq!(added.transfer.as_ref().unwrap().hash, transfer.hash);
     assert_eq!(added.hash, None);
 
@@ -218,7 +218,7 @@ async fn transfer_events_publish_add_update_and_remove() {
         .unwrap();
     let event = events.recv().await.unwrap();
     assert_eq!(event.id, 2);
-    assert_eq!(event.event_type, "transfer.updated");
+    assert_eq!(event.event_type, TransferEventType::Updated);
     assert_eq!(event.transfer.as_ref().unwrap().priority, updated.priority);
 
     let deleted = core
@@ -228,7 +228,7 @@ async fn transfer_events_publish_add_update_and_remove() {
         .unwrap();
     let event = events.recv().await.unwrap();
     assert_eq!(event.id, 3);
-    assert_eq!(event.event_type, "transfer.removed");
+    assert_eq!(event.event_type, TransferEventType::Removed);
     assert!(event.transfer.is_none());
     assert_eq!(event.hash.as_deref(), Some(deleted.hash.as_str()));
 }

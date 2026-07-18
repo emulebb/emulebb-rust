@@ -496,18 +496,49 @@ pub struct Transfer {
     pub in_incoming: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferEventType {
+    #[serde(rename = "transfer.added")]
+    Added,
+    #[serde(rename = "transfer.updated")]
+    Updated,
+    #[serde(rename = "transfer.removed")]
+    Removed,
+    #[serde(rename = "sync.reset")]
+    SyncReset,
+}
+
+impl TransferEventType {
+    pub fn as_sse_name(self) -> &'static str {
+        match self {
+            Self::Added => "transfer.added",
+            Self::Updated => "transfer.updated",
+            Self::Removed => "transfer.removed",
+            Self::SyncReset => "sync.reset",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferEventResetReason {
+    #[serde(rename = "lagged")]
+    Lagged,
+    #[serde(rename = "last-event-id")]
+    LastEventId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferEvent {
     pub id: u64,
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: TransferEventType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transfer: Option<Transfer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub reason: Option<TransferEventResetReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -255,9 +255,10 @@ pub use rest_model::{
     HostNameResolution, IndexingStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
     NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferPart, TransferSource,
-    TransferStats, TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics,
-    UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferEventResetReason,
+    TransferEventType, TransferPart, TransferSource, TransferStats, TransferThroughputStats,
+    TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
+    VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -645,9 +646,9 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
         let event_type = if state.transfers.contains_key(&transfer.hash) {
-            "transfer.updated"
+            TransferEventType::Updated
         } else {
-            "transfer.added"
+            TransferEventType::Added
         };
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
@@ -721,23 +722,23 @@ impl EmulebbCore {
     }
 
     pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {
-        self.publish_transfer_event("transfer.updated", Some(transfer), None);
+        self.publish_transfer_event(TransferEventType::Updated, Some(transfer), None);
     }
 
     pub(crate) fn publish_transfer_removed(&self, hash: impl Into<String>) {
-        self.publish_transfer_event("transfer.removed", None, Some(hash.into()));
+        self.publish_transfer_event(TransferEventType::Removed, None, Some(hash.into()));
     }
 
     fn publish_transfer_event(
         &self,
-        event_type: &str,
+        event_type: TransferEventType,
         transfer: Option<Transfer>,
         hash: Option<String>,
     ) {
         let id = self.reserve_transfer_event_id();
         let _ = self.transfer_events.send(TransferEvent {
             id,
-            event_type: event_type.to_string(),
+            event_type,
             transfer,
             hash,
             reason: None,

@@ -18,7 +18,7 @@ use futures_util::stream;
 use serde_json::json;
 use std::convert::Infallible;
 
-use emulebb_core::{AppSettingsUpdate, TransferEvent};
+use emulebb_core::{AppSettingsUpdate, TransferEvent, TransferEventResetReason, TransferEventType};
 use tokio::sync::broadcast;
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
@@ -40,10 +40,10 @@ pub(crate) async fn events(
     let core = state.core.clone();
     let pending_reset = last_event_id(&headers).map(|last_event_id| TransferEvent {
         id: core.reserve_transfer_event_id(),
-        event_type: "sync.reset".to_string(),
+        event_type: TransferEventType::SyncReset,
         transfer: None,
         hash: None,
-        reason: Some("last-event-id".to_string()),
+        reason: Some(TransferEventResetReason::LastEventId),
         missed: None,
         last_event_id: Some(last_event_id),
     });
@@ -67,10 +67,10 @@ pub(crate) async fn events(
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         let event = TransferEvent {
                             id: core.reserve_transfer_event_id(),
-                            event_type: "sync.reset".to_string(),
+                            event_type: TransferEventType::SyncReset,
                             transfer: None,
                             hash: None,
-                            reason: Some("lagged".to_string()),
+                            reason: Some(TransferEventResetReason::Lagged),
                             missed: Some(missed),
                             last_event_id: None,
                         };
@@ -98,7 +98,7 @@ fn last_event_id(headers: &HeaderMap) -> Option<String> {
 
 fn sse_event(event: TransferEvent) -> Event {
     let id = event.id.to_string();
-    let event_type = event.event_type.clone();
+    let event_type = event.event_type.as_sse_name();
     let data =
         serde_json::to_string(&event).expect("transfer events contain only serializable REST DTOs");
     Event::default().id(id).event(event_type).data(data)
