@@ -73,6 +73,39 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   ).toBe(true);
 });
 
+test("transfer add form validates eD2K link batches", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Transfers" }).click();
+  const transfersPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Transfers" }) });
+  const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
+  const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
+  const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "transfers").length;
+  const invalidLinkError = "Each transfer link must start with ed2k://, contain no whitespace, and be at most 2048 characters.";
+
+  await linkInput.fill("http://example.invalid/file");
+  await expect(transfersPanel.getByText(invalidLinkError)).toBeVisible();
+  await expect(addLinks).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+
+  const validLink = "ed2k://|file|Sample.bin|1|00112233445566778899aabbccddeeff|/";
+  await linkInput.fill(Array.from({ length: 101 }, () => validLink).join("\n"));
+  await expect(transfersPanel.getByText("Add links accepts at most 100 eD2K links.")).toBeVisible();
+  await expect(addLinks).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+
+  await linkInput.fill(validLink);
+  await expect(transfersPanel.getByText(invalidLinkError)).toHaveCount(0);
+  await expect(transfersPanel.getByText("Add links accepts at most 100 eD2K links.")).toHaveCount(0);
+  await addLinks.click();
+  await expect(page.getByText("Transfers queued")).toBeVisible();
+  const transferPost = requests.find((request) => request.method === "POST" && request.path === "transfers");
+  expect(transferPost).toBeDefined();
+  expect(JSON.parse(transferPost?.body ?? "{}")).toEqual({ links: [validLink], paused: false });
+});
+
 test("section resource operation forms validate endpoint ports", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));

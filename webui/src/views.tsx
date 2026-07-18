@@ -208,6 +208,7 @@ export function TransfersView(props: {
   const [details, setDetails] = useState<unknown>(null);
   const [sources, setSources] = useState<TransferSource[]>([]);
   const [detailError, setDetailError] = useState("");
+  const transferLinksError = transferLinksValidationError(ed2kLinks);
 
   const filtered = useMemo(
     () => props.transfers.filter((transfer) => !stateFilter || transfer.state === stateFilter),
@@ -247,9 +248,13 @@ export function TransfersView(props: {
   }, [props.client, selectedId]);
 
   const createTransfers = async () => {
-    const links = ed2kLinks.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const links = transferLinksFromText(ed2kLinks);
     if (links.length === 0) {
       throw new Error("At least one eD2K link is required");
+    }
+    const error = transferLinksValidationError(ed2kLinks);
+    if (error) {
+      throw new Error(error);
     }
     await props.client.post("transfers", { links, paused: pausedCreate });
     setEd2kLinks("");
@@ -297,17 +302,19 @@ export function TransfersView(props: {
           <textarea class="form-control"
             value={ed2kLinks}
             placeholder="One eD2K link per line"
+            aria-invalid={transferLinksError ? "true" : "false"}
             onInput={(event) => setEd2kLinks(event.currentTarget.value)}
           />
           <label class="check">
             <input class="form-check-input" type="checkbox" checked={pausedCreate} onInput={(event) => setPausedCreate(event.currentTarget.checked)} />
             Paused
           </label>
-          <button class="btn" type="submit">
+          <button class="btn" type="submit" disabled={Boolean(transferLinksError)}>
             <Download size={16} />
             Add links
           </button>
         </form>
+        {transferLinksError && <p class="field-error">{transferLinksError}</p>}
         <div class="table-wrap">
           <table class="table table-vcenter card-table">
             <thead>
@@ -3126,6 +3133,30 @@ function recordField(object: Record<string, unknown> | undefined, key: string): 
 function arrayField(object: Record<string, unknown> | undefined, key: string): string[] {
   const value = object?.[key];
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
+}
+
+const TRANSFER_ADD_LINK_TEXT_ERROR = "Each transfer link must start with ed2k://, contain no whitespace, and be at most 2048 characters.";
+
+function transferLinksFromText(value: string): string[] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function transferLinksValidationError(value: string): string | undefined {
+  const links = transferLinksFromText(value);
+  if (links.length === 0) {
+    return undefined;
+  }
+  if (links.length > 100) {
+    return "Add links accepts at most 100 eD2K links.";
+  }
+  if (links.some((link) => !isTransferAddLinkText(link))) {
+    return TRANSFER_ADD_LINK_TEXT_ERROR;
+  }
+  return undefined;
+}
+
+function isTransferAddLinkText(value: string): boolean {
+  return value.length <= 2048 && !/[\u0000-\u001f\u007f]/.test(value) && /^[eE][dD]2[kK]:\/\/\S+$/.test(value);
 }
 
 function optionalPort(value: string): number | null {
