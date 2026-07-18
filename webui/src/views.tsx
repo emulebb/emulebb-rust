@@ -1,3 +1,4 @@
+import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import {
   Ban,
@@ -2080,6 +2081,7 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
     }
     return showAdvanced || spec?.class !== "advancedControl";
   };
+  const sectionVisible = (paths: string[]) => paths.some(shouldRender);
   const renderField = (path: string, key: SettingsTextKey, label: string) => shouldRender(path)
     ? <Field label={label} value={form[key]} surface={surfaceByPath.get(path)} error={validationErrors.get(key)} onInput={(value) => update(key, value)} />
     : null;
@@ -2193,58 +2195,161 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         </div>
       </div>
       {hasValidationErrors && <p class="settings-error-summary">Fix highlighted settings before saving.</p>}
-      <div class="settings-grid">
-        {renderField("core.uploadLimitKiBps", "uploadLimitKiBps", "Upload limit KiB/s")}
-        {renderField("core.downloadLimitKiBps", "downloadLimitKiBps", "Download limit KiB/s")}
-        {renderField("core.maxConnections", "maxConnections", "Max connections")}
-        {renderField("core.maxConnectionsPerFiveSeconds", "maxConnectionsPerFiveSeconds", "New connections / 5s")}
-        {renderField("core.maxSourcesPerFile", "maxSourcesPerFile", "Max sources / file")}
-        {renderField("core.uploadClientDataRate", "uploadClientDataRate", "Upload client KiB/s")}
-        {renderField("core.maxUploadSlots", "maxUploadSlots", "Max upload slots")}
-        {renderField("core.uploadSlotElasticPercent", "uploadSlotElasticPercent", "Upload elasticity %")}
-        {renderField("core.queueSize", "queueSize", "Queue size")}
-        {renderField("daemon.incomingDir", "incomingDir", "Incoming directory")}
-        {renderField("daemon.p2pBindIp", "p2pBindIp", "P2P bind IP")}
-        {renderField("daemon.p2pBindInterface", "p2pBindInterface", "P2P bind interface")}
-        {renderField("daemon.hostnameLookup.dnsServers", "hostnameLookupDnsServers", "DNS servers")}
-        {renderField("daemon.hostnameLookup.cacheTtlSecs", "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds")}
-        {renderField("daemon.hostnameLookup.maxLookupsPerTick", "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick")}
-        {renderField("daemon.hostnameLookup.tickIntervalSecs", "hostnameLookupTickIntervalSecs", "DNS tick seconds")}
-        {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
-        {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
-        {renderField("kad.republishIntervalSecs", "kadRepublishIntervalSecs", "Kad republish seconds")}
-        {renderField("nat.bindIp", "natBindIp", "NAT bind IP")}
-        {renderField("nat.backendOrder", "natBackendOrder", "NAT backend order")}
-        {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
-        {renderField("vpnGuard.allowedPublicIpCidrs", "vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs")}
-        {renderField("ipFilter.path", "ipFilterPath", "IP filter path")}
-        {renderField("ipFilter.level", "ipFilterLevel", "IP filter level")}
-      </div>
-      <div class="toggle-grid">
-        {renderToggle("core.autoConnect", "autoConnect", "Auto connect")}
-        {renderToggle("core.reconnect", "reconnect", "Reconnect")}
-        {renderToggle("core.creditSystem", "creditSystem", "Credit system")}
-        {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
-        {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
-        {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
-        {renderToggle("core.networkEd2k", "networkEd2k", "Network eD2K")}
-        {renderToggle("ed2k.obfuscationEnabled", "obfuscationEnabled", "Obfuscation")}
-        {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
-        {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
-        {renderToggle("ed2k.publishEmuleRustIdentity", "publishEmuleRustIdentity", "Publish Rust identity")}
-        {renderToggle("kad.publishSharedFilesEnabled", "kadPublishSharedFilesEnabled", "Kad publish shared files")}
-        {renderToggle("kad.udpFirewallCheckEnabled", "udpFirewallCheckEnabled", "Kad UDP firewall checks")}
-        {renderToggle("kad.tcpFirewallCheckEnabled", "tcpFirewallCheckEnabled", "Kad TCP firewall checks")}
-        {renderToggle("kad.buddyEnabled", "buddyEnabled", "Kad buddy")}
-        {renderToggle("kad.routingMaintenanceEnabled", "routingMaintenanceEnabled", "Routing maintenance")}
-        {renderToggle("nat.enabled", "natEnabled", "NAT")}
-        {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
-        {renderToggle("vpnGuard.enabled", "vpnGuardEnabled", "VPN Guard")}
-        {renderToggle("ipFilter.enabled", "ipFilterEnabled", "IP filter")}
-        {renderToggle("daemon.hostnameLookup.enabled", "hostnameLookupEnabled", "Hostname lookup")}
+      <div class="settings-sections">
+        {sectionVisible(["daemon.incomingDir"]) && (
+          <SettingsControlSection title="Storage">
+            <div class="settings-grid">
+              {renderField("daemon.incomingDir", "incomingDir", "Incoming directory")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "core.uploadLimitKiBps",
+          "core.downloadLimitKiBps",
+          "core.maxSourcesPerFile",
+          "core.uploadClientDataRate",
+          "core.maxUploadSlots",
+          "core.uploadSlotElasticPercent",
+          "core.queueSize",
+          "core.creditSystem",
+          "ed2k.enableUdpReask"
+        ]) && (
+          <SettingsControlSection title="Transfers">
+            <div class="settings-grid">
+              {renderField("core.uploadLimitKiBps", "uploadLimitKiBps", "Upload limit KiB/s")}
+              {renderField("core.downloadLimitKiBps", "downloadLimitKiBps", "Download limit KiB/s")}
+              {renderField("core.maxSourcesPerFile", "maxSourcesPerFile", "Max sources / file")}
+              {renderField("core.uploadClientDataRate", "uploadClientDataRate", "Upload client KiB/s")}
+              {renderField("core.maxUploadSlots", "maxUploadSlots", "Max upload slots")}
+              {renderField("core.uploadSlotElasticPercent", "uploadSlotElasticPercent", "Upload elasticity %")}
+              {renderField("core.queueSize", "queueSize", "Queue size")}
+              {renderToggle("core.creditSystem", "creditSystem", "Credit system")}
+              {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "daemon.p2pBindIp",
+          "daemon.p2pBindInterface",
+          "core.maxConnections",
+          "core.maxConnectionsPerFiveSeconds",
+          "core.networkEd2k",
+          "core.networkKademlia",
+          "ed2k.listenPort",
+          "kad.listenPort",
+          "ed2k.obfuscationEnabled",
+          "ed2k.publishEmuleRustIdentity"
+        ]) && (
+          <SettingsControlSection title="Network">
+            <div class="settings-grid">
+              {renderField("daemon.p2pBindIp", "p2pBindIp", "P2P bind IP")}
+              {renderField("daemon.p2pBindInterface", "p2pBindInterface", "P2P bind interface")}
+              {renderField("core.maxConnections", "maxConnections", "Max connections")}
+              {renderField("core.maxConnectionsPerFiveSeconds", "maxConnectionsPerFiveSeconds", "New connections / 5s")}
+              {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
+              {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
+              {renderToggle("core.networkEd2k", "networkEd2k", "Network eD2K")}
+              {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
+              {renderToggle("ed2k.obfuscationEnabled", "obfuscationEnabled", "Obfuscation")}
+              {renderToggle("ed2k.publishEmuleRustIdentity", "publishEmuleRustIdentity", "Publish Rust identity")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "daemon.hostnameLookup.enabled",
+          "daemon.hostnameLookup.dnsServers",
+          "daemon.hostnameLookup.cacheTtlSecs",
+          "daemon.hostnameLookup.maxLookupsPerTick",
+          "daemon.hostnameLookup.tickIntervalSecs"
+        ]) && (
+          <SettingsControlSection title="Hostname Lookup">
+            <div class="settings-grid">
+              {renderToggle("daemon.hostnameLookup.enabled", "hostnameLookupEnabled", "Hostname lookup")}
+              {renderField("daemon.hostnameLookup.dnsServers", "hostnameLookupDnsServers", "DNS servers")}
+              {renderField("daemon.hostnameLookup.cacheTtlSecs", "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds")}
+              {renderField("daemon.hostnameLookup.maxLookupsPerTick", "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick")}
+              {renderField("daemon.hostnameLookup.tickIntervalSecs", "hostnameLookupTickIntervalSecs", "DNS tick seconds")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "core.autoConnect",
+          "core.reconnect",
+          "core.safeServerConnect",
+          "core.addServersFromServer",
+          "ed2k.reconnectEnabled"
+        ]) && (
+          <SettingsControlSection title="Servers">
+            <div class="settings-grid">
+              {renderToggle("core.autoConnect", "autoConnect", "Auto connect")}
+              {renderToggle("core.reconnect", "reconnect", "Reconnect")}
+              {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
+              {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
+              {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "kad.publishSharedFilesEnabled",
+          "kad.republishIntervalSecs",
+          "kad.udpFirewallCheckEnabled",
+          "kad.tcpFirewallCheckEnabled",
+          "kad.buddyEnabled",
+          "kad.routingMaintenanceEnabled"
+        ]) && (
+          <SettingsControlSection title="Kad">
+            <div class="settings-grid">
+              {renderToggle("kad.publishSharedFilesEnabled", "kadPublishSharedFilesEnabled", "Kad publish shared files")}
+              {renderField("kad.republishIntervalSecs", "kadRepublishIntervalSecs", "Kad republish seconds")}
+              {renderToggle("kad.udpFirewallCheckEnabled", "udpFirewallCheckEnabled", "Kad UDP firewall checks")}
+              {renderToggle("kad.tcpFirewallCheckEnabled", "tcpFirewallCheckEnabled", "Kad TCP firewall checks")}
+              {renderToggle("kad.buddyEnabled", "buddyEnabled", "Kad buddy")}
+              {renderToggle("kad.routingMaintenanceEnabled", "routingMaintenanceEnabled", "Routing maintenance")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible(["nat.enabled", "nat.requireInitialMapping", "nat.bindIp", "nat.backendOrder"]) && (
+          <SettingsControlSection title="NAT">
+            <div class="settings-grid">
+              {renderToggle("nat.enabled", "natEnabled", "NAT")}
+              {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
+              {renderField("nat.bindIp", "natBindIp", "NAT bind IP")}
+              {renderField("nat.backendOrder", "natBackendOrder", "NAT backend order")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible(["vpnGuard.enabled", "vpnGuard.mode", "vpnGuard.allowedPublicIpCidrs"]) && (
+          <SettingsControlSection title="VPN Guard">
+            <div class="settings-grid">
+              {renderToggle("vpnGuard.enabled", "vpnGuardEnabled", "VPN Guard")}
+              {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
+              {renderField("vpnGuard.allowedPublicIpCidrs", "vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible(["ipFilter.enabled", "ipFilter.path", "ipFilter.level"]) && (
+          <SettingsControlSection title="IP Filter">
+            <div class="settings-grid">
+              {renderToggle("ipFilter.enabled", "ipFilterEnabled", "IP filter")}
+              {renderField("ipFilter.path", "ipFilterPath", "IP filter path")}
+              {renderField("ipFilter.level", "ipFilterLevel", "IP filter level")}
+            </div>
+          </SettingsControlSection>
+        )}
       </div>
       <SettingsSectionResources resources={props.surface?.sectionResources ?? []} openSection={props.openSection} />
     </section>
+  );
+}
+
+function SettingsControlSection(props: { title: string; children: ComponentChildren }) {
+  return (
+    <div class="settings-control-section">
+      <div class="subsection-title">
+        <h3>{props.title}</h3>
+      </div>
+      {props.children}
+    </div>
   );
 }
 

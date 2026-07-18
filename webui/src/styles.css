@@ -689,6 +689,29 @@ td {
   justify-content: flex-end;
 }
 
+.settings-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-control-section {
+  border-top: var(--tblr-border-width) solid var(--tblr-border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.settings-control-section .settings-grid {
+  margin-bottom: 0;
+}
+
+.settings-control-section .check {
+  align-items: flex-start;
+  flex-direction: row;
+}
+
 .toggle-grid {
   background: var(--tblr-bg-surface-secondary);
   border: var(--tblr-border-width) solid var(--tblr-border-color);

@@ -80,6 +80,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await page.getByRole("button", { name: "Settings" }).click();
   const settingsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Settings" }) });
 
+  await expect(settingsPanel.getByRole("heading", { name: "Storage" })).toBeVisible();
+  await expect(settingsPanel.getByRole("heading", { name: "Transfers" })).toBeVisible();
+  await expect(settingsPanel.getByRole("heading", { name: "Network" })).toBeVisible();
+  await expect(settingsPanel.getByRole("heading", { name: "VPN Guard" })).toBeVisible();
+
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
