@@ -27,6 +27,9 @@ Everything below is this repo's local deltas only:
   OpenAPI cleanup. During this development phase, evolve the implementation,
   OpenAPI artifact, embedded SPA WebUI, and tests together; reserve version
   bumps for deliberate freeze/release boundaries.
+- The embedded SPA WebUI is the active UI completeness target. Slint/native UI
+  work is a frozen/abandoned experiment unless the operator explicitly requests
+  removal or revival work; do not spend UI feature effort there by default.
 - Until an explicit Rust freeze or release-candidate decision, Rust development
   cleanup assumes clean state for code, settings, metadata/schema, REST, and UI
   surfaces. Do not add compatibility shims, legacy aliases, old-name remapping,
