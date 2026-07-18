@@ -27,6 +27,7 @@ import {
   LogRecord,
   Page,
   RestClient,
+  RuntimeDiagnostics,
   SearchItem,
   ServerItem,
   SharedDirectories,
@@ -2825,11 +2826,15 @@ function categoryPriorityValue(value: string): string | number {
   return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
 }
 
-export function DiagnosticsView(props: { app: unknown; capabilities: unknown; runtimeDiagnostics: unknown; client: RestClient; run: RunFunction }) {
+export function DiagnosticsView(props: { app: unknown; capabilities: unknown; runtimeDiagnostics: RuntimeDiagnostics | null; client: RestClient; run: RunFunction }) {
   const [fullMemory, setFullMemory] = useState(false);
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
   const [dumpPath, setDumpPath] = useState("");
+  const diagnostics = props.runtimeDiagnostics ?? {};
+  const reload = diagnostics.sharedDirectoryReloadProgress ?? {};
+  const ed2kPublishPhase = stringField(recordField(diagnostics, "ed2kPublish"), "phase") || "unknown";
+  const kadPublishPhase = stringField(recordField(diagnostics, "kadPublish"), "phase") || "unknown";
 
   const captureDump = async () => {
     const result = await props.client.post<{ path?: string }>("diagnostics/dumps", { confirmDump: true, fullMemory });
@@ -2873,6 +2878,20 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; ru
             Shutdown
           </button>
         </div>
+      </section>
+      <section class="view-grid">
+        <Metric label="Process" value={String(diagnostics.processId ?? "n/a")} />
+        <Metric label="Known Files" value={String(diagnostics.knownFileCount ?? 0)} />
+        <Metric label="Shared Files" value={String(diagnostics.sharedFileCount ?? 0)} />
+        <Metric label="Hashing" value={String(diagnostics.sharedHashingCount ?? 0)} />
+        <Metric label="Reload" value={reload.phase ?? "idle"} />
+        <Metric label="Hashed" value={`${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0}`} />
+        <Metric label="Read Rate" value={formatRate(reload.readRateBytesPerSec)} />
+        <Metric label="Downloads" value={String(diagnostics.downloadFileCount ?? 0)} />
+        <Metric label="Active Uploads" value={String(diagnostics.activeUploads ?? 0)} />
+        <Metric label="Waiting Uploads" value={String(diagnostics.waitingUploads ?? 0)} />
+        <Metric label="eD2K Publish" value={ed2kPublishPhase} />
+        <Metric label="Kad Publish" value={kadPublishPhase} />
       </section>
       <section class="panel card">
         <div class="section-title">

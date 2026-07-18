@@ -129,4 +129,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
 
   await settingsPanel.getByRole("button", { name: "Open Diagnostics" }).click();
   await expect(page.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
+  const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
+  await expect(metricValue("Hashing")).toHaveText("1");
+  await expect(metricValue("Reload")).toHaveText("hashing");
+  await expect(metricValue("Hashed")).toHaveText("1/3");
+  await expect(metricValue("eD2K Publish")).toHaveText("published");
+  await expect(metricValue("Kad Publish")).toHaveText("waiting");
 });
