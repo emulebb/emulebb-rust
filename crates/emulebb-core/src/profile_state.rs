@@ -6,6 +6,8 @@ use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, Metadat
 use emulebb_settings::{
     AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER,
     SECTION_KAD, SECTION_NAT, SECTION_VPN_GUARD, app_settings_update_is_empty,
+    apply_daemon_settings_update, apply_ed2k_settings_update, apply_ip_filter_settings_update,
+    apply_kad_settings_update, apply_nat_settings_update, apply_vpn_guard_settings_update,
     core_settings_from_values, core_settings_to_values, section_settings_from_values,
     section_settings_to_values,
 };
@@ -131,22 +133,34 @@ pub(crate) fn persist_app_settings_update(
         !app_settings_update_is_empty(&update),
         "settings PATCH requires at least one settings section"
     );
-    if let Some(settings) = update.daemon {
+    if let Some(update) = update.daemon {
+        let mut settings = load_settings_section(metadata, SECTION_DAEMON)?;
+        apply_daemon_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_DAEMON, &settings)?;
     }
-    if let Some(settings) = update.ed2k {
+    if let Some(update) = update.ed2k {
+        let mut settings = load_settings_section(metadata, SECTION_ED2K)?;
+        apply_ed2k_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_ED2K, &settings)?;
     }
-    if let Some(settings) = update.kad {
+    if let Some(update) = update.kad {
+        let mut settings = load_settings_section(metadata, SECTION_KAD)?;
+        apply_kad_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_KAD, &settings)?;
     }
-    if let Some(settings) = update.nat {
+    if let Some(update) = update.nat {
+        let mut settings = load_settings_section(metadata, SECTION_NAT)?;
+        apply_nat_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_NAT, &settings)?;
     }
-    if let Some(settings) = update.vpn_guard {
+    if let Some(update) = update.vpn_guard {
+        let mut settings = load_settings_section(metadata, SECTION_VPN_GUARD)?;
+        apply_vpn_guard_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_VPN_GUARD, &settings)?;
     }
-    if let Some(settings) = update.ip_filter {
+    if let Some(update) = update.ip_filter {
+        let mut settings = load_settings_section(metadata, SECTION_IP_FILTER)?;
+        apply_ip_filter_settings_update(&mut settings, update);
         persist_settings_section(metadata, SECTION_IP_FILTER, &settings)?;
     }
     load_app_settings(metadata)

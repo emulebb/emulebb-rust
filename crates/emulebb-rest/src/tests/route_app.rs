@@ -285,6 +285,51 @@ async fn settings_patch_rejects_incoming_dir_that_is_not_directory() {
 }
 
 #[tokio::test]
+async fn settings_patch_preserves_unspecified_section_fields() {
+    let app = test_router();
+
+    let initial = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"nat":{"backendOrder":["first","second"],"leaseDurationSecs":7200,"externalIpOverride":"198.51.100.24"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+
+    let partial = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"nat":{"enabled":true}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partial.status(), StatusCode::OK);
+    let body = to_bytes(partial.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["nat"]["enabled"], true);
+    assert_eq!(
+        value["data"]["nat"]["backendOrder"],
+        json!(["first", "second"])
+    );
+    assert_eq!(value["data"]["nat"]["leaseDurationSecs"], 7200);
+    assert_eq!(value["data"]["nat"]["externalIpOverride"], "198.51.100.24");
+}
+
+#[tokio::test]
 async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let runtime_dir = unique_test_dir("snapshot");
     let transfer_root = runtime_dir.join("transfers");

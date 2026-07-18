@@ -177,7 +177,7 @@ impl EmulebbCore {
 
 fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result<()> {
     if let Some(daemon) = &mut request.daemon
-        && let Some(path) = &mut daemon.incoming_dir
+        && let Some(emulebb_settings::NullableUpdate::Value(path)) = &mut daemon.incoming_dir
     {
         let text = path.to_string_lossy();
         let trimmed = text.trim();

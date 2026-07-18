@@ -426,12 +426,12 @@ fn app_settings_update_from_form(
 
     Ok(AppSettingsUpdate {
         core: None,
-        daemon: changed_section(&next.daemon, &baseline.daemon),
-        ed2k: changed_section(&next.ed2k, &baseline.ed2k),
-        kad: changed_section(&next.kad, &baseline.kad),
-        nat: changed_section(&next.nat, &baseline.nat),
-        vpn_guard: changed_section(&next.vpn_guard, &baseline.vpn_guard),
-        ip_filter: changed_section(&next.ip_filter, &baseline.ip_filter),
+        daemon: changed_section(&next.daemon, &baseline.daemon).map(Into::into),
+        ed2k: changed_section(&next.ed2k, &baseline.ed2k).map(Into::into),
+        kad: changed_section(&next.kad, &baseline.kad).map(Into::into),
+        nat: changed_section(&next.nat, &baseline.nat).map(Into::into),
+        vpn_guard: changed_section(&next.vpn_guard, &baseline.vpn_guard).map(Into::into),
+        ip_filter: changed_section(&next.ip_filter, &baseline.ip_filter).map(Into::into),
     })
 }
 
