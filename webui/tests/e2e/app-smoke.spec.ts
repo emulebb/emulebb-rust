@@ -135,4 +135,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Hashed")).toHaveText("1/3");
   await expect(metricValue("eD2K Publish")).toHaveText("published");
   await expect(metricValue("Kad Publish")).toHaveText("waiting");
+  await expect(metricValue("Event Stream")).toHaveText(/Connecting|Streaming|Reconnecting/);
+  await expect(metricValue("Last Event")).toHaveText("sync.reset");
+  await expect(metricValue("Last Event ID")).toHaveText("1");
 });

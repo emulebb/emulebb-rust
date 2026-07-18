@@ -2826,15 +2826,43 @@ function categoryPriorityValue(value: string): string | number {
   return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
 }
 
-export function DiagnosticsView(props: { app: unknown; capabilities: unknown; runtimeDiagnostics: RuntimeDiagnostics | null; client: RestClient; run: RunFunction }) {
+export type EventStreamStatus = {
+  mode: "polling" | "connecting" | "streaming" | "reconnecting";
+  enabled: boolean;
+  connected: boolean;
+  lastEventId?: string;
+  lastEventType?: string;
+  lastEventAt?: string;
+  reconnectAttempts: number;
+  lastError?: string;
+  pollIntervalMs: number;
+  retryIntervalMs: number;
+};
+
+export function DiagnosticsView(props: {
+  app: unknown;
+  capabilities: unknown;
+  runtimeDiagnostics: RuntimeDiagnostics | null;
+  eventStreamStatus: EventStreamStatus;
+  client: RestClient;
+  run: RunFunction;
+}) {
   const [fullMemory, setFullMemory] = useState(false);
   const [crashConfirm, setCrashConfirm] = useState("");
   const [shutdownConfirm, setShutdownConfirm] = useState("");
   const [dumpPath, setDumpPath] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
+  const eventStream = props.eventStreamStatus;
   const reload = diagnostics.sharedDirectoryReloadProgress ?? {};
   const ed2kPublishPhase = stringField(recordField(diagnostics, "ed2kPublish"), "phase") || "unknown";
   const kadPublishPhase = stringField(recordField(diagnostics, "kadPublish"), "phase") || "unknown";
+  const eventStreamMode = eventStream.mode === "streaming"
+    ? "Streaming"
+    : eventStream.mode === "reconnecting"
+      ? "Reconnecting"
+      : eventStream.mode === "connecting"
+        ? "Connecting"
+        : "Polling";
 
   const captureDump = async () => {
     const result = await props.client.post<{ path?: string }>("diagnostics/dumps", { confirmDump: true, fullMemory });
@@ -2892,6 +2920,12 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; ru
         <Metric label="Waiting Uploads" value={String(diagnostics.waitingUploads ?? 0)} />
         <Metric label="eD2K Publish" value={ed2kPublishPhase} />
         <Metric label="Kad Publish" value={kadPublishPhase} />
+        <Metric label="Event Stream" value={eventStreamMode} />
+        <Metric label="Last Event" value={eventStream.lastEventType ?? "n/a"} />
+        <Metric label="Last Event ID" value={eventStream.lastEventId ?? "n/a"} />
+        <Metric label="Reconnects" value={String(eventStream.reconnectAttempts)} />
+        <Metric label="Poll Interval" value={`${eventStream.pollIntervalMs} ms`} />
+        <Metric label="Stream Error" value={eventStream.lastError ?? "n/a"} />
       </section>
       <section class="panel card">
         <div class="section-title">

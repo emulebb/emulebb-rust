@@ -54,7 +54,8 @@ import {
   SharedFilesView,
   SharingView,
   TransfersView,
-  UploadsView
+  UploadsView,
+  type EventStreamStatus
 } from "./views";
 import "@tabler/core/dist/css/tabler.min.css";
 import "./styles.css";
@@ -62,6 +63,8 @@ import "./styles.css";
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
 const SNAPSHOT_LIMIT = 500;
 const LOG_LIMIT = 300;
+const REFRESH_INTERVAL_MS = 3000;
+const EVENT_STREAM_RETRY_MS = 3000;
 
 type Tab =
   | "overview"
@@ -89,6 +92,15 @@ const settingsSectionTabs: Record<string, Tab> = {
   diagnostics: "diagnostics"
 };
 
+const pollingEventStreamStatus: EventStreamStatus = {
+  mode: "polling",
+  enabled: false,
+  connected: false,
+  reconnectAttempts: 0,
+  pollIntervalMs: REFRESH_INTERVAL_MS,
+  retryIntervalMs: EVENT_STREAM_RETRY_MS
+};
+
 export function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE) ?? "");
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
@@ -110,6 +122,7 @@ export function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
 
   useEffect(() => {
     client.setApiKey(apiKey);
@@ -185,7 +198,7 @@ export function App() {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 3000);
+    const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
@@ -193,14 +206,24 @@ export function App() {
 
   useEffect(() => {
     if (!transferSseEnabled) {
+      setEventStreamStatus(pollingEventStreamStatus);
       return;
     }
     const controller = new AbortController();
     let closed = false;
     let lastEventId: string | undefined;
+    let reconnectAttempts = 0;
     let refreshTimer: number | undefined;
     let refreshInFlight = false;
     let refreshPending = false;
+    setEventStreamStatus({
+      mode: "connecting",
+      enabled: true,
+      connected: false,
+      reconnectAttempts: 0,
+      pollIntervalMs: REFRESH_INTERVAL_MS,
+      retryIntervalMs: EVENT_STREAM_RETRY_MS
+    });
 
     const runScheduledRefresh = async () => {
       if (refreshInFlight) {
@@ -232,16 +255,58 @@ export function App() {
     const runStream = async () => {
       while (!closed) {
         try {
+          setEventStreamStatus((status) => ({
+            ...status,
+            mode: status.lastEventAt ? "reconnecting" : "connecting",
+            enabled: true,
+            connected: false,
+            reconnectAttempts,
+            pollIntervalMs: REFRESH_INTERVAL_MS,
+            retryIntervalMs: EVENT_STREAM_RETRY_MS
+          }));
           await client.streamTransferEvents((event: TransferEvent) => {
             lastEventId = String(event.id);
+            setEventStreamStatus({
+              mode: "streaming",
+              enabled: true,
+              connected: true,
+              lastEventId,
+              lastEventType: event.type,
+              lastEventAt: new Date().toISOString(),
+              reconnectAttempts,
+              pollIntervalMs: REFRESH_INTERVAL_MS,
+              retryIntervalMs: EVENT_STREAM_RETRY_MS
+            });
             scheduleRefresh();
           }, { signal: controller.signal, lastEventId });
-        } catch {
+          if (!closed && !controller.signal.aborted) {
+            setEventStreamStatus((status) => ({
+              ...status,
+              mode: "reconnecting",
+              enabled: true,
+              connected: false,
+              reconnectAttempts,
+              pollIntervalMs: REFRESH_INTERVAL_MS,
+              retryIntervalMs: EVENT_STREAM_RETRY_MS
+            }));
+          }
+        } catch (streamError) {
           if (closed || controller.signal.aborted) {
             return;
           }
+          reconnectAttempts += 1;
+          setEventStreamStatus((status) => ({
+            ...status,
+            mode: "reconnecting",
+            enabled: true,
+            connected: false,
+            reconnectAttempts,
+            lastError: errorMessage(streamError),
+            pollIntervalMs: REFRESH_INTERVAL_MS,
+            retryIntervalMs: EVENT_STREAM_RETRY_MS
+          }));
         }
-        await delayWithAbort(3000, controller.signal);
+        await delayWithAbort(EVENT_STREAM_RETRY_MS, controller.signal);
       }
     };
 
@@ -402,7 +467,7 @@ export function App() {
                 openSection={(name) => setTab(settingsSectionTabs[name] ?? "settings")}
               />
             )}
-            {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} client={client} run={run} />}
+            {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} eventStreamStatus={eventStreamStatus} client={client} run={run} />}
             {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
           </div>
         </div>
