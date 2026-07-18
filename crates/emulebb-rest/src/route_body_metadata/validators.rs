@@ -168,6 +168,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     KAD_SETTINGS_FIELDS,
                     "settings.kad",
                 )?;
+                validate_kad_settings_patch_body_fields(section_object)?;
             }
             "nat" => {
                 validate_non_empty_update_object(section_object, "settings.nat")?;
@@ -266,6 +267,39 @@ fn validate_hostname_lookup_settings_patch_body_fields(
         "tickIntervalSecs",
         "settings.daemon.hostnameLookup.tickIntervalSecs",
         5,
+    )
+}
+
+fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_unsigned_number_min(
+        object,
+        "bootstrapMinRoutingContacts",
+        "settings.kad.bootstrapMinRoutingContacts",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "republishIntervalSecs",
+        "settings.kad.republishIntervalSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "publishContactFanout",
+        "settings.kad.publishContactFanout",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "udpFirewallCheckIntervalSecs",
+        "settings.kad.udpFirewallCheckIntervalSecs",
+        60,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "tcpFirewallCheckIntervalSecs",
+        "settings.kad.tcpFirewallCheckIntervalSecs",
+        60,
     )
 }
 

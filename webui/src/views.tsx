@@ -2702,8 +2702,8 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "kadBootstrapMinRoutingContacts", "Bootstrap contact floor", { min: 1 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
   validateUnsigned(errors, form, "kadPublishContactFanout", "Publish contact fanout", { min: 1 });
-  validateUnsigned(errors, form, "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds", { min: 1 });
-  validateUnsigned(errors, form, "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds", { min: 1 });
+  validateUnsigned(errors, form, "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds", { min: 60 });
+  validateUnsigned(errors, form, "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds", { min: 60 });
   validateUnsigned(errors, form, "natSsdpLocalPort", "SSDP local port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "natDiscoveryTimeoutSecs", "Discovery timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
@@ -2731,7 +2731,13 @@ function validateUnsigned(
   const min = options.min ?? 0;
   const max = options.max ?? Number.MAX_SAFE_INTEGER;
   if (parsed < min || parsed > max) {
-    errors.set(key, `${label} must be between ${min} and ${max}.`);
+    if (options.min !== undefined && options.max === undefined) {
+      errors.set(key, `${label} must be at least ${min}.`);
+    } else if (options.min === undefined && options.max !== undefined) {
+      errors.set(key, `${label} must be no more than ${max}.`);
+    } else {
+      errors.set(key, `${label} must be between ${min} and ${max}.`);
+    }
   }
 }
 

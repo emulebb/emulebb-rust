@@ -118,6 +118,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("eD2K listen port").fill("4662");
   await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toHaveCount(0);
+  await settingsPanel.getByLabel("UDP firewall interval seconds").fill("59");
+  await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("UDP firewall interval seconds").fill("3600");
+  await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toHaveCount(0);
   const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
   await expect(metricValue("Bind")).toHaveText("resolved");
   await expect(metricValue("Interface")).toHaveText("Test Adapter");

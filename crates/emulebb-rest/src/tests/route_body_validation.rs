@@ -366,6 +366,26 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.kad field: unsupportedSetting",
         ),
         (
+            r#"{"kad":{"bootstrapMinRoutingContacts":0}}"#,
+            "settings.kad.bootstrapMinRoutingContacts must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"republishIntervalSecs":0}}"#,
+            "settings.kad.republishIntervalSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"publishContactFanout":0}}"#,
+            "settings.kad.publishContactFanout must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"kad":{"udpFirewallCheckIntervalSecs":59}}"#,
+            "settings.kad.udpFirewallCheckIntervalSecs must be an unsigned number greater than or equal to 60",
+        ),
+        (
+            r#"{"kad":{"tcpFirewallCheckIntervalSecs":"60"}}"#,
+            "settings.kad.tcpFirewallCheckIntervalSecs must be an unsigned number greater than or equal to 60",
+        ),
+        (
             r#"{"nat":{"unsupportedSetting":1}}"#,
             "unknown settings.nat field: unsupportedSetting",
         ),
