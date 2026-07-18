@@ -218,6 +218,11 @@ pub(crate) async fn vpn_guard(State(state): State<RestState>) -> impl IntoRespon
     api_ok(vpn_guard_response(&state.core.vpn_guard_status()))
 }
 
+pub(crate) async fn probe_vpn_guard(State(state): State<RestState>) -> impl IntoResponse {
+    state.core.run_vpn_guard_egress_probe().await;
+    api_ok(vpn_guard_response(&state.core.vpn_guard_status()))
+}
+
 pub(crate) async fn network(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(network_response(
         state.core.network_binding_status().as_ref(),

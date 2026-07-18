@@ -476,6 +476,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("GET", "/api/v1/network")
         | ("GET", "/api/v1/nat")
         | ("GET", "/api/v1/vpn-guard")
+        | ("POST", "/api/v1/vpn-guard/operations/probe")
         | ("GET", "/api/v1/categories")
         | ("POST", "/api/v1/categories")
         | ("GET", "/api/v1/friends")
@@ -553,6 +554,7 @@ fn route_query_fields_for_parameterized(
         | ("GET", ["uploads", _])
         | ("GET", ["upload-queue", _]) => Some(NONE),
         ("POST", ["servers", _, "operations", "connect"])
+        | ("POST", ["vpn-guard", "operations", "probe"])
         | ("POST", ["searches", _, "results", _, "operations", "download"]) => Some(NONE),
         ("POST", ["transfers", _, "operations", operation])
             if matches!(*operation, "pause" | "resume" | "stop" | "recheck") =>

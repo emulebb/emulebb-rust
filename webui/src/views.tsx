@@ -2591,6 +2591,12 @@ export function SettingsView(props: {
               {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
               {renderField("vpnGuard.allowedPublicIpCidrs", "vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs")}
             </div>
+            <div class="row-actions">
+              <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("vpn-guard/operations/probe"), "VPN Guard probe completed")}>
+                <Shield size={15} />
+                Probe VPN Guard
+              </button>
+            </div>
           </SettingsControlSection>
         )}
         {sectionVisible(["ipFilter.enabled", "ipFilter.path", "ipFilter.level"]) && (

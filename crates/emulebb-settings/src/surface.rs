@@ -743,7 +743,7 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         class: SettingSurfaceClass::ExistingSectionResource,
         route: "/api/v1/vpn-guard",
         ui_section: "VPN Guard",
-        description: "VPN Guard startup, binding, and egress verdict status.",
+        description: "VPN Guard startup, binding, egress verdict, and probe operation.",
     },
     SettingsSectionResourceSpec {
         name: "diagnostics",

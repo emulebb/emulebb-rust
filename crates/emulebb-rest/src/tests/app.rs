@@ -631,6 +631,33 @@ async fn vpn_guard_returns_runtime_status_directly() {
 }
 
 #[tokio::test]
+async fn vpn_guard_probe_returns_refreshed_runtime_status() {
+    let router = test_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/vpn-guard/operations/probe")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+    assert_eq!(value["data"]["mode"], "off");
+    assert_eq!(value["data"]["startupBlocked"], false);
+    assert_eq!(value["data"]["egressVerified"], false);
+    assert_eq!(value["data"]["stunProbe"]["attempted"], false);
+    assert_eq!(value["data"]["httpProbe"]["attempted"], false);
+}
+
+#[tokio::test]
 async fn network_returns_runtime_binding_status_directly() {
     let router = test_router();
 

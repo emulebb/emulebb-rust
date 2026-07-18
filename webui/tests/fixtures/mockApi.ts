@@ -447,7 +447,7 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("network", "/api/v1/network", "Network", "Live P2P port, binding, interface, and VPN Guard status."),
           sectionResource("nat", "/api/v1/nat", "NAT", "Live NAT gateway, mapping, external address, and error status."),
           sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
-          sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, and egress verdict status."),
+          sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, egress verdict, and probe operation."),
           sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")
         ]
       };
