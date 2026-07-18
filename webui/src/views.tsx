@@ -2139,6 +2139,7 @@ export function SettingsView(props: {
   natStatus: NatStatus | null;
   ipFilterStatus: IpFilterStatus | null;
   vpnGuardStatus: VpnGuardStatus | null;
+  focusedSection: string | null;
   client: RestClient;
   run: RunFunction;
   openSection: (name: string) => void;
@@ -2154,6 +2155,20 @@ export function SettingsView(props: {
     }
     return byPath;
   }, [props.surface]);
+
+  useEffect(() => {
+    if (!props.focusedSection) {
+      return;
+    }
+    const section = Array.from(document.querySelectorAll<HTMLElement>("[data-settings-section]")).find(
+      (element) => element.dataset.settingsSection === props.focusedSection
+    );
+    if (!section) {
+      return;
+    }
+    section.scrollIntoView({ block: "start", behavior: "smooth" });
+    section.focus({ preventScroll: true });
+  }, [props.focusedSection]);
 
   useEffect(() => {
     setForm(baseline);
@@ -2541,7 +2556,7 @@ export function SettingsView(props: {
           "nat.renewMarginSecs",
           "nat.externalIpOverride"
         ]) && (
-          <SettingsControlSection title="NAT">
+          <SettingsControlSection title="NAT" resourceName="nat">
             <section class="view-grid compact-grid">
               <Metric label="NAT" value={props.natStatus?.enabled ? "Enabled" : "Off"} />
               <Metric label="Gateway" value={props.natStatus?.gatewayDiscovered ? "Discovered" : "Missing"} />
@@ -2564,7 +2579,7 @@ export function SettingsView(props: {
           </SettingsControlSection>
         )}
         {sectionVisible(["vpnGuard.enabled", "vpnGuard.mode", "vpnGuard.allowedPublicIpCidrs"]) && (
-          <SettingsControlSection title="VPN Guard">
+          <SettingsControlSection title="VPN Guard" resourceName="vpnGuard">
             <section class="view-grid compact-grid">
               <Metric label="Guard" value={props.vpnGuardStatus?.enabled ? "Enabled" : "Off"} />
               <Metric label="Mode" value={String(props.vpnGuardStatus?.mode ?? "off")} />
@@ -2579,7 +2594,7 @@ export function SettingsView(props: {
           </SettingsControlSection>
         )}
         {sectionVisible(["ipFilter.enabled", "ipFilter.path", "ipFilter.level"]) && (
-          <SettingsControlSection title="IP Filter">
+          <SettingsControlSection title="IP Filter" resourceName="ipFilter">
             <section class="view-grid compact-grid">
               <Metric label="Configured" value={props.ipFilterStatus?.configured ? "Yes" : "No"} />
               <Metric label="Reloadable" value={props.ipFilterStatus?.reloadable ? "Yes" : "No"} />
@@ -2645,9 +2660,9 @@ function BootstrapSettingsSection(props: { settings: SettingSurfaceSpec[] }) {
   );
 }
 
-function SettingsControlSection(props: { title: string; children: ComponentChildren }) {
+function SettingsControlSection(props: { title: string; resourceName?: string; children: ComponentChildren }) {
   return (
-    <div class="settings-control-section">
+    <div class="settings-control-section" data-settings-section={props.resourceName} tabIndex={props.resourceName ? -1 : undefined}>
       <div class="subsection-title">
         <h3>{props.title}</h3>
       </div>

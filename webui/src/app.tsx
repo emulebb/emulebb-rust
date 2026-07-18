@@ -123,6 +123,7 @@ export function App() {
   const [vpnGuardStatus, setVpnGuardStatus] = useState<VpnGuardStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsSurface, setSettingsSurface] = useState<SettingsSurface | null>(null);
+  const [settingsSectionTarget, setSettingsSectionTarget] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
@@ -490,9 +491,13 @@ export function App() {
                 natStatus={natStatus}
                 ipFilterStatus={ipFilterStatus}
                 vpnGuardStatus={vpnGuardStatus}
+                focusedSection={settingsSectionTarget}
                 client={client}
                 run={run}
-                openSection={(name) => setTab(settingsSectionTabs[name] ?? "settings")}
+                openSection={(name) => {
+                  setSettingsSectionTarget(name);
+                  setTab(settingsSectionTabs[name] ?? "settings");
+                }}
               />
             )}
             {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} eventStreamStatus={eventStreamStatus} client={client} run={run} />}

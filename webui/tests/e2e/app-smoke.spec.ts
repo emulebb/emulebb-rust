@@ -145,6 +145,13 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(page.getByText("IP filter reloaded")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "ip-filter/operations/reload")).toBe(true);
 
+  await settingsPanel.getByRole("button", { name: "Open NAT" }).click();
+  await expect(page.locator('[data-settings-section="nat"]')).toBeFocused();
+  await settingsPanel.getByRole("button", { name: "Open VPN Guard" }).click();
+  await expect(page.locator('[data-settings-section="vpnGuard"]')).toBeFocused();
+  await settingsPanel.getByRole("button", { name: "Open IP Filter" }).click();
+  await expect(page.locator('[data-settings-section="ipFilter"]')).toBeFocused();
+
   await settingsPanel.getByRole("button", { name: "Open Diagnostics" }).click();
   await expect(page.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
   await expect(metricValue("Hashing")).toHaveText("1");
