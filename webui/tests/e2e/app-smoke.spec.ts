@@ -73,6 +73,33 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   ).toBe(true);
 });
 
+test("search create form uses REST-native type tokens", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Search" }).click();
+  const searchPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Search" }) });
+  const startSearch = searchPanel.getByRole("button", { name: "Start" });
+  const initialSearchPosts = requests.filter((request) => request.method === "POST" && request.path === "searches").length;
+
+  await expect(startSearch).toBeDisabled();
+  await searchPanel.getByPlaceholder("Search query").fill("a".repeat(161));
+  await expect(searchPanel.getByText("Search query must be at most 160 characters.")).toBeVisible();
+  await expect(startSearch).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "searches").length).toBe(initialSearchPosts);
+
+  await searchPanel.getByPlaceholder("Search query").fill(" alpha   beta ");
+  await searchPanel.locator("select").nth(0).selectOption("kad");
+  await searchPanel.locator("select").nth(1).selectOption("arc");
+  await expect(searchPanel.getByText("Search query must be at most 160 characters.")).toHaveCount(0);
+  await startSearch.click();
+  await expect(page.getByText("Search started")).toBeVisible();
+  const searchPost = requests.find((request) => request.method === "POST" && request.path === "searches");
+  expect(searchPost).toBeDefined();
+  expect(JSON.parse(searchPost?.body ?? "{}")).toEqual({ query: "alpha beta", method: "kad", type: "arc" });
+});
+
 test("transfer add form validates eD2K link batches", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));

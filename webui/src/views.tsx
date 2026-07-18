@@ -430,13 +430,19 @@ export function SearchView(props: {
 }) {
   const [query, setQuery] = useState("");
   const [method, setMethod] = useState("automatic");
-  const [fileType, setFileType] = useState("any");
+  const [fileType, setFileType] = useState("");
   const [categoryId, setCategoryId] = useState("0");
   const [paused, setPaused] = useState(false);
   const results = props.latestSearch?.results ?? [];
+  const searchQueryError = searchQueryValidationError(query);
 
   const startSearch = async () => {
-    const next = await props.client.post<SearchItem>("searches", { query, method, type: fileType });
+    const normalizedQuery = normalizeSearchQuery(query);
+    const error = searchQueryValidationError(query);
+    if (error) {
+      throw new Error(error);
+    }
+    const next = await props.client.post<SearchItem>("searches", { query: normalizedQuery, method, type: fileType });
     props.setLatestSearch(next);
     await props.refresh();
   };
@@ -449,9 +455,11 @@ export function SearchView(props: {
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(startSearch, "Search started");
+        if (!searchQueryError) {
+          void props.run(startSearch, "Search started");
+        }
       }}>
-        <input class="form-control" value={query} placeholder="Search query" onInput={(event) => setQuery(event.currentTarget.value)} />
+        <input class="form-control" value={query} placeholder="Search query" aria-invalid={searchQueryError ? "true" : "false"} onInput={(event) => setQuery(event.currentTarget.value)} />
         <select class="form-select" value={method} onInput={(event) => setMethod(event.currentTarget.value)}>
           <option value="automatic">Automatic</option>
           <option value="server">Server</option>
@@ -459,14 +467,19 @@ export function SearchView(props: {
           <option value="kad">Kad</option>
         </select>
         <select class="form-select" value={fileType} onInput={(event) => setFileType(event.currentTarget.value)}>
-          <option value="any">Any</option>
+          <option value="">Any</option>
           <option value="audio">Audio</option>
           <option value="video">Video</option>
-          <option value="archive">Archive</option>
-          <option value="document">Document</option>
+          <option value="image">Image</option>
+          <option value="doc">Document</option>
+          <option value="arc">Archive</option>
+          <option value="iso">ISO</option>
+          <option value="pro">Program</option>
+          <option value="emulecollection">eMule collection</option>
         </select>
-        <button class="btn" type="submit"><Search size={16} />Start</button>
+        <button class="btn" type="submit" disabled={!normalizeSearchQuery(query) || Boolean(searchQueryError)}><Search size={16} />Start</button>
       </form>
+      {searchQueryError && <p class="field-error">{searchQueryError}</p>}
       <div class="form-row subtle-row">
         <select class="form-select" value={categoryId} onInput={(event) => setCategoryId(event.currentTarget.value)}>
           <option value="0">Download uncategorized</option>
@@ -3239,6 +3252,21 @@ function categoryPriorityError(value: string): string | undefined {
     return undefined;
   }
   return "Category priority must be verylow, low, normal, high, veryhigh, or a u32 number.";
+}
+
+function normalizeSearchQuery(value: string): string {
+  return value.trim().split(/[ \t\n\r\f\v]+/).filter(Boolean).join(" ");
+}
+
+function searchQueryValidationError(value: string): string | undefined {
+  const normalized = normalizeSearchQuery(value);
+  if (!normalized) {
+    return undefined;
+  }
+  if (/[\u0000-\u001f\u007f]/.test(normalized)) {
+    return "Search query must not contain control characters.";
+  }
+  return normalized.length <= 160 ? undefined : "Search query must be at most 160 characters.";
 }
 
 function optionalPort(value: string): number | null {
