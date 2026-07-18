@@ -7,13 +7,13 @@ describe("components", () => {
   it("marks connected-style statuses as good", () => {
     render(<StatusPill value="Connected" />);
 
-    expect(screen.getByText("Connected")).toHaveClass("pill", "good");
+    expect(screen.getByText("Connected")).toHaveClass("status-pill", "badge", "bg-success-lt");
   });
 
   it("marks error-style statuses as bad", () => {
     render(<StatusPill value="firewalled" />);
 
-    expect(screen.getByText("firewalled")).toHaveClass("pill", "bad");
+    expect(screen.getByText("firewalled")).toHaveClass("status-pill", "badge", "bg-danger-lt");
   });
 
   it("invokes action button callbacks", () => {
