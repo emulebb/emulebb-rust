@@ -25,7 +25,7 @@ export function StatusPill(props: { value: string }) {
     ) {
       return "pill good";
     }
-    if (value.includes("error") || value.includes("firewall") || value.includes("banned")) {
+    if (value.includes("error") || value.includes("firewall") || value.includes("banned") || value.includes("failed") || value.includes("blocked")) {
       return "pill bad";
     }
     if (value.includes("paused") || value.includes("idle") || value.includes("queued") || value.includes("active")) {

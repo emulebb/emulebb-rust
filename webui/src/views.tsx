@@ -944,6 +944,187 @@ function UploadTable(props: { title: string; items: Upload[]; basePath: string; 
   );
 }
 
+type NetworkEndpointRow = {
+  key: string;
+  kind: string;
+  endpoint: string;
+  ip: string;
+  host: string;
+  dnsStatus: string;
+  state: string;
+  detail: string;
+  lastSeen: string;
+  bindPolicy: string;
+};
+
+type NetworkTransferSource = TransferSource & {
+  transferHash?: string;
+  transferName?: string;
+};
+
+export function NetworkHealthView(props: {
+  servers: ServerItem[];
+  transfers: Transfer[];
+  uploads: Upload[];
+  uploadQueue: Upload[];
+  kad: KadStatus;
+  settings: AppSettings | null;
+  client: RestClient;
+}) {
+  const [nodes, setNodes] = useState<KadNode[]>([]);
+  const [sources, setSources] = useState<NetworkTransferSource[]>([]);
+  const [filter, setFilter] = useState("");
+  const [selectedKey, setSelectedKey] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setLoadError("");
+      try {
+        const [nodePage, sourcePages] = await Promise.all([
+          props.client.get<Page<KadNode>>("kad/nodes?limit=300"),
+          Promise.all(
+            props.transfers
+              .filter((transfer) => transfer.state !== "completed")
+              .slice(0, 12)
+              .map(async (transfer) => {
+                try {
+                  const page = await props.client.get<Page<TransferSource>>(`transfers/${transfer.hash}/sources`);
+                  return (page.items ?? []).map((source) => ({
+                    ...source,
+                    transferHash: transfer.hash,
+                    transferName: transfer.name
+                  }));
+                } catch {
+                  return [] as NetworkTransferSource[];
+                }
+              })
+          )
+        ]);
+        if (!cancelled) {
+          setNodes(nodePage.items ?? []);
+          setSources(sourcePages.flat());
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setLoadError(caught instanceof Error ? caught.message : String(caught));
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.client, props.kad.contactCount, props.kad.connected, props.transfers]);
+
+  const bindPolicy = networkBindPolicy(props.settings);
+  const rows = useMemo(
+    () => networkEndpointRows(props.servers, nodes, sources, props.uploads, props.uploadQueue, bindPolicy),
+    [bindPolicy, nodes, props.servers, props.uploadQueue, props.uploads, sources]
+  );
+  const filteredRows = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) {
+      return rows;
+    }
+    return rows.filter((row) => [
+      row.kind,
+      row.endpoint,
+      row.ip,
+      row.host,
+      row.dnsStatus,
+      row.state,
+      row.detail,
+      row.bindPolicy
+    ].some((value) => value.toLowerCase().includes(needle)));
+  }, [filter, rows]);
+  const selected = rows.find((row) => row.key === selectedKey) ?? filteredRows[0];
+  const dnsBlocked = rows.filter((row) => row.dnsStatus === "blockedByBindPolicy").length;
+  const dnsFailed = rows.filter((row) => row.dnsStatus === "failed").length;
+  const unresolved = rows.filter((row) => !row.host && row.dnsStatus && !["resolved", "not-requested"].includes(row.dnsStatus)).length;
+
+  return (
+    <section class="view-stack">
+      <section class="view-grid">
+        <Metric label="Kad Nodes" value={String(nodes.length)} />
+        <Metric label="Servers" value={`${props.servers.filter((server) => server.connected).length}/${props.servers.length}`} />
+        <Metric label="Peer Endpoints" value={String(sources.length + props.uploads.length + props.uploadQueue.length)} />
+        <Metric label="DNS Pending" value={String(unresolved)} />
+        <Metric label="DNS Failed" value={String(dnsFailed)} />
+        <Metric label="Bind Policy" value={bindPolicy.label} />
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Kad Graph</h2>
+          <span>{props.kad.connected ? "connected" : props.kad.running ? "running" : "stopped"}</span>
+        </div>
+        <KadGraph nodes={nodes} selectedNodeId={selected?.kind === "Kad" ? selected.key.replace(/^kad:/, "") : ""} onSelect={(nodeId) => setSelectedKey(`kad:${nodeId}`)} />
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Network Health</h2>
+          <span>{rows.length} endpoints</span>
+        </div>
+        {loadError && <div class="notice error">{loadError}</div>}
+        <div class="network-summary">
+          <div class="kv compact">
+            <span>P2P bind</span><strong>{bindPolicy.detail}</strong>
+            <span>Hostname lookup</span><strong>{hostnameLookupPolicy(props.settings)}</strong>
+            <span>Blocked DNS</span><strong>{dnsBlocked}</strong>
+          </div>
+          <div class="form-row">
+            <input value={filter} placeholder="Filter kind, endpoint, IP, host, DNS, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th>Endpoint</th>
+                <th>IP</th>
+                <th>Host</th>
+                <th>DNS</th>
+                <th>State</th>
+                <th>Bind</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row) => (
+                <tr key={row.key} class={selected?.key === row.key ? "selected-row" : ""} onClick={() => setSelectedKey(row.key)}>
+                  <td>{row.kind}</td>
+                  <td>{row.endpoint}</td>
+                  <td>{row.ip}</td>
+                  <td>{row.host}</td>
+                  <td><StatusPill value={row.dnsStatus || "not-requested"} /></td>
+                  <td><StatusPill value={row.state || "unknown"} /></td>
+                  <td>{row.bindPolicy}</td>
+                  <td>{row.detail}</td>
+                </tr>
+              ))}
+              {filteredRows.length === 0 && <EmptyRow colSpan={8} text="No endpoints." />}
+            </tbody>
+          </table>
+        </div>
+        {selected && (
+          <div class="kv compact detail-split">
+            <span>Selected</span><strong>{selected.kind} {selected.endpoint}</strong>
+            <span>IP / host</span><strong>{selected.ip} / {selected.host || "unresolved"}</strong>
+            <span>DNS state</span><strong>{selected.dnsStatus || "not-requested"}</strong>
+            <span>Bind policy</span><strong>{selected.bindPolicy}</strong>
+            <span>Last seen</span><strong>{selected.lastSeen}</strong>
+            <span>Detail</span><strong>{selected.detail}</strong>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
 export function ServersView(props: { servers: ServerItem[]; client: RestClient; run: RunFunction }) {
   const [address, setAddress] = useState("");
   const [port, setPort] = useState("4661");
@@ -1218,6 +1399,157 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       )}
     </section>
   );
+}
+
+function KadGraph(props: { nodes: KadNode[]; selectedNodeId?: string; onSelect: (nodeId: string) => void }) {
+  const visible = props.nodes.slice(0, 120);
+  const width = 760;
+  const height = 340;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radiusX = 310;
+  const radiusY = 122;
+  const points = visible.map((node, index) => {
+    const angle = visible.length > 0 ? (Math.PI * 2 * index) / visible.length - Math.PI / 2 : 0;
+    const verifiedOffset = node.verified ? 0 : -28;
+    return {
+      node,
+      x: centerX + Math.cos(angle) * (radiusX + verifiedOffset),
+      y: centerY + Math.sin(angle) * (radiusY + verifiedOffset * 0.45),
+      selected: node.nodeId === props.selectedNodeId
+    };
+  });
+  return (
+    <div class="kad-graph-wrap">
+      <svg class="kad-graph" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Kad routing contact graph">
+        <rect x="0" y="0" width={width} height={height} rx="8" />
+        <g class="kad-graph-edges">
+          {points.map((point) => (
+            <line key={`edge-${point.node.nodeId ?? `${point.node.ip}:${point.node.udpPort}`}`} x1={centerX} y1={centerY} x2={point.x} y2={point.y} />
+          ))}
+        </g>
+        <g class="kad-graph-self">
+          <circle cx={centerX} cy={centerY} r="18" />
+          <text x={centerX} y={centerY + 4} text-anchor="middle">self</text>
+        </g>
+        <g>
+          {points.map((point) => {
+            const nodeId = point.node.nodeId ?? `${point.node.ip}:${point.node.udpPort}`;
+            const className = [
+              "kad-graph-node",
+              point.node.verified ? "verified" : "unverified",
+              point.node.bootstrap ? "bootstrap" : "",
+              point.node.udpFirewalled || point.node.tcpFirewalled ? "firewalled" : "",
+              point.selected ? "selected" : ""
+            ].filter(Boolean).join(" ");
+            return (
+              <g key={nodeId} class={className} onClick={() => props.onSelect(nodeId)}>
+                <circle cx={point.x} cy={point.y} r={point.selected ? 8 : 5.5} />
+                <title>{`${point.node.ip ?? ""}:${point.node.udpPort ?? ""} ${point.node.contactType ?? ""}`}</title>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+      <div class="graph-legend">
+        <span><i class="legend-dot verified" />Verified</span>
+        <span><i class="legend-dot unverified" />Unverified</span>
+        <span><i class="legend-dot bootstrap" />Bootstrap</span>
+        <span><i class="legend-dot firewalled" />Firewalled</span>
+      </div>
+    </div>
+  );
+}
+
+function networkEndpointRows(
+  servers: ServerItem[],
+  nodes: KadNode[],
+  sources: NetworkTransferSource[],
+  uploads: Upload[],
+  uploadQueue: Upload[],
+  bindPolicy: { label: string; detail: string }
+): NetworkEndpointRow[] {
+  const rows: NetworkEndpointRow[] = [];
+  for (const server of servers) {
+    const endpoint = serverEndpoint(server);
+    rows.push({
+      key: `server:${endpoint}`,
+      kind: "eD2K Server",
+      endpoint,
+      ip: server.ip || server.dynIp || server.address || "",
+      host: server.hostName ?? "",
+      dnsStatus: server.hostNameStatus ?? (server.hostName ? "resolved" : "not-requested"),
+      state: server.connected ? "connected" : server.connecting ? "connecting" : server.enabled === false ? "disabled" : "idle",
+      detail: server.name || server.description || `${server.users ?? 0} users / ${server.files ?? 0} files`,
+      lastSeen: server.ping ? `${server.ping} ms ping` : "",
+      bindPolicy: bindPolicy.label
+    });
+  }
+  for (const node of nodes) {
+    const endpoint = `${node.ip ?? ""}:${node.udpPort ?? ""}`;
+    rows.push({
+      key: `kad:${node.nodeId ?? endpoint}`,
+      kind: "Kad",
+      endpoint,
+      ip: node.ip ?? "",
+      host: node.hostName ?? "",
+      dnsStatus: node.hostNameStatus ?? (node.hostName ? "resolved" : "not-requested"),
+      state: node.contactType ?? "unknown",
+      detail: `v${node.kadVersion ?? 0} ${node.verified ? "verified" : "unverified"}${node.bootstrap ? " bootstrap" : ""}`,
+      lastSeen: shortTime(node.lastSeen),
+      bindPolicy: bindPolicy.label
+    });
+  }
+  for (const source of sources) {
+    rows.push(peerEndpointRow("Transfer Source", `source:${source.transferHash ?? ""}:${source.clientId ?? source.address ?? ""}`, source, bindPolicy, source.transferName ?? source.requestedFileName ?? ""));
+  }
+  for (const upload of uploads) {
+    rows.push(peerEndpointRow("Upload", `upload:${upload.clientId ?? upload.address ?? ""}`, upload, bindPolicy, upload.requestedFileName ?? ""));
+  }
+  for (const peer of uploadQueue) {
+    rows.push(peerEndpointRow("Upload Queue", `queue:${peer.clientId ?? peer.address ?? ""}`, peer, bindPolicy, peer.requestedFileName ?? ""));
+  }
+  return rows;
+}
+
+function peerEndpointRow(kind: string, key: string, peer: TransferSource | Upload, bindPolicy: { label: string; detail: string }, detail: string): NetworkEndpointRow {
+  const address = stringField(peer, "address");
+  const port = numberField(peer, "port");
+  return {
+    key,
+    kind,
+    endpoint: port ? `${address}:${port}` : address || stringField(peer, "clientId"),
+    ip: address,
+    host: "",
+    dnsStatus: "not-exposed",
+    state: stringField(peer, "state") || stringField(peer, "uploadState") || (boolField(peer, "uploading") ? "uploading" : boolField(peer, "waitingQueue") ? "queued" : "active"),
+    detail: detail || stringField(peer, "userName") || stringField(peer, "clientSoftware"),
+    lastSeen: "",
+    bindPolicy: bindPolicy.label
+  };
+}
+
+function networkBindPolicy(settings: AppSettings | null): { label: string; detail: string } {
+  const daemon = settings?.daemon;
+  const bindIp = stringField(daemon, "p2pBindIp");
+  const bindInterface = stringField(daemon, "p2pBindInterface");
+  if (bindIp || bindInterface) {
+    return {
+      label: "bound",
+      detail: [bindInterface && `interface ${bindInterface}`, bindIp && `IP ${bindIp}`].filter(Boolean).join(", ")
+    };
+  }
+  return { label: "unbound", detail: "No P2P bind IP/interface configured" };
+}
+
+function hostnameLookupPolicy(settings: AppSettings | null): string {
+  const lookup = recordField(settings?.daemon, "hostnameLookup");
+  const enabled = boolField(lookup, "enabled");
+  const servers = arrayField(lookup, "dnsServers");
+  if (!enabled) {
+    return "disabled";
+  }
+  return servers.length ? `enabled via ${servers.join(", ")}` : "enabled without DNS servers";
 }
 
 function serverEndpoint(server: ServerItem): string {

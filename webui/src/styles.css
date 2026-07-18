@@ -384,6 +384,104 @@ td {
   margin: 6px 0 10px;
 }
 
+.network-summary {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(280px, 0.7fr) minmax(0, 1fr);
+  margin-bottom: 12px;
+}
+
+.kad-graph-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kad-graph {
+  background: #f7f9fb;
+  border: 1px solid #dde2e7;
+  border-radius: 8px;
+  display: block;
+  height: 340px;
+  width: 100%;
+}
+
+.kad-graph rect {
+  fill: #f7f9fb;
+}
+
+.kad-graph-edges line {
+  stroke: #cbd3da;
+  stroke-width: 1;
+}
+
+.kad-graph-self circle {
+  fill: #263241;
+}
+
+.kad-graph-self text {
+  fill: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.kad-graph-node {
+  cursor: pointer;
+}
+
+.kad-graph-node circle {
+  fill: #7f8b98;
+  stroke: #ffffff;
+  stroke-width: 1.5;
+}
+
+.kad-graph-node.verified circle,
+.legend-dot.verified {
+  fill: #2f7d80;
+}
+
+.kad-graph-node.unverified circle,
+.legend-dot.unverified {
+  fill: #8b95a1;
+}
+
+.kad-graph-node.bootstrap circle,
+.legend-dot.bootstrap {
+  fill: #6f62a8;
+}
+
+.kad-graph-node.firewalled circle,
+.legend-dot.firewalled {
+  fill: #c35b45;
+}
+
+.kad-graph-node.selected circle {
+  stroke: #17202b;
+  stroke-width: 3;
+}
+
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.graph-legend span {
+  align-items: center;
+  color: #5c6672;
+  display: inline-flex;
+  font-size: 0.84rem;
+  gap: 6px;
+}
+
+.legend-dot {
+  border-radius: 999px;
+  display: inline-block;
+  height: 10px;
+  width: 10px;
+}
+
 .empty {
   color: #677280;
   margin: 0;
@@ -634,6 +732,7 @@ td {
     grid-column: 1 / -1;
   }
 
+  .network-summary,
   .split,
   .settings-grid,
   .toggle-grid {
@@ -674,6 +773,7 @@ td {
     grid-template-columns: 1fr;
   }
 
+  .network-summary,
   .split,
   .editor-grid,
   .settings-grid,

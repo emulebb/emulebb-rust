@@ -7,6 +7,7 @@ import {
   KeyRound,
   ListChecks,
   Lock,
+  Network,
   RefreshCw,
   Search,
   Server,
@@ -42,6 +43,7 @@ import {
   FriendsView,
   KadView,
   LogsView,
+  NetworkHealthView,
   Overview,
   SearchView,
   ServersView,
@@ -64,6 +66,7 @@ type Tab =
   | "sharing"
   | "shared-files"
   | "uploads"
+  | "network"
   | "servers"
   | "kad"
   | "categories"
@@ -235,6 +238,7 @@ export function App() {
         <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
         <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
         <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
+        <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
         <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
         <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
         <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
@@ -275,6 +279,17 @@ export function App() {
       {tab === "sharing" && <SharingView directories={sharedDirectories} client={client} run={run} />}
       {tab === "shared-files" && <SharedFilesView files={sharedFiles} client={client} run={run} />}
       {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
+      {tab === "network" && (
+        <NetworkHealthView
+          servers={servers}
+          transfers={transfers}
+          uploads={uploads}
+          uploadQueue={uploadQueue}
+          kad={kad}
+          settings={settings}
+          client={client}
+        />
+      )}
       {tab === "servers" && <ServersView servers={servers} client={client} run={run} />}
       {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
       {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
