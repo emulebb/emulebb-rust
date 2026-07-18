@@ -2055,6 +2055,8 @@ type SettingsBooleanKey = {
   [K in keyof SettingsForm]: SettingsForm[K] extends boolean ? K : never;
 }[keyof SettingsForm];
 
+const NAT_BACKEND_UPNP_MINIUPNPC = "upnp_miniupnpc";
+
 const emptySettingsForm: SettingsForm = {
   uploadLimitKiBps: "",
   downloadLimitKiBps: "",
@@ -2708,6 +2710,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "natDiscoveryTimeoutSecs", "Discovery timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
   validateUnsigned(errors, form, "natRenewMarginSecs", "Renew margin seconds", { min: 1 });
+  validateNatBackendOrder(errors, form);
   validateUnsigned(errors, form, "ipFilterLevel", "IP filter level", {});
   return errors;
 }
@@ -2737,6 +2740,15 @@ function validateUnsigned(
       errors.set(key, `${label} must be no more than ${max}.`);
     } else {
       errors.set(key, `${label} must be between ${min} and ${max}.`);
+    }
+  }
+}
+
+function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: SettingsForm) {
+  for (const backend of commaList(form.natBackendOrder)) {
+    if (backend !== NAT_BACKEND_UPNP_MINIUPNPC) {
+      errors.set("natBackendOrder", `NAT backend order must contain only ${NAT_BACKEND_UPNP_MINIUPNPC}.`);
+      return;
     }
   }
 }

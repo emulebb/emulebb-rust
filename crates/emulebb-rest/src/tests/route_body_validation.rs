@@ -522,6 +522,18 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.nat.ssdpLocalPort must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"nat":{"backendOrder":"upnp_miniupnpc"}}"#,
+            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+        ),
+        (
+            r#"{"nat":{"backendOrder":["upnp_miniupnpc",7]}}"#,
+            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+        ),
+        (
+            r#"{"nat":{"backendOrder":["natpmp"]}}"#,
+            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+        ),
+        (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
             "settings.nat PATCH requires at least one setting",
         ),

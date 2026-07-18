@@ -105,6 +105,8 @@ const NAT_SETTINGS_FIELDS: &[&str] = &[
 ];
 const VPN_GUARD_SETTINGS_FIELDS: &[&str] = &["enabled", "mode", "allowedPublicIpCidrs"];
 const IP_FILTER_SETTINGS_FIELDS: &[&str] = &["enabled", "path", "level"];
+const NAT_BACKEND_UPNP_MINIUPNPC: &str = "upnp_miniupnpc";
+const NAT_BACKENDS: &[&str] = &[NAT_BACKEND_UPNP_MINIUPNPC];
 const VPN_GUARD_MODES: &[&str] = &["off", "block"];
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
@@ -191,6 +193,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     "settings.nat.ssdpLocalPort",
                     1,
                 )?;
+                validate_nat_settings_patch_body_fields(section_object)?;
             }
             "vpnGuard" => {
                 validate_non_empty_update_object(section_object, "settings.vpnGuard")?;
@@ -488,6 +491,31 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
         "settings.kad.snoopQueueSourceStopAfterResults",
         1,
     )
+}
+
+fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let Some(backend_order) = object.get("backendOrder") else {
+        return Ok(());
+    };
+    let Some(backend_order) = backend_order.as_array() else {
+        return Err(invalid_nat_backend_order_error());
+    };
+    for backend in backend_order {
+        let Some(backend) = backend.as_str() else {
+            return Err(invalid_nat_backend_order_error());
+        };
+        if !NAT_BACKENDS.contains(&backend) {
+            return Err(invalid_nat_backend_order_error());
+        }
+    }
+    Ok(())
+}
+
+fn invalid_nat_backend_order_error() -> Box<Response> {
+    invalid_body_error(format!(
+        "settings.nat.backendOrder must contain only {}",
+        NAT_BACKEND_UPNP_MINIUPNPC
+    ))
 }
 
 fn validate_nullable_unsigned_number_min(
