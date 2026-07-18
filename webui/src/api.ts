@@ -64,10 +64,23 @@ export type RuntimeDiagnostics = {
   sharedDirectoryReloadProgress?: SharedDirectoryReloadProgress;
   ed2kPublish?: Record<string, unknown>;
   kadPublish?: Record<string, unknown>;
+  transferEvents?: TransferEventRuntimeDiagnostics;
   downloadFileCount?: number;
   activeUploads?: number;
   waitingUploads?: number;
   geolocation?: Record<string, unknown> | null;
+  [key: string]: unknown;
+};
+
+export type TransferEventRuntimeDiagnostics = {
+  enabled?: boolean;
+  stream?: string;
+  channelCapacity?: number;
+  queuedEventCount?: number;
+  subscriberCount?: number;
+  latestEventId?: number;
+  nextEventId?: number;
+  resumeBehavior?: string;
   [key: string]: unknown;
 };
 

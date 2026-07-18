@@ -2853,6 +2853,7 @@ export function DiagnosticsView(props: {
   const [dumpPath, setDumpPath] = useState("");
   const diagnostics = props.runtimeDiagnostics ?? {};
   const eventStream = props.eventStreamStatus;
+  const transferEvents = diagnostics.transferEvents ?? {};
   const reload = diagnostics.sharedDirectoryReloadProgress ?? {};
   const ed2kPublishPhase = stringField(recordField(diagnostics, "ed2kPublish"), "phase") || "unknown";
   const kadPublishPhase = stringField(recordField(diagnostics, "kadPublish"), "phase") || "unknown";
@@ -2926,6 +2927,10 @@ export function DiagnosticsView(props: {
         <Metric label="Reconnects" value={String(eventStream.reconnectAttempts)} />
         <Metric label="Poll Interval" value={`${eventStream.pollIntervalMs} ms`} />
         <Metric label="Stream Error" value={eventStream.lastError ?? "n/a"} />
+        <Metric label="SSE Subscribers" value={String(transferEvents.subscriberCount ?? 0)} />
+        <Metric label="Event Queue" value={`${transferEvents.queuedEventCount ?? 0}/${transferEvents.channelCapacity ?? 0}`} />
+        <Metric label="Latest Bus Event" value={String(transferEvents.latestEventId ?? 0)} />
+        <Metric label="Resume" value={transferEvents.resumeBehavior ?? "n/a"} />
       </section>
       <section class="panel card">
         <div class="section-title">

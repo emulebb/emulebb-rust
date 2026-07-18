@@ -547,6 +547,19 @@ pub enum TransferEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferEventDiagnostics {
+    pub enabled: bool,
+    pub stream: String,
+    pub channel_capacity: usize,
+    pub queued_event_count: usize,
+    pub subscriber_count: usize,
+    pub latest_event_id: u64,
+    pub next_event_id: u64,
+    pub resume_behavior: String,
+}
+
 impl TransferEvent {
     pub fn added(id: u64, transfer: Transfer) -> Self {
         Self::Added { id, transfer }

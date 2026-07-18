@@ -138,4 +138,8 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Event Stream")).toHaveText(/Connecting|Streaming|Reconnecting/);
   await expect(metricValue("Last Event")).toHaveText("sync.reset");
   await expect(metricValue("Last Event ID")).toHaveText("1");
+  await expect(metricValue("SSE Subscribers")).toHaveText("1");
+  await expect(metricValue("Event Queue")).toHaveText("1/1024");
+  await expect(metricValue("Latest Bus Event")).toHaveText("1");
+  await expect(metricValue("Resume")).toHaveText("reset");
 });

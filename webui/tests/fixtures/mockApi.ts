@@ -40,7 +40,17 @@ const snapshot = {
         readRateBytesPerSec: 4096
       },
       ed2kPublish: { phase: "published" },
-      kadPublish: { phase: "waiting" }
+      kadPublish: { phase: "waiting" },
+      transferEvents: {
+        enabled: true,
+        stream: "sse",
+        channelCapacity: 1024,
+        queuedEventCount: 1,
+        subscriberCount: 1,
+        latestEventId: 1,
+        nextEventId: 2,
+        resumeBehavior: "reset"
+      }
     },
     stats: {
       downloadRateBytesPerSec: 2048,

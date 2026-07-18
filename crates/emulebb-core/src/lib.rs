@@ -256,10 +256,10 @@ pub use rest_model::{
     HostNameResolution, IndexingStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
     NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferEventResetReason,
-    TransferEventType, TransferPart, TransferSource, TransferStats, TransferThroughputStats,
-    TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig,
-    VpnGuardProbeStatus, VpnGuardStatus,
+    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
+    TransferEventResetReason, TransferEventType, TransferPart, TransferSource, TransferStats,
+    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
+    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -720,6 +720,20 @@ impl EmulebbCore {
 
     pub fn reserve_transfer_event_id(&self) -> u64 {
         self.next_transfer_event_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn transfer_event_diagnostics(&self) -> TransferEventDiagnostics {
+        let next_event_id = self.next_transfer_event_id.load(Ordering::Relaxed);
+        TransferEventDiagnostics {
+            enabled: true,
+            stream: "sse".to_string(),
+            channel_capacity: TRANSFER_EVENT_CHANNEL_CAPACITY,
+            queued_event_count: self.transfer_events.len(),
+            subscriber_count: self.transfer_events.receiver_count(),
+            latest_event_id: next_event_id.saturating_sub(1),
+            next_event_id,
+            resume_behavior: "reset".to_string(),
+        }
     }
 
     pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {

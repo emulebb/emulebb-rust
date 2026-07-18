@@ -477,5 +477,41 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
     );
     assert_eq!(value["data"]["ed2kPublish"]["phase"], "idle");
     assert_eq!(value["data"]["kadPublish"]["phase"], "idle");
+    assert_eq!(value["data"]["transferEvents"]["enabled"], true);
+    assert_eq!(value["data"]["transferEvents"]["stream"], "sse");
+    assert_eq!(value["data"]["transferEvents"]["channelCapacity"], 1024);
+    assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 0);
+    assert_eq!(value["data"]["transferEvents"]["latestEventId"], 2);
+    assert_eq!(value["data"]["transferEvents"]["nextEventId"], 3);
+    assert_eq!(value["data"]["transferEvents"]["resumeBehavior"], "reset");
     assert_eq!(value["data"]["geolocation"], Value::Null);
+}
+
+#[tokio::test]
+async fn diagnostics_reports_transfer_event_subscribers() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let _events = core.subscribe_transfer_events();
+    let router = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/diagnostics")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 1);
 }

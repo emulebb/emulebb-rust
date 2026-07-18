@@ -172,6 +172,7 @@ fn runtime_diagnostics_response_with(
         "sharedDirectoryReloadProgress": shared_directory_reload_progress,
         "ed2kPublish": state.core.ed2k_publish_diagnostics(),
         "kadPublish": state.core.kad_publish_diagnostics(),
+        "transferEvents": state.core.transfer_event_diagnostics(),
         "downloadFileCount": download_file_count,
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
