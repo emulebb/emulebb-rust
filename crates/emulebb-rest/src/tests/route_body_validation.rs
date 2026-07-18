@@ -378,6 +378,18 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.ed2k.sourceServerAttemptBudget must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"ed2k":{"deadServerRetries":0}}"#,
+            "settings.ed2k.deadServerRetries must be an unsigned number in the range 1..10",
+        ),
+        (
+            r#"{"ed2k":{"deadServerRetries":11}}"#,
+            "settings.ed2k.deadServerRetries must be an unsigned number in the range 1..10",
+        ),
+        (
+            r#"{"ed2k":{"deadServerRetries":"1"}}"#,
+            "settings.ed2k.deadServerRetries must be an unsigned number in the range 1..10",
+        ),
+        (
             r#"{"ed2k":{"uploadQueue":{}}}"#,
             "settings.ed2k.uploadQueue PATCH requires at least one setting",
         ),

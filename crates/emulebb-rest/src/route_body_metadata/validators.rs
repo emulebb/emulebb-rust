@@ -307,6 +307,13 @@ fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), B
         "sourceServerAttemptBudget",
         "settings.ed2k.sourceServerAttemptBudget",
         1,
+    )?;
+    validate_unsigned_number_range(
+        object,
+        "deadServerRetries",
+        "settings.ed2k.deadServerRetries",
+        1,
+        10,
     )
 }
 
@@ -477,6 +484,29 @@ fn validate_unsigned_number_min(
     if number < min {
         return Err(invalid_body_error(format!(
             "{path} must be an unsigned number greater than or equal to {min}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_unsigned_number_range(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+    min: u64,
+    max: u64,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number in the range {min}..{max}"
+        )));
+    };
+    if number < min || number > max {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number in the range {min}..{max}"
         )));
     }
     Ok(())

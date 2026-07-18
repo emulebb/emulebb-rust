@@ -129,6 +129,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("UDP firewall interval seconds").fill("3600");
   await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toHaveCount(0);
+  await settingsPanel.getByLabel("Dead server retries").fill("11");
+  await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("Dead server retries").fill("1");
+  await expect(settingsPanel.getByText("Dead server retries must be between 1 and 10.")).toHaveCount(0);
   await settingsPanel.getByLabel("Concurrent downloads").fill("0");
   await settingsPanel.getByLabel("eD2K new connections / 5s").fill("0");
   await settingsPanel.getByLabel("eD2K half-open connections").fill("0");

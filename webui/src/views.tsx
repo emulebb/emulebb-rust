@@ -2676,7 +2676,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kCallbackTimeoutSecs", "Callback timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", {});
-  validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
+  validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", { min: 1, max: 10 });
   validateUnsigned(errors, form, "ed2kSessionRotationSecs", "Session rotation seconds", {});
   validateUnsigned(errors, form, "ed2kMaxConcurrentDownloads", "Concurrent downloads", {});
   validateUnsigned(errors, form, "ed2kMaxNewConnectionsPerFiveSeconds", "eD2K new connections / 5s", {});
