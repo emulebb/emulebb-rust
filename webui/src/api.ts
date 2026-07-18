@@ -569,9 +569,11 @@ export type NatSettings = {
   [key: string]: unknown;
 };
 
+export type VpnGuardMode = "off" | "block";
+
 export type VpnGuardSettings = {
   enabled?: boolean;
-  mode?: string;
+  mode?: VpnGuardMode;
   allowedPublicIpCidrs?: string;
   [key: string]: unknown;
 };
@@ -587,7 +589,7 @@ export type VpnGuardProbeStatus = {
 
 export type VpnGuardStatus = {
   enabled?: boolean;
-  mode?: string;
+  mode?: VpnGuardMode;
   allowedPublicIpCidrs?: string;
   startupBlocked?: boolean;
   startupBlockReason?: string;

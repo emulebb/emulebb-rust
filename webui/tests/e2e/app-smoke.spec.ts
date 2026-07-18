@@ -129,6 +129,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Configured")).toHaveText("Yes");
   await expect(metricValue("Reloadable")).toHaveText("Yes");
   await expect(metricValue("Ranges")).toHaveText("3");
+  await expect(settingsPanel.getByLabel("VPN Guard mode")).toHaveValue("block");
 
   await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
   await expect(save).toBeEnabled();

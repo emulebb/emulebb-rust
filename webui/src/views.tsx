@@ -51,6 +51,7 @@ import {
   Transfer,
   TransferSource,
   Upload,
+  VpnGuardMode,
   VpnGuardSettingsUpdate,
   VpnGuardStatus,
   encodeSegment
@@ -2039,7 +2040,7 @@ type SettingsForm = {
   natRenewMarginSecs: string;
   natExternalIpOverride: string;
   vpnGuardEnabled: boolean;
-  vpnGuardMode: string;
+  vpnGuardMode: VpnGuardMode;
   vpnGuardAllowedPublicIpCidrs: string;
   ipFilterEnabled: boolean;
   ipFilterPath: string;
@@ -2135,7 +2136,7 @@ const emptySettingsForm: SettingsForm = {
   natRenewMarginSecs: "",
   natExternalIpOverride: "",
   vpnGuardEnabled: false,
-  vpnGuardMode: "",
+  vpnGuardMode: "off",
   vpnGuardAllowedPublicIpCidrs: "",
   ipFilterEnabled: false,
   ipFilterPath: "",
@@ -2486,7 +2487,22 @@ export function SettingsView(props: {
             </section>
             <div class="settings-grid">
               {renderToggle("vpnGuard.enabled", "vpnGuardEnabled", "VPN Guard")}
-              {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
+              {shouldRender("vpnGuard.mode") && (
+                <label title={surfaceByPath.get("vpnGuard.mode")?.description}>
+                  <span class="setting-label">
+                    <span>VPN Guard mode</span>
+                    <SettingBadges surface={surfaceByPath.get("vpnGuard.mode")} />
+                  </span>
+                  <select
+                    class="form-select"
+                    value={form.vpnGuardMode}
+                    onInput={(event) => update("vpnGuardMode", event.currentTarget.value as VpnGuardMode)}
+                  >
+                    <option value="off">Off</option>
+                    <option value="block">Block</option>
+                  </select>
+                </label>
+              )}
               {renderField("vpnGuard.allowedPublicIpCidrs", "vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs")}
             </div>
             <div class="row-actions">
@@ -2955,7 +2971,7 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     natRenewMarginSecs: String(numberField(settings.nat, "renewMarginSecs") ?? ""),
     natExternalIpOverride: stringField(settings.nat, "externalIpOverride"),
     vpnGuardEnabled: boolField(settings.vpnGuard, "enabled"),
-    vpnGuardMode: stringField(settings.vpnGuard, "mode"),
+    vpnGuardMode: vpnGuardModeField(settings.vpnGuard),
     vpnGuardAllowedPublicIpCidrs: stringField(settings.vpnGuard, "allowedPublicIpCidrs"),
     ipFilterEnabled: boolField(settings.ipFilter, "enabled"),
     ipFilterPath: stringField(settings.ipFilter, "path"),
@@ -2976,6 +2992,10 @@ function arrayField(object: Record<string, unknown> | undefined, key: string): s
 function optionalPort(value: string): number | null {
   const trimmed = value.trim();
   return trimmed ? Number(trimmed) : null;
+}
+
+function vpnGuardModeField(object: Record<string, unknown> | undefined): VpnGuardMode {
+  return object?.mode === "block" ? "block" : "off";
 }
 
 function categoryPriorityValue(value: string): string | number {

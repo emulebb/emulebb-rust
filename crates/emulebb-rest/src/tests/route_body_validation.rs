@@ -378,6 +378,18 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.vpnGuard field: unsupportedSetting",
         ),
         (
+            r#"{"vpnGuard":{"mode":"enforce"}}"#,
+            "settings.vpnGuard.mode must be one of off, block",
+        ),
+        (
+            r#"{"vpnGuard":{"mode":"Block"}}"#,
+            "settings.vpnGuard.mode must be one of off, block",
+        ),
+        (
+            r#"{"vpnGuard":{"mode":1}}"#,
+            "settings.vpnGuard.mode must be one of off, block",
+        ),
+        (
             r#"{"ipFilter":{"unsupportedSetting":1}}"#,
             "unknown settings.ipFilter field: unsupportedSetting",
         ),

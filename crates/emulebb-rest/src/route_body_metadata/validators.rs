@@ -105,6 +105,7 @@ const NAT_SETTINGS_FIELDS: &[&str] = &[
 ];
 const VPN_GUARD_SETTINGS_FIELDS: &[&str] = &["enabled", "mode", "allowedPublicIpCidrs"];
 const IP_FILTER_SETTINGS_FIELDS: &[&str] = &["enabled", "path", "level"];
+const VPN_GUARD_MODES: &[&str] = &["off", "block"];
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     search::validate_search_create_body_fields(object)
@@ -183,6 +184,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     VPN_GUARD_SETTINGS_FIELDS,
                     "settings.vpnGuard",
                 )?;
+                validate_vpn_guard_settings_patch_body_fields(section_object)?;
             }
             "ipFilter" => {
                 validate_non_empty_update_object(section_object, "settings.ipFilter")?;
@@ -265,6 +267,23 @@ fn validate_hostname_lookup_settings_patch_body_fields(
         "settings.daemon.hostnameLookup.tickIntervalSecs",
         5,
     )
+}
+
+fn validate_vpn_guard_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    let Some(mode) = object.get("mode") else {
+        return Ok(());
+    };
+    let Some(mode) = mode.as_str() else {
+        return Err(invalid_body_error(
+            "settings.vpnGuard.mode must be one of off, block",
+        ));
+    };
+    if !VPN_GUARD_MODES.contains(&mode) {
+        return Err(invalid_body_error(
+            "settings.vpnGuard.mode must be one of off, block",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_unsigned_number_min(

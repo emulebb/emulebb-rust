@@ -474,12 +474,25 @@ pub struct NatSettings {
     pub external_ip_override: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub const VPN_GUARD_MODE_OFF: &str = "off";
+pub const VPN_GUARD_MODE_BLOCK: &str = "block";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct VpnGuardSettings {
     pub enabled: bool,
     pub mode: String,
     pub allowed_public_ip_cidrs: String,
+}
+
+impl Default for VpnGuardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: VPN_GUARD_MODE_OFF.to_string(),
+            allowed_public_ip_cidrs: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1974,6 +1987,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded, settings);
+    }
+
+    #[test]
+    fn vpn_guard_settings_default_uses_off_mode_token() {
+        assert_eq!(VpnGuardSettings::default().mode, VPN_GUARD_MODE_OFF);
     }
 
     #[test]
