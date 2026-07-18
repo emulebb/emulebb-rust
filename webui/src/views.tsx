@@ -1362,6 +1362,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const [importUrl, setImportUrl] = useState("");
   const [filter, setFilter] = useState("");
   const [selectedEndpoint, setSelectedEndpoint] = useState("");
+  const serverPortError = endpointPortError(port, "Port");
 
   const filteredServers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -1385,13 +1386,19 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
     return props.servers.find((server) => serverEndpoint(server) === selectedEndpoint) ?? props.servers[0];
   }, [props.servers, selectedEndpoint]);
 
-  const createServer = () => props.client.post("servers", {
-    address,
-    port: Number(port),
-    name: name || undefined,
-    priority: "normal",
-    static: true
-  });
+  const createServer = () => {
+    const parsedPort = parseEndpointPort(port);
+    if (parsedPort === null) {
+      return Promise.resolve();
+    }
+    return props.client.post("servers", {
+      address,
+      port: parsedPort,
+      name: name || undefined,
+      priority: "normal",
+      static: true
+    });
+  };
 
   return (
     <section class="panel card">
@@ -1404,13 +1411,16 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(createServer, "Server added");
+        if (!serverPortError) {
+          void props.run(createServer, "Server added");
+        }
       }}>
         <input class="form-control" value={address} placeholder="Address" onInput={(event) => setAddress(event.currentTarget.value)} />
-        <input class="form-control" value={port} placeholder="Port" inputMode="numeric" onInput={(event) => setPort(event.currentTarget.value)} />
+        <input class="form-control" value={port} placeholder="Port" inputMode="numeric" aria-invalid={serverPortError ? "true" : "false"} onInput={(event) => setPort(event.currentTarget.value)} />
         <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <button class="btn" type="submit"><Server size={16} />Add</button>
+        <button class="btn" type="submit" disabled={Boolean(serverPortError)}><Server size={16} />Add</button>
       </form>
+      {serverPortError && <p class="field-error">{serverPortError}</p>}
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         void props.run(() => props.client.post("servers/operations/import-met-url", { url: importUrl }), "Server list import started");
@@ -1498,6 +1508,7 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
   const [nodes, setNodes] = useState<KadNode[]>([]);
   const [filter, setFilter] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const bootstrapPortError = endpointPortError(bootstrapPort, "Bootstrap port");
 
   const loadNodes = async () => {
     const page = await props.client.get<Page<KadNode>>("kad/nodes?limit=100");
@@ -1567,12 +1578,16 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
       </form>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(() => props.client.post("kad/operations/bootstrap", { address: bootstrapAddress, port: Number(bootstrapPort) }), "Kad bootstrap started");
+        const parsedPort = parseEndpointPort(bootstrapPort);
+        if (parsedPort !== null) {
+          void props.run(() => props.client.post("kad/operations/bootstrap", { address: bootstrapAddress, port: parsedPort }), "Kad bootstrap started");
+        }
       }}>
         <input class="form-control" value={bootstrapAddress} placeholder="Bootstrap address" onInput={(event) => setBootstrapAddress(event.currentTarget.value)} />
-        <input class="form-control" value={bootstrapPort} inputMode="numeric" placeholder="Port" onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
-        <button class="btn" type="submit"><Plug size={16} />Bootstrap</button>
+        <input class="form-control" value={bootstrapPort} inputMode="numeric" placeholder="Port" aria-invalid={bootstrapPortError ? "true" : "false"} onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
+        <button class="btn" type="submit" disabled={Boolean(bootstrapPortError)}><Plug size={16} />Bootstrap</button>
       </form>
+      {bootstrapPortError && <p class="field-error">{bootstrapPortError}</p>}
       <div class="form-row">
         <input class="form-control" value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
@@ -3116,6 +3131,19 @@ function arrayField(object: Record<string, unknown> | undefined, key: string): s
 function optionalPort(value: string): number | null {
   const trimmed = value.trim();
   return trimmed ? Number(trimmed) : null;
+}
+
+function parseEndpointPort(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const port = Number(trimmed);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+function endpointPortError(value: string, label: string): string | undefined {
+  return parseEndpointPort(value) === null ? `${label} must be between 1 and 65535.` : undefined;
 }
 
 function vpnGuardModeField(object: Record<string, unknown> | undefined): VpnGuardMode {

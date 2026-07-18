@@ -73,6 +73,45 @@ test("submits a synthetic transfer operation", async ({ page }) => {
   ).toBe(true);
 });
 
+test("section resource operation forms validate endpoint ports", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Servers" }).click();
+  const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
+  const initialServerPosts = requests.filter((request) => request.method === "POST" && request.path === "servers").length;
+  await serversPanel.getByPlaceholder("Address").fill("127.0.0.1");
+  await serversPanel.getByPlaceholder("Port").fill("0");
+  await expect(serversPanel.getByText("Port must be between 1 and 65535.")).toBeVisible();
+  await expect(serversPanel.getByRole("button", { name: "Add" })).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "servers").length).toBe(initialServerPosts);
+  await serversPanel.getByPlaceholder("Port").fill("4661");
+  await expect(serversPanel.getByText("Port must be between 1 and 65535.")).toHaveCount(0);
+  await serversPanel.getByRole("button", { name: "Add" }).click();
+  await expect(page.getByText("Server added")).toBeVisible();
+  const serverPost = requests.find((request) => request.method === "POST" && request.path === "servers");
+  expect(serverPost).toBeDefined();
+  expect(JSON.parse(serverPost?.body ?? "{}").port).toBe(4661);
+
+  await page.getByRole("button", { name: "Kad" }).click();
+  const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
+  const initialKadBootstrapPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/bootstrap").length;
+  await kadPanel.getByPlaceholder("Bootstrap address").fill("203.0.113.10");
+  await kadPanel.getByPlaceholder("Port").fill("65536");
+  await expect(kadPanel.getByText("Bootstrap port must be between 1 and 65535.")).toBeVisible();
+  await expect(kadPanel.getByRole("button", { name: "Bootstrap" })).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "kad/operations/bootstrap").length).toBe(initialKadBootstrapPosts);
+  await kadPanel.getByPlaceholder("Port").fill("4672");
+  await expect(kadPanel.getByText("Bootstrap port must be between 1 and 65535.")).toHaveCount(0);
+  await kadPanel.getByRole("button", { name: "Bootstrap" }).click();
+  await expect(page.getByText("Kad bootstrap started")).toBeVisible();
+  const bootstrapPost = requests.find((request) => request.method === "POST" && request.path === "kad/operations/bootstrap");
+  expect(bootstrapPost).toBeDefined();
+  expect(JSON.parse(bootstrapPost?.body ?? "{}").port).toBe(4672);
+});
+
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
