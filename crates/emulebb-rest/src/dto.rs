@@ -146,6 +146,7 @@ pub(crate) struct SearchResultsPage {
     pub(crate) total: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,
+    pub(crate) include_evidence: bool,
     pub(crate) results: Vec<SearchResult>,
 }
 

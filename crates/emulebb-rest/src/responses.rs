@@ -313,11 +313,18 @@ fn completion_state(complete: bool) -> &'static str {
 }
 
 pub(crate) fn search_result_response(result: &SearchResult) -> Value {
+    search_result_response_with_options(result, true)
+}
+
+pub(crate) fn search_result_response_with_options(
+    result: &SearchResult,
+    include_evidence: bool,
+) -> Value {
     let extension = FsPath::new(&result.name)
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    json!({
+    let mut response = json!({
         "searchId": result.search_id,
         "method": result.method,
         "type": result.r#type,
@@ -329,6 +336,7 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
         "fileType": result.file_type,
         "extension": extension,
         "complete": result.complete,
+        "knownType": "unknown",
         "directory": result.directory,
         "clientIp": "",
         "clientPort": 0,
@@ -339,8 +347,10 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
         "kadPublishInfo": 0,
         "rating": 0,
         "hasComment": false,
-        "spam": false,
-        "evidence": {
+        "spam": false
+    });
+    if include_evidence {
+        response["evidence"] = json!({
             "confidence": {
                 "band": "looks_good",
                 "score": 70,
@@ -376,12 +386,19 @@ pub(crate) fn search_result_response(result: &SearchResult) -> Value {
                 "extensionType": null,
                 "detectedHeaderType": null
             }
-        }
-    })
+        });
+    }
+    response
 }
 
-pub(crate) fn search_results_response(results: &[SearchResult]) -> Vec<Value> {
-    results.iter().map(search_result_response).collect()
+pub(crate) fn search_results_response(
+    results: &[SearchResult],
+    include_evidence: bool,
+) -> Vec<Value> {
+    results
+        .iter()
+        .map(|result| search_result_response_with_options(result, include_evidence))
+        .collect()
 }
 
 pub(crate) fn search_session_response(search: &Search) -> Value {
@@ -425,7 +442,7 @@ pub(crate) fn search_page_response(search: &SearchResultsPage) -> Value {
         "total": search.total,
         "offset": search.offset,
         "limit": search.limit,
-        "items": search_results_response(&search.results)
+        "items": search_results_response(&search.results, search.include_evidence)
     })
 }
 

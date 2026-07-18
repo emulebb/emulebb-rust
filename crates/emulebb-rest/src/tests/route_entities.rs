@@ -470,6 +470,15 @@ async fn search_results_use_canonical_paging_query() {
     })
     .await
     .unwrap();
+    core.index_file(IndexedFile {
+        ed2k_hash: "11223344556677889900aabbccddeeff".to_string(),
+        name: "Paged.Result.Three.iso".to_string(),
+        size_bytes: 126,
+        content_type: "iso".to_string(),
+        availability_score: 4,
+    })
+    .await
+    .unwrap();
     let app = router(
         core,
         RestServerSettings {
@@ -518,10 +527,32 @@ async fn search_results_use_canonical_paging_query() {
     assert_eq!(value["data"]["id"], search_id);
     // The eMuleBB master returns paged search results under "items" with
     // total/offset/limit (search/results shares the common page shape).
-    assert_eq!(value["data"]["total"], 2);
+    assert_eq!(value["data"]["total"], 3);
     assert_eq!(value["data"]["offset"], 1);
     assert_eq!(value["data"]["limit"], 1);
     assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(value["data"]["items"][0]["knownType"], "unknown");
+    assert!(value["data"]["items"][0].get("evidence").is_none());
+
+    let estimated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/searches/{search_id}?offset=0&limit=1&exactTotal=false"
+                ))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(estimated.status(), StatusCode::OK);
+    let body = to_bytes(estimated.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["total"], 2);
+    assert_eq!(value["data"]["items"].as_array().unwrap().len(), 1);
+    assert!(value["data"]["items"][0].get("evidence").is_some());
 
     // An out-of-range limit is rejected (matching the emulebb master), not
     // silently clamped, and carries field/constraint details.

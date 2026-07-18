@@ -61,15 +61,19 @@ pub(crate) fn search_results_page(
     query: SearchResultsQuery,
 ) -> Result<SearchResultsPage, Box<Response>> {
     let (offset, limit) = resolve_page_bounds(query.offset, query.limit)?;
-    let _include_evidence = query.include_evidence.unwrap_or(true);
-    let _exact_total = query.exact_total.unwrap_or(true);
-    let total = search.results.len();
+    let include_evidence = query.include_evidence.unwrap_or(true);
+    let exact_total = query.exact_total.unwrap_or(true);
+    let total = if exact_total {
+        search.results.len()
+    } else {
+        estimated_total(search.results.len(), offset, limit)
+    };
     let results = search
         .results
         .into_iter()
         .skip(offset)
         .take(limit)
-        .collect::<Vec<_>>();
+        .collect();
     Ok(SearchResultsPage {
         id: search.id,
         query: search.query,
@@ -80,8 +84,18 @@ pub(crate) fn search_results_page(
         total,
         offset,
         limit,
+        include_evidence,
         results,
     })
+}
+
+fn estimated_total(exact_count: usize, offset: usize, limit: usize) -> usize {
+    let page_end = offset.saturating_add(limit);
+    if exact_count > page_end {
+        page_end.saturating_add(1)
+    } else {
+        exact_count
+    }
 }
 
 pub(crate) fn api_bulk_operation(items: Vec<BulkOperationResult>) -> (StatusCode, Json<Value>) {

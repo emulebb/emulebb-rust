@@ -109,7 +109,9 @@ export type SearchResult = {
   completeSources?: number;
   availability?: number;
   fileType?: string;
+  knownType?: string;
   directory?: string;
+  evidence?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
