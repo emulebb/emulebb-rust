@@ -2056,6 +2056,9 @@ type SettingsBooleanKey = {
 }[keyof SettingsForm];
 
 const NAT_BACKEND_UPNP_MINIUPNPC = "upnp_miniupnpc";
+const CORE_I32_MAX = 2147483647;
+const CORE_U32_MAX = 4294967295;
+const CORE_U32_MAX_MINUS_ONE = 4294967294;
 
 const emptySettingsForm: SettingsForm = {
   uploadLimitKiBps: "",
@@ -2660,12 +2663,12 @@ function SettingBadges(props: { surface?: SettingSurfaceSpec }) {
 
 function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> {
   const errors = new Map<SettingsTextKey, string>();
-  validateUnsigned(errors, form, "uploadLimitKiBps", "Upload limit KiB/s", { min: 1 });
-  validateUnsigned(errors, form, "downloadLimitKiBps", "Download limit KiB/s", { min: 1 });
-  validateUnsigned(errors, form, "maxConnections", "Max connections", { min: 1 });
-  validateUnsigned(errors, form, "maxConnectionsPerFiveSeconds", "New connections / 5s", { min: 1 });
-  validateUnsigned(errors, form, "maxSourcesPerFile", "Max sources / file", { min: 1 });
-  validateUnsigned(errors, form, "uploadClientDataRate", "Upload client KiB/s", { min: 1 });
+  validateUnsigned(errors, form, "uploadLimitKiBps", "Upload limit KiB/s", { min: 1, max: CORE_U32_MAX_MINUS_ONE });
+  validateUnsigned(errors, form, "downloadLimitKiBps", "Download limit KiB/s", { min: 1, max: CORE_U32_MAX_MINUS_ONE });
+  validateUnsigned(errors, form, "maxConnections", "Max connections", { min: 1, max: CORE_I32_MAX });
+  validateUnsigned(errors, form, "maxConnectionsPerFiveSeconds", "New connections / 5s", { min: 1, max: CORE_I32_MAX });
+  validateUnsigned(errors, form, "maxSourcesPerFile", "Max sources / file", { min: 1, max: CORE_I32_MAX });
+  validateUnsigned(errors, form, "uploadClientDataRate", "Upload client KiB/s", { min: 1, max: CORE_U32_MAX });
   validateUnsigned(errors, form, "maxUploadSlots", "Max upload slots", { min: 1, max: 64 });
   validateUnsigned(errors, form, "uploadSlotElasticPercent", "Upload elasticity %", { max: 100 });
   validateUnsigned(errors, form, "queueSize", "Queue size", { min: 2000, max: 10000 });
