@@ -810,6 +810,7 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
   const [linkValue, setLinkValue] = useState("");
   const [comments, setComments] = useState<unknown[]>([]);
   const selected = props.files.find((file) => file.hash === selectedHash) ?? props.files[0];
+  const ratingError = sharedFileRatingError(rating);
 
   useEffect(() => {
     if (!selected) {
@@ -836,11 +837,17 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
     };
   }, [props.client, selected?.hash]);
 
-  const save = () => props.client.patch(`shared-files/${selected?.hash}`, {
-    priority,
-    comment,
-    rating: Number(rating)
-  });
+  const save = () => {
+    const parsedRating = parseSharedFileRating(rating);
+    if (!selected || parsedRating === null) {
+      return Promise.resolve();
+    }
+    return props.client.patch(`shared-files/${selected.hash}`, {
+      priority,
+      comment,
+      rating: parsedRating
+    });
+  };
 
   return (
     <section class="view-stack">
@@ -889,16 +896,17 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
             <label>
               Priority
               <select class="form-select" value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
+                <option value="auto">Auto</option>
+                <option value="verylow">Very low</option>
                 <option value="low">Low</option>
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
-                <option value="veryhigh">Very high</option>
                 <option value="release">Release</option>
               </select>
             </label>
             <label>
               Rating
-              <input class="form-control" value={rating} inputMode="numeric" onInput={(event) => setRating(event.currentTarget.value)} />
+              <input class="form-control" value={rating} inputMode="numeric" aria-invalid={ratingError ? "true" : "false"} onInput={(event) => setRating(event.currentTarget.value)} />
             </label>
             <label class="wide-field">
               Comment
@@ -914,7 +922,8 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
                 </button>
               </div>
             </label>
-            <button class="btn" type="submit"><Save size={15} />Save</button>
+            {ratingError && <p class="field-error">{ratingError}</p>}
+            <button class="btn" type="submit" disabled={Boolean(ratingError)}><Save size={15} />Save</button>
           </form>
         )}
         <h3>Comments</h3>
@@ -3267,6 +3276,19 @@ function searchQueryValidationError(value: string): string | undefined {
     return "Search query must not contain control characters.";
   }
   return normalized.length <= 160 ? undefined : "Search query must be at most 160 characters.";
+}
+
+function parseSharedFileRating(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return parsed <= 5 ? parsed : null;
+}
+
+function sharedFileRatingError(value: string): string | undefined {
+  return parseSharedFileRating(value) === null ? "Shared file rating must be an integer between 0 and 5." : undefined;
 }
 
 function optionalPort(value: string): number | null {

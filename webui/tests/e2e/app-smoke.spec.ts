@@ -288,6 +288,34 @@ test("category forms validate names and priority inputs", async ({ page }) => {
   expect(JSON.parse(categoryPatch?.body ?? "{}").priority).toBe(4294967295);
 });
 
+test("shared file metadata form validates rating and priority contract", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Shared Files" }).click();
+  const metadataPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Metadata" }) });
+  await expect(metadataPanel.getByText("Shared Sample.bin")).toBeVisible();
+  await expect(metadataPanel.getByRole("option", { name: "Very high" })).toHaveCount(0);
+  const save = metadataPanel.getByRole("button", { name: "Save" });
+  const initialSharedFilePatches = requests.filter((request) => request.method === "PATCH" && request.path.startsWith("shared-files/")).length;
+
+  await metadataPanel.getByLabel("Rating").fill("6");
+  await expect(metadataPanel.getByText("Shared file rating must be an integer between 0 and 5.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  expect(requests.filter((request) => request.method === "PATCH" && request.path.startsWith("shared-files/")).length).toBe(initialSharedFilePatches);
+
+  await metadataPanel.getByLabel("Priority").selectOption("release");
+  await metadataPanel.getByLabel("Rating").fill("5");
+  await metadataPanel.getByLabel("Comment").fill("Verified release");
+  await expect(metadataPanel.getByText("Shared file rating must be an integer between 0 and 5.")).toHaveCount(0);
+  await save.click();
+  await expect(page.getByText("Shared file metadata saved")).toBeVisible();
+  const sharedFilePatch = requests.find((request) => request.method === "PATCH" && request.path.startsWith("shared-files/"));
+  expect(sharedFilePatch).toBeDefined();
+  expect(JSON.parse(sharedFilePatch?.body ?? "{}")).toEqual({ priority: "release", comment: "Verified release", rating: 5 });
+});
+
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));

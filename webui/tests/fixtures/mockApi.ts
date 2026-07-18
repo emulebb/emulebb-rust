@@ -8,6 +8,7 @@ export type RecordedApiRequest = {
 };
 
 const transferHash = "00112233445566778899AABBCCDDEEFF";
+const sharedFileHash = "FFEEDDCCBBAA99887766554433221100";
 
 const snapshot = {
   app: { version: "0.1.0-beta.1" },
@@ -81,7 +82,7 @@ const snapshot = {
   kad: { enabled: true, connected: true, firewalled: false },
   uploads: [],
   uploadQueue: [],
-  sharedFiles: [{ hash: "FFEEDDCCBBAA99887766554433221100", name: "Shared Sample.bin", sizeBytes: 4096 }]
+  sharedFiles: [{ hash: sharedFileHash, name: "Shared Sample.bin", sizeBytes: 4096 }]
 };
 
 export function installMockApi(requests: RecordedApiRequest[]) {
@@ -231,6 +232,10 @@ function dataFor(method: string, path: string): unknown {
       };
     case "shared-files":
       return { items: snapshot.sharedFiles };
+    case `shared-files/${sharedFileHash}/ed2k-link`:
+      return { hash: sharedFileHash, link: "ed2k://|file|Shared%20Sample.bin|4096|ffeeddccbbaa99887766554433221100|/" };
+    case `shared-files/${sharedFileHash}/comments`:
+      return { items: [] };
     case "categories":
       return { items: [{ id: 1, name: "Sample Category", priority: 0 }] };
     case "friends":
