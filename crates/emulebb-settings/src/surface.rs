@@ -172,10 +172,10 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
     ),
     app_setting(
         "ed2k.safeServerConnect",
-        SettingSurfaceClass::NormalControl,
+        SettingSurfaceClass::NotUserFacing,
         true,
         "Servers",
-        "Limit automatic server connection concurrency.",
+        "Shadowed by core safe server connection settings.",
     ),
     app_setting(
         "ed2k.keepaliveSecs",
@@ -347,10 +347,10 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
     ),
     app_setting(
         "ed2k.addServersFromServer",
-        SettingSurfaceClass::NormalControl,
+        SettingSurfaceClass::NotUserFacing,
         true,
         "Servers",
-        "Accept servers advertised by connected servers.",
+        "Shadowed by core advertised-server import settings.",
     ),
     app_setting(
         "ed2k.deadServerRetries",
@@ -797,6 +797,27 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(unique.len(), inventory.len());
+    }
+
+    #[test]
+    fn shadowed_ed2k_server_toggles_are_not_user_facing() {
+        let inventory = app_settings_surface_inventory();
+        let class_for = |path: &str| {
+            inventory
+                .iter()
+                .find(|entry| entry.path == path)
+                .map(|entry| entry.class)
+                .unwrap()
+        };
+
+        assert_eq!(
+            class_for("ed2k.safeServerConnect"),
+            SettingSurfaceClass::NotUserFacing
+        );
+        assert_eq!(
+            class_for("ed2k.addServersFromServer"),
+            SettingSurfaceClass::NotUserFacing
+        );
     }
 
     #[test]
