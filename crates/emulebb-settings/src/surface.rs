@@ -752,6 +752,13 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         ui_section: "Diagnostics",
         description: "Runtime diagnostics and diagnostic operations.",
     },
+    SettingsSectionResourceSpec {
+        name: "logs",
+        class: SettingSurfaceClass::ExistingSectionResource,
+        route: "/api/v1/logs",
+        ui_section: "Logs",
+        description: "Recent daemon log lines and retained-log clear operation.",
+    },
 ];
 
 pub fn app_settings_surface_inventory() -> Vec<SettingSurfaceSpec> {

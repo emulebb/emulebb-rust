@@ -94,6 +94,7 @@ const settingsSectionTabs: Record<string, Tab> = {
   servers: "servers",
   kad: "kad",
   diagnostics: "diagnostics",
+  logs: "logs",
   network: "network",
   nat: "settings",
   ipFilter: "settings",

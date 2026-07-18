@@ -172,4 +172,8 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(metricValue("Event Queue")).toHaveText("1/1024");
   await expect(metricValue("Latest Bus Event")).toHaveText("1");
   await expect(metricValue("Resume")).toHaveText("reset");
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await settingsPanel.getByRole("button", { name: "Open Logs" }).click();
+  await expect(page.getByRole("heading", { name: "Logs" })).toBeVisible();
 });

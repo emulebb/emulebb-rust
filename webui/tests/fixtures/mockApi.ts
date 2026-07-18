@@ -448,7 +448,8 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("nat", "/api/v1/nat", "NAT", "Live NAT gateway, mapping, external address, error status, and refresh operation."),
           sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
           sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, egress verdict, and probe operation."),
-          sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")
+          sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics and diagnostic operations."),
+          sectionResource("logs", "/api/v1/logs", "Logs", "Recent daemon log lines and retained-log clear operation.")
         ]
       };
     case "app/settings":

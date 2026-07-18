@@ -148,6 +148,11 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             && entry["route"] == "/api/v1/diagnostics"
     }));
     assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "logs"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/logs"
+    }));
+    assert!(section_resources.iter().any(|entry| {
         entry["name"] == "ipFilter"
             && entry["class"] == "existingSectionResource"
             && entry["route"] == "/api/v1/ip-filter"
