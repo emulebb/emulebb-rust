@@ -157,6 +157,11 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
         response.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/event-stream"
     );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache, no-transform"
+    );
+    assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
 }
 
 #[tokio::test]

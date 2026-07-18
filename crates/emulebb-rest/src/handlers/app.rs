@@ -8,7 +8,7 @@
 use axum::{
     body::Bytes,
     extract::{RawQuery, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -87,7 +87,19 @@ pub(crate) async fn events(
             }
         },
     );
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    (
+        [
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            ),
+            (
+                HeaderName::from_static("x-accel-buffering"),
+                HeaderValue::from_static("no"),
+            ),
+        ],
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
 }
 
 fn last_event_id(headers: &HeaderMap) -> Option<String> {
