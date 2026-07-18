@@ -55,11 +55,11 @@ pub fn router_with_shutdown(
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/categories", get(categories).post(create_category))
         .route(
-            "/api/v1/categories/{category_id}",
+            "/api/v1/categories/{categoryId}",
             get(category).patch(update_category).delete(delete_category),
         )
         .route("/api/v1/friends", get(friends).post(create_friend))
-        .route("/api/v1/friends/{user_hash}", delete(delete_friend))
+        .route("/api/v1/friends/{userHash}", delete(delete_friend))
         .route("/api/v1/kad", get(kad))
         .route("/api/v1/kad/nodes", get(kad_nodes))
         .route(
@@ -84,11 +84,11 @@ pub fn router_with_shutdown(
             post(servers_import_met_url),
         )
         .route(
-            "/api/v1/servers/{server_id}",
+            "/api/v1/servers/{serverId}",
             get(server).patch(update_server).delete(delete_server),
         )
         .route(
-            "/api/v1/servers/{server_id}/operations/connect",
+            "/api/v1/servers/{serverId}/operations/connect",
             post(connect_server),
         )
         .route(
@@ -96,7 +96,7 @@ pub fn router_with_shutdown(
             get(searches).post(create_search).delete(delete_searches),
         )
         .route(
-            "/api/v1/searches/{search_id}",
+            "/api/v1/searches/{searchId}",
             get(search).delete(delete_search),
         )
         .route("/api/v1/shared-files", get(shared_files))
@@ -121,7 +121,7 @@ pub fn router_with_shutdown(
             post(reload_shared_directories),
         )
         .route(
-            "/api/v1/searches/{search_id}/results/{hash}/operations/download",
+            "/api/v1/searches/{searchId}/results/{hash}/operations/download",
             post(download_search_result),
         )
         .route("/api/v1/transfers", get(transfers).post(create_transfer))
@@ -140,87 +140,87 @@ pub fn router_with_shutdown(
         .route("/api/v1/transfers/{hash}/details", get(transfer_details))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}",
+            "/api/v1/transfers/{hash}/sources/{clientId}",
             get(transfer_source),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/browse",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/browse",
             post(transfer_source_browse),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/add-friend",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/add-friend",
             post(transfer_source_add_friend),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/remove-friend",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/remove-friend",
             post(transfer_source_remove_friend),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/remove",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/remove",
             post(transfer_source_remove),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/ban",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/ban",
             post(transfer_source_ban),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/unban",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/unban",
             post(transfer_source_unban),
         )
         .route(
-            "/api/v1/transfers/{hash}/sources/{client_id}/operations/release-slot",
+            "/api/v1/transfers/{hash}/sources/{clientId}/operations/release-slot",
             post(transfer_source_release_slot),
         )
         .route("/api/v1/uploads", get(uploads))
-        .route("/api/v1/uploads/{client_id}", get(upload))
+        .route("/api/v1/uploads/{clientId}", get(upload))
         .route(
-            "/api/v1/uploads/{client_id}/operations/remove",
+            "/api/v1/uploads/{clientId}/operations/remove",
             post(upload_remove),
         )
         .route(
-            "/api/v1/uploads/{client_id}/operations/release-slot",
+            "/api/v1/uploads/{clientId}/operations/release-slot",
             post(upload_release_slot),
         )
         .route(
-            "/api/v1/uploads/{client_id}/operations/add-friend",
+            "/api/v1/uploads/{clientId}/operations/add-friend",
             post(upload_add_friend),
         )
         .route(
-            "/api/v1/uploads/{client_id}/operations/remove-friend",
+            "/api/v1/uploads/{clientId}/operations/remove-friend",
             post(upload_remove_friend),
         )
         .route(
-            "/api/v1/uploads/{client_id}/operations/ban",
+            "/api/v1/uploads/{clientId}/operations/ban",
             post(upload_ban),
         )
         .route(
-            "/api/v1/uploads/{client_id}/operations/unban",
+            "/api/v1/uploads/{clientId}/operations/unban",
             post(upload_unban),
         )
         .route("/api/v1/upload-queue", get(upload_queue))
-        .route("/api/v1/upload-queue/{client_id}", get(upload_queue_client))
+        .route("/api/v1/upload-queue/{clientId}", get(upload_queue_client))
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/remove",
+            "/api/v1/upload-queue/{clientId}/operations/remove",
             post(upload_remove),
         )
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/release-slot",
+            "/api/v1/upload-queue/{clientId}/operations/release-slot",
             post(upload_release_slot),
         )
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/add-friend",
+            "/api/v1/upload-queue/{clientId}/operations/add-friend",
             post(upload_add_friend),
         )
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/remove-friend",
+            "/api/v1/upload-queue/{clientId}/operations/remove-friend",
             post(upload_remove_friend),
         )
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/ban",
+            "/api/v1/upload-queue/{clientId}/operations/ban",
             post(upload_ban),
         )
         .route(
-            "/api/v1/upload-queue/{client_id}/operations/unban",
+            "/api/v1/upload-queue/{clientId}/operations/unban",
             post(upload_unban),
         )
         .route(
