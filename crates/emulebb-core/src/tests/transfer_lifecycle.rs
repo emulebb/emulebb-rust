@@ -198,10 +198,15 @@ async fn transfer_events_publish_add_update_and_remove() {
         .await
         .unwrap();
     let added = events.recv().await.unwrap();
-    assert_eq!(added.id, 1);
-    assert_eq!(added.event_type, TransferEventType::Added);
-    assert_eq!(added.transfer.as_ref().unwrap().hash, transfer.hash);
-    assert_eq!(added.hash, None);
+    assert_eq!(added.id(), 1);
+    assert_eq!(added.event_type(), TransferEventType::Added);
+    match added {
+        TransferEvent::Added {
+            transfer: event_transfer,
+            ..
+        } => assert_eq!(event_transfer.hash, transfer.hash),
+        other => panic!("expected transfer.added event, got {other:?}"),
+    }
 
     let updated = core
         .update_transfer(
@@ -217,9 +222,15 @@ async fn transfer_events_publish_add_update_and_remove() {
         .unwrap()
         .unwrap();
     let event = events.recv().await.unwrap();
-    assert_eq!(event.id, 2);
-    assert_eq!(event.event_type, TransferEventType::Updated);
-    assert_eq!(event.transfer.as_ref().unwrap().priority, updated.priority);
+    assert_eq!(event.id(), 2);
+    assert_eq!(event.event_type(), TransferEventType::Updated);
+    match event {
+        TransferEvent::Updated {
+            transfer: event_transfer,
+            ..
+        } => assert_eq!(event_transfer.priority, updated.priority),
+        other => panic!("expected transfer.updated event, got {other:?}"),
+    }
 
     let deleted = core
         .delete_transfer_files(&transfer.hash)
@@ -227,10 +238,12 @@ async fn transfer_events_publish_add_update_and_remove() {
         .unwrap()
         .unwrap();
     let event = events.recv().await.unwrap();
-    assert_eq!(event.id, 3);
-    assert_eq!(event.event_type, TransferEventType::Removed);
-    assert!(event.transfer.is_none());
-    assert_eq!(event.hash.as_deref(), Some(deleted.hash.as_str()));
+    assert_eq!(event.id(), 3);
+    assert_eq!(event.event_type(), TransferEventType::Removed);
+    match event {
+        TransferEvent::Removed { hash, .. } => assert_eq!(hash, deleted.hash),
+        other => panic!("expected transfer.removed event, got {other:?}"),
+    }
 }
 
 #[tokio::test]

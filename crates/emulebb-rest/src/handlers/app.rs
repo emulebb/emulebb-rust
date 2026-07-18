@@ -19,8 +19,8 @@ use serde_json::json;
 use std::convert::Infallible;
 
 use emulebb_core::{
-    AppSettingsUpdate, TransferEvent, TransferEventResetReason, TransferEventType,
-    app_settings_surface_inventory, settings_section_resource_inventory,
+    AppSettingsUpdate, TransferEvent, app_settings_surface_inventory,
+    settings_section_resource_inventory,
 };
 use tokio::sync::broadcast;
 
@@ -41,14 +41,8 @@ pub(crate) async fn events(
 ) -> impl IntoResponse {
     let receiver = state.core.subscribe_transfer_events();
     let core = state.core.clone();
-    let pending_reset = last_event_id(&headers).map(|last_event_id| TransferEvent {
-        id: core.reserve_transfer_event_id(),
-        event_type: TransferEventType::SyncReset,
-        transfer: None,
-        hash: None,
-        reason: Some(TransferEventResetReason::LastEventId),
-        missed: None,
-        last_event_id: Some(last_event_id),
+    let pending_reset = last_event_id(&headers).map(|last_event_id| {
+        TransferEvent::reset_last_event_id(core.reserve_transfer_event_id(), last_event_id)
     });
     let stream = stream::unfold(
         (receiver, core, pending_reset),
@@ -68,15 +62,8 @@ pub(crate) async fn events(
                         ));
                     }
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        let event = TransferEvent {
-                            id: core.reserve_transfer_event_id(),
-                            event_type: TransferEventType::SyncReset,
-                            transfer: None,
-                            hash: None,
-                            reason: Some(TransferEventResetReason::Lagged),
-                            missed: Some(missed),
-                            last_event_id: None,
-                        };
+                        let event =
+                            TransferEvent::reset_lagged(core.reserve_transfer_event_id(), missed);
                         return Some((
                             Ok::<_, Infallible>(sse_event(event)),
                             (receiver, core, None),
@@ -112,8 +99,8 @@ fn last_event_id(headers: &HeaderMap) -> Option<String> {
 }
 
 fn sse_event(event: TransferEvent) -> Event {
-    let id = event.id.to_string();
-    let event_type = event.event_type.as_sse_name();
+    let id = event.id().to_string();
+    let event_type = event.event_type().as_sse_name();
     let data =
         serde_json::to_string(&event).expect("transfer events contain only serializable REST DTOs");
     Event::default().id(id).event(event_type).data(data)

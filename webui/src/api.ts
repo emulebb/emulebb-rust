@@ -94,16 +94,37 @@ export type Transfer = {
   [key: string]: unknown;
 };
 
-export type TransferEvent = {
+export type TransferAddedEvent = {
   id: number;
-  type: "transfer.added" | "transfer.updated" | "transfer.removed" | "sync.reset";
-  transfer?: Transfer;
-  hash?: string;
-  reason?: "lagged" | "last-event-id";
+  type: "transfer.added";
+  transfer: Transfer;
+  [key: string]: unknown;
+};
+
+export type TransferUpdatedEvent = {
+  id: number;
+  type: "transfer.updated";
+  transfer: Transfer;
+  [key: string]: unknown;
+};
+
+export type TransferRemovedEvent = {
+  id: number;
+  type: "transfer.removed";
+  hash: string;
+  [key: string]: unknown;
+};
+
+export type SyncResetEvent = {
+  id: number;
+  type: "sync.reset";
+  reason: "lagged" | "last-event-id";
   missed?: number;
   lastEventId?: string;
   [key: string]: unknown;
 };
+
+export type TransferEvent = TransferAddedEvent | TransferUpdatedEvent | TransferRemovedEvent | SyncResetEvent;
 
 export type TransferSource = {
   clientId?: string;

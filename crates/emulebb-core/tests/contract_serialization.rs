@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use emulebb_core::{TransferSource, Upload, UploadScoreBreakdown};
+use emulebb_core::{Transfer, TransferEvent, TransferSource, Upload, UploadScoreBreakdown};
 use serde_json::{Value, json};
 
 /// Collect the top-level object keys of a serialized value.
@@ -48,6 +48,38 @@ fn populated_transfer_source() -> TransferSource {
     }
 }
 
+fn populated_transfer() -> Transfer {
+    Transfer {
+        hash: "00112233445566778899aabbccddeeff".to_string(),
+        name: "Event Stream.bin".to_string(),
+        path: "Event Stream.bin".to_string(),
+        delivered_path: None,
+        size_bytes: 4096,
+        completed_bytes: 0,
+        state: "paused".to_string(),
+        progress: 0.0,
+        sources: 0,
+        sources_transferring: 0,
+        download_speed_ki_bps: 0.0,
+        upload_speed_ki_bps: 0.0,
+        stopped: false,
+        ed2k_link: "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/"
+            .to_string(),
+        priority: "normal".to_string(),
+        category_id: 0,
+        category_name: String::new(),
+        eta: None,
+        added_at: Some(1),
+        completed_at: None,
+        parts_total: 1,
+        parts_obtained: 0,
+        parts_progress_text: "0".to_string(),
+        parts_available: 0,
+        auto_priority: false,
+        in_incoming: true,
+    }
+}
+
 #[test]
 fn transfer_source_serializes_only_contract_keys() {
     let value = serde_json::to_value(populated_transfer_source()).unwrap();
@@ -83,6 +115,60 @@ fn transfer_source_serializes_only_contract_keys() {
             "TransferSource must not serialize `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn transfer_events_serialize_as_variant_specific_contract_shapes() {
+    let added = serde_json::to_value(TransferEvent::added(1, populated_transfer())).unwrap();
+    assert_eq!(added["type"], json!("transfer.added"));
+    assert_eq!(added["id"], json!(1));
+    assert!(added.get("transfer").is_some());
+    assert!(added.get("hash").is_none());
+    assert!(added.get("reason").is_none());
+
+    let updated = serde_json::to_value(TransferEvent::updated(2, populated_transfer())).unwrap();
+    assert_eq!(updated["type"], json!("transfer.updated"));
+    assert!(updated.get("transfer").is_some());
+    assert!(updated.get("hash").is_none());
+
+    let removed = serde_json::to_value(TransferEvent::removed(
+        3,
+        "00112233445566778899aabbccddeeff",
+    ))
+    .unwrap();
+    assert_eq!(
+        object_keys(&removed),
+        ["hash", "id", "type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+    assert_eq!(removed["type"], json!("transfer.removed"));
+    assert_eq!(removed["hash"], json!("00112233445566778899aabbccddeeff"));
+
+    let lagged = serde_json::to_value(TransferEvent::reset_lagged(4, 9)).unwrap();
+    assert_eq!(
+        object_keys(&lagged),
+        ["id", "missed", "reason", "type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+    assert_eq!(lagged["type"], json!("sync.reset"));
+    assert_eq!(lagged["reason"], json!("lagged"));
+    assert_eq!(lagged["missed"], json!(9));
+
+    let resumed = serde_json::to_value(TransferEvent::reset_last_event_id(5, "4")).unwrap();
+    assert_eq!(
+        object_keys(&resumed),
+        ["id", "lastEventId", "reason", "type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    );
+    assert_eq!(resumed["type"], json!("sync.reset"));
+    assert_eq!(resumed["reason"], json!("last-event-id"));
+    assert_eq!(resumed["lastEventId"], json!("4"));
 }
 
 fn score_breakdown() -> UploadScoreBreakdown {

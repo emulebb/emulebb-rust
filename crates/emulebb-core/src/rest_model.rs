@@ -528,21 +528,76 @@ pub enum TransferEventResetReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferEvent {
-    pub id: u64,
-    #[serde(rename = "type")]
-    pub event_type: TransferEventType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<Transfer>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<TransferEventResetReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub missed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_event_id: Option<String>,
+#[serde(tag = "type")]
+pub enum TransferEvent {
+    #[serde(rename = "transfer.added")]
+    Added { id: u64, transfer: Transfer },
+    #[serde(rename = "transfer.updated")]
+    Updated { id: u64, transfer: Transfer },
+    #[serde(rename = "transfer.removed")]
+    Removed { id: u64, hash: String },
+    #[serde(rename = "sync.reset")]
+    SyncReset {
+        id: u64,
+        reason: TransferEventResetReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        missed: Option<u64>,
+        #[serde(rename = "lastEventId", skip_serializing_if = "Option::is_none")]
+        last_event_id: Option<String>,
+    },
+}
+
+impl TransferEvent {
+    pub fn added(id: u64, transfer: Transfer) -> Self {
+        Self::Added { id, transfer }
+    }
+
+    pub fn updated(id: u64, transfer: Transfer) -> Self {
+        Self::Updated { id, transfer }
+    }
+
+    pub fn removed(id: u64, hash: impl Into<String>) -> Self {
+        Self::Removed {
+            id,
+            hash: hash.into(),
+        }
+    }
+
+    pub fn reset_lagged(id: u64, missed: u64) -> Self {
+        Self::SyncReset {
+            id,
+            reason: TransferEventResetReason::Lagged,
+            missed: Some(missed),
+            last_event_id: None,
+        }
+    }
+
+    pub fn reset_last_event_id(id: u64, last_event_id: impl Into<String>) -> Self {
+        Self::SyncReset {
+            id,
+            reason: TransferEventResetReason::LastEventId,
+            missed: None,
+            last_event_id: Some(last_event_id.into()),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Added { id, .. }
+            | Self::Updated { id, .. }
+            | Self::Removed { id, .. }
+            | Self::SyncReset { id, .. } => *id,
+        }
+    }
+
+    pub fn event_type(&self) -> TransferEventType {
+        match self {
+            Self::Added { .. } => TransferEventType::Added,
+            Self::Updated { .. } => TransferEventType::Updated,
+            Self::Removed { .. } => TransferEventType::Removed,
+            Self::SyncReset { .. } => TransferEventType::SyncReset,
+        }
+    }
 }
 
 /// One remembered ED2K peer source for a transfer.
