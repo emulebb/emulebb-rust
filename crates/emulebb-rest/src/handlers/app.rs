@@ -20,7 +20,7 @@ use std::convert::Infallible;
 
 use emulebb_core::{
     AppSettingsUpdate, TransferEvent, app_settings_surface_inventory,
-    settings_section_resource_inventory,
+    bootstrap_settings_surface_inventory, settings_section_resource_inventory,
 };
 use tokio::sync::broadcast;
 
@@ -185,6 +185,7 @@ pub(crate) async fn settings(State(state): State<RestState>) -> impl IntoRespons
 pub(crate) async fn settings_surface() -> impl IntoResponse {
     api_ok(json!({
         "settings": app_settings_surface_inventory(),
+        "bootstrapSettings": bootstrap_settings_surface_inventory(),
         "sectionResources": settings_section_resource_inventory(),
     }))
 }

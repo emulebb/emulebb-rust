@@ -125,6 +125,22 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
     }));
     assert!(!settings.iter().any(|entry| entry["path"] == "rest.apiKey"));
 
+    let bootstrap_settings = value["data"]["bootstrapSettings"].as_array().unwrap();
+    assert!(bootstrap_settings.iter().any(|entry| {
+        entry["path"] == "rest.bindAddr"
+            && entry["class"] == "bootstrapOnly"
+            && entry["restartRequired"] == true
+            && entry["route"] == "emulebb-rust-settings.toml"
+    }));
+    assert!(bootstrap_settings.iter().any(|entry| {
+        entry["path"] == "rest.apiKey"
+            && entry["class"] == "bootstrapOnly"
+            && entry["description"]
+                .as_str()
+                .unwrap()
+                .contains("not exposed through REST")
+    }));
+
     let section_resources = value["data"]["sectionResources"].as_array().unwrap();
     assert!(section_resources.iter().any(|entry| {
         entry["name"] == "diagnostics"

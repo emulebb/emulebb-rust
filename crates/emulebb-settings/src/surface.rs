@@ -50,6 +50,32 @@ const fn app_setting(
     }
 }
 
+pub const BOOTSTRAP_SETTINGS_SURFACE: &[SettingSurfaceSpec] = &[
+    bootstrap_setting(
+        "rest.bindAddr",
+        "REST bind socket address. This remains bootstrap-only so the daemon can start safely.",
+    ),
+    bootstrap_setting(
+        "rest.apiKey",
+        "REST API key. This remains bootstrap-only and is not exposed through REST.",
+    ),
+    bootstrap_setting(
+        "rest.webRootDir",
+        "Optional WebUI root override used before the REST server starts.",
+    ),
+];
+
+const fn bootstrap_setting(path: &'static str, description: &'static str) -> SettingSurfaceSpec {
+    SettingSurfaceSpec {
+        path,
+        class: SettingSurfaceClass::BootstrapOnly,
+        restart_required: true,
+        ui_section: "Bootstrap REST",
+        route: "emulebb-rust-settings.toml",
+        description,
+    }
+}
+
 const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
     app_setting(
         "daemon.incomingDir",
@@ -726,6 +752,10 @@ pub fn app_settings_surface_inventory() -> Vec<SettingSurfaceSpec> {
 
 pub fn settings_section_resource_inventory() -> &'static [SettingsSectionResourceSpec] {
     SETTINGS_SECTION_RESOURCES
+}
+
+pub fn bootstrap_settings_surface_inventory() -> &'static [SettingSurfaceSpec] {
+    BOOTSTRAP_SETTINGS_SURFACE
 }
 
 fn core_setting_class(advanced: bool) -> SettingSurfaceClass {

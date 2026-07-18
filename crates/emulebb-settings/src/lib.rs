@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 
 mod surface;
 pub use surface::{
-    SettingSurfaceClass, SettingSurfaceSpec, SettingsSectionResourceSpec,
-    app_settings_surface_inventory, settings_section_resource_inventory,
+    BOOTSTRAP_SETTINGS_SURFACE, SettingSurfaceClass, SettingSurfaceSpec,
+    SettingsSectionResourceSpec, app_settings_surface_inventory,
+    bootstrap_settings_surface_inventory, settings_section_resource_inventory,
 };
 
 pub const SECTION_CORE: &str = "core";

@@ -2325,6 +2325,7 @@ export function SettingsView(props: {
       </div>
       {hasValidationErrors && <p class="settings-error-summary">Fix highlighted settings before saving.</p>}
       <div class="settings-sections">
+        <BootstrapSettingsSection settings={props.surface?.bootstrapSettings ?? []} />
         {sectionVisible(["daemon.incomingDir"]) && (
           <SettingsControlSection title="Storage">
             <div class="settings-grid">
@@ -2577,6 +2578,28 @@ export function SettingsView(props: {
       </div>
       <SettingsSectionResources resources={props.surface?.sectionResources ?? []} openSection={props.openSection} />
     </section>
+  );
+}
+
+function BootstrapSettingsSection(props: { settings: SettingSurfaceSpec[] }) {
+  if (props.settings.length === 0) {
+    return null;
+  }
+  return (
+    <SettingsControlSection title="Bootstrap REST">
+      <div class="settings-resource-list">
+        {props.settings.map((setting) => (
+          <div class="settings-resource-row" key={setting.path}>
+            <div>
+              <strong>{setting.path}</strong>
+              <span>{setting.description}</span>
+              <code>{setting.route}</code>
+            </div>
+            {setting.restartRequired && <span class="setting-badge">Restart</span>}
+          </div>
+        ))}
+      </div>
+    </SettingsControlSection>
   );
 }
 

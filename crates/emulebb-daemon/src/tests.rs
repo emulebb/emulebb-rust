@@ -1,5 +1,6 @@
 use super::*;
 use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, NetworkInterfaceAddress};
+use emulebb_settings::{BOOTSTRAP_SETTINGS_SURFACE, SettingSurfaceClass};
 use std::collections::BTreeSet;
 
 fn metadata_store(profile: &DaemonProfile) -> MetadataStore {

@@ -331,6 +331,20 @@ function dataFor(method: string, path: string): unknown {
           setting("ipFilter.path", "normalControl", true),
           setting("ipFilter.level", "normalControl", true)
         ],
+        bootstrapSettings: [
+          bootstrapSetting(
+            "rest.bindAddr",
+            "REST bind socket address. This remains bootstrap-only so the daemon can start safely."
+          ),
+          bootstrapSetting(
+            "rest.apiKey",
+            "REST API key. This remains bootstrap-only and is not exposed through REST."
+          ),
+          bootstrapSetting(
+            "rest.webRootDir",
+            "Optional WebUI root override used before the REST server starts."
+          )
+        ],
         sectionResources: [
           sectionResource("sharedDirectories", "/api/v1/shared-directories", "Sharing", "Shared root ownership and reload operations."),
           sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category paths and priorities."),
@@ -467,6 +481,17 @@ function setting(path: string, classification: "normalControl" | "advancedContro
     uiSection: "Settings",
     route: "/api/v1/app/settings",
     description: path
+  };
+}
+
+function bootstrapSetting(path: string, description: string) {
+  return {
+    path,
+    class: "bootstrapOnly",
+    restartRequired: true,
+    uiSection: "Bootstrap REST",
+    route: "emulebb-rust-settings.toml",
+    description
   };
 }
 

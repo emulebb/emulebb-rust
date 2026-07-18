@@ -624,6 +624,7 @@ export type SettingsSectionResourceSpec = {
 
 export type SettingsSurface = {
   settings: SettingSurfaceSpec[];
+  bootstrapSettings?: SettingSurfaceSpec[];
   sectionResources: SettingsSectionResourceSpec[];
 };
 
