@@ -277,9 +277,15 @@ test("friend create form validates hash and name", async ({ page }) => {
   await expect(addFriend).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "friends").length).toBe(initialFriendPosts);
 
+  await friendsPanel.getByPlaceholder("Name").fill(`Harness${String.fromCharCode(1)}Peer`);
+  await expect(friendsPanel.getByText("Friend name must not contain control characters.")).toBeVisible();
+  await expect(addFriend).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "friends").length).toBe(initialFriendPosts);
+
   await friendsPanel.getByPlaceholder("Name").fill("Harness Peer");
   await expect(friendsPanel.getByText("User hash must be a 32-character lowercase hex string.")).toHaveCount(0);
   await expect(friendsPanel.getByText("Friend name must be at most 128 characters.")).toHaveCount(0);
+  await expect(friendsPanel.getByText("Friend name must not contain control characters.")).toHaveCount(0);
   await addFriend.click();
   await expect(page.getByText("Friend added")).toBeVisible();
   const friendPost = requests.find((request) => request.method === "POST" && request.path === "friends");
