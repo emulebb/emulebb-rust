@@ -5,7 +5,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use emulebb_core::{EmulebbCore, LocalShareCreate};
+use emulebb_core::{EmulebbCore, LocalShareCreate, TransferCreate};
 use emulebb_index::FileIndex;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -153,6 +153,58 @@ async fn events_endpoint_signals_rebaseline_for_last_event_id() {
     assert!(text.contains(r#""type":"sync.reset""#), "{text}");
     assert!(text.contains(r#""reason":"last-event-id""#), "{text}");
     assert!(text.contains(r#""lastEventId":"17""#), "{text}");
+}
+
+#[tokio::test]
+async fn events_endpoint_streams_transfer_add_events() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let router = router(
+        core.clone(),
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    let transfer = core
+        .create_transfer(TransferCreate {
+            link: Some(
+                "ed2k://|file|Route.Event.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
+            ),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+
+    let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("transfer add event")
+        .expect("SSE data frame")
+        .expect("valid body chunk");
+    let text = String::from_utf8(chunk.to_vec()).unwrap();
+    assert!(text.contains("event: transfer.added"), "{text}");
+    assert!(text.contains("id: 1"), "{text}");
+    assert!(text.contains(r#""type":"transfer.added""#), "{text}");
+    assert!(
+        text.contains(&format!(r#""hash":"{}""#, transfer.hash)),
+        "{text}"
+    );
 }
 
 #[tokio::test]
