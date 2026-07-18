@@ -681,6 +681,14 @@ td {
   margin-bottom: 14px;
 }
 
+.settings-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .toggle-grid {
   background: var(--tblr-bg-surface-secondary);
   border: var(--tblr-border-width) solid var(--tblr-border-color);
@@ -697,6 +705,37 @@ td {
   font-size: 0.82rem;
   font-weight: 700;
   gap: 5px;
+}
+
+.setting-check {
+  align-items: flex-start;
+  min-height: 38px;
+}
+
+.setting-label {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.setting-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.setting-badge {
+  background: var(--tblr-bg-surface);
+  border: var(--tblr-border-width) solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  color: var(--tblr-secondary);
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.35;
+  padding: 1px 4px;
+  text-transform: uppercase;
 }
 
 .wide-field {

@@ -34,6 +34,7 @@ import {
   SearchItem,
   SharedDirectories,
   SharedFile,
+  SettingsSurface,
   Snapshot,
   TransferEvent,
   Upload
@@ -89,6 +90,7 @@ export function App() {
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsSurface, setSettingsSurface] = useState<SettingsSurface | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [sharedDirectories, setSharedDirectories] = useState<SharedDirectories | null>(null);
@@ -121,7 +123,8 @@ export function App() {
         nextUploadQueue,
         nextAppInfo,
         nextCapabilities,
-        nextRuntimeDiagnostics
+        nextRuntimeDiagnostics,
+        nextSettingsSurface
       ] = await Promise.all([
         client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
         client.get<Page<LogRecord> | LogRecord[]>(`logs?limit=${LOG_LIMIT}`),
@@ -134,12 +137,14 @@ export function App() {
         client.get<Page<Upload>>(`upload-queue?limit=${SNAPSHOT_LIMIT}&includeScoreBreakdown=true`),
         client.get<AppInfo>("app"),
         client.get<unknown>("capabilities"),
-        client.get<RuntimeDiagnostics>("diagnostics")
+        client.get<RuntimeDiagnostics>("diagnostics"),
+        client.get<SettingsSurface>("app/settings/surface")
       ]);
       setSnapshot(nextSnapshot);
       setAppInfo(nextAppInfo);
       setCapabilities(nextCapabilities);
       setRuntimeDiagnostics(nextRuntimeDiagnostics);
+      setSettingsSurface(nextSettingsSurface);
       setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
       setSharedDirectories(nextSharedDirectories);
       setSharedFiles(nextSharedFiles.items ?? nextSnapshot.sharedFiles ?? []);
@@ -380,7 +385,7 @@ export function App() {
             {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
             {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
             {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}
-            {tab === "settings" && <SettingsView settings={settings} client={client} run={run} />}
+            {tab === "settings" && <SettingsView settings={settings} surface={settingsSurface} client={client} run={run} />}
             {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} client={client} run={run} />}
             {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
           </div>

@@ -71,3 +71,34 @@ test("submits a synthetic transfer operation", async ({ page }) => {
     )
   ).toBe(true);
 });
+
+test("settings use dirty state and advanced surface metadata", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settingsPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Settings" }) });
+
+  await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
+  await settingsPanel.getByLabel(/Advanced/).check();
+  await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
+
+  const save = settingsPanel.getByRole("button", { name: "Save" });
+  const revert = settingsPanel.getByRole("button", { name: "Revert" });
+  await expect(save).toBeDisabled();
+  await expect(revert).toBeDisabled();
+
+  await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
+  await expect(save).toBeEnabled();
+  await expect(revert).toBeEnabled();
+
+  await revert.click();
+  await expect(settingsPanel.getByLabel("Incoming directory")).toHaveValue("C:\\Sample\\Incoming");
+  await expect(save).toBeDisabled();
+
+  await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
+  await save.click();
+  await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
+  expect(requests.some((request) => request.method === "PATCH" && request.path === "app/settings")).toBe(true);
+});

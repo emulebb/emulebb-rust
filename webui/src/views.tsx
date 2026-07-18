@@ -30,6 +30,8 @@ import {
   ServerItem,
   SharedDirectories,
   SharedFile,
+  SettingSurfaceSpec,
+  SettingsSurface,
   Snapshot,
   Transfer,
   TransferSource,
@@ -1988,6 +1990,14 @@ type SettingsForm = {
   ipFilterLevel: string;
 };
 
+type SettingsTextKey = {
+  [K in keyof SettingsForm]: SettingsForm[K] extends string ? K : never;
+}[keyof SettingsForm];
+
+type SettingsBooleanKey = {
+  [K in keyof SettingsForm]: SettingsForm[K] extends boolean ? K : never;
+}[keyof SettingsForm];
+
 const emptySettingsForm: SettingsForm = {
   uploadLimitKiBps: "",
   downloadLimitKiBps: "",
@@ -2037,18 +2047,42 @@ const emptySettingsForm: SettingsForm = {
   ipFilterLevel: ""
 };
 
-export function SettingsView(props: { settings: AppSettings | null; client: RestClient; run: RunFunction }) {
+export function SettingsView(props: { settings: AppSettings | null; surface: SettingsSurface | null; client: RestClient; run: RunFunction }) {
   const [form, setForm] = useState<SettingsForm>(emptySettingsForm);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const baseline = useMemo(() => props.settings ? settingsFormFrom(props.settings) : emptySettingsForm, [props.settings]);
+  const surfaceByPath = useMemo(() => {
+    const byPath = new Map<string, SettingSurfaceSpec>();
+    for (const spec of props.surface?.settings ?? []) {
+      byPath.set(spec.path, spec);
+    }
+    return byPath;
+  }, [props.surface]);
 
   useEffect(() => {
-    if (props.settings) {
-      setForm(settingsFormFrom(props.settings));
-    }
-  }, [props.settings]);
+    setForm(baseline);
+  }, [baseline]);
 
   const update = <K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
   };
+
+  const dirty = props.settings ? JSON.stringify(form) !== JSON.stringify(baseline) : false;
+  const advancedCount = props.surface?.settings.filter((spec) => spec.class === "advancedControl").length ?? 0;
+  const shouldRender = (path: string) => {
+    const spec = surfaceByPath.get(path);
+    if (spec?.class === "notUserFacing") {
+      return false;
+    }
+    return showAdvanced || spec?.class !== "advancedControl";
+  };
+  const renderField = (path: string, key: SettingsTextKey, label: string) => shouldRender(path)
+    ? <Field label={label} value={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
+    : null;
+  const renderToggle = (path: string, key: SettingsBooleanKey, label: string) => shouldRender(path)
+    ? <Toggle label={label} checked={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
+    : null;
 
   const save = () => {
     const settings = props.settings ?? {};
@@ -2128,6 +2162,10 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
     });
   };
 
+  const revert = () => {
+    setForm(baseline);
+  };
+
   if (!props.settings) {
     return <section class="panel card"><p class="empty">Settings are not loaded.</p></section>;
   }
@@ -2136,80 +2174,108 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
     <section class="panel card">
       <div class="section-title">
         <h2>Settings</h2>
-        <button class="btn" type="button" onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
-          <Save size={15} />
-          Save
-        </button>
+        <div class="settings-actions">
+          <label class="check">
+            <input class="form-check-input" type="checkbox" checked={showAdvanced} onInput={(event) => setShowAdvanced(event.currentTarget.checked)} />
+            Advanced ({advancedCount})
+          </label>
+          <button class="btn" type="button" disabled={!dirty} onClick={revert}>
+            <RefreshCw size={15} />
+            Revert
+          </button>
+          <button class="btn" type="button" disabled={!dirty} onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
+            <Save size={15} />
+            Save
+          </button>
+        </div>
       </div>
       <div class="settings-grid">
-        <Field label="Upload limit KiB/s" value={form.uploadLimitKiBps} onInput={(value) => update("uploadLimitKiBps", value)} />
-        <Field label="Download limit KiB/s" value={form.downloadLimitKiBps} onInput={(value) => update("downloadLimitKiBps", value)} />
-        <Field label="Max connections" value={form.maxConnections} onInput={(value) => update("maxConnections", value)} />
-        <Field label="New connections / 5s" value={form.maxConnectionsPerFiveSeconds} onInput={(value) => update("maxConnectionsPerFiveSeconds", value)} />
-        <Field label="Max sources / file" value={form.maxSourcesPerFile} onInput={(value) => update("maxSourcesPerFile", value)} />
-        <Field label="Upload client KiB/s" value={form.uploadClientDataRate} onInput={(value) => update("uploadClientDataRate", value)} />
-        <Field label="Max upload slots" value={form.maxUploadSlots} onInput={(value) => update("maxUploadSlots", value)} />
-        <Field label="Upload elasticity %" value={form.uploadSlotElasticPercent} onInput={(value) => update("uploadSlotElasticPercent", value)} />
-        <Field label="Queue size" value={form.queueSize} onInput={(value) => update("queueSize", value)} />
-        <Field label="Incoming directory" value={form.incomingDir} onInput={(value) => update("incomingDir", value)} />
-        <Field label="P2P bind IP" value={form.p2pBindIp} onInput={(value) => update("p2pBindIp", value)} />
-        <Field label="P2P bind interface" value={form.p2pBindInterface} onInput={(value) => update("p2pBindInterface", value)} />
-        <Field label="DNS servers" value={form.hostnameLookupDnsServers} onInput={(value) => update("hostnameLookupDnsServers", value)} />
-        <Field label="DNS cache TTL seconds" value={form.hostnameLookupCacheTtlSecs} onInput={(value) => update("hostnameLookupCacheTtlSecs", value)} />
-        <Field label="DNS lookups / tick" value={form.hostnameLookupMaxLookupsPerTick} onInput={(value) => update("hostnameLookupMaxLookupsPerTick", value)} />
-        <Field label="DNS tick seconds" value={form.hostnameLookupTickIntervalSecs} onInput={(value) => update("hostnameLookupTickIntervalSecs", value)} />
-        <Field label="eD2K listen port" value={form.ed2kListenPort} onInput={(value) => update("ed2kListenPort", value)} />
-        <Field label="Kad listen port" value={form.kadListenPort} onInput={(value) => update("kadListenPort", value)} />
-        <Field label="Kad republish seconds" value={form.kadRepublishIntervalSecs} onInput={(value) => update("kadRepublishIntervalSecs", value)} />
-        <Field label="NAT bind IP" value={form.natBindIp} onInput={(value) => update("natBindIp", value)} />
-        <Field label="NAT backend order" value={form.natBackendOrder} onInput={(value) => update("natBackendOrder", value)} />
-        <Field label="VPN Guard mode" value={form.vpnGuardMode} onInput={(value) => update("vpnGuardMode", value)} />
-        <Field label="Allowed public CIDRs" value={form.vpnGuardAllowedPublicIpCidrs} onInput={(value) => update("vpnGuardAllowedPublicIpCidrs", value)} />
-        <Field label="IP filter path" value={form.ipFilterPath} onInput={(value) => update("ipFilterPath", value)} />
-        <Field label="IP filter level" value={form.ipFilterLevel} onInput={(value) => update("ipFilterLevel", value)} />
+        {renderField("core.uploadLimitKiBps", "uploadLimitKiBps", "Upload limit KiB/s")}
+        {renderField("core.downloadLimitKiBps", "downloadLimitKiBps", "Download limit KiB/s")}
+        {renderField("core.maxConnections", "maxConnections", "Max connections")}
+        {renderField("core.maxConnectionsPerFiveSeconds", "maxConnectionsPerFiveSeconds", "New connections / 5s")}
+        {renderField("core.maxSourcesPerFile", "maxSourcesPerFile", "Max sources / file")}
+        {renderField("core.uploadClientDataRate", "uploadClientDataRate", "Upload client KiB/s")}
+        {renderField("core.maxUploadSlots", "maxUploadSlots", "Max upload slots")}
+        {renderField("core.uploadSlotElasticPercent", "uploadSlotElasticPercent", "Upload elasticity %")}
+        {renderField("core.queueSize", "queueSize", "Queue size")}
+        {renderField("daemon.incomingDir", "incomingDir", "Incoming directory")}
+        {renderField("daemon.p2pBindIp", "p2pBindIp", "P2P bind IP")}
+        {renderField("daemon.p2pBindInterface", "p2pBindInterface", "P2P bind interface")}
+        {renderField("daemon.hostnameLookup.dnsServers", "hostnameLookupDnsServers", "DNS servers")}
+        {renderField("daemon.hostnameLookup.cacheTtlSecs", "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds")}
+        {renderField("daemon.hostnameLookup.maxLookupsPerTick", "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick")}
+        {renderField("daemon.hostnameLookup.tickIntervalSecs", "hostnameLookupTickIntervalSecs", "DNS tick seconds")}
+        {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
+        {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
+        {renderField("kad.republishIntervalSecs", "kadRepublishIntervalSecs", "Kad republish seconds")}
+        {renderField("nat.bindIp", "natBindIp", "NAT bind IP")}
+        {renderField("nat.backendOrder", "natBackendOrder", "NAT backend order")}
+        {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
+        {renderField("vpnGuard.allowedPublicIpCidrs", "vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs")}
+        {renderField("ipFilter.path", "ipFilterPath", "IP filter path")}
+        {renderField("ipFilter.level", "ipFilterLevel", "IP filter level")}
       </div>
       <div class="toggle-grid">
-        <Toggle label="Auto connect" checked={form.autoConnect} onInput={(value) => update("autoConnect", value)} />
-        <Toggle label="Reconnect" checked={form.reconnect} onInput={(value) => update("reconnect", value)} />
-        <Toggle label="Credit system" checked={form.creditSystem} onInput={(value) => update("creditSystem", value)} />
-        <Toggle label="Safe server connect" checked={form.safeServerConnect} onInput={(value) => update("safeServerConnect", value)} />
-        <Toggle label="Add servers from server" checked={form.addServersFromServer} onInput={(value) => update("addServersFromServer", value)} />
-        <Toggle label="Network Kad" checked={form.networkKademlia} onInput={(value) => update("networkKademlia", value)} />
-        <Toggle label="Network eD2K" checked={form.networkEd2k} onInput={(value) => update("networkEd2k", value)} />
-        <Toggle label="Obfuscation" checked={form.obfuscationEnabled} onInput={(value) => update("obfuscationEnabled", value)} />
-        <Toggle label="eD2K reconnect" checked={form.ed2kReconnectEnabled} onInput={(value) => update("ed2kReconnectEnabled", value)} />
-        <Toggle label="UDP reask" checked={form.enableUdpReask} onInput={(value) => update("enableUdpReask", value)} />
-        <Toggle label="Publish Rust identity" checked={form.publishEmuleRustIdentity} onInput={(value) => update("publishEmuleRustIdentity", value)} />
-        <Toggle label="Kad publish shared files" checked={form.kadPublishSharedFilesEnabled} onInput={(value) => update("kadPublishSharedFilesEnabled", value)} />
-        <Toggle label="Kad UDP firewall checks" checked={form.udpFirewallCheckEnabled} onInput={(value) => update("udpFirewallCheckEnabled", value)} />
-        <Toggle label="Kad TCP firewall checks" checked={form.tcpFirewallCheckEnabled} onInput={(value) => update("tcpFirewallCheckEnabled", value)} />
-        <Toggle label="Kad buddy" checked={form.buddyEnabled} onInput={(value) => update("buddyEnabled", value)} />
-        <Toggle label="Routing maintenance" checked={form.routingMaintenanceEnabled} onInput={(value) => update("routingMaintenanceEnabled", value)} />
-        <Toggle label="NAT" checked={form.natEnabled} onInput={(value) => update("natEnabled", value)} />
-        <Toggle label="Require initial NAT mapping" checked={form.natRequireInitialMapping} onInput={(value) => update("natRequireInitialMapping", value)} />
-        <Toggle label="VPN Guard" checked={form.vpnGuardEnabled} onInput={(value) => update("vpnGuardEnabled", value)} />
-        <Toggle label="IP filter" checked={form.ipFilterEnabled} onInput={(value) => update("ipFilterEnabled", value)} />
-        <Toggle label="Hostname lookup" checked={form.hostnameLookupEnabled} onInput={(value) => update("hostnameLookupEnabled", value)} />
+        {renderToggle("core.autoConnect", "autoConnect", "Auto connect")}
+        {renderToggle("core.reconnect", "reconnect", "Reconnect")}
+        {renderToggle("core.creditSystem", "creditSystem", "Credit system")}
+        {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
+        {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
+        {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
+        {renderToggle("core.networkEd2k", "networkEd2k", "Network eD2K")}
+        {renderToggle("ed2k.obfuscationEnabled", "obfuscationEnabled", "Obfuscation")}
+        {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
+        {renderToggle("ed2k.enableUdpReask", "enableUdpReask", "UDP reask")}
+        {renderToggle("ed2k.publishEmuleRustIdentity", "publishEmuleRustIdentity", "Publish Rust identity")}
+        {renderToggle("kad.publishSharedFilesEnabled", "kadPublishSharedFilesEnabled", "Kad publish shared files")}
+        {renderToggle("kad.udpFirewallCheckEnabled", "udpFirewallCheckEnabled", "Kad UDP firewall checks")}
+        {renderToggle("kad.tcpFirewallCheckEnabled", "tcpFirewallCheckEnabled", "Kad TCP firewall checks")}
+        {renderToggle("kad.buddyEnabled", "buddyEnabled", "Kad buddy")}
+        {renderToggle("kad.routingMaintenanceEnabled", "routingMaintenanceEnabled", "Routing maintenance")}
+        {renderToggle("nat.enabled", "natEnabled", "NAT")}
+        {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
+        {renderToggle("vpnGuard.enabled", "vpnGuardEnabled", "VPN Guard")}
+        {renderToggle("ipFilter.enabled", "ipFilterEnabled", "IP filter")}
+        {renderToggle("daemon.hostnameLookup.enabled", "hostnameLookupEnabled", "Hostname lookup")}
       </div>
     </section>
   );
 }
 
-function Field(props: { label: string; value: string; onInput: (value: string) => void }) {
+function Field(props: { label: string; value: string; surface?: SettingSurfaceSpec; onInput: (value: string) => void }) {
   return (
-    <label>
-      {props.label}
+    <label title={props.surface?.description}>
+      <span class="setting-label">
+        <span>{props.label}</span>
+        <SettingBadges surface={props.surface} />
+      </span>
       <input class="form-control" value={props.value} onInput={(event) => props.onInput(event.currentTarget.value)} />
     </label>
   );
 }
 
-function Toggle(props: { label: string; checked: boolean; onInput: (value: boolean) => void }) {
+function Toggle(props: { label: string; checked: boolean; surface?: SettingSurfaceSpec; onInput: (value: boolean) => void }) {
   return (
-    <label class="check">
+    <label class="check setting-check" title={props.surface?.description}>
       <input class="form-check-input" type="checkbox" checked={props.checked} onInput={(event) => props.onInput(event.currentTarget.checked)} />
-      {props.label}
+      <span class="setting-label">
+        <span>{props.label}</span>
+        <SettingBadges surface={props.surface} />
+      </span>
     </label>
+  );
+}
+
+function SettingBadges(props: { surface?: SettingSurfaceSpec }) {
+  if (!props.surface) {
+    return null;
+  }
+  return (
+    <span class="setting-badges">
+      {props.surface.class === "advancedControl" && <span class="setting-badge">Advanced</span>}
+      {props.surface.restartRequired && <span class="setting-badge">Restart</span>}
+    </span>
   );
 }
 

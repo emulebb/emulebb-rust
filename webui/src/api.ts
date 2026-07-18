@@ -419,6 +419,30 @@ export type AppSettings = {
   [key: string]: unknown;
 };
 
+export type SettingSurfaceClass = "normalControl" | "advancedControl" | "existingSectionResource" | "bootstrapOnly" | "notUserFacing";
+
+export type SettingSurfaceSpec = {
+  path: string;
+  class: SettingSurfaceClass;
+  restartRequired: boolean;
+  uiSection: string;
+  route: string;
+  description: string;
+};
+
+export type SettingsSectionResourceSpec = {
+  name: string;
+  class: "existingSectionResource";
+  route: string;
+  uiSection: string;
+  description: string;
+};
+
+export type SettingsSurface = {
+  settings: SettingSurfaceSpec[];
+  sectionResources: SettingsSectionResourceSpec[];
+};
+
 export type Snapshot = {
   app?: AppInfo;
   status?: Status;

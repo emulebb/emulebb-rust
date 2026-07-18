@@ -223,6 +223,61 @@ function dataFor(method: string, path: string): unknown {
       return { items: [{ id: 1, name: "Sample Category", priority: 0 }] };
     case "friends":
       return { items: [] };
+    case "app/settings/surface":
+      return {
+        settings: [
+          setting("core.uploadLimitKiBps", "normalControl", false),
+          setting("core.downloadLimitKiBps", "normalControl", false),
+          setting("core.maxConnections", "advancedControl", false),
+          setting("core.maxConnectionsPerFiveSeconds", "advancedControl", false),
+          setting("core.maxSourcesPerFile", "advancedControl", false),
+          setting("core.uploadClientDataRate", "advancedControl", false),
+          setting("core.maxUploadSlots", "normalControl", false),
+          setting("core.uploadSlotElasticPercent", "advancedControl", false),
+          setting("core.queueSize", "advancedControl", false),
+          setting("core.autoConnect", "normalControl", true),
+          setting("core.reconnect", "normalControl", true),
+          setting("core.creditSystem", "normalControl", false),
+          setting("core.safeServerConnect", "normalControl", false),
+          setting("core.addServersFromServer", "normalControl", false),
+          setting("core.networkKademlia", "normalControl", true),
+          setting("core.networkEd2k", "normalControl", true),
+          setting("daemon.incomingDir", "normalControl", false),
+          setting("daemon.p2pBindIp", "normalControl", true),
+          setting("daemon.p2pBindInterface", "normalControl", true),
+          setting("daemon.ed2kUserHash", "notUserFacing", true),
+          setting("daemon.hostnameLookup.enabled", "advancedControl", false),
+          setting("daemon.hostnameLookup.dnsServers", "advancedControl", false),
+          setting("daemon.hostnameLookup.cacheTtlSecs", "advancedControl", false),
+          setting("daemon.hostnameLookup.maxLookupsPerTick", "advancedControl", false),
+          setting("daemon.hostnameLookup.tickIntervalSecs", "advancedControl", false),
+          setting("ed2k.listenPort", "normalControl", true),
+          setting("ed2k.obfuscationEnabled", "normalControl", true),
+          setting("ed2k.reconnectEnabled", "normalControl", true),
+          setting("ed2k.enableUdpReask", "normalControl", true),
+          setting("ed2k.publishEmuleRustIdentity", "advancedControl", true),
+          setting("kad.listenPort", "normalControl", true),
+          setting("kad.publishSharedFilesEnabled", "normalControl", true),
+          setting("kad.republishIntervalSecs", "advancedControl", true),
+          setting("kad.udpFirewallCheckEnabled", "normalControl", true),
+          setting("kad.tcpFirewallCheckEnabled", "normalControl", true),
+          setting("kad.buddyEnabled", "normalControl", true),
+          setting("kad.routingMaintenanceEnabled", "normalControl", true),
+          setting("nat.enabled", "normalControl", true),
+          setting("nat.requireInitialMapping", "advancedControl", true),
+          setting("nat.backendOrder", "advancedControl", true),
+          setting("nat.bindIp", "advancedControl", true),
+          setting("vpnGuard.enabled", "normalControl", true),
+          setting("vpnGuard.mode", "normalControl", true),
+          setting("vpnGuard.allowedPublicIpCidrs", "normalControl", true),
+          setting("ipFilter.enabled", "normalControl", true),
+          setting("ipFilter.path", "normalControl", true),
+          setting("ipFilter.level", "normalControl", true)
+        ],
+        sectionResources: [
+          { name: "diagnostics", class: "existingSectionResource", route: "/api/v1/diagnostics", uiSection: "Diagnostics", description: "Runtime diagnostics." }
+        ]
+      };
     case "app/settings":
       return {
         core: { autoConnect: true, networkEd2k: true, networkKademlia: true },
@@ -254,4 +309,15 @@ function dataFor(method: string, path: string): unknown {
     default:
       return undefined;
   }
+}
+
+function setting(path: string, classification: "normalControl" | "advancedControl" | "notUserFacing", restartRequired: boolean) {
+  return {
+    path,
+    class: classification,
+    restartRequired,
+    uiSection: "Settings",
+    route: "/api/v1/app/settings",
+    description: path
+  };
 }
