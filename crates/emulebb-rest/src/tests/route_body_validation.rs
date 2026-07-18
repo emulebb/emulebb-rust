@@ -362,6 +362,22 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.ed2k.listenPort must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"ed2k":{"maxParallelDownloadPeers":0}}"#,
+            "settings.ed2k.maxParallelDownloadPeers must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"keywordServerAttemptBudget":0}}"#,
+            "settings.ed2k.keywordServerAttemptBudget must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"exactHashKeywordServerAttemptBudget":0}}"#,
+            "settings.ed2k.exactHashKeywordServerAttemptBudget must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"sourceServerAttemptBudget":"1"}}"#,
+            "settings.ed2k.sourceServerAttemptBudget must be an unsigned number greater than or equal to 1",
+        ),
+        (
             r#"{"ed2k":{"uploadQueue":{}}}"#,
             "settings.ed2k.uploadQueue PATCH requires at least one setting",
         ),

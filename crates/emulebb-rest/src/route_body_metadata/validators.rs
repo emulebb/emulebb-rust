@@ -160,6 +160,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     "settings.ed2k.listenPort",
                     1,
                 )?;
+                validate_ed2k_settings_patch_body_fields(section_object)?;
                 validate_nested_settings_update_object(
                     section_object,
                     "uploadQueue",
@@ -279,6 +280,33 @@ fn validate_hostname_lookup_settings_patch_body_fields(
         "tickIntervalSecs",
         "settings.daemon.hostnameLookup.tickIntervalSecs",
         5,
+    )
+}
+
+fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_unsigned_number_min(
+        object,
+        "maxParallelDownloadPeers",
+        "settings.ed2k.maxParallelDownloadPeers",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "keywordServerAttemptBudget",
+        "settings.ed2k.keywordServerAttemptBudget",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "exactHashKeywordServerAttemptBudget",
+        "settings.ed2k.exactHashKeywordServerAttemptBudget",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "sourceServerAttemptBudget",
+        "settings.ed2k.sourceServerAttemptBudget",
+        1,
     )
 }
 
