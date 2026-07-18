@@ -109,6 +109,7 @@ mod ed2k_publish_diagnostics;
 mod ed2k_source_batch;
 mod ed2k_sources;
 mod friend_api;
+mod hostname_lookup;
 mod kad_buddy;
 mod kad_callback_initiator;
 mod kad_control;
@@ -251,11 +252,12 @@ pub use emulebb_settings::{
 pub use rest_model::{
     AppInfo, AppLifecycle, Category, CategoryCreate, CategoryPriorityValue, CategoryUpdate,
     DiagnosticDumpResult, DownloadSourceMetrics, Ed2kNetworkConfig, Friend, FriendCreate,
-    IndexingStatus, LocalShare, LocalShareCreate, NetworkStatus, NullableStringField,
-    NullableU32Field, Search, SearchCreate, SearchResult, SearchResultDownloadCreate, ServerCreate,
-    ServerInfo, ServerUpdate, SharedFileUpdate, Status, Transfer, TransferCreate, TransferDetails,
-    TransferPart, TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
-    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    HostNameResolution, IndexingStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
+    NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
+    SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
+    Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource, TransferStats,
+    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
+    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -426,6 +428,7 @@ pub struct EmulebbCore {
     kad_notes_dirty: Arc<std::sync::Mutex<HashSet<String>>>,
     ed2k_publish_diagnostics: ed2k_publish_diagnostics::SharedEd2kPublishDiagnostics,
     kad_publish_diagnostics: kad_publish_diagnostics::SharedKadPublishDiagnostics,
+    hostname_lookup_cache: Arc<hostname_lookup::HostNameLookupCache>,
     /// Connection-aware queue for network searches (`search_queue.rs` state
     /// machine + `search_queue_runtime.rs` drain task). `std::sync::Mutex` by
     /// design: guards are held for short sync sections only — never across an
@@ -543,6 +546,7 @@ impl EmulebbCore {
             kad_notes_dirty: Arc::new(std::sync::Mutex::new(HashSet::new())),
             ed2k_publish_diagnostics: ed2k_publish_diagnostics::new_shared(),
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
+            hostname_lookup_cache: Arc::new(hostname_lookup::HostNameLookupCache::default()),
             search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
             state: Arc::new(Mutex::new(core_state)),
         })

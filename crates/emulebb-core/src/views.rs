@@ -500,6 +500,10 @@ pub(crate) fn server_info_from_parts(
         udp_flags: None,
         users: 0,
         files: 0,
+        host_name: None,
+        host_name_status: None,
+        host_name_resolved_at: None,
+        host_name_error: None,
     }
 }
 

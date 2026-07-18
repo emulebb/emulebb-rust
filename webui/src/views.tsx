@@ -21,6 +21,7 @@ import {
   AppSettings,
   Category,
   Friend,
+  KadNode,
   KadStatus,
   LogRecord,
   Page,
@@ -948,6 +949,30 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const [port, setPort] = useState("4661");
   const [name, setName] = useState("");
   const [importUrl, setImportUrl] = useState("");
+  const [filter, setFilter] = useState("");
+  const [selectedEndpoint, setSelectedEndpoint] = useState("");
+
+  const filteredServers = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) {
+      return props.servers;
+    }
+    return props.servers.filter((server) => [
+      serverEndpoint(server),
+      server.name,
+      server.address,
+      server.ip,
+      server.dynIp,
+      server.hostName,
+      server.description
+    ].some((value) => String(value ?? "").toLowerCase().includes(needle)));
+  }, [filter, props.servers]);
+  const selected = useMemo(() => {
+    if (!props.servers.length) {
+      return undefined;
+    }
+    return props.servers.find((server) => serverEndpoint(server) === selectedEndpoint) ?? props.servers[0];
+  }, [props.servers, selectedEndpoint]);
 
   const createServer = () => props.client.post("servers", {
     address,
@@ -982,29 +1007,38 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
         <input value={importUrl} placeholder="server.met URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
         <button type="submit"><Download size={16} />Import</button>
       </form>
+      <div class="form-row">
+        <input value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Endpoint</th>
+              <th>Host</th>
+              <th>IP</th>
               <th>Name</th>
               <th>Status</th>
-              <th>Priority</th>
               <th>Users</th>
+              <th>Files</th>
+              <th>Ping</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {props.servers.map((server) => {
-              const endpoint = server.endpoint ?? server.id ?? `${server.address}:${server.port}`;
+            {filteredServers.map((server) => {
+              const endpoint = serverEndpoint(server);
               const encoded = encodeSegment(endpoint);
               return (
-                <tr key={endpoint}>
+                <tr key={endpoint} class={selected && serverEndpoint(selected) === endpoint ? "selected-row" : ""} onClick={() => setSelectedEndpoint(endpoint)}>
                   <td>{endpoint}</td>
+                  <td>{hostNameLabel(server)}</td>
+                  <td>{server.ip || server.dynIp || ""}</td>
                   <td>{server.name ?? ""}</td>
-                  <td><StatusPill value={server.connected ? "connected" : server.connecting ? "connecting" : server.enabled === false ? "disabled" : "idle"} /></td>
-                  <td>{server.priority ?? "normal"}</td>
+                  <td><StatusPill value={server.connected ? "connected" : server.connecting ? "connecting" : server.enabled === false ? "disabled" : server.current ? "current" : "idle"} /></td>
                   <td>{server.users ?? 0}</td>
+                  <td>{server.files ?? 0}</td>
+                  <td>{server.ping ? `${server.ping} ms` : ""}</td>
                   <td>
                     <div class="row-actions">
                       <Action title="Connect" icon={<Plug size={15} />} onClick={() => void props.run(() => props.client.post(`servers/${encoded}/operations/connect`), "Server connect started")} />
@@ -1017,10 +1051,31 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
                 </tr>
               );
             })}
-            {props.servers.length === 0 && <EmptyRow colSpan={6} text="No servers." />}
+            {filteredServers.length === 0 && <EmptyRow colSpan={9} text="No servers." />}
           </tbody>
         </table>
       </div>
+      {selected && (
+        <div class="split detail-split">
+          <div class="kv compact">
+            <span>Configured address</span><strong>{selected.address ?? ""}</strong>
+            <span>Resolved IP</span><strong>{selected.ip || ""}</strong>
+            <span>Dynamic IP/name</span><strong>{selected.dynIp || ""}</strong>
+            <span>Hostname</span><strong>{hostNameLabel(selected)}</strong>
+            <span>DNS status</span><strong>{selected.hostNameStatus ?? "unknown"}</strong>
+            <span>Description</span><strong>{selected.description || ""}</strong>
+          </div>
+          <div class="kv compact">
+            <span>Priority</span><strong>{selected.priority ?? "normal"}</strong>
+            <span>Enabled/static</span><strong>{yesNo(selected.enabled !== false)} / {yesNo(selected.static)}</strong>
+            <span>Current</span><strong>{yesNo(selected.current)}</strong>
+            <span>Soft/hard files</span><strong>{selected.softFiles ?? 0} / {selected.hardFiles ?? 0}</strong>
+            <span>Version</span><strong>{selected.version || ""}</strong>
+            <span>Obfuscation/UDP flags</span><strong>{selected.obfuscationTcpPort ?? ""} / {selected.udpFlags ?? ""}</strong>
+            <span>Failures</span><strong>{selected.failedCount ?? 0}</strong>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1029,21 +1084,64 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
   const [bootstrapAddress, setBootstrapAddress] = useState("");
   const [bootstrapPort, setBootstrapPort] = useState("4662");
   const [importUrl, setImportUrl] = useState("");
+  const [nodes, setNodes] = useState<KadNode[]>([]);
+  const [filter, setFilter] = useState("");
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+
+  const loadNodes = async () => {
+    const page = await props.client.get<Page<KadNode>>("kad/nodes?limit=100");
+    setNodes(page.items ?? []);
+  };
+
+  useEffect(() => {
+    void loadNodes();
+  }, [props.kad.contactCount, props.kad.connected]);
+
+  const filteredNodes = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) {
+      return nodes;
+    }
+    return nodes.filter((node) => [
+      node.nodeId,
+      node.ip,
+      node.hostName,
+      node.contactType,
+      node.udpPort,
+      node.tcpPort
+    ].some((value) => String(value ?? "").toLowerCase().includes(needle)));
+  }, [filter, nodes]);
+  const selected = useMemo(() => {
+    if (!nodes.length) {
+      return undefined;
+    }
+    return nodes.find((node) => node.nodeId === selectedNodeId) ?? nodes[0];
+  }, [nodes, selectedNodeId]);
+
   return (
     <section class="panel">
       <div class="section-title">
         <h2>Kad</h2>
         <div class="row-actions">
+          <button type="button" onClick={() => void loadNodes()}><RefreshCw size={15} />Refresh</button>
           <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/start"), "Kad started")}><Play size={15} />Start</button>
           <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/stop"), "Kad stopped")}><Pause size={15} />Stop</button>
           <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/recheck-firewall"), "Kad firewall recheck started")}><Shield size={15} />Recheck</button>
         </div>
       </div>
       <div class="kv compact">
+        <span>Running</span>
+        <strong>{props.kad.running ? "yes" : "no"}</strong>
         <span>Connected</span>
         <strong>{props.kad.connected ? "yes" : "no"}</strong>
         <span>Firewall</span>
         <strong>{firewallLabel(props.kad.firewalled)}</strong>
+        <span>Bootstrapping</span>
+        <strong>{yesNo(props.kad.bootstrapping)}</strong>
+        <span>Contacts</span>
+        <strong>{props.kad.contactCount ?? props.kad.nodes ?? 0}</strong>
+        <span>Users/files</span>
+        <strong>{props.kad.users ?? 0} / {props.kad.files ?? 0}</strong>
         <span>Keywords</span>
         <strong>{props.kad.indexedKeywordCount ?? 0}</strong>
         <span>Sources</span>
@@ -1064,8 +1162,91 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
         <input value={bootstrapPort} inputMode="numeric" placeholder="Port" onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
         <button type="submit"><Plug size={16} />Bootstrap</button>
       </form>
+      <div class="form-row">
+        <input value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>IP</th>
+              <th>Host</th>
+              <th>UDP/TCP</th>
+              <th>Version</th>
+              <th>State</th>
+              <th>Verified</th>
+              <th>Flags</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredNodes.map((node) => (
+              <tr key={node.nodeId ?? `${node.ip}:${node.udpPort}`} class={selected && selected.nodeId === node.nodeId ? "selected-row" : ""} onClick={() => setSelectedNodeId(node.nodeId ?? "")}>
+                <td>{node.ip ?? ""}</td>
+                <td>{hostNameLabel(node)}</td>
+                <td>{node.udpPort ?? 0} / {node.tcpPort ?? 0}</td>
+                <td>{node.kadVersion ?? 0}</td>
+                <td><StatusPill value={node.contactType ?? "unknown"} /></td>
+                <td>{yesNo(node.verified)}</td>
+                <td>{node.udpKeyKnown ? "key " : ""}{node.bootstrap ? "boot " : ""}{node.udpFirewalled ? "udp-fw " : ""}{node.tcpFirewalled ? "tcp-fw" : ""}</td>
+                <td>{shortTime(node.lastSeen)}</td>
+              </tr>
+            ))}
+            {filteredNodes.length === 0 && <EmptyRow colSpan={8} text="No Kad nodes." />}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <div class="split detail-split">
+          <div class="kv compact">
+            <span>Node ID</span><strong>{selected.nodeId ?? ""}</strong>
+            <span>IP</span><strong>{selected.ip ?? ""}</strong>
+            <span>Hostname</span><strong>{hostNameLabel(selected)}</strong>
+            <span>DNS status</span><strong>{selected.hostNameStatus ?? "unknown"}</strong>
+            <span>UDP/TCP ports</span><strong>{selected.udpPort ?? 0} / {selected.tcpPort ?? 0}</strong>
+            <span>Kad version</span><strong>{selected.kadVersion ?? 0}</strong>
+          </div>
+          <div class="kv compact">
+            <span>Contact type</span><strong>{selected.contactType ?? "unknown"}</strong>
+            <span>Probe type</span><strong>{selected.probeType ?? 0}</strong>
+            <span>Verified</span><strong>{yesNo(selected.verified)}</strong>
+            <span>UDP key known</span><strong>{yesNo(selected.udpKeyKnown)}</strong>
+            <span>Hello source UDP</span><strong>{selected.helloSourceUdpPort ?? ""}</strong>
+            <span>Created / last seen</span><strong>{shortTime(selected.createdAt)} / {shortTime(selected.lastSeen)}</strong>
+          </div>
+        </div>
+      )}
     </section>
   );
+}
+
+function serverEndpoint(server: ServerItem): string {
+  return server.endpoint ?? server.id ?? `${server.address ?? ""}:${server.port ?? ""}`;
+}
+
+function hostNameLabel(item: { hostName?: string | null; hostNameStatus?: string | null; hostNameError?: string | null }): string {
+  if (item.hostName) {
+    return item.hostName;
+  }
+  if (item.hostNameStatus && item.hostNameStatus !== "unknown") {
+    return item.hostNameStatus;
+  }
+  return "";
+}
+
+function yesNo(value: unknown): string {
+  return value === true ? "yes" : "no";
+}
+
+function shortTime(value?: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 export function CategoriesView(props: { categories: Category[]; client: RestClient; run: RunFunction }) {
@@ -1236,6 +1417,11 @@ type SettingsForm = {
   incomingDir: string;
   p2pBindIp: string;
   p2pBindInterface: string;
+  hostnameLookupEnabled: boolean;
+  hostnameLookupDnsServers: string;
+  hostnameLookupCacheTtlSecs: string;
+  hostnameLookupMaxLookupsPerTick: string;
+  hostnameLookupTickIntervalSecs: string;
   ed2kListenPort: string;
   kadListenPort: string;
   obfuscationEnabled: boolean;
@@ -1280,6 +1466,11 @@ const emptySettingsForm: SettingsForm = {
   incomingDir: "",
   p2pBindIp: "",
   p2pBindInterface: "",
+  hostnameLookupEnabled: false,
+  hostnameLookupDnsServers: "",
+  hostnameLookupCacheTtlSecs: "",
+  hostnameLookupMaxLookupsPerTick: "",
+  hostnameLookupTickIntervalSecs: "",
   ed2kListenPort: "",
   kadListenPort: "",
   obfuscationEnabled: false,
@@ -1343,7 +1534,15 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
         ...(settings.daemon ?? {}),
         incomingDir: optionalString(form.incomingDir),
         p2pBindIp: optionalString(form.p2pBindIp),
-        p2pBindInterface: optionalString(form.p2pBindInterface)
+        p2pBindInterface: optionalString(form.p2pBindInterface),
+        hostnameLookup: {
+          ...(recordField(settings.daemon, "hostnameLookup")),
+          enabled: form.hostnameLookupEnabled,
+          dnsServers: form.hostnameLookupDnsServers.split(",").map((item) => item.trim()).filter(Boolean),
+          cacheTtlSecs: parseNumber(form.hostnameLookupCacheTtlSecs, 86400),
+          maxLookupsPerTick: parseNumber(form.hostnameLookupMaxLookupsPerTick, 32),
+          tickIntervalSecs: parseNumber(form.hostnameLookupTickIntervalSecs, 30)
+        }
       },
       ed2k: {
         ...(settings.ed2k ?? {}),
@@ -1413,6 +1612,10 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
         <Field label="Incoming directory" value={form.incomingDir} onInput={(value) => update("incomingDir", value)} />
         <Field label="P2P bind IP" value={form.p2pBindIp} onInput={(value) => update("p2pBindIp", value)} />
         <Field label="P2P bind interface" value={form.p2pBindInterface} onInput={(value) => update("p2pBindInterface", value)} />
+        <Field label="DNS servers" value={form.hostnameLookupDnsServers} onInput={(value) => update("hostnameLookupDnsServers", value)} />
+        <Field label="DNS cache TTL seconds" value={form.hostnameLookupCacheTtlSecs} onInput={(value) => update("hostnameLookupCacheTtlSecs", value)} />
+        <Field label="DNS lookups / tick" value={form.hostnameLookupMaxLookupsPerTick} onInput={(value) => update("hostnameLookupMaxLookupsPerTick", value)} />
+        <Field label="DNS tick seconds" value={form.hostnameLookupTickIntervalSecs} onInput={(value) => update("hostnameLookupTickIntervalSecs", value)} />
         <Field label="eD2K listen port" value={form.ed2kListenPort} onInput={(value) => update("ed2kListenPort", value)} />
         <Field label="Kad listen port" value={form.kadListenPort} onInput={(value) => update("kadListenPort", value)} />
         <Field label="Kad republish seconds" value={form.kadRepublishIntervalSecs} onInput={(value) => update("kadRepublishIntervalSecs", value)} />
@@ -1444,6 +1647,7 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
         <Toggle label="Require initial NAT mapping" checked={form.natRequireInitialMapping} onInput={(value) => update("natRequireInitialMapping", value)} />
         <Toggle label="VPN Guard" checked={form.vpnGuardEnabled} onInput={(value) => update("vpnGuardEnabled", value)} />
         <Toggle label="IP filter" checked={form.ipFilterEnabled} onInput={(value) => update("ipFilterEnabled", value)} />
+        <Toggle label="Hostname lookup" checked={form.hostnameLookupEnabled} onInput={(value) => update("hostnameLookupEnabled", value)} />
       </div>
     </section>
   );
@@ -1489,6 +1693,11 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     incomingDir: stringField(settings.daemon, "incomingDir"),
     p2pBindIp: stringField(settings.daemon, "p2pBindIp"),
     p2pBindInterface: stringField(settings.daemon, "p2pBindInterface"),
+    hostnameLookupEnabled: boolField(recordField(settings.daemon, "hostnameLookup"), "enabled"),
+    hostnameLookupDnsServers: arrayField(recordField(settings.daemon, "hostnameLookup"), "dnsServers").join(", "),
+    hostnameLookupCacheTtlSecs: String(numberField(recordField(settings.daemon, "hostnameLookup"), "cacheTtlSecs") ?? ""),
+    hostnameLookupMaxLookupsPerTick: String(numberField(recordField(settings.daemon, "hostnameLookup"), "maxLookupsPerTick") ?? ""),
+    hostnameLookupTickIntervalSecs: String(numberField(recordField(settings.daemon, "hostnameLookup"), "tickIntervalSecs") ?? ""),
     ed2kListenPort: String(numberField(settings.ed2k, "listenPort") ?? ""),
     kadListenPort: String(numberField(settings.kad, "listenPort") ?? ""),
     obfuscationEnabled: boolField(settings.ed2k, "obfuscationEnabled"),
@@ -1512,6 +1721,16 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ipFilterPath: stringField(settings.ipFilter, "path"),
     ipFilterLevel: String(numberField(settings.ipFilter, "level") ?? "")
   };
+}
+
+function recordField(object: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
+  const value = object?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function arrayField(object: Record<string, unknown> | undefined, key: string): string[] {
+  const value = object?.[key];
+  return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
 function optionalPort(value: string): number | null {

@@ -3,7 +3,12 @@
 //! Extracted verbatim from `lib.rs` during the maintainability restructuring;
 //! behavior is unchanged.
 
-use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    body::Bytes,
+    extract::{RawQuery, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use serde_json::json;
 
 use crate::handlers::prelude::*;
@@ -14,6 +19,17 @@ pub(crate) async fn kad(State(state): State<RestState>) -> impl IntoResponse {
         state.core.network_binding_status().as_ref(),
         &state.core.vpn_guard_status(),
     ))
+}
+
+pub(crate) async fn kad_nodes(
+    State(state): State<RestState>,
+    RawQuery(raw_query): RawQuery,
+) -> impl IntoResponse {
+    let query = match parse_optional_query::<PageQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    api_collection_page(state.core.kad_nodes().await, query).into_response()
 }
 
 pub(crate) async fn kad_start(State(state): State<RestState>) -> impl IntoResponse {

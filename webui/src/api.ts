@@ -139,15 +139,62 @@ export type ServerItem = {
   static?: boolean;
   users?: number;
   files?: number;
+  current?: boolean;
+  description?: string;
+  dynIp?: string;
+  failedCount?: number;
+  hardFiles?: number;
+  ip?: string;
+  ping?: number;
+  softFiles?: number;
+  version?: string;
+  obfuscationTcpPort?: number | null;
+  udpFlags?: number | null;
+  hostName?: string | null;
+  hostNameStatus?: string | null;
+  hostNameResolvedAt?: string | null;
+  hostNameError?: string | null;
+  [key: string]: unknown;
+};
+
+export type KadNode = {
+  nodeId?: string;
+  ip?: string;
+  hostName?: string | null;
+  hostNameStatus?: string | null;
+  hostNameResolvedAt?: string | null;
+  hostNameError?: string | null;
+  udpPort?: number;
+  tcpPort?: number;
+  kadVersion?: number;
+  verified?: boolean;
+  contactType?: string;
+  probeType?: number;
+  udpKeyKnown?: boolean;
+  helloSourceUdpPort?: number | null;
+  udpFirewalled?: boolean;
+  tcpFirewalled?: boolean;
+  receivedHelloPacket?: boolean;
+  bootstrap?: boolean;
+  createdAt?: string;
+  lastSeen?: string;
   [key: string]: unknown;
 };
 
 export type KadStatus = {
   enabled?: boolean;
+  running?: boolean;
   connected?: boolean;
   firewalled?: boolean | null;
+  bootstrapping?: boolean;
+  bootstrapProgress?: number;
+  contactCount?: number;
+  users?: number;
+  files?: number;
+  nodes?: number;
   indexedKeywordCount?: number;
   indexedSourceCount?: number;
+  blockedByVpnGuard?: boolean;
   [key: string]: unknown;
 };
 

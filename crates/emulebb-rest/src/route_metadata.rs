@@ -503,6 +503,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         }),
         ("GET", "/api/v1/snapshot") => Some(SNAPSHOT),
         ("GET", "/api/v1/shared-files") => Some(PAGE),
+        ("GET", "/api/v1/kad/nodes") => Some(PAGE),
         ("GET", "/api/v1/transfers") => Some(TRANSFERS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),

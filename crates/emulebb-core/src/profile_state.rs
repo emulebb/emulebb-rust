@@ -285,5 +285,9 @@ fn server_from_metadata(server: MetadataServer) -> ServerInfo {
         udp_flags: server.udp_flags,
         users: server.users,
         files: server.files,
+        host_name: None,
+        host_name_status: None,
+        host_name_resolved_at: None,
+        host_name_error: None,
     }
 }

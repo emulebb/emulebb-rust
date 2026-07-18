@@ -361,6 +361,17 @@ pub struct DaemonSettings {
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
+    pub hostname_lookup: HostnameLookupSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct HostnameLookupSettings {
+    pub enabled: bool,
+    pub dns_servers: Vec<String>,
+    pub cache_ttl_secs: u64,
+    pub max_lookups_per_tick: usize,
+    pub tick_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,6 +591,18 @@ impl Default for Ed2kSettings {
             publish_emule_rust_identity: false,
             add_servers_from_server: false,
             dead_server_retries: 1,
+        }
+    }
+}
+
+impl Default for HostnameLookupSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dns_servers: Vec::new(),
+            cache_ttl_secs: 86_400,
+            max_lookups_per_tick: 32,
+            tick_interval_secs: 30,
         }
     }
 }

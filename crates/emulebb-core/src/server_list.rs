@@ -68,7 +68,13 @@ impl EmulebbCore {
         {
             apply_server_live_details(server, &connection.2);
         }
-        server_map.into_values().collect::<Vec<_>>()
+        server_map
+            .into_values()
+            .map(|mut server| {
+                self.apply_hostname_to_server(&mut server);
+                server
+            })
+            .collect::<Vec<_>>()
     }
 
     pub(crate) async fn effective_ed2k_config(

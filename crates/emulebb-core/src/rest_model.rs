@@ -107,6 +107,48 @@ pub struct ServerInfo {
     pub udp_flags: Option<u32>,
     pub users: u64,
     pub files: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name_resolved_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostNameResolution {
+    pub host_name: Option<String>,
+    pub host_name_status: String,
+    pub host_name_resolved_at: Option<DateTime<Utc>>,
+    pub host_name_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KadNode {
+    pub node_id: String,
+    pub ip: String,
+    pub host_name: Option<String>,
+    pub host_name_status: String,
+    pub host_name_resolved_at: Option<DateTime<Utc>>,
+    pub host_name_error: Option<String>,
+    pub udp_port: u16,
+    pub tcp_port: u16,
+    pub kad_version: u8,
+    pub verified: bool,
+    pub contact_type: String,
+    pub probe_type: u8,
+    pub udp_key_known: bool,
+    pub hello_source_udp_port: Option<u16>,
+    pub udp_firewalled: bool,
+    pub tcp_firewalled: bool,
+    pub received_hello_packet: bool,
+    pub bootstrap: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

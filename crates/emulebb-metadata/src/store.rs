@@ -73,24 +73,28 @@ impl MetadataStore {
         }
     }
 
-    /// Ensure the database matches this development build's fresh schema.
+    /// Ensure the database matches this build's current schema.
     ///
-    /// During the Rust dev phase there is no in-product schema migration path:
-    /// a mismatched or unmarked database is dropped and recreated. Operator-local
-    /// profile preservation belongs in explicit one-off SQLite/Python updates.
+    /// Rust product code is current-schema-only: it creates a schema for an empty
+    /// database, and otherwise requires the stored schema marker to match exactly.
+    /// Operator-local profile preservation belongs in explicit one-off
+    /// SQLite/Python updates outside this crate.
     fn ensure_schema(&mut self) -> Result<()> {
         if self.table_exists("metadata_schema")? {
-            if self.stored_schema_version()? == Some(SCHEMA_VERSION) {
-                self.prune_transfer_sources()?;
-                return Ok(());
-            }
-            self.reset_schema()?;
+            let stored_version = self
+                .stored_schema_version()?
+                .with_context(|| format!("metadata schema marker {SCHEMA_ID:?} is missing"))?;
+            ensure!(
+                stored_version == SCHEMA_VERSION,
+                "metadata schema version {stored_version} is not current {SCHEMA_VERSION}; run the explicit Python soak-profile migration or use a fresh profile"
+            );
+            self.prune_transfer_sources()?;
             return Ok(());
         }
-        if self.has_user_tables()? {
-            self.reset_schema()?;
-            return Ok(());
-        }
+        ensure!(
+            !self.has_user_tables()?,
+            "metadata database has existing user objects but no metadata_schema marker; refusing to create or repair schema in Rust"
+        );
         self.create_schema()
     }
 
@@ -153,36 +157,6 @@ impl MetadataStore {
             |row| row.get(0),
         )?;
         Ok(count != 0)
-    }
-
-    fn reset_schema(&mut self) -> Result<()> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        let objects = tx
-            .prepare(
-                r#"
-                SELECT type, name
-                FROM sqlite_master
-                WHERE type IN ('table', 'view', 'trigger')
-                  AND name NOT LIKE 'sqlite_%'
-                ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END, name
-                "#,
-            )?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (object_type, name) in objects {
-            let escaped = name.replace('"', "\"\"");
-            match object_type.as_str() {
-                "trigger" => tx.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{escaped}\""))?,
-                "view" => tx.execute_batch(&format!("DROP VIEW IF EXISTS \"{escaped}\""))?,
-                _ => tx.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped}\""))?,
-            }
-        }
-        tx.commit()?;
-        drop(conn);
-        self.create_schema()
     }
 
     fn create_schema(&mut self) -> Result<()> {
@@ -506,17 +480,20 @@ mod tests {
     }
 
     #[test]
-    fn resets_unmarked_existing_database() {
+    fn rejects_unmarked_existing_database() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE files(id INTEGER PRIMARY KEY)", [])
             .unwrap();
-        let store = MetadataStore::from_connection(conn).unwrap();
-        assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
-        assert!(!store.table_exists("files").unwrap());
+        let error = MetadataStore::from_connection(conn).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("no metadata_schema marker"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
-    fn resets_marked_database_with_noncurrent_schema_version() {
+    fn rejects_marked_database_with_noncurrent_schema_version() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
@@ -533,10 +510,36 @@ mod tests {
         )
         .unwrap();
 
-        let store = MetadataStore::from_connection(conn).unwrap();
+        let error = MetadataStore::from_connection(conn).unwrap_err();
 
-        assert_eq!(store.table_count("metadata_schema").unwrap(), 1);
-        assert!(!store.table_exists("files").unwrap());
+        assert!(
+            format!("{error:#}").contains("metadata schema version 1 is not current"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_marked_database_missing_current_schema_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE metadata_schema (
+                schema_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO metadata_schema(schema_id, schema_version, created_at_ms)
+            VALUES ('other-schema', 16, 0);
+            "#,
+        )
+        .unwrap();
+
+        let error = MetadataStore::from_connection(conn).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("metadata schema marker"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

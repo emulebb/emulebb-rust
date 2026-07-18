@@ -61,6 +61,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/friends", get(friends).post(create_friend))
         .route("/api/v1/friends/{user_hash}", delete(delete_friend))
         .route("/api/v1/kad", get(kad))
+        .route("/api/v1/kad/nodes", get(kad_nodes))
         .route(
             "/api/v1/kad/operations/import-nodes-url",
             post(kad_import_nodes_url),

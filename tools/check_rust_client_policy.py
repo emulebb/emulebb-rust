@@ -81,6 +81,7 @@ def main() -> int:
     errors.extend(check_no_loopback_binds())
     errors.extend(check_egress_audit_is_test_only())
     errors.extend(check_no_legacy_rust_native_surface())
+    errors.extend(check_current_only_metadata_schema())
     if errors:
         print("rust client policy check failed:", file=sys.stderr)
         for error in errors:
@@ -239,6 +240,57 @@ def check_no_legacy_rust_native_surface() -> list[str]:
         for needle, reason in FORBIDDEN_RUST_NATIVE_SURFACE.items():
             if needle in text:
                 errors.append(f"{normalized} contains {reason}: {needle}")
+    return errors
+
+
+METADATA_SCHEMA_FORBIDDEN_PATTERNS = (
+    (
+        re.compile(r"\bfn\s+reset_schema\b"),
+        "Rust metadata reset helper; stale databases must fail, not be recreated",
+    ),
+    (
+        re.compile(r"\breset_schema\s*\("),
+        "Rust metadata schema reset call; use explicit Python soak-profile migration instead",
+    ),
+    (
+        re.compile(r"\bALTER\s+TABLE\b", re.IGNORECASE),
+        "Rust metadata ALTER TABLE migration; schema changes must be current-only",
+    ),
+    (
+        re.compile(r"\bDROP\s+(?:TABLE|VIEW|TRIGGER)\b", re.IGNORECASE),
+        "Rust metadata drop/recreate migration; stale databases must fail visibly",
+    ),
+)
+
+
+def check_current_only_metadata_schema(file_texts: dict[str, str] | None = None) -> list[str]:
+    """Reject Rust-side metadata migrations and retired schema fields."""
+
+    if file_texts is None:
+        files = {
+            rel.replace("\\", "/"): (ROOT / rel).read_text(encoding="utf-8")
+            for rel in tracked_files("crates/emulebb-metadata/src/*")
+            if rel.endswith((".rs", ".sql"))
+        }
+    else:
+        files = {rel.replace("\\", "/"): text for rel, text in file_texts.items()}
+
+    errors: list[str] = []
+    for rel, text in files.items():
+        if rel.endswith("schema.sql") and re.search(
+            r"CREATE\s+TABLE\s+shared_directory_roots\b.*\brecursive\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            errors.append(
+                f"{rel} contains retired shared_directory_roots.recursive; "
+                "metadata schema must be current-only"
+            )
+        if not rel.endswith(".rs"):
+            continue
+        for pattern, reason in METADATA_SCHEMA_FORBIDDEN_PATTERNS:
+            if pattern.search(text):
+                errors.append(f"{rel} contains {reason}")
     return errors
 
 

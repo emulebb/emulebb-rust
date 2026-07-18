@@ -393,6 +393,10 @@ td {
   overflow-x: auto;
 }
 
+.table-wrap td {
+  overflow-wrap: anywhere;
+}
+
 .path-cell {
   max-width: 760px;
   overflow-wrap: anywhere;
@@ -478,6 +482,10 @@ td {
   display: grid;
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.detail-split {
+  margin-top: 12px;
 }
 
 .json-panel {

@@ -22,6 +22,21 @@ fn names(mut paths: Vec<PathBuf>) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn shared_directory_root_update_rejects_retired_recursive_field() {
+    let error = serde_json::from_str::<SharedDirectoriesUpdate>(
+        r#"{"roots":[{"path":"C:/Shared","recursive":true}],"confirmReplaceRoots":true}"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown shared-directory root field: recursive"),
+        "unexpected error: {error}"
+    );
+}
+
 #[tokio::test]
 async fn incremental_reload_skips_unchanged_failed_source_and_retries_changed_identity() {
     let root = scratch_dir("failed-source");

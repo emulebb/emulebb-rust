@@ -30,6 +30,7 @@ use emulebb_kad_proto::{KadUdpKey, NodeId};
 use emulebb_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -80,6 +81,27 @@ pub struct KadRoutingSummaryCounts {
     /// Contacts carrying a non-zero peer UDP anti-spoofing key (oracle
     /// `with_udp_key`).
     pub with_udp_key: usize,
+}
+
+/// A read-only routing contact snapshot for operator-facing network views.
+#[derive(Debug, Clone)]
+pub struct KadRoutingContactSnapshot {
+    pub node_id: String,
+    pub ip: Ipv4Addr,
+    pub udp_port: u16,
+    pub tcp_port: u16,
+    pub kad_version: u8,
+    pub verified: bool,
+    pub contact_type: &'static str,
+    pub probe_type: u8,
+    pub udp_key_known: bool,
+    pub hello_source_udp_port: Option<u16>,
+    pub udp_firewalled: bool,
+    pub tcp_firewalled: bool,
+    pub received_hello_packet: bool,
+    pub bootstrap: bool,
+    pub created_at: SystemTime,
+    pub last_seen: SystemTime,
 }
 
 /// The top-level DHT node. Clone-able (backed by Arc).
@@ -231,6 +253,37 @@ impl DhtNode {
             }
         }
         counts
+    }
+
+    /// Snapshot all routing contacts for the power-user Kad node view. The mutex
+    /// is held only while cloning contacts out of the routing table.
+    pub async fn routing_contacts_snapshot(&self) -> Vec<KadRoutingContactSnapshot> {
+        let rt = self.inner.routing_table.lock().await;
+        rt.all_contacts()
+            .into_iter()
+            .map(|contact| KadRoutingContactSnapshot {
+                node_id: contact.id.to_string(),
+                ip: contact.ip,
+                udp_port: contact.udp_port,
+                tcp_port: contact.tcp_port,
+                kad_version: contact.kad_version,
+                verified: contact.verified,
+                contact_type: match contact.contact_type {
+                    emulebb_kad_routing::ContactType::Active => "active",
+                    emulebb_kad_routing::ContactType::Inactive => "inactive",
+                    emulebb_kad_routing::ContactType::Dead => "dead",
+                },
+                probe_type: contact.probe_type,
+                udp_key_known: contact.udp_key != KadUdpKey::ZERO,
+                hello_source_udp_port: contact.hello_source_udp_port,
+                udp_firewalled: contact.udp_firewalled,
+                tcp_firewalled: contact.tcp_firewalled,
+                received_hello_packet: contact.received_hello_packet,
+                bootstrap: contact.bootstrap,
+                created_at: contact.created_at,
+                last_seen: contact.last_seen,
+            })
+            .collect()
     }
 
     /// Estimated Kad DHT user population (oracle `CKademlia::GetKademliaUsers` via

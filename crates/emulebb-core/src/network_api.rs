@@ -265,6 +265,10 @@ impl EmulebbCore {
         if kad_network_enabled {
             tasks.push(dht.clone().start());
         }
+        tasks.push(tokio::spawn(hostname_lookup::run_hostname_lookup_loop(
+            self.clone(),
+            Arc::clone(&shutdown),
+        )));
         // "Reconnect now" signal: the advertised-ports sync fires it when the
         // external port changes (UPnP ready / remapped) so the server loop re-logs
         // in with the new HighID callback port instead of waiting for a reconnect.

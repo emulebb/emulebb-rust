@@ -36,7 +36,7 @@ pub(crate) use categories::{
 };
 pub(crate) use friends::{create_friend, delete_friend, friends};
 pub(crate) use kad::{
-    kad, kad_bootstrap, kad_import_nodes_url, kad_recheck_firewall, kad_start, kad_stop,
+    kad, kad_bootstrap, kad_import_nodes_url, kad_nodes, kad_recheck_firewall, kad_start, kad_stop,
 };
 pub(crate) use logs::{clear_logs, logs};
 pub(crate) use searches::{

@@ -251,7 +251,11 @@ pub(crate) fn server_response(server: &ServerInfo) -> Value {
         "obfuscationTcpPort": server.obfuscation_tcp_port,
         "udpFlags": server.udp_flags,
         "users": server.users,
-        "files": server.files
+        "files": server.files,
+        "hostName": server.host_name,
+        "hostNameStatus": server.host_name_status,
+        "hostNameResolvedAt": server.host_name_resolved_at,
+        "hostNameError": server.host_name_error
     })
 }
 
@@ -749,6 +753,10 @@ mod tests {
             udp_flags: Some(0x331),
             users: 0,
             files: 0,
+            host_name: None,
+            host_name_status: None,
+            host_name_resolved_at: None,
+            host_name_error: None,
         }];
 
         let value = server_status_value(&status, &servers);

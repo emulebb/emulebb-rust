@@ -78,6 +78,7 @@ async fn all_limited_routes_reject_out_of_range_limit_with_canonical_bounds() {
         "/api/v1/logs?limit=5000",
         "/api/v1/shared-files?limit=0",
         "/api/v1/upload-queue?limit=5000",
+        "/api/v1/kad/nodes?limit=0",
     ] {
         let (status, value) = query_error_value(uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");

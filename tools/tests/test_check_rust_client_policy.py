@@ -73,6 +73,61 @@ class TestLintSuppressions(unittest.TestCase):
         self.assertFalse(CHECKER.contains_permanent_lint_allow("#[allow(non_snake_case)]"))
 
 
+class TestCurrentOnlyMetadataSchema(unittest.TestCase):
+    def test_rejects_rust_side_schema_repair_patterns(self) -> None:
+        errors = CHECKER.check_current_only_metadata_schema(
+            {
+                "crates/emulebb-metadata/src/store.rs": """
+fn reset_schema(&mut self) {}
+fn open() {
+    self.reset_schema()?;
+    tx.execute_batch("DROP TABLE old");
+    tx.execute_batch("ALTER TABLE files ADD COLUMN old INTEGER");
+}
+""",
+            }
+        )
+
+        self.assertGreaterEqual(len(errors), 4)
+        self.assertTrue(any("reset helper" in error for error in errors))
+        self.assertTrue(any("ALTER TABLE" in error for error in errors))
+
+    def test_rejects_retired_recursive_schema_field(self) -> None:
+        errors = CHECKER.check_current_only_metadata_schema(
+            {
+                "crates/emulebb-metadata/src/schema.sql": """
+CREATE TABLE shared_directory_roots (
+    id INTEGER PRIMARY KEY,
+    recursive INTEGER NOT NULL DEFAULT 0
+);
+""",
+            }
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("shared_directory_roots.recursive", errors[0])
+
+    def test_accepts_current_schema_open_path(self) -> None:
+        errors = CHECKER.check_current_only_metadata_schema(
+            {
+                "crates/emulebb-metadata/src/store.rs": """
+fn ensure_schema(&mut self) -> Result<()> {
+    ensure!(stored_version == SCHEMA_VERSION, "not current");
+    Ok(())
+}
+""",
+                "crates/emulebb-metadata/src/schema.sql": """
+CREATE TABLE shared_directory_roots (
+    id INTEGER PRIMARY KEY,
+    path_id INTEGER NOT NULL
+);
+""",
+            }
+        )
+
+        self.assertEqual(errors, [])
+
+
 class TestActionPins(unittest.TestCase):
     def test_accepts_only_full_lowercase_commit_ids(self) -> None:
         self.assertTrue(CHECKER.action_ref_is_immutable("a" * 40))

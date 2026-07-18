@@ -38,6 +38,16 @@ Everything below is this repo's local deltas only:
   preserved, use an explicit one-off SQLite/Python update against that
   operator-local DB (for example a soak `emulebb-rust-metadata.db`) instead of encoding
   the compatibility path in product code.
+- Rust metadata DB schema is current-only. Product Rust code must require the
+  checked-in schema exactly; do not add Rust-side schema migrations, fallback
+  reads for retired columns, legacy field support, or silent startup repair.
+  Persisted live-soak profiles may be repaired only by an explicit ad-hoc Python
+  migration in `repos\emulebb-build-tests`, with a backup, leaving the database
+  at the current schema. A stale unmigrated DB should fail visibly.
+- Retired Rust REST, settings, and metadata fields are hard errors. Do not
+  deserialize-and-ignore, alias, remap, or bridge old field names in Rust code.
+  If a persisted live-soak profile or harness still emits retired fields, fix it
+  outside the Rust product path.
 - Follow the responsibility-based source-structure and test-placement policy in
   `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust\reference\CODE-QUALITY.md`.
   Source length is advisory; split by responsibility, keep substantial tests
