@@ -2706,6 +2706,9 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "kadPublishContactFanout", "Publish contact fanout", { min: 1 });
   validateUnsigned(errors, form, "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds", { min: 60 });
   validateUnsigned(errors, form, "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds", { min: 60 });
+  validateOptionalIpv4(errors, form, "natBindIp", "NAT bind IP");
+  validateOptionalIpv4(errors, form, "natIgdIp", "Pinned IGD IP");
+  validateOptionalIpv4(errors, form, "natExternalIpOverride", "External IP override");
   validateUnsigned(errors, form, "natSsdpLocalPort", "SSDP local port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "natDiscoveryTimeoutSecs", "Discovery timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
@@ -2742,6 +2745,28 @@ function validateUnsigned(
       errors.set(key, `${label} must be between ${min} and ${max}.`);
     }
   }
+}
+
+function validateOptionalIpv4(
+  errors: Map<SettingsTextKey, string>,
+  form: SettingsForm,
+  key: SettingsTextKey,
+  label: string
+) {
+  const value = form[key].trim();
+  if (value && !isIpv4Address(value)) {
+    errors.set(key, `${label} must be an IPv4 address.`);
+  }
+}
+
+function isIpv4Address(value: string): boolean {
+  const parts = value.split(".");
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^(0|[1-9]\d{0,2})$/.test(part)) {
+      return false;
+    }
+    return Number(part) <= 255;
+  });
 }
 
 function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: SettingsForm) {

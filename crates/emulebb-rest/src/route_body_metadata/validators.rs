@@ -4,6 +4,7 @@ mod core_settings;
 mod search;
 
 use axum::response::Response;
+use std::net::Ipv4Addr;
 
 use super::{JsonObject, invalid_body_error};
 
@@ -494,6 +495,13 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 }
 
 fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_nullable_ipv4_text(object, "bindIp", "settings.nat.bindIp")?;
+    validate_nullable_ipv4_text(object, "igdIp", "settings.nat.igdIp")?;
+    validate_nullable_ipv4_text(
+        object,
+        "externalIpOverride",
+        "settings.nat.externalIpOverride",
+    )?;
     validate_unsigned_number_min(
         object,
         "discoveryTimeoutSecs",
@@ -530,6 +538,30 @@ fn invalid_nat_backend_order_error() -> Box<Response> {
         "settings.nat.backendOrder must contain only {}",
         NAT_BACKEND_UPNP_MINIUPNPC
     ))
+}
+
+fn validate_nullable_ipv4_text(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(text) = value.as_str() else {
+        return Err(invalid_ipv4_text_error(path));
+    };
+    if text.parse::<Ipv4Addr>().is_err() {
+        return Err(invalid_ipv4_text_error(path));
+    }
+    Ok(())
+}
+
+fn invalid_ipv4_text_error(path: &str) -> Box<Response> {
+    invalid_body_error(format!("{path} must be an IPv4 address string or null"))
 }
 
 fn validate_nullable_unsigned_number_min(

@@ -139,6 +139,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("Startup upload slots").fill("3");
   await expect(settingsPanel.getByText("Startup upload slots must be between 1 and 64.")).toHaveCount(0);
+  await settingsPanel.getByLabel("NAT bind IP").fill("not-an-ip");
+  await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("NAT bind IP").fill("192.0.2.11");
+  await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toHaveCount(0);
   await settingsPanel.getByLabel("Concurrent downloads").fill("0");
   await settingsPanel.getByLabel("eD2K new connections / 5s").fill("0");
   await settingsPanel.getByLabel("eD2K half-open connections").fill("0");

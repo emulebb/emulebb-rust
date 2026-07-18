@@ -546,6 +546,18 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.nat.renewMarginSecs must be an unsigned number greater than or equal to 1",
         ),
         (
+            r#"{"nat":{"bindIp":"not-an-ip"}}"#,
+            "settings.nat.bindIp must be an IPv4 address string or null",
+        ),
+        (
+            r#"{"nat":{"igdIp":"2001:db8::1"}}"#,
+            "settings.nat.igdIp must be an IPv4 address string or null",
+        ),
+        (
+            r#"{"nat":{"externalIpOverride":203}}"#,
+            "settings.nat.externalIpOverride must be an IPv4 address string or null",
+        ),
+        (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
             "settings.nat PATCH requires at least one setting",
         ),
