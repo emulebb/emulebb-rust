@@ -310,12 +310,13 @@ test("category forms validate names and priority inputs", async ({ page }) => {
   await expect(addCategory).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "categories").length).toBe(initialCategoryPosts);
   await categoriesPanel.getByPlaceholder("Name").fill("Media");
+  await categoriesPanel.getByPlaceholder("Incoming path").fill("   ");
   await categoriesPanel.locator("select").selectOption("verylow");
   await addCategory.click();
   await expect(page.getByText("Category created")).toBeVisible();
   const categoryPost = requests.find((request) => request.method === "POST" && request.path === "categories");
   expect(categoryPost).toBeDefined();
-  expect(JSON.parse(categoryPost?.body ?? "{}")).toMatchObject({ name: "Media", priority: "verylow" });
+  expect(JSON.parse(categoryPost?.body ?? "{}")).toMatchObject({ name: "Media", path: null, priority: "verylow" });
 
   const categoryRow = categoriesPanel.locator("tbody tr").first();
   const rowInputs = categoryRow.locator("input.form-control");
