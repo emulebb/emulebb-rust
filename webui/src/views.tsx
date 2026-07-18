@@ -2069,6 +2069,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
     setForm((current) => ({ ...current, [key]: value }));
   };
 
+  const validationErrors = validateSettingsForm(form);
+  const hasValidationErrors = validationErrors.size > 0;
   const dirty = props.settings ? JSON.stringify(form) !== JSON.stringify(baseline) : false;
   const advancedCount = props.surface?.settings.filter((spec) => spec.class === "advancedControl").length ?? 0;
   const shouldRender = (path: string) => {
@@ -2079,7 +2081,7 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
     return showAdvanced || spec?.class !== "advancedControl";
   };
   const renderField = (path: string, key: SettingsTextKey, label: string) => shouldRender(path)
-    ? <Field label={label} value={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
+    ? <Field label={label} value={form[key]} surface={surfaceByPath.get(path)} error={validationErrors.get(key)} onInput={(value) => update(key, value)} />
     : null;
   const renderToggle = (path: string, key: SettingsBooleanKey, label: string) => shouldRender(path)
     ? <Toggle label={label} checked={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
@@ -2184,12 +2186,13 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
             <RefreshCw size={15} />
             Revert
           </button>
-          <button class="btn" type="button" disabled={!dirty} onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
+          <button class="btn" type="button" disabled={!dirty || hasValidationErrors} onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
             <Save size={15} />
             Save
           </button>
         </div>
       </div>
+      {hasValidationErrors && <p class="settings-error-summary">Fix highlighted settings before saving.</p>}
       <div class="settings-grid">
         {renderField("core.uploadLimitKiBps", "uploadLimitKiBps", "Upload limit KiB/s")}
         {renderField("core.downloadLimitKiBps", "downloadLimitKiBps", "Download limit KiB/s")}
@@ -2273,14 +2276,15 @@ function SettingsSectionResources(props: { resources: SettingsSectionResourceSpe
   );
 }
 
-function Field(props: { label: string; value: string; surface?: SettingSurfaceSpec; onInput: (value: string) => void }) {
+function Field(props: { label: string; value: string; surface?: SettingSurfaceSpec; error?: string; onInput: (value: string) => void }) {
   return (
     <label title={props.surface?.description}>
       <span class="setting-label">
         <span>{props.label}</span>
         <SettingBadges surface={props.surface} />
       </span>
-      <input class="form-control" value={props.value} onInput={(event) => props.onInput(event.currentTarget.value)} />
+      <input class="form-control" aria-invalid={props.error ? "true" : "false"} value={props.value} onInput={(event) => props.onInput(event.currentTarget.value)} />
+      {props.error && <span class="field-error">{props.error}</span>}
     </label>
   );
 }
@@ -2307,6 +2311,50 @@ function SettingBadges(props: { surface?: SettingSurfaceSpec }) {
       {props.surface.restartRequired && <span class="setting-badge">Restart</span>}
     </span>
   );
+}
+
+function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> {
+  const errors = new Map<SettingsTextKey, string>();
+  validateUnsigned(errors, form, "uploadLimitKiBps", "Upload limit KiB/s", { min: 1 });
+  validateUnsigned(errors, form, "downloadLimitKiBps", "Download limit KiB/s", { min: 1 });
+  validateUnsigned(errors, form, "maxConnections", "Max connections", { min: 1 });
+  validateUnsigned(errors, form, "maxConnectionsPerFiveSeconds", "New connections / 5s", { min: 1 });
+  validateUnsigned(errors, form, "maxSourcesPerFile", "Max sources / file", { min: 1 });
+  validateUnsigned(errors, form, "uploadClientDataRate", "Upload client KiB/s", { min: 1 });
+  validateUnsigned(errors, form, "maxUploadSlots", "Max upload slots", { min: 1, max: 64 });
+  validateUnsigned(errors, form, "uploadSlotElasticPercent", "Upload elasticity %", { max: 100 });
+  validateUnsigned(errors, form, "queueSize", "Queue size", { min: 2000, max: 10000 });
+  validateUnsigned(errors, form, "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds", { min: 1 });
+  validateUnsigned(errors, form, "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick", { min: 1 });
+  validateUnsigned(errors, form, "hostnameLookupTickIntervalSecs", "DNS tick seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kListenPort", "eD2K listen port", { optional: true, min: 1, max: 65535 });
+  validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
+  validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
+  validateUnsigned(errors, form, "ipFilterLevel", "IP filter level", {});
+  return errors;
+}
+
+function validateUnsigned(
+  errors: Map<SettingsTextKey, string>,
+  form: SettingsForm,
+  key: SettingsTextKey,
+  label: string,
+  options: { optional?: boolean; min?: number; max?: number }
+) {
+  const value = form[key].trim();
+  if (!value && options.optional) {
+    return;
+  }
+  if (!/^\d+$/.test(value)) {
+    errors.set(key, `${label} must be a whole number.`);
+    return;
+  }
+  const parsed = Number(value);
+  const min = options.min ?? 0;
+  const max = options.max ?? Number.MAX_SAFE_INTEGER;
+  if (parsed < min || parsed > max) {
+    errors.set(key, `${label} must be between ${min} and ${max}.`);
+  }
 }
 
 function settingsFormFrom(settings: AppSettings): SettingsForm {

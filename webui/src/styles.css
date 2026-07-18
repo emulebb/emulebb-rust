@@ -738,6 +738,16 @@ td {
   text-transform: uppercase;
 }
 
+.field-error,
+.settings-error-summary {
+  color: var(--tblr-danger);
+  font-size: 0.78rem;
+}
+
+.settings-error-summary {
+  margin: 0 0 12px;
+}
+
 .settings-section-resources {
   display: flex;
   flex-direction: column;

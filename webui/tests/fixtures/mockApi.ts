@@ -284,13 +284,53 @@ function dataFor(method: string, path: string): unknown {
       };
     case "app/settings":
       return {
-        core: { autoConnect: true, networkEd2k: true, networkKademlia: true },
-        daemon: { incomingDir: "C:\\Sample\\Incoming" },
-        ed2k: { listenPort: 4662 },
-        kad: { listenPort: 4672 },
-        nat: { enabled: false, backendOrder: [] },
+        core: {
+          uploadLimitKiBps: 6200,
+          downloadLimitKiBps: 12207,
+          maxConnections: 500,
+          maxConnectionsPerFiveSeconds: 50,
+          maxSourcesPerFile: 600,
+          uploadClientDataRate: 32,
+          maxUploadSlots: 12,
+          uploadSlotElasticPercent: 80,
+          queueSize: 10000,
+          autoConnect: true,
+          reconnect: true,
+          creditSystem: true,
+          safeServerConnect: true,
+          addServersFromServer: true,
+          networkEd2k: true,
+          networkKademlia: true
+        },
+        daemon: {
+          incomingDir: "C:\\Sample\\Incoming",
+          hostnameLookup: {
+            enabled: false,
+            dnsServers: [],
+            cacheTtlSecs: 86400,
+            maxLookupsPerTick: 32,
+            tickIntervalSecs: 30
+          }
+        },
+        ed2k: {
+          listenPort: 4662,
+          obfuscationEnabled: true,
+          reconnectEnabled: true,
+          enableUdpReask: true,
+          publishEmuleRustIdentity: false
+        },
+        kad: {
+          listenPort: 4672,
+          publishSharedFilesEnabled: true,
+          republishIntervalSecs: 1800,
+          udpFirewallCheckEnabled: true,
+          tcpFirewallCheckEnabled: true,
+          buddyEnabled: true,
+          routingMaintenanceEnabled: true
+        },
+        nat: { enabled: false, requireInitialMapping: true, backendOrder: [] },
         vpnGuard: { enabled: false, mode: "block", allowedPublicIpCidrs: "" },
-        ipFilter: { enabled: false }
+        ipFilter: { enabled: false, level: 127 }
       };
     case "uploads":
     case "upload-queue":
