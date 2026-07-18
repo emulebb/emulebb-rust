@@ -167,6 +167,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     "settings.ed2k.uploadQueue",
                     ED2K_UPLOAD_QUEUE_SETTINGS_FIELDS,
                 )?;
+                validate_ed2k_upload_queue_settings_patch_body_fields(section_object)?;
             }
             "kad" => {
                 validate_non_empty_update_object(section_object, "settings.kad")?;
@@ -314,6 +315,60 @@ fn validate_ed2k_settings_patch_body_fields(object: &JsonObject) -> Result<(), B
         "settings.ed2k.deadServerRetries",
         1,
         10,
+    )
+}
+
+fn validate_ed2k_upload_queue_settings_patch_body_fields(
+    ed2k: &JsonObject,
+) -> Result<(), Box<Response>> {
+    let Some(object) = ed2k
+        .get("uploadQueue")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(());
+    };
+    validate_unsigned_number_range(
+        object,
+        "activeSlots",
+        "settings.ed2k.uploadQueue.activeSlots",
+        1,
+        64,
+    )?;
+    validate_unsigned_number_max(
+        object,
+        "elasticPercent",
+        "settings.ed2k.uploadQueue.elasticPercent",
+        100,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "elasticUnderfillSecs",
+        "settings.ed2k.uploadQueue.elasticUnderfillSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "waitingTimeoutSecs",
+        "settings.ed2k.uploadQueue.waitingTimeoutSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "grantedTimeoutSecs",
+        "settings.ed2k.uploadQueue.grantedTimeoutSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "uploadTimeoutSecs",
+        "settings.ed2k.uploadQueue.uploadTimeoutSecs",
+        1,
+    )?;
+    validate_unsigned_number_max(
+        object,
+        "sessionTransferPercent",
+        "settings.ed2k.uploadQueue.sessionTransferPercent",
+        100,
     )
 }
 
@@ -484,6 +539,28 @@ fn validate_unsigned_number_min(
     if number < min {
         return Err(invalid_body_error(format!(
             "{path} must be an unsigned number greater than or equal to {min}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_unsigned_number_max(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+    max: u64,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number less than or equal to {max}"
+        )));
+    };
+    if number > max {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number less than or equal to {max}"
         )));
     }
     Ok(())

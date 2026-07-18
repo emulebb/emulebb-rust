@@ -2692,12 +2692,12 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
   validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s", {});
   validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillSecs", "Elastic underfill seconds", { min: 1 });
-  validateUnsigned(errors, form, "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity", {});
   validateUnsigned(errors, form, "ed2kUploadQueueWaitingTimeoutSecs", "Waiting timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kUploadQueueGrantedTimeoutSecs", "Granted idle timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kUploadQueueUploadTimeoutSecs", "Upload timeout seconds", { min: 1 });
-  validateUnsigned(errors, form, "ed2kUploadQueueSessionTransferPercent", "Session transfer %", { min: 1, max: 100 });
-  validateUnsigned(errors, form, "ed2kUploadQueueSessionTimeLimitSecs", "Session time limit seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueSessionTransferPercent", "Session transfer %", { max: 100 });
+  validateUnsigned(errors, form, "ed2kUploadQueueSessionTimeLimitSecs", "Session time limit seconds", {});
   validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "kadBootstrapMinRoutingContacts", "Bootstrap contact floor", { min: 1 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });

@@ -398,6 +398,38 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.ed2k.uploadQueue field: unsupportedSetting",
         ),
         (
+            r#"{"ed2k":{"uploadQueue":{"activeSlots":0}}}"#,
+            "settings.ed2k.uploadQueue.activeSlots must be an unsigned number in the range 1..64",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"activeSlots":65}}}"#,
+            "settings.ed2k.uploadQueue.activeSlots must be an unsigned number in the range 1..64",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"elasticPercent":101}}}"#,
+            "settings.ed2k.uploadQueue.elasticPercent must be an unsigned number less than or equal to 100",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"elasticUnderfillSecs":0}}}"#,
+            "settings.ed2k.uploadQueue.elasticUnderfillSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"waitingTimeoutSecs":0}}}"#,
+            "settings.ed2k.uploadQueue.waitingTimeoutSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"grantedTimeoutSecs":0}}}"#,
+            "settings.ed2k.uploadQueue.grantedTimeoutSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"uploadTimeoutSecs":"1"}}}"#,
+            "settings.ed2k.uploadQueue.uploadTimeoutSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{"sessionTransferPercent":101}}}"#,
+            "settings.ed2k.uploadQueue.sessionTransferPercent must be an unsigned number less than or equal to 100",
+        ),
+        (
             r#"{"kad":{"unsupportedSetting":1}}"#,
             "unknown settings.kad field: unsupportedSetting",
         ),
