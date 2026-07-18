@@ -408,14 +408,155 @@ export type SharedDirectories = {
   [key: string]: unknown;
 };
 
+export type CoreSettings = {
+  uploadLimitKiBps?: number;
+  downloadLimitKiBps?: number;
+  maxConnections?: number;
+  maxConnectionsPerFiveSeconds?: number;
+  maxSourcesPerFile?: number;
+  uploadClientDataRate?: number;
+  maxUploadSlots?: number;
+  uploadSlotElasticPercent?: number;
+  queueSize?: number;
+  autoConnect?: boolean;
+  reconnect?: boolean;
+  creditSystem?: boolean;
+  safeServerConnect?: boolean;
+  addServersFromServer?: boolean;
+  networkKademlia?: boolean;
+  networkEd2k?: boolean;
+  [key: string]: unknown;
+};
+
+export type HostnameLookupSettings = {
+  enabled?: boolean;
+  dnsServers?: string[];
+  cacheTtlSecs?: number;
+  maxLookupsPerTick?: number;
+  tickIntervalSecs?: number;
+  [key: string]: unknown;
+};
+
+export type DaemonSettings = {
+  incomingDir?: string | null;
+  p2pBindIp?: string | null;
+  p2pBindInterface?: string | null;
+  ed2kUserHash?: string | null;
+  hostnameLookup?: HostnameLookupSettings;
+  [key: string]: unknown;
+};
+
+export type Ed2kUploadQueueSettings = {
+  activeSlots?: number;
+  elasticPercent?: number;
+  uploadLimitBytesPerSec?: number;
+  elasticUnderfillBytesPerSec?: number;
+  elasticUnderfillSecs?: number;
+  waitingCapacity?: number;
+  waitingTimeoutSecs?: number;
+  grantedTimeoutSecs?: number;
+  uploadTimeoutSecs?: number;
+  sessionTransferPercent?: number;
+  sessionTimeLimitSecs?: number;
+  [key: string]: unknown;
+};
+
+export type Ed2kSettings = {
+  listenPort?: number | null;
+  obfuscationEnabled?: boolean;
+  probeSearchTerm?: string | null;
+  connectTimeoutSecs?: number;
+  serverConnectTimeoutSecs?: number;
+  callbackTimeoutSecs?: number;
+  reconnectIntervalSecs?: number;
+  reconnectEnabled?: boolean;
+  safeServerConnect?: boolean;
+  keepaliveSecs?: number;
+  sessionRotationSecs?: number;
+  maxConcurrentDownloads?: number;
+  maxNewConnectionsPerFiveSeconds?: number;
+  maxHalfOpenConnections?: number;
+  maxSourcesPerFile?: number;
+  maxParallelDownloadPeers?: number;
+  keywordServerAttemptBudget?: number;
+  exactHashKeywordServerAttemptBudget?: number;
+  sourceServerAttemptBudget?: number;
+  uploadQueue?: Ed2kUploadQueueSettings;
+  downloadLimitBytesPerSec?: number;
+  enableUdpReask?: boolean;
+  publishEmuleRustIdentity?: boolean;
+  addServersFromServer?: boolean;
+  deadServerRetries?: number;
+  [key: string]: unknown;
+};
+
+export type KadSettings = {
+  listenPort?: number | null;
+  bootstrapMinRoutingContacts?: number;
+  localStoreEnabled?: boolean;
+  localStoreKeywordTtlSecs?: number;
+  localStoreSourceTtlSecs?: number;
+  localStoreNotesTtlSecs?: number;
+  localStoreKeywordCapacity?: number;
+  localStoreSourceCapacity?: number;
+  localStoreNotesCapacity?: number;
+  localStoreSourcePerFileCapacity?: number;
+  localStoreNotesPerFileCapacity?: number;
+  publishSharedFilesEnabled?: boolean;
+  republishIntervalSecs?: number;
+  publishContactFanout?: number;
+  udpFirewallCheckEnabled?: boolean;
+  udpFirewallCheckIntervalSecs?: number;
+  tcpFirewallCheckEnabled?: boolean;
+  tcpFirewallCheckIntervalSecs?: number;
+  buddyEnabled?: boolean;
+  routingMaintenanceEnabled?: boolean;
+  snoopQueueDedupWindowSecs?: number;
+  snoopQueueGeneralMaxQueriesPer600s?: number;
+  snoopQueueGeneralDrainCooldownSecs?: number;
+  snoopQueueSourceMaxQueriesPer600s?: number;
+  snoopQueueSourceDrainCooldownSecs?: number;
+  snoopQueueSourceStopAfterResults?: number;
+  [key: string]: unknown;
+};
+
+export type NatSettings = {
+  enabled?: boolean;
+  requireInitialMapping?: boolean;
+  backendOrder?: string[];
+  bindIp?: string | null;
+  igdIp?: string | null;
+  minissdpdSocket?: string | null;
+  ssdpLocalPort?: number | null;
+  discoveryTimeoutSecs?: number;
+  leaseDurationSecs?: number;
+  renewMarginSecs?: number;
+  externalIpOverride?: string | null;
+  [key: string]: unknown;
+};
+
+export type VpnGuardSettings = {
+  enabled?: boolean;
+  mode?: string;
+  allowedPublicIpCidrs?: string;
+  [key: string]: unknown;
+};
+
+export type IpFilterSettings = {
+  enabled?: boolean;
+  path?: string | null;
+  level?: number;
+  [key: string]: unknown;
+};
+
 export type AppSettings = {
-  core?: Record<string, unknown>;
-  daemon?: Record<string, unknown>;
-  ed2k?: Record<string, unknown>;
-  kad?: Record<string, unknown>;
-  nat?: Record<string, unknown>;
-  vpnGuard?: Record<string, unknown>;
-  ipFilter?: Record<string, unknown>;
+  core?: CoreSettings;
+  daemon?: DaemonSettings;
+  ed2k?: Ed2kSettings;
+  kad?: KadSettings;
+  nat?: NatSettings;
+  vpnGuard?: VpnGuardSettings;
+  ipFilter?: IpFilterSettings;
   [key: string]: unknown;
 };
 
