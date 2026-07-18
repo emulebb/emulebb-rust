@@ -506,6 +506,12 @@ pub struct TransferEvent {
     pub transfer: Option<Transfer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_id: Option<String>,
 }
 
 /// One remembered ED2K peer source for a transfer.

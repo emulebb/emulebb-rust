@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::{Body, to_bytes},
@@ -6,6 +7,7 @@ use axum::{
 };
 use emulebb_core::{EmulebbCore, LocalShareCreate};
 use emulebb_index::FileIndex;
+use futures_util::StreamExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -121,6 +123,36 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
         response.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/event-stream"
     );
+}
+
+#[tokio::test]
+async fn events_endpoint_signals_rebaseline_for_last_event_id() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .header("X-API-Key", "secret")
+                .header("Last-Event-ID", "17")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body().into_data_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("resume reset event")
+        .expect("SSE data frame")
+        .expect("valid body chunk");
+    let text = String::from_utf8(chunk.to_vec()).unwrap();
+    assert!(text.contains("event: sync.reset"), "{text}");
+    assert!(text.contains("id: 1"), "{text}");
+    assert!(text.contains(r#""id":1"#), "{text}");
+    assert!(text.contains(r#""type":"sync.reset""#), "{text}");
+    assert!(text.contains(r#""reason":"last-event-id""#), "{text}");
+    assert!(text.contains(r#""lastEventId":"17""#), "{text}");
 }
 
 #[tokio::test]

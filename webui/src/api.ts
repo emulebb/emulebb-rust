@@ -90,8 +90,9 @@ export type TransferEvent = {
   type: "transfer.added" | "transfer.updated" | "transfer.removed" | "sync.reset";
   transfer?: Transfer;
   hash?: string;
-  reason?: string;
+  reason?: "lagged" | "last-event-id";
   missed?: number;
+  lastEventId?: string;
   [key: string]: unknown;
 };
 

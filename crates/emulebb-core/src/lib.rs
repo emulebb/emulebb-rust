@@ -740,6 +740,9 @@ impl EmulebbCore {
             event_type: event_type.to_string(),
             transfer,
             hash,
+            reason: None,
+            missed: None,
+            last_event_id: None,
         });
     }
 

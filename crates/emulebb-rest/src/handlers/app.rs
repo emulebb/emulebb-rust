@@ -8,7 +8,7 @@
 use axum::{
     body::Bytes,
     extract::{RawQuery, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -18,7 +18,7 @@ use futures_util::stream;
 use serde_json::json;
 use std::convert::Infallible;
 
-use emulebb_core::AppSettingsUpdate;
+use emulebb_core::{AppSettingsUpdate, TransferEvent};
 use tokio::sync::broadcast;
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
@@ -32,49 +32,76 @@ pub(crate) async fn capabilities(State(state): State<RestState>) -> impl IntoRes
     api_ok(capabilities_response(state.core.app_info()))
 }
 
-pub(crate) async fn events(State(state): State<RestState>) -> impl IntoResponse {
+pub(crate) async fn events(
+    headers: HeaderMap,
+    State(state): State<RestState>,
+) -> impl IntoResponse {
     let receiver = state.core.subscribe_transfer_events();
     let core = state.core.clone();
-    let stream = stream::unfold((receiver, core), |(mut receiver, core)| async move {
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let data = serde_json::to_string(&event)
-                        .expect("transfer events contain only serializable REST DTOs");
-                    return Some((
-                        Ok::<_, Infallible>(
-                            Event::default()
-                                .id(event.id.to_string())
-                                .event(event.event_type)
-                                .data(data),
-                        ),
-                        (receiver, core),
-                    ));
-                }
-                Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    let id = core.reserve_transfer_event_id();
-                    let data = json!({
-                        "id": id,
-                        "type": "sync.reset",
-                        "reason": "lagged",
-                        "missed": missed
-                    })
-                    .to_string();
-                    return Some((
-                        Ok::<_, Infallible>(
-                            Event::default()
-                                .id(id.to_string())
-                                .event("sync.reset")
-                                .data(data),
-                        ),
-                        (receiver, core),
-                    ));
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        }
+    let pending_reset = last_event_id(&headers).map(|last_event_id| TransferEvent {
+        id: core.reserve_transfer_event_id(),
+        event_type: "sync.reset".to_string(),
+        transfer: None,
+        hash: None,
+        reason: Some("last-event-id".to_string()),
+        missed: None,
+        last_event_id: Some(last_event_id),
     });
+    let stream = stream::unfold(
+        (receiver, core, pending_reset),
+        |(mut receiver, core, pending_reset)| async move {
+            if let Some(event) = pending_reset {
+                return Some((
+                    Ok::<_, Infallible>(sse_event(event)),
+                    (receiver, core, None),
+                ));
+            }
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        return Some((
+                            Ok::<_, Infallible>(sse_event(event)),
+                            (receiver, core, None),
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        let event = TransferEvent {
+                            id: core.reserve_transfer_event_id(),
+                            event_type: "sync.reset".to_string(),
+                            transfer: None,
+                            hash: None,
+                            reason: Some("lagged".to_string()),
+                            missed: Some(missed),
+                            last_event_id: None,
+                        };
+                        return Some((
+                            Ok::<_, Infallible>(sse_event(event)),
+                            (receiver, core, None),
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn last_event_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("Last-Event-ID")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn sse_event(event: TransferEvent) -> Event {
+    let id = event.id.to_string();
+    let event_type = event.event_type.clone();
+    let data =
+        serde_json::to_string(&event).expect("transfer events contain only serializable REST DTOs");
+    Event::default().id(id).event(event_type).data(data)
 }
 
 pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {
