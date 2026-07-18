@@ -688,6 +688,34 @@ export type AppSettings = {
   [key: string]: unknown;
 };
 
+export type CoreSettingsUpdate = Partial<CoreSettings>;
+export type HostnameLookupSettingsUpdate = Partial<HostnameLookupSettings>;
+
+export type DaemonSettingsUpdate = Omit<Partial<DaemonSettings>, "hostnameLookup"> & {
+  hostnameLookup?: HostnameLookupSettingsUpdate;
+};
+
+export type Ed2kUploadQueueSettingsUpdate = Partial<Ed2kUploadQueueSettings>;
+
+export type Ed2kSettingsUpdate = Omit<Partial<Ed2kSettings>, "uploadQueue"> & {
+  uploadQueue?: Ed2kUploadQueueSettingsUpdate;
+};
+
+export type KadSettingsUpdate = Partial<KadSettings>;
+export type NatSettingsUpdate = Partial<NatSettings>;
+export type VpnGuardSettingsUpdate = Partial<VpnGuardSettings>;
+export type IpFilterSettingsUpdate = Partial<IpFilterSettings>;
+
+export type AppSettingsUpdate = {
+  core?: CoreSettingsUpdate;
+  daemon?: DaemonSettingsUpdate;
+  ed2k?: Ed2kSettingsUpdate;
+  kad?: KadSettingsUpdate;
+  nat?: NatSettingsUpdate;
+  vpnGuard?: VpnGuardSettingsUpdate;
+  ipFilter?: IpFilterSettingsUpdate;
+};
+
 export type SettingSurfaceClass = "normalControl" | "advancedControl" | "existingSectionResource" | "bootstrapOnly" | "notUserFacing";
 
 export type SettingSurfaceSpec = {

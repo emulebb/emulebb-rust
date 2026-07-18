@@ -20,12 +20,21 @@ import {
 } from "lucide-preact";
 import {
   AppSettings,
+  AppSettingsUpdate,
+  CoreSettingsUpdate,
   Category,
+  DaemonSettingsUpdate,
+  Ed2kSettingsUpdate,
+  Ed2kUploadQueueSettingsUpdate,
   Friend,
+  HostnameLookupSettingsUpdate,
+  IpFilterSettingsUpdate,
   IpFilterStatus,
+  KadSettingsUpdate,
   KadNode,
   KadStatus,
   LogRecord,
+  NatSettingsUpdate,
   NatStatus,
   NetworkStatus,
   Page,
@@ -42,6 +51,7 @@ import {
   Transfer,
   TransferSource,
   Upload,
+  VpnGuardSettingsUpdate,
   VpnGuardStatus,
   encodeSegment
 } from "./api";
@@ -2197,125 +2207,7 @@ export function SettingsView(props: {
     ? <Toggle label={label} checked={form[key]} surface={surfaceByPath.get(path)} onInput={(value) => update(key, value)} />
     : null;
 
-  const save = () => {
-    const settings = props.settings ?? {};
-    return props.client.patch("app/settings", {
-      core: {
-        ...(settings.core ?? {}),
-        uploadLimitKiBps: parseNumber(form.uploadLimitKiBps),
-        downloadLimitKiBps: parseNumber(form.downloadLimitKiBps),
-        maxConnections: parseNumber(form.maxConnections),
-        maxConnectionsPerFiveSeconds: parseNumber(form.maxConnectionsPerFiveSeconds),
-        maxSourcesPerFile: parseNumber(form.maxSourcesPerFile),
-        uploadClientDataRate: parseNumber(form.uploadClientDataRate),
-        maxUploadSlots: parseNumber(form.maxUploadSlots),
-        uploadSlotElasticPercent: parseNumber(form.uploadSlotElasticPercent),
-        queueSize: parseNumber(form.queueSize),
-        autoConnect: form.autoConnect,
-        reconnect: form.reconnect,
-        creditSystem: form.creditSystem,
-        safeServerConnect: form.safeServerConnect,
-        addServersFromServer: form.addServersFromServer,
-        networkKademlia: form.networkKademlia,
-        networkEd2k: form.networkEd2k
-      },
-      daemon: {
-        ...(settings.daemon ?? {}),
-        incomingDir: optionalString(form.incomingDir),
-        p2pBindIp: optionalString(form.p2pBindIp),
-        p2pBindInterface: optionalString(form.p2pBindInterface),
-        hostnameLookup: {
-          ...(recordField(settings.daemon, "hostnameLookup")),
-          enabled: form.hostnameLookupEnabled,
-          dnsServers: form.hostnameLookupDnsServers.split(",").map((item) => item.trim()).filter(Boolean),
-          cacheTtlSecs: parseNumber(form.hostnameLookupCacheTtlSecs, 86400),
-          maxLookupsPerTick: parseNumber(form.hostnameLookupMaxLookupsPerTick, 32),
-          tickIntervalSecs: parseNumber(form.hostnameLookupTickIntervalSecs, 30)
-        }
-      },
-      ed2k: {
-        ...(settings.ed2k ?? {}),
-        listenPort: optionalPort(form.ed2kListenPort),
-        connectTimeoutSecs: parseNumber(form.ed2kConnectTimeoutSecs),
-        serverConnectTimeoutSecs: parseNumber(form.ed2kServerConnectTimeoutSecs),
-        callbackTimeoutSecs: parseNumber(form.ed2kCallbackTimeoutSecs),
-        reconnectIntervalSecs: parseNumber(form.ed2kReconnectIntervalSecs),
-        keepaliveSecs: parseNumber(form.ed2kKeepaliveSecs),
-        sessionRotationSecs: parseNumber(form.ed2kSessionRotationSecs),
-        maxConcurrentDownloads: parseNumber(form.ed2kMaxConcurrentDownloads),
-        maxNewConnectionsPerFiveSeconds: parseNumber(form.ed2kMaxNewConnectionsPerFiveSeconds),
-        maxHalfOpenConnections: parseNumber(form.ed2kMaxHalfOpenConnections),
-        maxSourcesPerFile: parseNumber(form.ed2kMaxSourcesPerFile),
-        maxParallelDownloadPeers: parseNumber(form.ed2kMaxParallelDownloadPeers),
-        keywordServerAttemptBudget: parseNumber(form.ed2kKeywordServerAttemptBudget),
-        exactHashKeywordServerAttemptBudget: parseNumber(form.ed2kExactHashKeywordServerAttemptBudget),
-        sourceServerAttemptBudget: parseNumber(form.ed2kSourceServerAttemptBudget),
-        downloadLimitBytesPerSec: parseNumber(form.ed2kDownloadLimitBytesPerSec),
-        obfuscationEnabled: form.obfuscationEnabled,
-        reconnectEnabled: form.ed2kReconnectEnabled,
-        enableUdpReask: form.enableUdpReask,
-        publishEmuleRustIdentity: form.publishEmuleRustIdentity,
-        addServersFromServer: form.addServersFromServer,
-        safeServerConnect: form.safeServerConnect,
-        deadServerRetries: parseNumber(form.ed2kDeadServerRetries),
-        uploadQueue: {
-          ...(recordField(settings.ed2k, "uploadQueue")),
-          activeSlots: parseNumber(form.ed2kUploadQueueActiveSlots),
-          elasticPercent: parseNumber(form.ed2kUploadQueueElasticPercent),
-          uploadLimitBytesPerSec: parseNumber(form.ed2kUploadQueueUploadLimitBytesPerSec),
-          elasticUnderfillBytesPerSec: parseNumber(form.ed2kUploadQueueElasticUnderfillBytesPerSec),
-          elasticUnderfillSecs: parseNumber(form.ed2kUploadQueueElasticUnderfillSecs),
-          waitingCapacity: parseNumber(form.ed2kUploadQueueWaitingCapacity),
-          waitingTimeoutSecs: parseNumber(form.ed2kUploadQueueWaitingTimeoutSecs),
-          grantedTimeoutSecs: parseNumber(form.ed2kUploadQueueGrantedTimeoutSecs),
-          uploadTimeoutSecs: parseNumber(form.ed2kUploadQueueUploadTimeoutSecs),
-          sessionTransferPercent: parseNumber(form.ed2kUploadQueueSessionTransferPercent),
-          sessionTimeLimitSecs: parseNumber(form.ed2kUploadQueueSessionTimeLimitSecs)
-        }
-      },
-      kad: {
-        ...(settings.kad ?? {}),
-        listenPort: optionalPort(form.kadListenPort),
-        bootstrapMinRoutingContacts: parseNumber(form.kadBootstrapMinRoutingContacts),
-        localStoreEnabled: form.kadLocalStoreEnabled,
-        publishSharedFilesEnabled: form.kadPublishSharedFilesEnabled,
-        republishIntervalSecs: parseNumber(form.kadRepublishIntervalSecs),
-        publishContactFanout: parseNumber(form.kadPublishContactFanout),
-        udpFirewallCheckEnabled: form.udpFirewallCheckEnabled,
-        udpFirewallCheckIntervalSecs: parseNumber(form.kadUdpFirewallCheckIntervalSecs),
-        tcpFirewallCheckEnabled: form.tcpFirewallCheckEnabled,
-        tcpFirewallCheckIntervalSecs: parseNumber(form.kadTcpFirewallCheckIntervalSecs),
-        buddyEnabled: form.buddyEnabled,
-        routingMaintenanceEnabled: form.routingMaintenanceEnabled
-      },
-      nat: {
-        ...(settings.nat ?? {}),
-        enabled: form.natEnabled,
-        requireInitialMapping: form.natRequireInitialMapping,
-        bindIp: optionalString(form.natBindIp),
-        backendOrder: form.natBackendOrder.split(",").map((item) => item.trim()).filter(Boolean),
-        igdIp: optionalString(form.natIgdIp),
-        minissdpdSocket: optionalString(form.natMinissdpdSocket),
-        ssdpLocalPort: optionalPort(form.natSsdpLocalPort),
-        discoveryTimeoutSecs: parseNumber(form.natDiscoveryTimeoutSecs),
-        leaseDurationSecs: parseNumber(form.natLeaseDurationSecs),
-        renewMarginSecs: parseNumber(form.natRenewMarginSecs),
-        externalIpOverride: optionalString(form.natExternalIpOverride)
-      },
-      vpnGuard: {
-        ...(settings.vpnGuard ?? {}),
-        enabled: form.vpnGuardEnabled,
-        mode: form.vpnGuardMode,
-        allowedPublicIpCidrs: form.vpnGuardAllowedPublicIpCidrs
-      },
-      ipFilter: {
-        ...(settings.ipFilter ?? {}),
-        enabled: form.ipFilterEnabled,
-        path: optionalString(form.ipFilterPath),
-        level: parseNumber(form.ipFilterLevel)
-      }
-    });
-  };
+  const save = () => props.client.patch<AppSettings>("app/settings", settingsUpdateFromForm(form, baseline));
 
   const revert = () => {
     setForm(baseline);
@@ -2825,6 +2717,159 @@ function validateUnsigned(
   if (parsed < min || parsed > max) {
     errors.set(key, `${label} must be between ${min} and ${max}.`);
   }
+}
+
+function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): AppSettingsUpdate {
+  const core: CoreSettingsUpdate = {};
+  putChanged(core, "uploadLimitKiBps", parseNumber(form.uploadLimitKiBps), parseNumber(baseline.uploadLimitKiBps));
+  putChanged(core, "downloadLimitKiBps", parseNumber(form.downloadLimitKiBps), parseNumber(baseline.downloadLimitKiBps));
+  putChanged(core, "maxConnections", parseNumber(form.maxConnections), parseNumber(baseline.maxConnections));
+  putChanged(core, "maxConnectionsPerFiveSeconds", parseNumber(form.maxConnectionsPerFiveSeconds), parseNumber(baseline.maxConnectionsPerFiveSeconds));
+  putChanged(core, "maxSourcesPerFile", parseNumber(form.maxSourcesPerFile), parseNumber(baseline.maxSourcesPerFile));
+  putChanged(core, "uploadClientDataRate", parseNumber(form.uploadClientDataRate), parseNumber(baseline.uploadClientDataRate));
+  putChanged(core, "maxUploadSlots", parseNumber(form.maxUploadSlots), parseNumber(baseline.maxUploadSlots));
+  putChanged(core, "uploadSlotElasticPercent", parseNumber(form.uploadSlotElasticPercent), parseNumber(baseline.uploadSlotElasticPercent));
+  putChanged(core, "queueSize", parseNumber(form.queueSize), parseNumber(baseline.queueSize));
+  putChanged(core, "autoConnect", form.autoConnect, baseline.autoConnect);
+  putChanged(core, "reconnect", form.reconnect, baseline.reconnect);
+  putChanged(core, "creditSystem", form.creditSystem, baseline.creditSystem);
+  putChanged(core, "safeServerConnect", form.safeServerConnect, baseline.safeServerConnect);
+  putChanged(core, "addServersFromServer", form.addServersFromServer, baseline.addServersFromServer);
+  putChanged(core, "networkKademlia", form.networkKademlia, baseline.networkKademlia);
+  putChanged(core, "networkEd2k", form.networkEd2k, baseline.networkEd2k);
+
+  const hostnameLookup: HostnameLookupSettingsUpdate = {};
+  putChanged(hostnameLookup, "enabled", form.hostnameLookupEnabled, baseline.hostnameLookupEnabled);
+  putChanged(hostnameLookup, "dnsServers", commaList(form.hostnameLookupDnsServers), commaList(baseline.hostnameLookupDnsServers));
+  putChanged(hostnameLookup, "cacheTtlSecs", parseNumber(form.hostnameLookupCacheTtlSecs, 86400), parseNumber(baseline.hostnameLookupCacheTtlSecs, 86400));
+  putChanged(hostnameLookup, "maxLookupsPerTick", parseNumber(form.hostnameLookupMaxLookupsPerTick, 32), parseNumber(baseline.hostnameLookupMaxLookupsPerTick, 32));
+  putChanged(hostnameLookup, "tickIntervalSecs", parseNumber(form.hostnameLookupTickIntervalSecs, 30), parseNumber(baseline.hostnameLookupTickIntervalSecs, 30));
+
+  const daemon: DaemonSettingsUpdate = {};
+  putChanged(daemon, "incomingDir", optionalString(form.incomingDir), optionalString(baseline.incomingDir));
+  putChanged(daemon, "p2pBindIp", optionalString(form.p2pBindIp), optionalString(baseline.p2pBindIp));
+  putChanged(daemon, "p2pBindInterface", optionalString(form.p2pBindInterface), optionalString(baseline.p2pBindInterface));
+  if (!isEmptyRecord(hostnameLookup)) {
+    daemon.hostnameLookup = hostnameLookup;
+  }
+
+  const uploadQueue: Ed2kUploadQueueSettingsUpdate = {};
+  putChanged(uploadQueue, "activeSlots", parseNumber(form.ed2kUploadQueueActiveSlots), parseNumber(baseline.ed2kUploadQueueActiveSlots));
+  putChanged(uploadQueue, "elasticPercent", parseNumber(form.ed2kUploadQueueElasticPercent), parseNumber(baseline.ed2kUploadQueueElasticPercent));
+  putChanged(uploadQueue, "uploadLimitBytesPerSec", parseNumber(form.ed2kUploadQueueUploadLimitBytesPerSec), parseNumber(baseline.ed2kUploadQueueUploadLimitBytesPerSec));
+  putChanged(uploadQueue, "elasticUnderfillBytesPerSec", parseNumber(form.ed2kUploadQueueElasticUnderfillBytesPerSec), parseNumber(baseline.ed2kUploadQueueElasticUnderfillBytesPerSec));
+  putChanged(uploadQueue, "elasticUnderfillSecs", parseNumber(form.ed2kUploadQueueElasticUnderfillSecs), parseNumber(baseline.ed2kUploadQueueElasticUnderfillSecs));
+  putChanged(uploadQueue, "waitingCapacity", parseNumber(form.ed2kUploadQueueWaitingCapacity), parseNumber(baseline.ed2kUploadQueueWaitingCapacity));
+  putChanged(uploadQueue, "waitingTimeoutSecs", parseNumber(form.ed2kUploadQueueWaitingTimeoutSecs), parseNumber(baseline.ed2kUploadQueueWaitingTimeoutSecs));
+  putChanged(uploadQueue, "grantedTimeoutSecs", parseNumber(form.ed2kUploadQueueGrantedTimeoutSecs), parseNumber(baseline.ed2kUploadQueueGrantedTimeoutSecs));
+  putChanged(uploadQueue, "uploadTimeoutSecs", parseNumber(form.ed2kUploadQueueUploadTimeoutSecs), parseNumber(baseline.ed2kUploadQueueUploadTimeoutSecs));
+  putChanged(uploadQueue, "sessionTransferPercent", parseNumber(form.ed2kUploadQueueSessionTransferPercent), parseNumber(baseline.ed2kUploadQueueSessionTransferPercent));
+  putChanged(uploadQueue, "sessionTimeLimitSecs", parseNumber(form.ed2kUploadQueueSessionTimeLimitSecs), parseNumber(baseline.ed2kUploadQueueSessionTimeLimitSecs));
+
+  const ed2k: Ed2kSettingsUpdate = {};
+  putChanged(ed2k, "listenPort", optionalPort(form.ed2kListenPort), optionalPort(baseline.ed2kListenPort));
+  putChanged(ed2k, "connectTimeoutSecs", parseNumber(form.ed2kConnectTimeoutSecs), parseNumber(baseline.ed2kConnectTimeoutSecs));
+  putChanged(ed2k, "serverConnectTimeoutSecs", parseNumber(form.ed2kServerConnectTimeoutSecs), parseNumber(baseline.ed2kServerConnectTimeoutSecs));
+  putChanged(ed2k, "callbackTimeoutSecs", parseNumber(form.ed2kCallbackTimeoutSecs), parseNumber(baseline.ed2kCallbackTimeoutSecs));
+  putChanged(ed2k, "reconnectIntervalSecs", parseNumber(form.ed2kReconnectIntervalSecs), parseNumber(baseline.ed2kReconnectIntervalSecs));
+  putChanged(ed2k, "keepaliveSecs", parseNumber(form.ed2kKeepaliveSecs), parseNumber(baseline.ed2kKeepaliveSecs));
+  putChanged(ed2k, "sessionRotationSecs", parseNumber(form.ed2kSessionRotationSecs), parseNumber(baseline.ed2kSessionRotationSecs));
+  putChanged(ed2k, "maxConcurrentDownloads", parseNumber(form.ed2kMaxConcurrentDownloads), parseNumber(baseline.ed2kMaxConcurrentDownloads));
+  putChanged(ed2k, "maxNewConnectionsPerFiveSeconds", parseNumber(form.ed2kMaxNewConnectionsPerFiveSeconds), parseNumber(baseline.ed2kMaxNewConnectionsPerFiveSeconds));
+  putChanged(ed2k, "maxHalfOpenConnections", parseNumber(form.ed2kMaxHalfOpenConnections), parseNumber(baseline.ed2kMaxHalfOpenConnections));
+  putChanged(ed2k, "maxSourcesPerFile", parseNumber(form.ed2kMaxSourcesPerFile), parseNumber(baseline.ed2kMaxSourcesPerFile));
+  putChanged(ed2k, "maxParallelDownloadPeers", parseNumber(form.ed2kMaxParallelDownloadPeers), parseNumber(baseline.ed2kMaxParallelDownloadPeers));
+  putChanged(ed2k, "keywordServerAttemptBudget", parseNumber(form.ed2kKeywordServerAttemptBudget), parseNumber(baseline.ed2kKeywordServerAttemptBudget));
+  putChanged(ed2k, "exactHashKeywordServerAttemptBudget", parseNumber(form.ed2kExactHashKeywordServerAttemptBudget), parseNumber(baseline.ed2kExactHashKeywordServerAttemptBudget));
+  putChanged(ed2k, "sourceServerAttemptBudget", parseNumber(form.ed2kSourceServerAttemptBudget), parseNumber(baseline.ed2kSourceServerAttemptBudget));
+  putChanged(ed2k, "downloadLimitBytesPerSec", parseNumber(form.ed2kDownloadLimitBytesPerSec), parseNumber(baseline.ed2kDownloadLimitBytesPerSec));
+  putChanged(ed2k, "obfuscationEnabled", form.obfuscationEnabled, baseline.obfuscationEnabled);
+  putChanged(ed2k, "reconnectEnabled", form.ed2kReconnectEnabled, baseline.ed2kReconnectEnabled);
+  putChanged(ed2k, "enableUdpReask", form.enableUdpReask, baseline.enableUdpReask);
+  putChanged(ed2k, "publishEmuleRustIdentity", form.publishEmuleRustIdentity, baseline.publishEmuleRustIdentity);
+  putChanged(ed2k, "deadServerRetries", parseNumber(form.ed2kDeadServerRetries), parseNumber(baseline.ed2kDeadServerRetries));
+  if (!isEmptyRecord(uploadQueue)) {
+    ed2k.uploadQueue = uploadQueue;
+  }
+
+  const kad: KadSettingsUpdate = {};
+  putChanged(kad, "listenPort", optionalPort(form.kadListenPort), optionalPort(baseline.kadListenPort));
+  putChanged(kad, "bootstrapMinRoutingContacts", parseNumber(form.kadBootstrapMinRoutingContacts), parseNumber(baseline.kadBootstrapMinRoutingContacts));
+  putChanged(kad, "localStoreEnabled", form.kadLocalStoreEnabled, baseline.kadLocalStoreEnabled);
+  putChanged(kad, "publishSharedFilesEnabled", form.kadPublishSharedFilesEnabled, baseline.kadPublishSharedFilesEnabled);
+  putChanged(kad, "republishIntervalSecs", parseNumber(form.kadRepublishIntervalSecs), parseNumber(baseline.kadRepublishIntervalSecs));
+  putChanged(kad, "publishContactFanout", parseNumber(form.kadPublishContactFanout), parseNumber(baseline.kadPublishContactFanout));
+  putChanged(kad, "udpFirewallCheckEnabled", form.udpFirewallCheckEnabled, baseline.udpFirewallCheckEnabled);
+  putChanged(kad, "udpFirewallCheckIntervalSecs", parseNumber(form.kadUdpFirewallCheckIntervalSecs), parseNumber(baseline.kadUdpFirewallCheckIntervalSecs));
+  putChanged(kad, "tcpFirewallCheckEnabled", form.tcpFirewallCheckEnabled, baseline.tcpFirewallCheckEnabled);
+  putChanged(kad, "tcpFirewallCheckIntervalSecs", parseNumber(form.kadTcpFirewallCheckIntervalSecs), parseNumber(baseline.kadTcpFirewallCheckIntervalSecs));
+  putChanged(kad, "buddyEnabled", form.buddyEnabled, baseline.buddyEnabled);
+  putChanged(kad, "routingMaintenanceEnabled", form.routingMaintenanceEnabled, baseline.routingMaintenanceEnabled);
+
+  const nat: NatSettingsUpdate = {};
+  putChanged(nat, "enabled", form.natEnabled, baseline.natEnabled);
+  putChanged(nat, "requireInitialMapping", form.natRequireInitialMapping, baseline.natRequireInitialMapping);
+  putChanged(nat, "bindIp", optionalString(form.natBindIp), optionalString(baseline.natBindIp));
+  putChanged(nat, "backendOrder", commaList(form.natBackendOrder), commaList(baseline.natBackendOrder));
+  putChanged(nat, "igdIp", optionalString(form.natIgdIp), optionalString(baseline.natIgdIp));
+  putChanged(nat, "minissdpdSocket", optionalString(form.natMinissdpdSocket), optionalString(baseline.natMinissdpdSocket));
+  putChanged(nat, "ssdpLocalPort", optionalPort(form.natSsdpLocalPort), optionalPort(baseline.natSsdpLocalPort));
+  putChanged(nat, "discoveryTimeoutSecs", parseNumber(form.natDiscoveryTimeoutSecs), parseNumber(baseline.natDiscoveryTimeoutSecs));
+  putChanged(nat, "leaseDurationSecs", parseNumber(form.natLeaseDurationSecs), parseNumber(baseline.natLeaseDurationSecs));
+  putChanged(nat, "renewMarginSecs", parseNumber(form.natRenewMarginSecs), parseNumber(baseline.natRenewMarginSecs));
+  putChanged(nat, "externalIpOverride", optionalString(form.natExternalIpOverride), optionalString(baseline.natExternalIpOverride));
+
+  const vpnGuard: VpnGuardSettingsUpdate = {};
+  putChanged(vpnGuard, "enabled", form.vpnGuardEnabled, baseline.vpnGuardEnabled);
+  putChanged(vpnGuard, "mode", form.vpnGuardMode, baseline.vpnGuardMode);
+  putChanged(vpnGuard, "allowedPublicIpCidrs", form.vpnGuardAllowedPublicIpCidrs, baseline.vpnGuardAllowedPublicIpCidrs);
+
+  const ipFilter: IpFilterSettingsUpdate = {};
+  putChanged(ipFilter, "enabled", form.ipFilterEnabled, baseline.ipFilterEnabled);
+  putChanged(ipFilter, "path", optionalString(form.ipFilterPath), optionalString(baseline.ipFilterPath));
+  putChanged(ipFilter, "level", parseNumber(form.ipFilterLevel), parseNumber(baseline.ipFilterLevel));
+
+  const update: AppSettingsUpdate = {};
+  if (!isEmptyRecord(core)) {
+    update.core = core;
+  }
+  if (!isEmptyRecord(daemon)) {
+    update.daemon = daemon;
+  }
+  if (!isEmptyRecord(ed2k)) {
+    update.ed2k = ed2k;
+  }
+  if (!isEmptyRecord(kad)) {
+    update.kad = kad;
+  }
+  if (!isEmptyRecord(nat)) {
+    update.nat = nat;
+  }
+  if (!isEmptyRecord(vpnGuard)) {
+    update.vpnGuard = vpnGuard;
+  }
+  if (!isEmptyRecord(ipFilter)) {
+    update.ipFilter = ipFilter;
+  }
+  return update;
+}
+
+function putChanged(target: object, key: string, next: unknown, baseline: unknown): void {
+  if (!sameValue(next, baseline)) {
+    (target as Record<string, unknown>)[key] = next;
+  }
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isEmptyRecord(value: object): boolean {
+  return Object.keys(value).length === 0;
+}
+
+function commaList(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function settingsFormFrom(settings: AppSettings): SettingsForm {

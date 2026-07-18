@@ -141,7 +141,9 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await settingsPanel.getByLabel("Incoming directory").fill("C:\\Changed\\Incoming");
   await save.click();
   await expect(page.getByText("Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")).toBeVisible();
-  expect(requests.some((request) => request.method === "PATCH" && request.path === "app/settings")).toBe(true);
+  const settingsPatch = requests.find((request) => request.method === "PATCH" && request.path === "app/settings");
+  expect(settingsPatch).toBeDefined();
+  expect(JSON.parse(settingsPatch?.body ?? "{}")).toEqual({ daemon: { incomingDir: "C:\\Changed\\Incoming" } });
   await settingsPanel.getByRole("button", { name: "Reload IP filter" }).click();
   await expect(page.getByText("IP filter reloaded")).toBeVisible();
   expect(requests.some((request) => request.method === "POST" && request.path === "ip-filter/operations/reload")).toBe(true);
