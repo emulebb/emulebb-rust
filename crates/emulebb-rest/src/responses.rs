@@ -204,14 +204,14 @@ pub(crate) fn network_response(
             "activeInterfaceIndex": network.active_interface_index,
             "resolveResult": network.resolve_result
         },
-        "vpnGuard": vpn_guard_json(guard)
+        "vpnGuard": vpn_guard_response(guard)
     })
 }
 
 /// The `vpnGuard` REST object incl. the bound dual-plane egress-probe results
 /// (eMuleBB `PublicIpProbe`): `stunProbe` (UDP) + `httpProbe` (TCP), the
 /// probe-confirmed `publicIp`, and the `egressVerified` verdict.
-fn vpn_guard_json(guard: &VpnGuardStatus) -> Value {
+pub(crate) fn vpn_guard_response(guard: &VpnGuardStatus) -> Value {
     json!({
         "enabled": guard.enabled,
         "mode": guard.mode,

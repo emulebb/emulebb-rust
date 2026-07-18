@@ -241,6 +241,31 @@ function dataFor(method: string, path: string): unknown {
         level: 127,
         rangeCount: 3
       };
+    case "vpn-guard":
+      return {
+        enabled: true,
+        mode: "block",
+        allowedPublicIpCidrs: "203.0.113.0/24",
+        startupBlocked: false,
+        startupBlockReason: "",
+        publicIp: "203.0.113.10",
+        egressVerified: true,
+        egressBlockReason: "",
+        stunProbe: {
+          attempted: true,
+          succeeded: true,
+          publicIp: "203.0.113.10",
+          provider: "stun",
+          error: null
+        },
+        httpProbe: {
+          attempted: true,
+          succeeded: true,
+          publicIp: "203.0.113.10",
+          provider: "http",
+          error: null
+        }
+      };
     case "app/settings/surface":
       return {
         settings: [
@@ -351,6 +376,7 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
           sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
+          sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, and egress verdict status."),
           sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")
         ]
       };

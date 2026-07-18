@@ -576,6 +576,29 @@ export type VpnGuardSettings = {
   [key: string]: unknown;
 };
 
+export type VpnGuardProbeStatus = {
+  attempted?: boolean;
+  succeeded?: boolean;
+  publicIp?: string | null;
+  provider?: string;
+  error?: string | null;
+  [key: string]: unknown;
+};
+
+export type VpnGuardStatus = {
+  enabled?: boolean;
+  mode?: string;
+  allowedPublicIpCidrs?: string;
+  startupBlocked?: boolean;
+  startupBlockReason?: string;
+  publicIp?: string | null;
+  egressVerified?: boolean;
+  egressBlockReason?: string;
+  stunProbe?: VpnGuardProbeStatus;
+  httpProbe?: VpnGuardProbeStatus;
+  [key: string]: unknown;
+};
+
 export type IpFilterSettings = {
   enabled?: boolean;
   path?: string | null;

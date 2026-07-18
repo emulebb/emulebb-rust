@@ -725,6 +725,13 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         description: "IP filter status and live reload operation.",
     },
     SettingsSectionResourceSpec {
+        name: "vpnGuard",
+        class: SettingSurfaceClass::ExistingSectionResource,
+        route: "/api/v1/vpn-guard",
+        ui_section: "VPN Guard",
+        description: "VPN Guard startup, binding, and egress verdict status.",
+    },
+    SettingsSectionResourceSpec {
         name: "diagnostics",
         class: SettingSurfaceClass::ExistingSectionResource,
         route: "/api/v1/diagnostics",

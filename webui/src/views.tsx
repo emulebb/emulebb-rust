@@ -40,6 +40,7 @@ import {
   Transfer,
   TransferSource,
   Upload,
+  VpnGuardStatus,
   encodeSegment
 } from "./api";
 import { Action, EmptyRow, JsonPanel, Metric, StatusPill } from "./components";
@@ -2133,6 +2134,7 @@ export function SettingsView(props: {
   settings: AppSettings | null;
   surface: SettingsSurface | null;
   ipFilterStatus: IpFilterStatus | null;
+  vpnGuardStatus: VpnGuardStatus | null;
   client: RestClient;
   run: RunFunction;
   openSection: (name: string) => void;
@@ -2547,6 +2549,12 @@ export function SettingsView(props: {
         )}
         {sectionVisible(["vpnGuard.enabled", "vpnGuard.mode", "vpnGuard.allowedPublicIpCidrs"]) && (
           <SettingsControlSection title="VPN Guard">
+            <section class="view-grid compact-grid">
+              <Metric label="Guard" value={props.vpnGuardStatus?.enabled ? "Enabled" : "Off"} />
+              <Metric label="Mode" value={String(props.vpnGuardStatus?.mode ?? "off")} />
+              <Metric label="Startup" value={props.vpnGuardStatus?.startupBlocked ? "Blocked" : "Allowed"} />
+              <Metric label="Egress" value={vpnGuardEgressLabel(props.vpnGuardStatus)} />
+            </section>
             <div class="settings-grid">
               {renderToggle("vpnGuard.enabled", "vpnGuardEnabled", "VPN Guard")}
               {renderField("vpnGuard.mode", "vpnGuardMode", "VPN Guard mode")}
@@ -2579,6 +2587,16 @@ export function SettingsView(props: {
       <SettingsSectionResources resources={props.surface?.sectionResources ?? []} openSection={props.openSection} />
     </section>
   );
+}
+
+function vpnGuardEgressLabel(status: VpnGuardStatus | null): string {
+  if (!status?.enabled) {
+    return "Off";
+  }
+  if (status.egressVerified) {
+    return status.publicIp ? `Verified ${status.publicIp}` : "Verified";
+  }
+  return status.egressBlockReason || "Not verified";
 }
 
 function BootstrapSettingsSection(props: { settings: SettingSurfaceSpec[] }) {

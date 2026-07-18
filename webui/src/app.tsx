@@ -38,7 +38,8 @@ import {
   SettingsSurface,
   Snapshot,
   TransferEvent,
-  Upload
+  Upload,
+  VpnGuardStatus
 } from "./api";
 import { errorMessage } from "./format";
 import {
@@ -91,7 +92,8 @@ const settingsSectionTabs: Record<string, Tab> = {
   servers: "servers",
   kad: "kad",
   diagnostics: "diagnostics",
-  ipFilter: "settings"
+  ipFilter: "settings",
+  vpnGuard: "settings"
 };
 
 const pollingEventStreamStatus: EventStreamStatus = {
@@ -112,6 +114,7 @@ export function App() {
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [ipFilterStatus, setIpFilterStatus] = useState<IpFilterStatus | null>(null);
+  const [vpnGuardStatus, setVpnGuardStatus] = useState<VpnGuardStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsSurface, setSettingsSurface] = useState<SettingsSurface | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -149,6 +152,7 @@ export function App() {
         nextCapabilities,
         nextRuntimeDiagnostics,
         nextIpFilterStatus,
+        nextVpnGuardStatus,
         nextSettingsSurface
       ] = await Promise.all([
         client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
@@ -164,6 +168,7 @@ export function App() {
         client.get<unknown>("capabilities"),
         client.get<RuntimeDiagnostics>("diagnostics"),
         client.get<IpFilterStatus>("ip-filter"),
+        client.get<VpnGuardStatus>("vpn-guard"),
         client.get<SettingsSurface>("app/settings/surface")
       ]);
       setSnapshot(nextSnapshot);
@@ -171,6 +176,7 @@ export function App() {
       setCapabilities(nextCapabilities);
       setRuntimeDiagnostics(nextRuntimeDiagnostics);
       setIpFilterStatus(nextIpFilterStatus);
+      setVpnGuardStatus(nextVpnGuardStatus);
       setSettingsSurface(nextSettingsSurface);
       setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
       setSharedDirectories(nextSharedDirectories);
@@ -469,6 +475,7 @@ export function App() {
                 settings={settings}
                 surface={settingsSurface}
                 ipFilterStatus={ipFilterStatus}
+                vpnGuardStatus={vpnGuardStatus}
                 client={client}
                 run={run}
                 openSection={(name) => setTab(settingsSectionTabs[name] ?? "settings")}

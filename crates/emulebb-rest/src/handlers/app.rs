@@ -214,6 +214,10 @@ pub(crate) async fn diagnostics(State(state): State<RestState>) -> impl IntoResp
     api_ok(runtime_diagnostics_response(&state).await)
 }
 
+pub(crate) async fn vpn_guard(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(vpn_guard_response(&state.core.vpn_guard_status()))
+}
+
 pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;

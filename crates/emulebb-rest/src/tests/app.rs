@@ -152,6 +152,11 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             && entry["class"] == "existingSectionResource"
             && entry["route"] == "/api/v1/ip-filter"
     }));
+    assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "vpnGuard"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/vpn-guard"
+    }));
 }
 
 #[tokio::test]
@@ -535,6 +540,32 @@ async fn diagnostics_reports_transfer_event_subscribers() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 1);
+}
+
+#[tokio::test]
+async fn vpn_guard_returns_runtime_status_directly() {
+    let router = test_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/vpn-guard")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+    assert_eq!(value["data"]["mode"], "off");
+    assert_eq!(value["data"]["startupBlocked"], false);
+    assert_eq!(value["data"]["egressVerified"], false);
+    assert_eq!(value["data"]["stunProbe"]["attempted"], false);
+    assert_eq!(value["data"]["httpProbe"]["attempted"], false);
 }
 
 #[tokio::test]
