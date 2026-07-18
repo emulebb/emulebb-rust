@@ -431,6 +431,11 @@ export type RestClientOptions = {
   fetch?: typeof fetch;
 };
 
+export type StreamTransferEventsOptions = {
+  signal?: AbortSignal;
+  lastEventId?: string;
+};
+
 export function encodeSegment(value: string): string {
   return encodeURIComponent(value);
 }
@@ -465,6 +470,35 @@ export class RestClient {
     return this.request<T>("DELETE", path);
   }
 
+  async streamTransferEvents(
+    onEvent: (event: TransferEvent) => void,
+    options: StreamTransferEventsOptions = {}
+  ): Promise<void> {
+    const headers: Record<string, string> = { Accept: "text/event-stream" };
+    if (this.apiKey) {
+      headers["X-API-Key"] = this.apiKey;
+    }
+    if (options.lastEventId) {
+      headers["Last-Event-ID"] = options.lastEventId;
+    }
+    const requestPath = `${this.basePath}/events`;
+    const response = await this.fetchImpl(requestPath, {
+      method: "GET",
+      headers,
+      signal: options.signal
+    });
+    if (!response.ok) {
+      throw new Error(`GET ${requestPath} failed`);
+    }
+    if (!isEventStreamResponse(response)) {
+      throw new Error(`GET ${requestPath} returned ${describeContentType(response)}; expected text/event-stream`);
+    }
+    if (!response.body) {
+      throw new Error(`GET ${requestPath} returned no stream body`);
+    }
+    await readTransferEventStream(response.body, onEvent, options.signal);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.apiKey) {
@@ -491,6 +525,72 @@ function normalizeBasePath(basePath: string): string {
   return basePath.replace(/\/+$/, "");
 }
 
+async function readTransferEventStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent: (event: TransferEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      if (signal?.aborted) {
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      buffer = drainSseFrames(buffer, onEvent);
+    }
+    buffer += decoder.decode();
+    drainSseFrames(`${buffer}\n\n`, onEvent);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function drainSseFrames(buffer: string, onEvent: (event: TransferEvent) => void): string {
+  for (;;) {
+    const separator = sseFrameSeparator(buffer);
+    if (separator === undefined) {
+      return buffer;
+    }
+    const frame = buffer.slice(0, separator.index);
+    buffer = buffer.slice(separator.index + separator.length);
+    const event = parseTransferEventFrame(frame);
+    if (event) {
+      onEvent(event);
+    }
+  }
+}
+
+function sseFrameSeparator(buffer: string): { index: number; length: number } | undefined {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf < 0) {
+    return crlf < 0 ? undefined : { index: crlf, length: 4 };
+  }
+  if (crlf < 0 || lf < crlf) {
+    return { index: lf, length: 2 };
+  }
+  return { index: crlf, length: 4 };
+}
+
+function parseTransferEventFrame(frame: string): TransferEvent | undefined {
+  const data = frame
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data) {
+    return undefined;
+  }
+  return JSON.parse(data) as TransferEvent;
+}
+
 function parseApiEnvelope<T>(
   method: string,
   path: string,
@@ -514,6 +614,10 @@ function parseApiEnvelope<T>(
 function isJsonResponse(response: Response, text: string): boolean {
   const contentType = response.headers.get("Content-Type") ?? "";
   return /\bapplication\/json\b|\+json\b/i.test(contentType) || /^[\s]*[{[]/.test(text);
+}
+
+function isEventStreamResponse(response: Response): boolean {
+  return (response.headers.get("Content-Type") ?? "").toLowerCase().startsWith("text/event-stream");
 }
 
 function describeContentType(response: Response): string {

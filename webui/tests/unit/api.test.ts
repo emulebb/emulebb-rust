@@ -73,6 +73,55 @@ describe("RestClient", () => {
 
     await expect(client.get("snapshot")).rejects.toThrow("GET /api/v1/snapshot returned invalid JSON");
   });
+
+  it("streams transfer events with API key and resume headers", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            [
+              ": heartbeat",
+              "",
+              "event: transfer.added",
+              "id: 7",
+              'data: {"id":7,"type":"transfer.added","transfer":{"hash":"00112233445566778899aabbccddeeff"}}',
+              "",
+              ""
+            ].join("\n")
+          )
+        );
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () =>
+      new Response(body, {
+        headers: { "Content-Type": "text/event-stream" },
+        status: 200
+      })
+    ) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+    client.setApiKey("secret-key");
+    const events: unknown[] = [];
+
+    await client.streamTransferEvents((event) => events.push(event), { lastEventId: "6" });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/events", {
+      method: "GET",
+      headers: {
+        Accept: "text/event-stream",
+        "Last-Event-ID": "6",
+        "X-API-Key": "secret-key"
+      },
+      signal: undefined
+    });
+    expect(events).toEqual([
+      {
+        id: 7,
+        type: "transfer.added",
+        transfer: { hash: "00112233445566778899aabbccddeeff" }
+      }
+    ]);
+  });
 });
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {

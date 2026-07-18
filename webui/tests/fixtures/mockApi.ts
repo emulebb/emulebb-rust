@@ -87,6 +87,20 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     });
 
     const data = dataFor(request.method(), path);
+    if (data === eventStream) {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: [
+          "event: sync.reset",
+          "id: 1",
+          'data: {"id":1,"type":"sync.reset","reason":"last-event-id","lastEventId":"0"}',
+          "",
+          ""
+        ].join("\n")
+      });
+      return;
+    }
     if (data === undefined) {
       await route.fulfill({
         status: 404,
@@ -104,11 +118,15 @@ export function installMockApi(requests: RecordedApiRequest[]) {
   };
 }
 
+const eventStream = Symbol("eventStream");
+
 function dataFor(method: string, path: string): unknown {
   if (method !== "GET") {
     return {};
   }
   switch (path) {
+    case "events":
+      return eventStream;
     case "snapshot":
       return snapshot;
     case "logs":

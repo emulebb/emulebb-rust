@@ -34,6 +34,7 @@ import {
   SharedDirectories,
   SharedFile,
   Snapshot,
+  TransferEvent,
   Upload
 } from "./api";
 import { errorMessage } from "./format";
@@ -169,6 +170,72 @@ export function App() {
     const timer = window.setInterval(() => void refresh(), 3000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
+
+  useEffect(() => {
+    if (!transferSseEnabled) {
+      return;
+    }
+    const controller = new AbortController();
+    let closed = false;
+    let lastEventId: string | undefined;
+    let refreshTimer: number | undefined;
+    let refreshInFlight = false;
+    let refreshPending = false;
+
+    const runScheduledRefresh = async () => {
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await refresh();
+      } finally {
+        refreshInFlight = false;
+        if (refreshPending && !closed) {
+          refreshPending = false;
+          scheduleRefresh();
+        }
+      }
+    };
+
+    const scheduleRefresh = () => {
+      if (refreshTimer !== undefined) {
+        return;
+      }
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        void runScheduledRefresh();
+      }, 100);
+    };
+
+    const runStream = async () => {
+      while (!closed) {
+        try {
+          await client.streamTransferEvents((event: TransferEvent) => {
+            lastEventId = String(event.id);
+            scheduleRefresh();
+          }, { signal: controller.signal, lastEventId });
+        } catch {
+          if (closed || controller.signal.aborted) {
+            return;
+          }
+        }
+        await delayWithAbort(3000, controller.signal);
+      }
+    };
+
+    void runStream();
+    return () => {
+      closed = true;
+      controller.abort();
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, [apiKey, refresh, transferSseEnabled]);
 
   const saveApiKey = () => {
     const next = apiKeyInput.trim();
@@ -316,6 +383,35 @@ export function App() {
       </div>
     </div>
   );
+}
+
+function supportsTransferSse(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const capabilities = (value as Record<string, unknown>).capabilities;
+  if (Array.isArray(capabilities)) {
+    return capabilities.includes("transfers.sse");
+  }
+  if (typeof capabilities === "object" && capabilities !== null) {
+    return (capabilities as Record<string, unknown>)["transfers.sse"] === true;
+  }
+  return false;
+}
+
+function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = window.setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 function TabButton(props: {
