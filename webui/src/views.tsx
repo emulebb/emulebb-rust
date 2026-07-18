@@ -544,6 +544,7 @@ export function SharingView(props: {
   const roots = props.directories?.roots ?? [];
   const items = props.directories?.items ?? [];
   const reload = props.directories?.reloadProgress ?? {};
+  const pathError = sharedRootPathError(path);
 
   const replaceRoots = (paths: string[]) =>
     props.client.patch("shared-directories", {
@@ -553,8 +554,8 @@ export function SharingView(props: {
 
   const addRoot = async () => {
     const nextPath = path.trim();
-    if (!nextPath) {
-      throw new Error("Path is required");
+    if (!nextPath || pathError) {
+      return;
     }
     await replaceRoots([...roots.map((root) => root.path), nextPath]);
     setPath("");
@@ -583,11 +584,14 @@ export function SharingView(props: {
         <p class="hint">Folder trees are always recursive and monitored. Single-file sharing is not supported.</p>
         <form class="form-row" onSubmit={(event) => {
           event.preventDefault();
-          void props.run(addRoot, "Folder added");
+          if (!pathError) {
+            void props.run(addRoot, "Folder added");
+          }
         }}>
-          <input class="form-control" value={path} placeholder="Folder path" onInput={(event) => setPath(event.currentTarget.value)} />
-          <button class="btn" type="submit"><FolderPlus size={16} />Add</button>
+          <input class="form-control" value={path} placeholder="Folder path" aria-invalid={pathError ? "true" : "false"} onInput={(event) => setPath(event.currentTarget.value)} />
+          <button class="btn" type="submit" disabled={!path.trim() || Boolean(pathError)}><FolderPlus size={16} />Add</button>
         </form>
+        {pathError && <p class="field-error">{pathError}</p>}
         <div class="table-wrap">
           <table class="table table-vcenter card-table">
             <thead>
@@ -3289,6 +3293,10 @@ function parseSharedFileRating(value: string): number | null {
 
 function sharedFileRatingError(value: string): string | undefined {
   return parseSharedFileRating(value) === null ? "Shared file rating must be an integer between 0 and 5." : undefined;
+}
+
+function sharedRootPathError(value: string): string | undefined {
+  return value && !value.trim() ? "Folder path must not be empty." : undefined;
 }
 
 function optionalPort(value: string): number | null {

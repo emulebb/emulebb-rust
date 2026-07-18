@@ -100,6 +100,34 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
   expect(JSON.parse(searchPost?.body ?? "{}")).toEqual({ query: "alpha beta", method: "kad", type: "arc" });
 });
 
+test("shared folder add form validates root paths", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sharing" }).click();
+  const sharingPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Folders" }) });
+  const addFolder = sharingPanel.getByRole("button", { name: "Add" });
+  const initialSharedDirectoryPatches = requests.filter((request) => request.method === "PATCH" && request.path === "shared-directories").length;
+
+  await expect(addFolder).toBeDisabled();
+  await sharingPanel.getByPlaceholder("Folder path").fill("   ");
+  await expect(sharingPanel.getByText("Folder path must not be empty.")).toBeVisible();
+  await expect(addFolder).toBeDisabled();
+  expect(requests.filter((request) => request.method === "PATCH" && request.path === "shared-directories").length).toBe(initialSharedDirectoryPatches);
+
+  await sharingPanel.getByPlaceholder("Folder path").fill(" C:\\More\\Shared ");
+  await expect(sharingPanel.getByText("Folder path must not be empty.")).toHaveCount(0);
+  await addFolder.click();
+  await expect(page.getByText("Folder added")).toBeVisible();
+  const sharedDirectoryPatch = requests.find((request) => request.method === "PATCH" && request.path === "shared-directories");
+  expect(sharedDirectoryPatch).toBeDefined();
+  expect(JSON.parse(sharedDirectoryPatch?.body ?? "{}")).toEqual({
+    roots: [{ path: "C:\\Sample\\Shared" }, { path: "C:\\More\\Shared" }],
+    confirmReplaceRoots: true
+  });
+});
+
 test("transfer add form validates eD2K link batches", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
