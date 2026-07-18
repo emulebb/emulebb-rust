@@ -338,6 +338,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.daemon.ed2kUserHash must be a marker-normalized 32-character lowercase hex eD2K user hash or null",
         ),
         (
+            r#"{"daemon":{"p2pBindInterface":"   "}}"#,
+            "settings.daemon.p2pBindInterface must not be empty",
+        ),
+        (
+            r#"{"daemon":{"p2pBindInterface":7}}"#,
+            "settings.daemon.p2pBindInterface must be a non-empty string",
+        ),
+        (
             r#"{"daemon":{"unsupportedSetting":1}}"#,
             "unknown settings.daemon field: unsupportedSetting",
         ),
@@ -582,6 +590,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.nat.externalIpOverride must be an IPv4 address string or null",
         ),
         (
+            r#"{"nat":{"minissdpdSocket":"   "}}"#,
+            "settings.nat.minissdpdSocket must not be empty",
+        ),
+        (
+            r#"{"nat":{"minissdpdSocket":7}}"#,
+            "settings.nat.minissdpdSocket must be a non-empty string path",
+        ),
+        (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
             "settings.nat PATCH requires at least one setting",
         ),
@@ -604,6 +620,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"ipFilter":{"unsupportedSetting":1}}"#,
             "unknown settings.ipFilter field: unsupportedSetting",
+        ),
+        (
+            r#"{"ipFilter":{"path":"   "}}"#,
+            "settings.ipFilter.path must not be empty",
+        ),
+        (
+            r#"{"ipFilter":{"path":7}}"#,
+            "settings.ipFilter.path must be a non-empty string path",
         ),
     ];
 

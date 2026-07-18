@@ -212,6 +212,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     IP_FILTER_SETTINGS_FIELDS,
                     "settings.ipFilter",
                 )?;
+                validate_ip_filter_settings_patch_body_fields(section_object)?;
             }
             _ => {}
         }
@@ -229,6 +230,11 @@ pub(super) fn validate_daemon_settings_patch_body_fields(
     }
     validate_nullable_ipv4_text(object, "p2pBindIp", "settings.daemon.p2pBindIp")?;
     validate_nullable_ed2k_user_hash_text(object, "ed2kUserHash", "settings.daemon.ed2kUserHash")?;
+    validate_nullable_non_empty_text(
+        object,
+        "p2pBindInterface",
+        "settings.daemon.p2pBindInterface",
+    )?;
     Ok(())
 }
 
@@ -504,6 +510,7 @@ fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
         "externalIpOverride",
         "settings.nat.externalIpOverride",
     )?;
+    validate_nullable_path_text(object, "minissdpdSocket", "settings.nat.minissdpdSocket")?;
     validate_unsigned_number_min(
         object,
         "discoveryTimeoutSecs",
@@ -540,6 +547,38 @@ fn invalid_nat_backend_order_error() -> Box<Response> {
         "settings.nat.backendOrder must contain only {}",
         NAT_BACKEND_UPNP_MINIUPNPC
     ))
+}
+
+fn validate_ip_filter_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_nullable_path_text(object, "path", "settings.ipFilter.path")
+}
+
+fn validate_nullable_non_empty_text(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    validate_non_empty_text_body_field(Some(value), path)
+}
+
+fn validate_nullable_path_text(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    validate_path_text_body_field(Some(value), path)
 }
 
 fn validate_nullable_ipv4_text(
