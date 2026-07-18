@@ -19,6 +19,47 @@ pub(super) fn validate_core_settings_patch_body_fields(
     core_settings::validate_core_settings_patch_body_fields(object)
 }
 
+pub(super) fn validate_app_settings_patch_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if object.is_empty() {
+        return Err(invalid_body_error(
+            "settings PATCH requires at least one settings section",
+        ));
+    }
+    for (section, value) in object {
+        let Some(section_object) = value.as_object() else {
+            return Err(invalid_body_error(format!("{section} must be an object")));
+        };
+        match section.as_str() {
+            "core" => validate_core_settings_patch_body_fields(section_object)?,
+            "daemon" => {
+                validate_non_empty_update_object(section_object, "settings.daemon")?;
+                validate_daemon_settings_patch_body_fields(section_object)?;
+                validate_nested_settings_update_object(
+                    section_object,
+                    "hostnameLookup",
+                    "settings.daemon.hostnameLookup",
+                )?;
+            }
+            "ed2k" => {
+                validate_non_empty_update_object(section_object, "settings.ed2k")?;
+                validate_nested_settings_update_object(
+                    section_object,
+                    "uploadQueue",
+                    "settings.ed2k.uploadQueue",
+                )?;
+            }
+            "kad" => validate_non_empty_update_object(section_object, "settings.kad")?,
+            "nat" => validate_non_empty_update_object(section_object, "settings.nat")?,
+            "vpnGuard" => validate_non_empty_update_object(section_object, "settings.vpnGuard")?,
+            "ipFilter" => validate_non_empty_update_object(section_object, "settings.ipFilter")?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_daemon_settings_patch_body_fields(
     object: &JsonObject,
 ) -> Result<(), Box<Response>> {
@@ -26,6 +67,29 @@ pub(super) fn validate_daemon_settings_patch_body_fields(
         && !incoming_dir.is_null()
     {
         validate_path_text_body_field(Some(incoming_dir), "incomingDir")?;
+    }
+    Ok(())
+}
+
+fn validate_nested_settings_update_object(
+    parent: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(value) = parent.get(field) else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object() else {
+        return Err(invalid_body_error(format!("{path} must be an object")));
+    };
+    validate_non_empty_update_object(object, path)
+}
+
+fn validate_non_empty_update_object(object: &JsonObject, path: &str) -> Result<(), Box<Response>> {
+    if object.is_empty() {
+        return Err(invalid_body_error(format!(
+            "{path} PATCH requires at least one setting"
+        )));
     }
     Ok(())
 }

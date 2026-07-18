@@ -11,15 +11,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use validators::{
-    validate_category_create_body_fields, validate_category_patch_body_fields,
-    validate_core_settings_patch_body_fields, validate_daemon_settings_patch_body_fields,
-    validate_destructive_confirmation_body_field, validate_friend_create_body_fields,
-    validate_kad_bootstrap_body_fields, validate_optional_boolean_body_field,
-    validate_paused_body_field, validate_search_create_body_fields,
-    validate_server_create_body_fields, validate_server_patch_body_fields,
-    validate_shared_directories_patch_body_fields, validate_shared_file_patch_body_fields,
-    validate_transfer_add_body_fields, validate_transfer_patch_body_fields,
-    validate_url_import_body_fields,
+    validate_app_settings_patch_body_fields, validate_category_create_body_fields,
+    validate_category_patch_body_fields, validate_destructive_confirmation_body_field,
+    validate_friend_create_body_fields, validate_kad_bootstrap_body_fields,
+    validate_optional_boolean_body_field, validate_paused_body_field,
+    validate_search_create_body_fields, validate_server_create_body_fields,
+    validate_server_patch_body_fields, validate_shared_directories_patch_body_fields,
+    validate_shared_file_patch_body_fields, validate_transfer_add_body_fields,
+    validate_transfer_patch_body_fields, validate_url_import_body_fields,
 };
 
 pub(super) type JsonObject = serde_json::Map<String, serde_json::Value>;
@@ -115,18 +114,7 @@ fn validate_route_specific_body_fields(
         return validate_destructive_confirmation_body(method, path, object);
     }
     if method == "PATCH" && path == "/api/v1/app/settings" {
-        if let Some(core) = object.get("core") {
-            let Some(core) = core.as_object() else {
-                return Err(invalid_body_error("core must be an object"));
-            };
-            validate_core_settings_patch_body_fields(core)?;
-        }
-        if let Some(daemon) = object.get("daemon") {
-            let Some(daemon) = daemon.as_object() else {
-                return Err(invalid_body_error("daemon must be an object"));
-            };
-            validate_daemon_settings_patch_body_fields(daemon)?;
-        }
+        validate_app_settings_patch_body_fields(object)?;
         return validate_destructive_confirmation_body(method, path, object);
     }
     if method == "POST" && path == "/api/v1/servers" {

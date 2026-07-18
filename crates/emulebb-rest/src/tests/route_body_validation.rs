@@ -244,6 +244,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
     let uri = "/api/v1/app/settings";
     let cases = [
         (
+            r#"{}"#,
+            "settings PATCH requires at least one settings section",
+        ),
+        (
             r#"{"core":{}}"#,
             "settings.core PATCH requires at least one core setting",
         ),
@@ -298,12 +302,36 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         ),
         (r#"{"daemon":1}"#, "daemon must be an object"),
         (
+            r#"{"daemon":{}}"#,
+            "settings.daemon PATCH requires at least one setting",
+        ),
+        (
             r#"{"daemon":{"incomingDir":1}}"#,
             "incomingDir must be a non-empty string path",
         ),
         (
             r#"{"daemon":{"incomingDir":"   "}}"#,
             "incomingDir must not be empty",
+        ),
+        (
+            r#"{"daemon":{"hostnameLookup":{}}}"#,
+            "settings.daemon.hostnameLookup PATCH requires at least one setting",
+        ),
+        (
+            r#"{"daemon":{"hostnameLookup":1}}"#,
+            "settings.daemon.hostnameLookup must be an object",
+        ),
+        (
+            r#"{"ed2k":{}}"#,
+            "settings.ed2k PATCH requires at least one setting",
+        ),
+        (
+            r#"{"ed2k":{"uploadQueue":{}}}"#,
+            "settings.ed2k.uploadQueue PATCH requires at least one setting",
+        ),
+        (
+            r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
+            "settings.nat PATCH requires at least one setting",
         ),
     ];
 
