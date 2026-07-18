@@ -534,6 +534,18 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.nat.backendOrder must contain only upnp_miniupnpc",
         ),
         (
+            r#"{"nat":{"discoveryTimeoutSecs":0}}"#,
+            "settings.nat.discoveryTimeoutSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"nat":{"leaseDurationSecs":0}}"#,
+            "settings.nat.leaseDurationSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"nat":{"renewMarginSecs":0}}"#,
+            "settings.nat.renewMarginSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
             "settings.nat PATCH requires at least one setting",
         ),

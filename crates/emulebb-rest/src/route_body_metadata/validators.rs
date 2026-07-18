@@ -494,6 +494,20 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 }
 
 fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_unsigned_number_min(
+        object,
+        "discoveryTimeoutSecs",
+        "settings.nat.discoveryTimeoutSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "leaseDurationSecs",
+        "settings.nat.leaseDurationSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(object, "renewMarginSecs", "settings.nat.renewMarginSecs", 1)?;
+
     let Some(backend_order) = object.get("backendOrder") else {
         return Ok(());
     };
