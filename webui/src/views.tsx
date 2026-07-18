@@ -1981,9 +1981,14 @@ type SettingsForm = {
   enableUdpReask: boolean;
   publishEmuleRustIdentity: boolean;
   kadPublishSharedFilesEnabled: boolean;
+  kadBootstrapMinRoutingContacts: string;
+  kadLocalStoreEnabled: boolean;
   kadRepublishIntervalSecs: string;
+  kadPublishContactFanout: string;
   udpFirewallCheckEnabled: boolean;
+  kadUdpFirewallCheckIntervalSecs: string;
   tcpFirewallCheckEnabled: boolean;
+  kadTcpFirewallCheckIntervalSecs: string;
   buddyEnabled: boolean;
   routingMaintenanceEnabled: boolean;
   natEnabled: boolean;
@@ -2051,9 +2056,14 @@ const emptySettingsForm: SettingsForm = {
   enableUdpReask: false,
   publishEmuleRustIdentity: false,
   kadPublishSharedFilesEnabled: false,
+  kadBootstrapMinRoutingContacts: "",
+  kadLocalStoreEnabled: false,
   kadRepublishIntervalSecs: "",
+  kadPublishContactFanout: "",
   udpFirewallCheckEnabled: false,
+  kadUdpFirewallCheckIntervalSecs: "",
   tcpFirewallCheckEnabled: false,
+  kadTcpFirewallCheckIntervalSecs: "",
   buddyEnabled: false,
   routingMaintenanceEnabled: false,
   natEnabled: false,
@@ -2170,10 +2180,15 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
       kad: {
         ...(settings.kad ?? {}),
         listenPort: optionalPort(form.kadListenPort),
+        bootstrapMinRoutingContacts: parseNumber(form.kadBootstrapMinRoutingContacts),
+        localStoreEnabled: form.kadLocalStoreEnabled,
         publishSharedFilesEnabled: form.kadPublishSharedFilesEnabled,
         republishIntervalSecs: parseNumber(form.kadRepublishIntervalSecs),
+        publishContactFanout: parseNumber(form.kadPublishContactFanout),
         udpFirewallCheckEnabled: form.udpFirewallCheckEnabled,
+        udpFirewallCheckIntervalSecs: parseNumber(form.kadUdpFirewallCheckIntervalSecs),
         tcpFirewallCheckEnabled: form.tcpFirewallCheckEnabled,
+        tcpFirewallCheckIntervalSecs: parseNumber(form.kadTcpFirewallCheckIntervalSecs),
         buddyEnabled: form.buddyEnabled,
         routingMaintenanceEnabled: form.routingMaintenanceEnabled
       },
@@ -2341,19 +2356,29 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
           </SettingsControlSection>
         )}
         {sectionVisible([
+          "kad.bootstrapMinRoutingContacts",
+          "kad.localStoreEnabled",
           "kad.publishSharedFilesEnabled",
           "kad.republishIntervalSecs",
+          "kad.publishContactFanout",
           "kad.udpFirewallCheckEnabled",
+          "kad.udpFirewallCheckIntervalSecs",
           "kad.tcpFirewallCheckEnabled",
+          "kad.tcpFirewallCheckIntervalSecs",
           "kad.buddyEnabled",
           "kad.routingMaintenanceEnabled"
         ]) && (
           <SettingsControlSection title="Kad">
             <div class="settings-grid">
+              {renderField("kad.bootstrapMinRoutingContacts", "kadBootstrapMinRoutingContacts", "Bootstrap contact floor")}
+              {renderToggle("kad.localStoreEnabled", "kadLocalStoreEnabled", "Kad local store")}
               {renderToggle("kad.publishSharedFilesEnabled", "kadPublishSharedFilesEnabled", "Kad publish shared files")}
               {renderField("kad.republishIntervalSecs", "kadRepublishIntervalSecs", "Kad republish seconds")}
+              {renderField("kad.publishContactFanout", "kadPublishContactFanout", "Publish contact fanout")}
               {renderToggle("kad.udpFirewallCheckEnabled", "udpFirewallCheckEnabled", "Kad UDP firewall checks")}
+              {renderField("kad.udpFirewallCheckIntervalSecs", "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds")}
               {renderToggle("kad.tcpFirewallCheckEnabled", "tcpFirewallCheckEnabled", "Kad TCP firewall checks")}
+              {renderField("kad.tcpFirewallCheckIntervalSecs", "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds")}
               {renderToggle("kad.buddyEnabled", "buddyEnabled", "Kad buddy")}
               {renderToggle("kad.routingMaintenanceEnabled", "routingMaintenanceEnabled", "Routing maintenance")}
             </div>
@@ -2510,7 +2535,11 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
   validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
+  validateUnsigned(errors, form, "kadBootstrapMinRoutingContacts", "Bootstrap contact floor", { min: 1 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
+  validateUnsigned(errors, form, "kadPublishContactFanout", "Publish contact fanout", { min: 1 });
+  validateUnsigned(errors, form, "kadUdpFirewallCheckIntervalSecs", "UDP firewall interval seconds", { min: 1 });
+  validateUnsigned(errors, form, "kadTcpFirewallCheckIntervalSecs", "TCP firewall interval seconds", { min: 1 });
   validateUnsigned(errors, form, "natSsdpLocalPort", "SSDP local port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "natDiscoveryTimeoutSecs", "Discovery timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
@@ -2581,10 +2610,15 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kReconnectEnabled: boolField(settings.ed2k, "reconnectEnabled"),
     enableUdpReask: boolField(settings.ed2k, "enableUdpReask"),
     publishEmuleRustIdentity: boolField(settings.ed2k, "publishEmuleRustIdentity"),
+    kadBootstrapMinRoutingContacts: String(numberField(settings.kad, "bootstrapMinRoutingContacts") ?? ""),
+    kadLocalStoreEnabled: boolField(settings.kad, "localStoreEnabled"),
     kadPublishSharedFilesEnabled: boolField(settings.kad, "publishSharedFilesEnabled"),
     kadRepublishIntervalSecs: String(numberField(settings.kad, "republishIntervalSecs") ?? ""),
+    kadPublishContactFanout: String(numberField(settings.kad, "publishContactFanout") ?? ""),
     udpFirewallCheckEnabled: boolField(settings.kad, "udpFirewallCheckEnabled"),
+    kadUdpFirewallCheckIntervalSecs: String(numberField(settings.kad, "udpFirewallCheckIntervalSecs") ?? ""),
     tcpFirewallCheckEnabled: boolField(settings.kad, "tcpFirewallCheckEnabled"),
+    kadTcpFirewallCheckIntervalSecs: String(numberField(settings.kad, "tcpFirewallCheckIntervalSecs") ?? ""),
     buddyEnabled: boolField(settings.kad, "buddyEnabled"),
     routingMaintenanceEnabled: boolField(settings.kad, "routingMaintenanceEnabled"),
     natEnabled: boolField(settings.nat, "enabled"),
