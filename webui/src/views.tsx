@@ -2669,7 +2669,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "queueSize", "Queue size", { min: 2000, max: 10000 });
   validateUnsigned(errors, form, "hostnameLookupCacheTtlSecs", "DNS cache TTL seconds", { min: 1 });
   validateUnsigned(errors, form, "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick", { min: 1 });
-  validateUnsigned(errors, form, "hostnameLookupTickIntervalSecs", "DNS tick seconds", { min: 1 });
+  validateUnsigned(errors, form, "hostnameLookupTickIntervalSecs", "DNS tick seconds", { min: 5 });
   validateUnsigned(errors, form, "ed2kListenPort", "eD2K listen port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds", { min: 1 });

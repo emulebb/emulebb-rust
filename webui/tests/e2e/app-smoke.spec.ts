@@ -106,6 +106,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Startup upload slots")).toBeVisible();
   await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
+  await expect(settingsPanel.getByLabel("DNS tick seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Discovery timeout seconds")).toBeVisible();
 
   const save = settingsPanel.getByRole("button", { name: "Save" });
@@ -118,6 +119,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("eD2K listen port").fill("4662");
   await expect(settingsPanel.getByText("eD2K listen port must be between 1 and 65535.")).toHaveCount(0);
+  await settingsPanel.getByLabel("DNS tick seconds").fill("4");
+  await expect(settingsPanel.getByText("DNS tick seconds must be at least 5.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("DNS tick seconds").fill("30");
+  await expect(settingsPanel.getByText("DNS tick seconds must be at least 5.")).toHaveCount(0);
   await settingsPanel.getByLabel("UDP firewall interval seconds").fill("59");
   await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toBeVisible();
   await expect(save).toBeDisabled();
