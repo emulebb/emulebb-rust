@@ -39,6 +39,10 @@ async fn app_returns_evelope_with_capabilities() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["meta"]["apiVersion"], "v1");
@@ -141,6 +145,10 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unauthorized.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
+    );
 
     let response = test_router()
         .oneshot(
@@ -156,6 +164,10 @@ async fn events_endpoint_requires_auth_and_serves_sse() {
     assert_eq!(
         response.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/event-stream"
+    );
+    assert_eq!(
+        response.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
     );
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL).unwrap(),

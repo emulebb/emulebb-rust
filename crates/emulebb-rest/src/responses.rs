@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::{BulkOperationResult, RestState, SearchResultsPage, SharedFileResponse};
 
-const CONTRACT_VERSION: &str = "1.2.0";
+pub(crate) const CONTRACT_VERSION: &str = "1.2.0";
 
 pub(crate) fn lifecycle_response(lifecycle: &AppLifecycle) -> Value {
     let shutdown = lifecycle.state == "shuttingdown" || lifecycle.state == "done";

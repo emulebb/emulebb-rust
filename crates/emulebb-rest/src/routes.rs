@@ -11,7 +11,7 @@ use axum::{
     Router,
     body::Body,
     extract::State,
-    http::{HeaderValue, Request, StatusCode, header},
+    http::{HeaderName, HeaderValue, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, delete, get, post},
@@ -22,6 +22,7 @@ use tokio::sync::watch;
 
 use crate::envelope::api_error;
 use crate::handlers::*;
+use crate::responses::CONTRACT_VERSION;
 use crate::route_metadata::validate_route_metadata;
 use crate::webui::mount_webui;
 use crate::{RestServerSettings, RestState};
@@ -252,6 +253,7 @@ pub fn router_with_shutdown(
             state.clone(),
             require_api_key,
         ))
+        .layer(middleware::map_response(add_contract_version_header))
         .with_state(state);
 
     mount_webui(api_router, config.web_root_dir)
@@ -279,6 +281,14 @@ async fn require_api_key(
         )
         .into_response()
     }
+}
+
+async fn add_contract_version_header(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static("x-contract-version"),
+        HeaderValue::from_static(CONTRACT_VERSION),
+    );
+    response
 }
 
 async fn fallback() -> impl IntoResponse {
