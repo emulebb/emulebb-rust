@@ -464,9 +464,10 @@ export class RestClient {
     }
     const response = await this.fetchImpl(`${this.basePath}/${path}`, init);
     const text = await response.text();
-    const value = text ? (JSON.parse(text) as ApiEnvelope<T> & ApiError) : undefined;
+    const requestPath = `${this.basePath}/${path}`;
+    const value = parseApiEnvelope<T>(method, requestPath, response, text);
     if (!response.ok) {
-      const message = value?.error?.message ?? `${method} ${this.basePath}/${path} failed`;
+      const message = value?.error?.message ?? `${method} ${requestPath} failed`;
       throw new Error(message);
     }
     return value?.data as T;
@@ -475,4 +476,33 @@ export class RestClient {
 
 function normalizeBasePath(basePath: string): string {
   return basePath.replace(/\/+$/, "");
+}
+
+function parseApiEnvelope<T>(
+  method: string,
+  path: string,
+  response: Response,
+  text: string
+): (ApiEnvelope<T> & ApiError) | undefined {
+  if (!text) {
+    return undefined;
+  }
+  if (!isJsonResponse(response, text)) {
+    throw new Error(`${method} ${path} returned ${response.status} ${response.statusText || "response"} with ${describeContentType(response)}; expected a REST JSON envelope`);
+  }
+  try {
+    return JSON.parse(text) as ApiEnvelope<T> & ApiError;
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    throw new Error(`${method} ${path} returned invalid JSON: ${message}`);
+  }
+}
+
+function isJsonResponse(response: Response, text: string): boolean {
+  const contentType = response.headers.get("Content-Type") ?? "";
+  return /\bapplication\/json\b|\+json\b/i.test(contentType) || /^[\s]*[{[]/.test(text);
+}
+
+function describeContentType(response: Response): string {
+  return response.headers.get("Content-Type") || "a non-JSON body";
 }

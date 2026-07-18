@@ -46,6 +46,33 @@ describe("RestClient", () => {
 
     await expect(client.delete("transfers/hash")).rejects.toThrow("DELETE /api/v1/transfers/hash failed");
   });
+
+  it("reports HTML fallback responses as a REST routing problem", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response("<!doctype html><html></html>", {
+        headers: { "Content-Type": "text/html" },
+        status: 200,
+        statusText: "OK"
+      })
+    ) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+
+    await expect(client.get("snapshot")).rejects.toThrow(
+      "GET /api/v1/snapshot returned 200 OK with text/html; expected a REST JSON envelope"
+    );
+  });
+
+  it("reports malformed JSON with request context", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response("{", {
+        headers: { "Content-Type": "application/json" },
+        status: 200
+      })
+    ) as unknown as typeof fetch;
+    const client = new RestClient({ fetch: fetchMock });
+
+    await expect(client.get("snapshot")).rejects.toThrow("GET /api/v1/snapshot returned invalid JSON");
+  });
 });
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
