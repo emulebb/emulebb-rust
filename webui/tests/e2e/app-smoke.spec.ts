@@ -87,11 +87,13 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
 
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
   await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
+  await expect(settingsPanel.getByText("Startup upload slots")).toHaveCount(0);
   await expect(settingsPanel.getByText("Bootstrap contact floor")).toHaveCount(0);
   await expect(settingsPanel.getByText("Discovery timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
+  await expect(settingsPanel.getByLabel("Startup upload slots")).toBeVisible();
   await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
   await expect(settingsPanel.getByLabel("Discovery timeout seconds")).toBeVisible();
 

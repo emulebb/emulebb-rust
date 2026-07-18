@@ -1975,6 +1975,17 @@ type SettingsForm = {
   ed2kReconnectIntervalSecs: string;
   ed2kKeepaliveSecs: string;
   ed2kDeadServerRetries: string;
+  ed2kUploadQueueActiveSlots: string;
+  ed2kUploadQueueElasticPercent: string;
+  ed2kUploadQueueUploadLimitBytesPerSec: string;
+  ed2kUploadQueueElasticUnderfillBytesPerSec: string;
+  ed2kUploadQueueElasticUnderfillSecs: string;
+  ed2kUploadQueueWaitingCapacity: string;
+  ed2kUploadQueueWaitingTimeoutSecs: string;
+  ed2kUploadQueueGrantedTimeoutSecs: string;
+  ed2kUploadQueueUploadTimeoutSecs: string;
+  ed2kUploadQueueSessionTransferPercent: string;
+  ed2kUploadQueueSessionTimeLimitSecs: string;
   kadListenPort: string;
   obfuscationEnabled: boolean;
   ed2kReconnectEnabled: boolean;
@@ -2050,6 +2061,17 @@ const emptySettingsForm: SettingsForm = {
   ed2kReconnectIntervalSecs: "",
   ed2kKeepaliveSecs: "",
   ed2kDeadServerRetries: "",
+  ed2kUploadQueueActiveSlots: "",
+  ed2kUploadQueueElasticPercent: "",
+  ed2kUploadQueueUploadLimitBytesPerSec: "",
+  ed2kUploadQueueElasticUnderfillBytesPerSec: "",
+  ed2kUploadQueueElasticUnderfillSecs: "",
+  ed2kUploadQueueWaitingCapacity: "",
+  ed2kUploadQueueWaitingTimeoutSecs: "",
+  ed2kUploadQueueGrantedTimeoutSecs: "",
+  ed2kUploadQueueUploadTimeoutSecs: "",
+  ed2kUploadQueueSessionTransferPercent: "",
+  ed2kUploadQueueSessionTimeLimitSecs: "",
   kadListenPort: "",
   obfuscationEnabled: false,
   ed2kReconnectEnabled: false,
@@ -2175,7 +2197,21 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         publishEmuleRustIdentity: form.publishEmuleRustIdentity,
         addServersFromServer: form.addServersFromServer,
         safeServerConnect: form.safeServerConnect,
-        deadServerRetries: parseNumber(form.ed2kDeadServerRetries)
+        deadServerRetries: parseNumber(form.ed2kDeadServerRetries),
+        uploadQueue: {
+          ...(recordField(settings.ed2k, "uploadQueue")),
+          activeSlots: parseNumber(form.ed2kUploadQueueActiveSlots),
+          elasticPercent: parseNumber(form.ed2kUploadQueueElasticPercent),
+          uploadLimitBytesPerSec: parseNumber(form.ed2kUploadQueueUploadLimitBytesPerSec),
+          elasticUnderfillBytesPerSec: parseNumber(form.ed2kUploadQueueElasticUnderfillBytesPerSec),
+          elasticUnderfillSecs: parseNumber(form.ed2kUploadQueueElasticUnderfillSecs),
+          waitingCapacity: parseNumber(form.ed2kUploadQueueWaitingCapacity),
+          waitingTimeoutSecs: parseNumber(form.ed2kUploadQueueWaitingTimeoutSecs),
+          grantedTimeoutSecs: parseNumber(form.ed2kUploadQueueGrantedTimeoutSecs),
+          uploadTimeoutSecs: parseNumber(form.ed2kUploadQueueUploadTimeoutSecs),
+          sessionTransferPercent: parseNumber(form.ed2kUploadQueueSessionTransferPercent),
+          sessionTimeLimitSecs: parseNumber(form.ed2kUploadQueueSessionTimeLimitSecs)
+        }
       },
       kad: {
         ...(settings.kad ?? {}),
@@ -2352,6 +2388,35 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderField("ed2k.callbackTimeoutSecs", "ed2kCallbackTimeoutSecs", "Callback timeout seconds")}
               {renderField("ed2k.reconnectIntervalSecs", "ed2kReconnectIntervalSecs", "Reconnect interval seconds")}
               {renderField("ed2k.deadServerRetries", "ed2kDeadServerRetries", "Dead server retries")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "ed2k.uploadQueue.activeSlots",
+          "ed2k.uploadQueue.elasticPercent",
+          "ed2k.uploadQueue.uploadLimitBytesPerSec",
+          "ed2k.uploadQueue.elasticUnderfillBytesPerSec",
+          "ed2k.uploadQueue.elasticUnderfillSecs",
+          "ed2k.uploadQueue.waitingCapacity",
+          "ed2k.uploadQueue.waitingTimeoutSecs",
+          "ed2k.uploadQueue.grantedTimeoutSecs",
+          "ed2k.uploadQueue.uploadTimeoutSecs",
+          "ed2k.uploadQueue.sessionTransferPercent",
+          "ed2k.uploadQueue.sessionTimeLimitSecs"
+        ]) && (
+          <SettingsControlSection title="Uploads">
+            <div class="settings-grid">
+              {renderField("ed2k.uploadQueue.activeSlots", "ed2kUploadQueueActiveSlots", "Startup upload slots")}
+              {renderField("ed2k.uploadQueue.elasticPercent", "ed2kUploadQueueElasticPercent", "Startup upload elasticity %")}
+              {renderField("ed2k.uploadQueue.uploadLimitBytesPerSec", "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s")}
+              {renderField("ed2k.uploadQueue.elasticUnderfillBytesPerSec", "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s")}
+              {renderField("ed2k.uploadQueue.elasticUnderfillSecs", "ed2kUploadQueueElasticUnderfillSecs", "Elastic underfill seconds")}
+              {renderField("ed2k.uploadQueue.waitingCapacity", "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity")}
+              {renderField("ed2k.uploadQueue.waitingTimeoutSecs", "ed2kUploadQueueWaitingTimeoutSecs", "Waiting timeout seconds")}
+              {renderField("ed2k.uploadQueue.grantedTimeoutSecs", "ed2kUploadQueueGrantedTimeoutSecs", "Granted idle timeout seconds")}
+              {renderField("ed2k.uploadQueue.uploadTimeoutSecs", "ed2kUploadQueueUploadTimeoutSecs", "Upload timeout seconds")}
+              {renderField("ed2k.uploadQueue.sessionTransferPercent", "ed2kUploadQueueSessionTransferPercent", "Session transfer %")}
+              {renderField("ed2k.uploadQueue.sessionTimeLimitSecs", "ed2kUploadQueueSessionTimeLimitSecs", "Session time limit seconds")}
             </div>
           </SettingsControlSection>
         )}
@@ -2534,6 +2599,17 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
+  validateUnsigned(errors, form, "ed2kUploadQueueActiveSlots", "Startup upload slots", { min: 1, max: 64 });
+  validateUnsigned(errors, form, "ed2kUploadQueueElasticPercent", "Startup upload elasticity %", { max: 100 });
+  validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
+  validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillBytesPerSec", "Elastic underfill B/s", {});
+  validateUnsigned(errors, form, "ed2kUploadQueueElasticUnderfillSecs", "Elastic underfill seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueWaitingCapacity", "Waiting queue capacity", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueWaitingTimeoutSecs", "Waiting timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueGrantedTimeoutSecs", "Granted idle timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueUploadTimeoutSecs", "Upload timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kUploadQueueSessionTransferPercent", "Session transfer %", { min: 1, max: 100 });
+  validateUnsigned(errors, form, "ed2kUploadQueueSessionTimeLimitSecs", "Session time limit seconds", { min: 1 });
   validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "kadBootstrapMinRoutingContacts", "Bootstrap contact floor", { min: 1 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
@@ -2605,6 +2681,17 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kReconnectIntervalSecs: String(numberField(settings.ed2k, "reconnectIntervalSecs") ?? ""),
     ed2kKeepaliveSecs: String(numberField(settings.ed2k, "keepaliveSecs") ?? ""),
     ed2kDeadServerRetries: String(numberField(settings.ed2k, "deadServerRetries") ?? ""),
+    ed2kUploadQueueActiveSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "activeSlots") ?? ""),
+    ed2kUploadQueueElasticPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticPercent") ?? ""),
+    ed2kUploadQueueUploadLimitBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadLimitBytesPerSec") ?? ""),
+    ed2kUploadQueueElasticUnderfillBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticUnderfillBytesPerSec") ?? ""),
+    ed2kUploadQueueElasticUnderfillSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticUnderfillSecs") ?? ""),
+    ed2kUploadQueueWaitingCapacity: String(numberField(recordField(settings.ed2k, "uploadQueue"), "waitingCapacity") ?? ""),
+    ed2kUploadQueueWaitingTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "waitingTimeoutSecs") ?? ""),
+    ed2kUploadQueueGrantedTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "grantedTimeoutSecs") ?? ""),
+    ed2kUploadQueueUploadTimeoutSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadTimeoutSecs") ?? ""),
+    ed2kUploadQueueSessionTransferPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "sessionTransferPercent") ?? ""),
+    ed2kUploadQueueSessionTimeLimitSecs: String(numberField(recordField(settings.ed2k, "uploadQueue"), "sessionTimeLimitSecs") ?? ""),
     kadListenPort: String(numberField(settings.kad, "listenPort") ?? ""),
     obfuscationEnabled: boolField(settings.ed2k, "obfuscationEnabled"),
     ed2kReconnectEnabled: boolField(settings.ed2k, "reconnectEnabled"),
