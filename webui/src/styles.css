@@ -22,29 +22,6 @@ textarea {
   font: inherit;
 }
 
-button:not(.btn):not(.link-button) {
-  align-items: center;
-  background: var(--tblr-primary);
-  border: var(--tblr-border-width) solid var(--tblr-primary);
-  border-radius: var(--tblr-border-radius);
-  color: var(--tblr-primary-fg);
-  cursor: pointer;
-  display: inline-flex;
-  gap: 6px;
-  min-height: 36px;
-  padding: 0.4375rem 0.75rem;
-}
-
-button:not(.btn):not(.link-button):hover {
-  background: color-mix(in srgb, var(--tblr-primary) 85%, black);
-}
-
-button:not(.btn):not(.link-button):disabled {
-  background: var(--tblr-secondary);
-  border-color: var(--tblr-secondary);
-  cursor: not-allowed;
-}
-
 input,
 select,
 textarea {
@@ -181,7 +158,9 @@ td {
 }
 
 .tabs {
+  align-items: center;
   display: flex;
+  flex-direction: row;
   flex-wrap: nowrap;
   gap: 0.25rem;
   overflow-x: auto;
@@ -190,8 +169,10 @@ td {
 
 .tab {
   align-items: center;
+  display: inline-flex;
   flex: 0 0 auto;
   gap: 6px;
+  width: auto;
 }
 
 .tab.active {
