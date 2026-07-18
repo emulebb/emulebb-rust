@@ -2715,6 +2715,7 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
   validateUnsigned(errors, form, "natRenewMarginSecs", "Renew margin seconds", { min: 1 });
   validateNatBackendOrder(errors, form);
+  validateVpnGuardAllowedPublicIpCidrs(errors, form);
   validateUnsigned(errors, form, "ipFilterLevel", "IP filter level", {});
   return errors;
 }
@@ -2761,13 +2762,26 @@ function validateOptionalIpv4(
 }
 
 function isIpv4Address(value: string): boolean {
+  return parseIpv4Address(value) !== null;
+}
+
+function parseIpv4Address(value: string): number[] | null {
   const parts = value.split(".");
-  return parts.length === 4 && parts.every((part) => {
+  if (parts.length !== 4) {
+    return null;
+  }
+  const octets: number[] = [];
+  for (const part of parts) {
     if (!/^(0|[1-9]\d{0,2})$/.test(part)) {
-      return false;
+      return null;
     }
-    return Number(part) <= 255;
-  });
+    const octet = Number(part);
+    if (octet > 255) {
+      return null;
+    }
+    octets.push(octet);
+  }
+  return octets;
 }
 
 function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: SettingsForm) {
@@ -2777,6 +2791,69 @@ function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: Set
       return;
     }
   }
+}
+
+function validateVpnGuardAllowedPublicIpCidrs(errors: Map<SettingsTextKey, string>, form: SettingsForm) {
+  const tokens = form.vpnGuardAllowedPublicIpCidrs
+    .split(/[,\s;]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  for (const token of tokens) {
+    const range = parseAllowedPublicIpv4Range(token);
+    if (!range || !isPublicIpv4RangeOnly(range.base, range.prefix)) {
+      errors.set("vpnGuardAllowedPublicIpCidrs", "Allowed public CIDRs must contain only public IPv4 CIDRs or host addresses.");
+      return;
+    }
+  }
+}
+
+function parseAllowedPublicIpv4Range(token: string): { base: number; prefix: number } | null {
+  const slashParts = token.split("/");
+  if (slashParts.length > 2) {
+    return null;
+  }
+  const address = parseIpv4Address(slashParts[0]);
+  if (!address) {
+    return null;
+  }
+  const prefix = slashParts.length === 2 ? Number(slashParts[1]) : 32;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+  return { base: (ipv4Number(address) & ipv4PrefixMask(prefix)) >>> 0, prefix };
+}
+
+function isPublicIpv4RangeOnly(base: number, prefix: number): boolean {
+  const nonPublic: Array<[number, number]> = [
+    [0x00000000, 8],
+    [0x0a000000, 8],
+    [0x64400000, 10],
+    [0x7f000000, 8],
+    [0xa9fe0000, 16],
+    [0xac100000, 12],
+    [0xc0000000, 24],
+    [0xc0000200, 24],
+    [0xc0a80000, 16],
+    [0xc6120000, 15],
+    [0xc6336400, 24],
+    [0xcb007100, 24],
+    [0xe0000000, 4],
+    [0xffffffff, 32]
+  ];
+  return nonPublic.every(([rangeBase, rangePrefix]) => !ipv4RangesOverlap(base, prefix, rangeBase, rangePrefix));
+}
+
+function ipv4RangesOverlap(firstBase: number, firstPrefix: number, secondBase: number, secondPrefix: number): boolean {
+  const mask = ipv4PrefixMask(Math.min(firstPrefix, secondPrefix));
+  return ((firstBase & mask) >>> 0) === ((secondBase & mask) >>> 0);
+}
+
+function ipv4PrefixMask(prefix: number): number {
+  return prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+}
+
+function ipv4Number(parts: number[]): number {
+  return (((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3]) >>> 0;
 }
 
 function settingsUpdateFromForm(form: SettingsForm, baseline: SettingsForm): AppSettingsUpdate {

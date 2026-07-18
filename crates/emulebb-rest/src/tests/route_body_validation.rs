@@ -618,6 +618,22 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.vpnGuard.mode must be one of off, block",
         ),
         (
+            r#"{"vpnGuard":{"allowedPublicIpCidrs":1}}"#,
+            "settings.vpnGuard.allowedPublicIpCidrs must contain only public IPv4 CIDRs or host addresses",
+        ),
+        (
+            r#"{"vpnGuard":{"allowedPublicIpCidrs":"not-a-cidr"}}"#,
+            "settings.vpnGuard.allowedPublicIpCidrs must contain only public IPv4 CIDRs or host addresses",
+        ),
+        (
+            r#"{"vpnGuard":{"allowedPublicIpCidrs":"2001:db8::1/128"}}"#,
+            "settings.vpnGuard.allowedPublicIpCidrs must contain only public IPv4 CIDRs or host addresses",
+        ),
+        (
+            r#"{"vpnGuard":{"allowedPublicIpCidrs":"192.0.2.0/24"}}"#,
+            "settings.vpnGuard.allowedPublicIpCidrs must contain only public IPv4 CIDRs or host addresses",
+        ),
+        (
             r#"{"ipFilter":{"unsupportedSetting":1}}"#,
             "unknown settings.ipFilter field: unsupportedSetting",
         ),

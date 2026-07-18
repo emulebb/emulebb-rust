@@ -158,7 +158,7 @@ async fn settings_use_typed_get_and_patch_route() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"192.0.2.0/24"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
+                    r#"{"core":{"uploadLimitKiBps":2048,"uploadClientDataRate":64,"maxUploadSlots":4,"queueSize":3000,"reconnect":false,"networkEd2k":false},"daemon":{"p2pBindInterface":"hide.me","ed2kUserHash":"00112233440e66778899aabbccdd6fff"},"vpnGuard":{"enabled":true,"mode":"block","allowedPublicIpCidrs":"8.8.8.0/24 1.1.1.1"},"nat":{"enabled":true,"requireInitialMapping":true,"backendOrder":["upnp_miniupnpc"],"discoveryTimeoutSecs":5,"leaseDurationSecs":3600,"renewMarginSecs":300}}"#,
                 ))
                 .unwrap(),
         )
@@ -180,6 +180,10 @@ async fn settings_use_typed_get_and_patch_route() {
     );
     assert_eq!(value["data"]["vpnGuard"]["enabled"], true);
     assert_eq!(value["data"]["vpnGuard"]["mode"], "block");
+    assert_eq!(
+        value["data"]["vpnGuard"]["allowedPublicIpCidrs"],
+        "8.8.8.0/24 1.1.1.1"
+    );
     assert_eq!(value["data"]["nat"]["enabled"], true);
 
     let empty_patch = app

@@ -149,6 +149,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("NAT bind IP").fill("192.0.2.11");
   await expect(settingsPanel.getByText("NAT bind IP must be an IPv4 address.")).toHaveCount(0);
+  await settingsPanel.getByLabel("Allowed public CIDRs").fill("192.0.2.0/24");
+  await expect(settingsPanel.getByText("Allowed public CIDRs must contain only public IPv4 CIDRs or host addresses.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("Allowed public CIDRs").fill("8.8.8.0/24 1.1.1.1");
+  await expect(settingsPanel.getByText("Allowed public CIDRs must contain only public IPv4 CIDRs or host addresses.")).toHaveCount(0);
   await settingsPanel.getByLabel("Concurrent downloads").fill("0");
   await settingsPanel.getByLabel("eD2K new connections / 5s").fill("0");
   await settingsPanel.getByLabel("eD2K half-open connections").fill("0");

@@ -677,20 +677,110 @@ fn validate_nullable_unsigned_number_min(
 }
 
 fn validate_vpn_guard_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
-    let Some(mode) = object.get("mode") else {
-        return Ok(());
-    };
-    let Some(mode) = mode.as_str() else {
-        return Err(invalid_body_error(
-            "settings.vpnGuard.mode must be one of off, block",
-        ));
-    };
-    if !VPN_GUARD_MODES.contains(&mode) {
-        return Err(invalid_body_error(
-            "settings.vpnGuard.mode must be one of off, block",
-        ));
+    if let Some(mode) = object.get("mode") {
+        let Some(mode) = mode.as_str() else {
+            return Err(invalid_body_error(
+                "settings.vpnGuard.mode must be one of off, block",
+            ));
+        };
+        if !VPN_GUARD_MODES.contains(&mode) {
+            return Err(invalid_body_error(
+                "settings.vpnGuard.mode must be one of off, block",
+            ));
+        }
+    }
+    if let Some(cidrs) = object.get("allowedPublicIpCidrs") {
+        validate_vpn_guard_allowed_public_ip_cidrs(cidrs)?;
     }
     Ok(())
+}
+
+fn validate_vpn_guard_allowed_public_ip_cidrs(
+    value: &serde_json::Value,
+) -> Result<(), Box<Response>> {
+    let Some(cidrs) = value.as_str() else {
+        return Err(invalid_vpn_guard_allowed_public_ip_cidrs_error());
+    };
+    for token in cidrs
+        .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let Some((base, prefix)) = parse_allowed_public_ipv4_range(token) else {
+            return Err(invalid_vpn_guard_allowed_public_ip_cidrs_error());
+        };
+        if !is_public_ipv4_range_only(base, prefix) {
+            return Err(invalid_vpn_guard_allowed_public_ip_cidrs_error());
+        }
+    }
+    Ok(())
+}
+
+fn invalid_vpn_guard_allowed_public_ip_cidrs_error() -> Box<Response> {
+    invalid_body_error(
+        "settings.vpnGuard.allowedPublicIpCidrs must contain only public IPv4 CIDRs or host addresses",
+    )
+}
+
+fn parse_allowed_public_ipv4_range(token: &str) -> Option<(u32, u8)> {
+    if let Some((address, prefix)) = token.split_once('/') {
+        if prefix.contains('/') {
+            return None;
+        }
+        let prefix = prefix.parse::<u8>().ok()?;
+        if prefix > 32 {
+            return None;
+        }
+        let address = address.parse::<Ipv4Addr>().ok()?;
+        return Some((u32::from(address) & ipv4_prefix_mask(prefix), prefix));
+    }
+    token
+        .parse::<Ipv4Addr>()
+        .ok()
+        .map(|address| (u32::from(address), 32))
+}
+
+fn is_public_ipv4_range_only(base: u32, prefix: u8) -> bool {
+    let non_public = [
+        (0x0000_0000, 8),
+        (0x0a00_0000, 8),
+        (0x6440_0000, 10),
+        (0x7f00_0000, 8),
+        (0xa9fe_0000, 16),
+        (0xac10_0000, 12),
+        (0xc000_0000, 24),
+        (0xc000_0200, 24),
+        (0xc0a8_0000, 16),
+        (0xc612_0000, 15),
+        (0xc633_6400, 24),
+        (0xcb00_7100, 24),
+        (0xe000_0000, 4),
+        (0xffff_ffff, 32),
+    ];
+    non_public
+        .iter()
+        .all(|(non_public_base, non_public_prefix)| {
+            !ipv4_ranges_overlap(base, prefix, *non_public_base, *non_public_prefix)
+        })
+}
+
+fn ipv4_ranges_overlap(
+    first_base: u32,
+    first_prefix: u8,
+    second_base: u32,
+    second_prefix: u8,
+) -> bool {
+    let shared_prefix = first_prefix.min(second_prefix);
+    let mask = ipv4_prefix_mask(shared_prefix);
+    (first_base & mask) == (second_base & mask)
+}
+
+fn ipv4_prefix_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix))
+    }
 }
 
 fn validate_unsigned_number_min(
