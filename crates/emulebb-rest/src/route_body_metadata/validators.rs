@@ -154,6 +154,12 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     ED2K_SETTINGS_FIELDS,
                     "settings.ed2k",
                 )?;
+                validate_nullable_unsigned_number_min(
+                    section_object,
+                    "listenPort",
+                    "settings.ed2k.listenPort",
+                    1,
+                )?;
                 validate_nested_settings_update_object(
                     section_object,
                     "uploadQueue",
@@ -176,6 +182,12 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     section_object,
                     NAT_SETTINGS_FIELDS,
                     "settings.nat",
+                )?;
+                validate_nullable_unsigned_number_min(
+                    section_object,
+                    "ssdpLocalPort",
+                    "settings.nat.ssdpLocalPort",
+                    1,
                 )?;
             }
             "vpnGuard" => {
@@ -271,6 +283,7 @@ fn validate_hostname_lookup_settings_patch_body_fields(
 }
 
 fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
+    validate_nullable_unsigned_number_min(object, "listenPort", "settings.kad.listenPort", 1)?;
     validate_unsigned_number_min(
         object,
         "bootstrapMinRoutingContacts",
@@ -301,6 +314,21 @@ fn validate_kad_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
         "settings.kad.tcpFirewallCheckIntervalSecs",
         60,
     )
+}
+
+fn validate_nullable_unsigned_number_min(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+    min: u64,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    validate_unsigned_number_min(object, field, path, min)
 }
 
 fn validate_vpn_guard_settings_patch_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {

@@ -354,6 +354,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.ed2k field: unsupportedSetting",
         ),
         (
+            r#"{"ed2k":{"listenPort":0}}"#,
+            "settings.ed2k.listenPort must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"ed2k":{"listenPort":"4662"}}"#,
+            "settings.ed2k.listenPort must be an unsigned number greater than or equal to 1",
+        ),
+        (
             r#"{"ed2k":{"uploadQueue":{}}}"#,
             "settings.ed2k.uploadQueue PATCH requires at least one setting",
         ),
@@ -364,6 +372,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"kad":{"unsupportedSetting":1}}"#,
             "unknown settings.kad field: unsupportedSetting",
+        ),
+        (
+            r#"{"kad":{"listenPort":0}}"#,
+            "settings.kad.listenPort must be an unsigned number greater than or equal to 1",
         ),
         (
             r#"{"kad":{"bootstrapMinRoutingContacts":0}}"#,
@@ -388,6 +400,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         (
             r#"{"nat":{"unsupportedSetting":1}}"#,
             "unknown settings.nat field: unsupportedSetting",
+        ),
+        (
+            r#"{"nat":{"ssdpLocalPort":0}}"#,
+            "settings.nat.ssdpLocalPort must be an unsigned number greater than or equal to 1",
         ),
         (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
