@@ -1982,6 +1982,9 @@ type SettingsForm = {
   ed2kMaxSourcesPerFile: string;
   ed2kMaxParallelDownloadPeers: string;
   ed2kDownloadLimitBytesPerSec: string;
+  ed2kKeywordServerAttemptBudget: string;
+  ed2kExactHashKeywordServerAttemptBudget: string;
+  ed2kSourceServerAttemptBudget: string;
   ed2kUploadQueueActiveSlots: string;
   ed2kUploadQueueElasticPercent: string;
   ed2kUploadQueueUploadLimitBytesPerSec: string;
@@ -2075,6 +2078,9 @@ const emptySettingsForm: SettingsForm = {
   ed2kMaxSourcesPerFile: "",
   ed2kMaxParallelDownloadPeers: "",
   ed2kDownloadLimitBytesPerSec: "",
+  ed2kKeywordServerAttemptBudget: "",
+  ed2kExactHashKeywordServerAttemptBudget: "",
+  ed2kSourceServerAttemptBudget: "",
   ed2kUploadQueueActiveSlots: "",
   ed2kUploadQueueElasticPercent: "",
   ed2kUploadQueueUploadLimitBytesPerSec: "",
@@ -2211,6 +2217,9 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         maxHalfOpenConnections: parseNumber(form.ed2kMaxHalfOpenConnections),
         maxSourcesPerFile: parseNumber(form.ed2kMaxSourcesPerFile),
         maxParallelDownloadPeers: parseNumber(form.ed2kMaxParallelDownloadPeers),
+        keywordServerAttemptBudget: parseNumber(form.ed2kKeywordServerAttemptBudget),
+        exactHashKeywordServerAttemptBudget: parseNumber(form.ed2kExactHashKeywordServerAttemptBudget),
+        sourceServerAttemptBudget: parseNumber(form.ed2kSourceServerAttemptBudget),
         downloadLimitBytesPerSec: parseNumber(form.ed2kDownloadLimitBytesPerSec),
         obfuscationEnabled: form.obfuscationEnabled,
         reconnectEnabled: form.ed2kReconnectEnabled,
@@ -2423,6 +2432,19 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderField("ed2k.callbackTimeoutSecs", "ed2kCallbackTimeoutSecs", "Callback timeout seconds")}
               {renderField("ed2k.reconnectIntervalSecs", "ed2kReconnectIntervalSecs", "Reconnect interval seconds")}
               {renderField("ed2k.deadServerRetries", "ed2kDeadServerRetries", "Dead server retries")}
+            </div>
+          </SettingsControlSection>
+        )}
+        {sectionVisible([
+          "ed2k.keywordServerAttemptBudget",
+          "ed2k.exactHashKeywordServerAttemptBudget",
+          "ed2k.sourceServerAttemptBudget"
+        ]) && (
+          <SettingsControlSection title="Search">
+            <div class="settings-grid">
+              {renderField("ed2k.keywordServerAttemptBudget", "ed2kKeywordServerAttemptBudget", "Keyword server attempts")}
+              {renderField("ed2k.exactHashKeywordServerAttemptBudget", "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts")}
+              {renderField("ed2k.sourceServerAttemptBudget", "ed2kSourceServerAttemptBudget", "Source server attempts")}
             </div>
           </SettingsControlSection>
         )}
@@ -2641,6 +2663,9 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kMaxSourcesPerFile", "eD2K source cap", { min: 1 });
   validateUnsigned(errors, form, "ed2kMaxParallelDownloadPeers", "Parallel download peers", { min: 1 });
   validateUnsigned(errors, form, "ed2kDownloadLimitBytesPerSec", "Download limit B/s", {});
+  validateUnsigned(errors, form, "ed2kKeywordServerAttemptBudget", "Keyword server attempts", { min: 1 });
+  validateUnsigned(errors, form, "ed2kExactHashKeywordServerAttemptBudget", "Exact-hash server attempts", { min: 1 });
+  validateUnsigned(errors, form, "ed2kSourceServerAttemptBudget", "Source server attempts", { min: 1 });
   validateUnsigned(errors, form, "ed2kUploadQueueActiveSlots", "Startup upload slots", { min: 1, max: 64 });
   validateUnsigned(errors, form, "ed2kUploadQueueElasticPercent", "Startup upload elasticity %", { max: 100 });
   validateUnsigned(errors, form, "ed2kUploadQueueUploadLimitBytesPerSec", "Upload limit B/s", {});
@@ -2730,6 +2755,9 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     ed2kMaxSourcesPerFile: String(numberField(settings.ed2k, "maxSourcesPerFile") ?? ""),
     ed2kMaxParallelDownloadPeers: String(numberField(settings.ed2k, "maxParallelDownloadPeers") ?? ""),
     ed2kDownloadLimitBytesPerSec: String(numberField(settings.ed2k, "downloadLimitBytesPerSec") ?? ""),
+    ed2kKeywordServerAttemptBudget: String(numberField(settings.ed2k, "keywordServerAttemptBudget") ?? ""),
+    ed2kExactHashKeywordServerAttemptBudget: String(numberField(settings.ed2k, "exactHashKeywordServerAttemptBudget") ?? ""),
+    ed2kSourceServerAttemptBudget: String(numberField(settings.ed2k, "sourceServerAttemptBudget") ?? ""),
     ed2kUploadQueueActiveSlots: String(numberField(recordField(settings.ed2k, "uploadQueue"), "activeSlots") ?? ""),
     ed2kUploadQueueElasticPercent: String(numberField(recordField(settings.ed2k, "uploadQueue"), "elasticPercent") ?? ""),
     ed2kUploadQueueUploadLimitBytesPerSec: String(numberField(recordField(settings.ed2k, "uploadQueue"), "uploadLimitBytesPerSec") ?? ""),

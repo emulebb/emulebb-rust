@@ -88,6 +88,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
   await expect(settingsPanel.getByText("eD2K half-open connections")).toHaveCount(0);
   await expect(settingsPanel.getByText("Concurrent downloads")).toHaveCount(0);
+  await expect(settingsPanel.getByText("Keyword server attempts")).toHaveCount(0);
   await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
   await expect(settingsPanel.getByText("Startup upload slots")).toHaveCount(0);
   await expect(settingsPanel.getByText("Bootstrap contact floor")).toHaveCount(0);
@@ -96,6 +97,7 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("eD2K half-open connections")).toBeVisible();
   await expect(settingsPanel.getByLabel("Concurrent downloads")).toBeVisible();
+  await expect(settingsPanel.getByLabel("Keyword server attempts")).toBeVisible();
   await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
   await expect(settingsPanel.getByLabel("Startup upload slots")).toBeVisible();
   await expect(settingsPanel.getByLabel("Bootstrap contact floor")).toBeVisible();
