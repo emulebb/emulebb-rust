@@ -12,6 +12,7 @@ impl EmulebbCore {
             capabilities: vec![
                 "transfers".to_string(),
                 "transfers.sse".to_string(),
+                "transfers.sse.status".to_string(),
                 "searches".to_string(),
                 "servers".to_string(),
                 "sharedFiles".to_string(),

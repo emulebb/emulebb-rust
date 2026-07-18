@@ -16,6 +16,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByText("0.1.0-beta.1")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
   await expect(page.locator("strong").filter({ hasText: /^Connected$/ })).toBeVisible();
+  expect(requests.some((request) => request.method === "GET" && request.path === "events/status")).toBe(true);
 
   await page.getByRole("button", { name: "Transfers" }).click();
   await expect(page.getByRole("heading", { name: "Transfers" })).toBeVisible();

@@ -89,6 +89,12 @@ pub(crate) async fn events(
     )
 }
 
+pub(crate) async fn event_status(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(transfer_event_diagnostics_response(
+        &state.core.transfer_event_diagnostics(),
+    ))
+}
+
 fn last_event_id(headers: &HeaderMap) -> Option<String> {
     headers
         .get("Last-Event-ID")

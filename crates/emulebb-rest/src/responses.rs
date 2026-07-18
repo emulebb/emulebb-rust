@@ -8,8 +8,8 @@ use std::path::Path as FsPath;
 
 use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
-    Search, SearchResult, ServerInfo, Status, Transfer, TransferThroughputStats,
-    UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
+    Search, SearchResult, ServerInfo, Status, Transfer, TransferEventDiagnostics,
+    TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use serde_json::{Value, json};
 
@@ -177,6 +177,19 @@ fn runtime_diagnostics_response_with(
         "activeUploads": upload_policy.active_sessions,
         "waitingUploads": upload_policy.waiting_sessions,
         "geolocation": null
+    })
+}
+
+pub(crate) fn transfer_event_diagnostics_response(diagnostics: &TransferEventDiagnostics) -> Value {
+    json!({
+        "enabled": diagnostics.enabled,
+        "stream": diagnostics.stream,
+        "channelCapacity": diagnostics.channel_capacity,
+        "queuedEventCount": diagnostics.queued_event_count,
+        "subscriberCount": diagnostics.subscriber_count,
+        "latestEventId": diagnostics.latest_event_id,
+        "nextEventId": diagnostics.next_event_id,
+        "resumeBehavior": diagnostics.resume_behavior,
     })
 }
 

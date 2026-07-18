@@ -50,6 +50,7 @@ async fn app_returns_evelope_with_capabilities() {
     assert_eq!(value["data"]["name"], "eMuleBB");
     assert_eq!(value["data"]["capabilities"]["transfers"], true);
     assert_eq!(value["data"]["capabilities"]["transfers.sse"], true);
+    assert_eq!(value["data"]["capabilities"]["transfers.sse.status"], true);
     assert_eq!(value["data"]["capabilities"]["sharedDirectories"], true);
     assert_eq!(value["data"]["capabilities"]["peerControls"], true);
     assert!(
@@ -89,6 +90,13 @@ async fn capabilities_returns_contract_version_and_capability_list() {
             .unwrap()
             .iter()
             .any(|capability| capability == "transfers.sse")
+    );
+    assert!(
+        value["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "transfers.sse.status")
     );
     assert!(
         !value["data"]["capabilities"]
@@ -297,6 +305,43 @@ async fn events_endpoint_signals_rebaseline_for_last_event_id() {
     assert!(text.contains(r#""type":"sync.reset""#), "{text}");
     assert!(text.contains(r#""reason":"last-event-id""#), "{text}");
     assert!(text.contains(r#""lastEventId":"17""#), "{text}");
+}
+
+#[tokio::test]
+async fn event_status_returns_transfer_event_diagnostics() {
+    let core =
+        Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+    let _events = core.subscribe_transfer_events();
+    let router = router(
+        core,
+        RestServerSettings {
+            api_key: "secret".to_string(),
+            web_root_dir: None,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events/status")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], true);
+    assert_eq!(value["data"]["stream"], "sse");
+    assert_eq!(value["data"]["channelCapacity"], 1024);
+    assert_eq!(value["data"]["queuedEventCount"], 0);
+    assert_eq!(value["data"]["subscriberCount"], 1);
+    assert_eq!(value["data"]["latestEventId"], 0);
+    assert_eq!(value["data"]["nextEventId"], 1);
+    assert_eq!(value["data"]["resumeBehavior"], "reset");
 }
 
 #[tokio::test]

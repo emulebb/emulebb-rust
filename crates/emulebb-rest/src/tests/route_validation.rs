@@ -276,6 +276,7 @@ async fn query_routes_use_canonical_error_envelope() {
         ("GET", "/api/v1/logs?unsupportedQuery=true"),
         ("GET", "/api/v1/app?unsupportedQuery=true"),
         ("GET", "/api/v1/uploads?unsupportedQuery=true"),
+        ("GET", "/api/v1/events/status?unsupportedQuery=true"),
         (
             "POST",
             "/api/v1/nat/operations/refresh?unsupportedQuery=true",

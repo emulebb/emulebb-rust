@@ -137,6 +137,8 @@ function dataFor(method: string, path: string): unknown {
   switch (path) {
     case "events":
       return eventStream;
+    case "events/status":
+      return snapshot.status.runtimeDiagnostics.transferEvents;
     case "snapshot":
       return snapshot;
     case "logs":
@@ -556,10 +558,10 @@ function dataFor(method: string, path: string): unknown {
         name: "eMuleBB",
         version: "0.1.0-beta.1",
         apiVersion: "v1",
-        capabilities: { transfers: true, "transfers.sse": true }
+        capabilities: { transfers: true, "transfers.sse": true, "transfers.sse.status": true }
       };
     case "capabilities":
-      return { contractVersion: "1.2.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse"] };
+      return { contractVersion: "1.2.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse", "transfers.sse.status"] };
     case "diagnostics":
       return snapshot.status.runtimeDiagnostics;
     case `transfers/${transferHash}/details`:

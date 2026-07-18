@@ -40,6 +40,7 @@ import {
   SettingsSurface,
   Snapshot,
   TransferEvent,
+  TransferEventRuntimeDiagnostics,
   Upload,
   VpnGuardStatus
 } from "./api";
@@ -159,6 +160,7 @@ export function App() {
         nextAppInfo,
         nextCapabilities,
         nextRuntimeDiagnostics,
+        nextTransferEventDiagnostics,
         nextNetworkStatus,
         nextNatStatus,
         nextIpFilterStatus,
@@ -177,6 +179,7 @@ export function App() {
         client.get<AppInfo>("app"),
         client.get<unknown>("capabilities"),
         client.get<RuntimeDiagnostics>("diagnostics"),
+        client.get<TransferEventRuntimeDiagnostics>("events/status"),
         client.get<NetworkStatus>("network"),
         client.get<NatStatus>("nat"),
         client.get<IpFilterStatus>("ip-filter"),
@@ -186,7 +189,10 @@ export function App() {
       setSnapshot(nextSnapshot);
       setAppInfo(nextAppInfo);
       setCapabilities(nextCapabilities);
-      setRuntimeDiagnostics(nextRuntimeDiagnostics);
+      setRuntimeDiagnostics({
+        ...nextRuntimeDiagnostics,
+        transferEvents: nextTransferEventDiagnostics
+      });
       setNetworkStatus(nextNetworkStatus);
       setNatStatus(nextNatStatus);
       setIpFilterStatus(nextIpFilterStatus);
