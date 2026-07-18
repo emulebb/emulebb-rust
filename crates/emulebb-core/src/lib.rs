@@ -231,11 +231,12 @@ use upload_view::{upload_from_snapshot, upload_policy_metrics_from_capacity};
 
 use shared_dir_monitor::SharedDirMonitor;
 pub use shared_directories::{
-    SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryRoot, SharedDirectoryRootUpdate,
-    SharedReloadDiagnostics,
+    SharedDirectories, SharedDirectoriesUpdate, SharedDirectoryHashActiveFile,
+    SharedDirectoryHashDiskProgress, SharedDirectoryHashQueuedFile, SharedDirectoryHashRecentFile,
+    SharedDirectoryReloadProgress, SharedDirectoryRoot, SharedDirectoryRootUpdate,
 };
 use shared_directories::{
-    refresh_shared_directory_row, reload_diagnostics_snapshot, shared_directory_from_index,
+    refresh_shared_directory_row, reload_progress_snapshot, shared_directory_from_index,
     shared_directory_items, shared_directory_to_index, shared_directory_update_path,
 };
 
@@ -406,7 +407,7 @@ pub struct EmulebbCore {
     /// Path-free live counters for the latest shared-directory reload plan.
     /// This is deliberately separate from tracing so REST can report why hashing
     /// is active without exposing operator file paths or names.
-    shared_reload_diagnostics: Arc<std::sync::Mutex<SharedReloadDiagnostics>>,
+    shared_directory_reload_progress: Arc<std::sync::Mutex<SharedDirectoryReloadProgress>>,
     /// Serializes detached shared-directory reloads. A controller may request
     /// reload while a prior scan/hash job is still pruning stale shares; coalesce
     /// such requests and run one follow-up pass instead of overlapping jobs.
@@ -531,8 +532,8 @@ impl EmulebbCore {
             ed2k_download_tasks: Arc::new(Mutex::new(JoinSet::new())),
             shared_dir_monitor: Arc::new(std::sync::Mutex::new(None)),
             shared_hashing_count: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            shared_reload_diagnostics: Arc::new(std::sync::Mutex::new(
-                SharedReloadDiagnostics::default(),
+            shared_directory_reload_progress: Arc::new(std::sync::Mutex::new(
+                SharedDirectoryReloadProgress::default(),
             )),
             shared_reload_running: Arc::new(AtomicBool::new(false)),
             shared_reload_pending: Arc::new(AtomicBool::new(false)),

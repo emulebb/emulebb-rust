@@ -16,6 +16,32 @@ export function formatRate(value?: number): string {
   return `${formatBytes(value)}/s`;
 }
 
+export function formatPercent(completed?: number, total?: number): string {
+  if (!total || total <= 0) {
+    return "0%";
+  }
+  const percent = Math.min(100, Math.max(0, ((completed ?? 0) / total) * 100));
+  return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+export function formatDurationMs(value?: number | null): string {
+  if (!value || value < 0) {
+    return "0s";
+  }
+  const seconds = Math.round(value / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m`;
+}
+
 export function formatKiBRate(value?: number): string {
   return `${formatBytes(value === undefined ? undefined : value * 1024)}/s`;
 }

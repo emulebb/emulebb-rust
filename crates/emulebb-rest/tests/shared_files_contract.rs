@@ -281,6 +281,14 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .await
         .unwrap();
     assert_eq!(get_response.status(), StatusCode::OK);
+    let body = to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert!(value["data"]["reloadProgress"]["phase"].is_string());
+    assert!(value["data"]["reloadProgress"]["plannedReadBytes"].is_u64());
+    assert!(value["data"]["reloadProgress"]["active"].is_array());
+    assert!(value["data"]["reloadProgress"]["disks"].is_array());
 
     let reload_response = app
         .clone()

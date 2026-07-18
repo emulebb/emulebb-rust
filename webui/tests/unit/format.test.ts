@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { formatBytes, formatKiBRate, formatProgress, lifecycleLabel, optionalString, parseNumber } from "../../src/format";
+import {
+  formatBytes,
+  formatDurationMs,
+  formatKiBRate,
+  formatPercent,
+  formatProgress,
+  lifecycleLabel,
+  optionalString,
+  parseNumber
+} from "../../src/format";
 
 describe("format helpers", () => {
   it("formats byte counts with binary units", () => {
@@ -13,6 +22,12 @@ describe("format helpers", () => {
 
   it("formats rates from KiB inputs", () => {
     expect(formatKiBRate(2)).toBe("2.0 KiB/s");
+  });
+
+  it("formats progress percentages and durations", () => {
+    expect(formatPercent(512, 1024)).toBe("50%");
+    expect(formatPercent(1, 100)).toBe("1.0%");
+    expect(formatDurationMs(65_000)).toBe("1m 5s");
   });
 
   it("prefers explicit progress and clamps it", () => {

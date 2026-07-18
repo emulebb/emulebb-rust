@@ -273,6 +273,14 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     );
     wait_for_hashing_idle(&core).await;
     assert_eq!(core.shared_directories().await.hashing_count, 0);
+    let progress = core.shared_directories().await.reload_progress;
+    assert_eq!(progress.planned_hash_count, FILE_COUNT);
+    assert_eq!(progress.hashed_count, FILE_COUNT);
+    assert_eq!(progress.failed_hash_count, 0);
+    assert!(progress.planned_hash_bytes > 0);
+    assert_eq!(progress.planned_read_bytes, progress.planned_hash_bytes * 2);
+    assert!(!progress.recent.is_empty());
+    assert!(!progress.disks.is_empty());
 
     // Incremental skip: a SECOND detached reload over the now-indexed, unchanged
     // library must NOT re-queue any file for hashing (every file matches its
@@ -289,7 +297,7 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
         "hashingCount must stay 0 when nothing needs re-hashing",
     );
     wait_for_reload_reuse_count(&core, FILE_COUNT).await;
-    let reload = core.shared_directories().await.reload;
+    let reload = core.shared_directories().await.reload_progress;
     assert_eq!(reload.scanned_count, FILE_COUNT);
     assert_eq!(reload.planned_hash_count, 0);
     assert_eq!(reload.reused_count, FILE_COUNT);
@@ -539,13 +547,13 @@ async fn wait_for_shared_file_names(core: &EmulebbCore, expected: Vec<String>) {
 
 async fn wait_for_reload_reuse_count(core: &EmulebbCore, count: usize) {
     for _ in 0..600 {
-        let reload = core.shared_directories().await.reload;
+        let reload = core.shared_directories().await.reload_progress;
         if reload.phase == "idle" && reload.reused_count >= count {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("shared-directory reload diagnostics did not report {count} reused files");
+    panic!("shared-directory reload progress did not report {count} reused files");
 }
 
 fn shared_file_names(shares: Vec<emulebb_core::LocalShare>) -> Vec<String> {

@@ -2,18 +2,49 @@
 
 use std::fs::Metadata;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 
 use crate::long_path::long_path;
 
-use super::hashset::{build_aich_hashset_from_payload, build_md4_hashset_from_payload};
+use super::hashset::{
+    build_aich_hashset_from_payload_with_progress, build_md4_hashset_from_payload_with_progress,
+};
 use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::{
     Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kTransferRuntime,
     Ed2kTransferState, expected_piece_length, new_transfer_job,
 };
+
+/// Hashing stage reported while a local payload is ingested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalIngestProgressStage {
+    Md4,
+    Aich,
+}
+
+impl LocalIngestProgressStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Md4 => "md4",
+            Self::Aich => "aich",
+        }
+    }
+}
+
+/// Read progress emitted by the blocking local ingest hash workers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalIngestProgressEvent {
+    pub stage: LocalIngestProgressStage,
+    pub stage_bytes_read: u64,
+    pub stage_bytes_total: u64,
+    pub file_bytes_read: u64,
+    pub file_bytes_total: u64,
+}
+
+pub type LocalIngestProgressObserver = Arc<dyn Fn(LocalIngestProgressEvent) + Send + Sync>;
 
 impl Ed2kTransferRuntime {
     /// Copy a local payload into the canonical ED2K transfer store and expose
@@ -22,6 +53,26 @@ impl Ed2kTransferRuntime {
         &self,
         source_path: &Path,
         display_name: &str,
+    ) -> Result<Ed2kLocalIngestSummary> {
+        self.ingest_local_file_inner(source_path, display_name, None)
+            .await
+    }
+
+    pub async fn ingest_local_file_with_progress(
+        &self,
+        source_path: &Path,
+        display_name: &str,
+        observer: LocalIngestProgressObserver,
+    ) -> Result<Ed2kLocalIngestSummary> {
+        self.ingest_local_file_inner(source_path, display_name, Some(observer))
+            .await
+    }
+
+    async fn ingest_local_file_inner(
+        &self,
+        source_path: &Path,
+        display_name: &str,
+        observer: Option<LocalIngestProgressObserver>,
     ) -> Result<Ed2kLocalIngestSummary> {
         let display_name = display_name.trim();
         if display_name.is_empty() {
@@ -68,10 +119,25 @@ impl Ed2kTransferRuntime {
         // lock held, and only take the manifest lock for the short write below.
         let md4_len = metadata.len();
         let md4_path = source_path.clone();
-        let (file_hash, md4_hashset) =
-            tokio::task::spawn_blocking(move || build_md4_hashset_from_payload(&md4_path, md4_len))
-                .await
-                .context("MD4 hashing task panicked")??;
+        let md4_observer = observer.clone();
+        let (file_hash, md4_hashset) = tokio::task::spawn_blocking(move || {
+            let mut md4_read = 0u64;
+            let mut progress = move |bytes_read: u64| {
+                md4_read = md4_read.saturating_add(bytes_read);
+                if let Some(observer) = md4_observer.as_ref() {
+                    observer(LocalIngestProgressEvent {
+                        stage: LocalIngestProgressStage::Md4,
+                        stage_bytes_read: md4_read,
+                        stage_bytes_total: md4_len,
+                        file_bytes_read: md4_read,
+                        file_bytes_total: md4_len.saturating_mul(2),
+                    });
+                }
+            };
+            build_md4_hashset_from_payload_with_progress(&md4_path, md4_len, Some(&mut progress))
+        })
+        .await
+        .context("MD4 hashing task panicked")??;
         let job = new_transfer_job(file_hash, display_name.to_string(), metadata.len());
         let transfer_dir = self.transfer_dir(&job.file_hash);
         tokio::fs::create_dir_all(&transfer_dir)
@@ -93,8 +159,22 @@ impl Ed2kTransferRuntime {
         // AICH/MD4 are computed straight from the original file.
         let aich_len = metadata.len();
         let aich_path = source_path.clone();
+        let aich_observer = observer.clone();
         let aich_hashset = tokio::task::spawn_blocking(move || {
-            build_aich_hashset_from_payload(&aich_path, aich_len)
+            let mut aich_read = 0u64;
+            let mut progress = move |bytes_read: u64| {
+                aich_read = aich_read.saturating_add(bytes_read);
+                if let Some(observer) = aich_observer.as_ref() {
+                    observer(LocalIngestProgressEvent {
+                        stage: LocalIngestProgressStage::Aich,
+                        stage_bytes_read: aich_read,
+                        stage_bytes_total: aich_len,
+                        file_bytes_read: aich_len.saturating_add(aich_read),
+                        file_bytes_total: aich_len.saturating_mul(2),
+                    });
+                }
+            };
+            build_aich_hashset_from_payload_with_progress(&aich_path, aich_len, Some(&mut progress))
         })
         .await
         .context("AICH hashing task panicked")??;

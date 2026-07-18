@@ -154,7 +154,7 @@ impl EmulebbCore {
 
         Status {
             lifecycle: AppLifecycle {
-                state: "running".to_string(),
+                state: self.lifecycle_state_name().to_string(),
             },
             uptime_secs: self.started_at.elapsed().as_secs(),
             kad: self.kad_status(kad_running).await,

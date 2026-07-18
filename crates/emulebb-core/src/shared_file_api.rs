@@ -2,6 +2,14 @@ use super::*;
 
 impl EmulebbCore {
     pub async fn share_local_file(&self, request: LocalShareCreate) -> Result<LocalShare> {
+        self.share_local_file_with_progress(request, None).await
+    }
+
+    pub(crate) async fn share_local_file_with_progress(
+        &self,
+        request: LocalShareCreate,
+        progress: Option<emulebb_ed2k::ed2k_transfer::LocalIngestProgressObserver>,
+    ) -> Result<LocalShare> {
         let source_path = Path::new(&request.path);
         let display_name = match request.name {
             Some(name) => name,
@@ -11,10 +19,18 @@ impl EmulebbCore {
                 .ok_or_else(|| anyhow::anyhow!("local share path has no valid file name"))?
                 .to_string(),
         };
-        let summary = self
-            .ed2k_transfers
-            .ingest_local_file(source_path, &display_name)
-            .await?;
+        let summary = match progress {
+            Some(progress) => {
+                self.ed2k_transfers
+                    .ingest_local_file_with_progress(source_path, &display_name, progress)
+                    .await?
+            }
+            None => {
+                self.ed2k_transfers
+                    .ingest_local_file(source_path, &display_name)
+                    .await?
+            }
+        };
         self.ed2k_transfers
             .remove_completed_transfer_row(&summary.file_hash)
             .await?;
@@ -230,7 +246,7 @@ impl EmulebbCore {
             monitor_owned,
             // Files still pending the initial hash in the background reload worker.
             hashing_count: shared_directories::hashing_count_snapshot(self),
-            reload: reload_diagnostics_snapshot(self),
+            reload_progress: reload_progress_snapshot(self),
         }
     }
 

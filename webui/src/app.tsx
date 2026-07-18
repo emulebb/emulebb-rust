@@ -256,6 +256,7 @@ export function App() {
           uploads={uploads}
           uploadQueue={uploadQueue}
           sharedFiles={sharedFiles}
+          sharedDirectories={sharedDirectories}
           kad={kad}
         />
       )}

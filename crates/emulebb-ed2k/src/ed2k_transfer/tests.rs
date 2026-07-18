@@ -1,6 +1,6 @@
 use super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kResumeManifest, Ed2kTransferRuntime, Ed2kTransferState,
-    PAYLOAD_FILE_NAME, new_transfer_job,
+    LocalIngestProgressStage, PAYLOAD_FILE_NAME, new_transfer_job,
 };
 use crate::paths::unique_test_dir;
 use crate::{HashType, PopularHash};
@@ -12,6 +12,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     path::Path,
     str::FromStr,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -629,6 +630,50 @@ async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
     );
     assert_eq!(manifest.md4_hashset.len(), 2);
     assert_eq!(manifest.aich_hashset.len(), 2);
+}
+
+#[tokio::test]
+async fn ingest_local_file_reports_md4_and_aich_read_progress() {
+    let root = unique_test_dir("ed2k-transfer-local-ingest-progress");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let source_dir = Path::new(&root).join("source");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source_path = source_dir.join("Progress.Sample.bin");
+    fs::write(&source_path, vec![0x5a; 8192]).unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let summary = runtime
+        .ingest_local_file_with_progress(
+            &source_path,
+            "Progress.Sample.bin",
+            Arc::new(move |event| {
+                observed.lock().unwrap().push(event);
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.file_size, 8192);
+    let events = events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.stage == LocalIngestProgressStage::Md4)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.stage == LocalIngestProgressStage::Aich)
+    );
+    assert_eq!(
+        events.last().map(|event| event.file_bytes_read),
+        Some(summary.file_size * 2)
+    );
+    assert_eq!(
+        events.last().map(|event| event.file_bytes_total),
+        Some(summary.file_size * 2)
+    );
 }
 
 #[tokio::test]

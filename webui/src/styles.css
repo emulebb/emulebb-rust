@@ -287,6 +287,103 @@ td {
   white-space: nowrap;
 }
 
+.stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.stage-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(110px, 0.7fr) auto minmax(0, 1fr);
+}
+
+.stage-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.progress-line {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress-head,
+.progress-foot {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.progress-head span,
+.progress-foot span {
+  color: #677280;
+  font-size: 0.82rem;
+}
+
+.progress-track {
+  background: #e9eef2;
+  border: 1px solid #d4dbe1;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  background: #2f7d80;
+  height: 100%;
+  min-width: 0;
+}
+
+.progress-kv {
+  grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+}
+
+.hash-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hash-card {
+  background: #f7f9fb;
+  border: 1px solid #dde2e7;
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.hash-card-title {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.hash-card-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hash-card p {
+  color: #5c6672;
+  font-size: 0.84rem;
+  margin: 6px 0 10px;
+}
+
 .empty {
   color: #677280;
   margin: 0;
@@ -518,6 +615,15 @@ td {
 
   .panel.wide {
     grid-column: span 2;
+  }
+
+  .progress-kv,
+  .stage-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .stage-row strong {
+    grid-column: 1 / -1;
   }
 
   .split,

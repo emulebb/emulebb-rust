@@ -13,6 +13,35 @@ const snapshot = {
   app: { version: "0.1.0-beta.1" },
   status: {
     lifecycle: "running",
+    sharedStartupCache: {
+      hashingCount: 1,
+      deferredHashingActive: true,
+      reloadProgress: {
+        phase: "hashing",
+        running: true,
+        plannedHashCount: 3,
+        activeHashCount: 1,
+        hashedCount: 1,
+        plannedReadBytes: 24576,
+        completedReadBytes: 12288,
+        readRateBytesPerSec: 4096
+      }
+    },
+    runtimeDiagnostics: {
+      sharedHashingCount: 1,
+      sharedDirectoryReloadProgress: {
+        phase: "hashing",
+        running: true,
+        plannedHashCount: 3,
+        activeHashCount: 1,
+        hashedCount: 1,
+        plannedReadBytes: 24576,
+        completedReadBytes: 12288,
+        readRateBytesPerSec: 4096
+      },
+      ed2kPublish: { phase: "published" },
+      kadPublish: { phase: "waiting" }
+    },
     stats: {
       downloadRateBytesPerSec: 2048,
       uploadRateBytesPerSec: 1024,
@@ -88,7 +117,87 @@ function dataFor(method: string, path: string): unknown {
       return {
         roots: [{ path: "C:\\Sample\\Shared", monitorOwned: true, shareable: true, accessible: true }],
         items: [],
-        reload: { phase: "idle", running: false, pending: false }
+        hashingCount: 1,
+        reloadProgress: {
+          phase: "hashing",
+          running: true,
+          pending: false,
+          scannedCount: 12,
+          plannedHashCount: 3,
+          activeHashCount: 1,
+          hashedCount: 1,
+          failedHashCount: 0,
+          reusedCount: 8,
+          newCount: 2,
+          changedCount: 1,
+          skippedIntakeCount: 0,
+          prunedCount: 0,
+          diskCount: 1,
+          plannedHashBytes: 12288,
+          completedHashBytes: 4096,
+          plannedReadBytes: 24576,
+          completedReadBytes: 12288,
+          readRateBytesPerSec: 4096,
+          active: [
+            {
+              id: "hash-000002",
+              diskKey: "C:",
+              path: "C:\\Sample\\Shared\\Hashing Now.bin",
+              name: "Hashing Now.bin",
+              sizeBytes: 4096,
+              reason: "new",
+              stage: "aich",
+              stageReadBytes: 2048,
+              stageTotalBytes: 4096,
+              readBytes: 6144,
+              readBytesTotal: 8192,
+              readRateBytesPerSec: 4096
+            }
+          ],
+          recent: [
+            {
+              id: "hash-000001",
+              diskKey: "C:",
+              path: "C:\\Sample\\Shared\\Recently Hashed.bin",
+              name: "Recently Hashed.bin",
+              sizeBytes: 4096,
+              reason: "new",
+              result: "ok",
+              hash: "11223344556677889900AABBCCDDEEFF",
+              readBytes: 8192,
+              readBytesTotal: 8192,
+              durationMs: 2000,
+              averageReadRateBytesPerSec: 4096
+            }
+          ],
+          upcoming: [
+            {
+              id: "hash-000003",
+              diskKey: "C:",
+              path: "C:\\Sample\\Shared\\Queued Next.bin",
+              name: "Queued Next.bin",
+              sizeBytes: 4096,
+              reason: "changed",
+              order: 2
+            }
+          ],
+          disks: [
+            {
+              diskKey: "C:",
+              plannedCount: 3,
+              activeCount: 1,
+              completedCount: 1,
+              failedCount: 0,
+              queuedCount: 1,
+              plannedReadBytes: 24576,
+              completedReadBytes: 12288,
+              readRateBytesPerSec: 4096,
+              currentPath: "C:\\Sample\\Shared\\Hashing Now.bin",
+              currentName: "Hashing Now.bin",
+              currentStage: "aich"
+            }
+          ]
+        }
       };
     case "shared-files":
       return { items: snapshot.sharedFiles };

@@ -77,6 +77,7 @@ pub use download_throttle::Ed2kDownloadThrottleReservation;
 use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
 pub use inbound_admission::Ed2kInboundConnectionGuard;
+pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIngestProgressStage};
 use manifest::Ed2kManifestCheckpointState;
 pub(crate) use manifest::expected_piece_length;
 pub use manifest::new_transfer_job;

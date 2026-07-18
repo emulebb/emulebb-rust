@@ -24,7 +24,10 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
 
   await page.getByRole("button", { name: "Sharing" }).click();
   await expect(page.getByRole("heading", { name: "Shared Folders" })).toBeVisible();
-  await expect(page.getByText("C:\\Sample\\Shared")).toBeVisible();
+  await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reload Progress" })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: "C:\\Sample\\Shared\\Hashing Now.bin" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Queued Next.bin", exact: true })).toBeVisible();
 
   expect(requests.some((request) => request.path === "snapshot")).toBe(true);
 });

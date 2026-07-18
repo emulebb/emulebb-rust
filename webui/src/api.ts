@@ -46,6 +46,19 @@ export type Status = {
   serverConnected?: boolean;
   firewalled?: boolean | null;
   stats?: Stats;
+  sharedStartupCache?: {
+    hashingCount?: number;
+    deferredHashingActive?: boolean;
+    reloadProgress?: SharedDirectoryReloadProgress;
+    [key: string]: unknown;
+  };
+  runtimeDiagnostics?: {
+    sharedHashingCount?: number;
+    sharedDirectoryReloadProgress?: SharedDirectoryReloadProgress;
+    ed2kPublish?: Record<string, unknown>;
+    kadPublish?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 };
 
@@ -221,17 +234,99 @@ export type SharedDirectoryRoot = {
   [key: string]: unknown;
 };
 
-export type SharedReloadDiagnostics = {
+export type SharedDirectoryReloadProgress = {
   phase?: string;
   running?: boolean;
   pending?: boolean;
   scannedCount?: number;
   plannedHashCount?: number;
+  activeHashCount?: number;
+  hashedCount?: number;
+  failedHashCount?: number;
   reusedCount?: number;
   newCount?: number;
   changedCount?: number;
+  missingMtimeCount?: number;
+  statFailedCount?: number;
+  skippedFailedCount?: number;
   skippedIntakeCount?: number;
   prunedCount?: number;
+  staleHashCount?: number;
+  diskCount?: number;
+  plannedHashBytes?: number;
+  completedHashBytes?: number;
+  plannedReadBytes?: number;
+  completedReadBytes?: number;
+  readRateBytesPerSec?: number;
+  startedAtMs?: number | null;
+  updatedAtMs?: number | null;
+  active?: SharedDirectoryHashActiveFile[];
+  recent?: SharedDirectoryHashRecentFile[];
+  upcoming?: SharedDirectoryHashQueuedFile[];
+  disks?: SharedDirectoryHashDiskProgress[];
+  [key: string]: unknown;
+};
+
+export type SharedDirectoryHashActiveFile = {
+  id?: string;
+  diskKey?: string;
+  path?: string;
+  name?: string;
+  sizeBytes?: number;
+  reason?: string;
+  stage?: string;
+  stageReadBytes?: number;
+  stageTotalBytes?: number;
+  readBytes?: number;
+  readBytesTotal?: number;
+  readRateBytesPerSec?: number;
+  startedAtMs?: number;
+  updatedAtMs?: number;
+  [key: string]: unknown;
+};
+
+export type SharedDirectoryHashRecentFile = {
+  id?: string;
+  diskKey?: string;
+  path?: string;
+  name?: string;
+  sizeBytes?: number;
+  reason?: string;
+  result?: string;
+  error?: string | null;
+  hash?: string | null;
+  readBytes?: number;
+  readBytesTotal?: number;
+  durationMs?: number;
+  averageReadRateBytesPerSec?: number;
+  finishedAtMs?: number;
+  [key: string]: unknown;
+};
+
+export type SharedDirectoryHashQueuedFile = {
+  id?: string;
+  diskKey?: string;
+  path?: string;
+  name?: string;
+  sizeBytes?: number;
+  reason?: string;
+  order?: number;
+  [key: string]: unknown;
+};
+
+export type SharedDirectoryHashDiskProgress = {
+  diskKey?: string;
+  plannedCount?: number;
+  activeCount?: number;
+  completedCount?: number;
+  failedCount?: number;
+  queuedCount?: number;
+  plannedReadBytes?: number;
+  completedReadBytes?: number;
+  readRateBytesPerSec?: number;
+  currentPath?: string | null;
+  currentName?: string | null;
+  currentStage?: string | null;
   [key: string]: unknown;
 };
 
@@ -240,7 +335,7 @@ export type SharedDirectories = {
   items?: SharedDirectoryRoot[];
   monitorOwned?: string[];
   hashingCount?: number;
-  reload?: SharedReloadDiagnostics;
+  reloadProgress?: SharedDirectoryReloadProgress;
   [key: string]: unknown;
 };
 

@@ -42,13 +42,21 @@ pub(super) fn build_md4_hashset_from_payload(
     payload_path: &Path,
     file_size: u64,
 ) -> Result<(Ed2kHash, Vec<[u8; 16]>)> {
+    build_md4_hashset_from_payload_with_progress(payload_path, file_size, None)
+}
+
+pub(super) fn build_md4_hashset_from_payload_with_progress(
+    payload_path: &Path,
+    file_size: u64,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<(Ed2kHash, Vec<[u8; 16]>)> {
     if file_size == 0 {
         anyhow::bail!("cannot build ED2K MD4 hashset for zero-sized file");
     }
     let mut file = fs::File::open(payload_path)
         .with_context(|| format!("failed to open ED2K payload {}", payload_path.display()))?;
     if file_size < ED2K_PART_SIZE {
-        let digest = read_md4_digest_from_reader(&mut file, file_size)?;
+        let digest = read_md4_digest_from_reader(&mut file, file_size, &mut progress)?;
         return Ok((Ed2kHash::from_bytes(digest), Vec::new()));
     }
 
@@ -57,11 +65,15 @@ pub(super) fn build_md4_hashset_from_payload(
     let mut remaining = file_size;
     while remaining > 0 {
         let part_size = remaining.min(ED2K_PART_SIZE);
-        part_hashes.push(read_md4_digest_from_reader(&mut file, part_size)?);
+        part_hashes.push(read_md4_digest_from_reader(
+            &mut file,
+            part_size,
+            &mut progress,
+        )?);
         remaining -= part_size;
     }
     if file_size.is_multiple_of(ED2K_PART_SIZE) {
-        part_hashes.push(read_md4_digest_from_reader(&mut file, 0)?);
+        part_hashes.push(read_md4_digest_from_reader(&mut file, 0, &mut progress)?);
     }
 
     let mut file_hasher = Md4::new();
@@ -74,7 +86,11 @@ pub(super) fn build_md4_hashset_from_payload(
     ))
 }
 
-fn read_md4_digest_from_reader(file: &mut fs::File, size: u64) -> Result<[u8; 16]> {
+fn read_md4_digest_from_reader(
+    file: &mut fs::File,
+    size: u64,
+    progress: &mut Option<&mut dyn FnMut(u64)>,
+) -> Result<[u8; 16]> {
     let mut hasher = Md4::new();
     let mut remaining = size;
     let mut buffer = vec![0u8; 65_536];
@@ -84,6 +100,9 @@ fn read_md4_digest_from_reader(file: &mut fs::File, size: u64) -> Result<[u8; 16
         file.read_exact(&mut buffer[..chunk_len])
             .context("failed to read ED2K MD4 payload data")?;
         hasher.update(&buffer[..chunk_len]);
+        if let Some(progress) = progress.as_deref_mut() {
+            progress(u64::try_from(chunk_len).unwrap_or(0));
+        }
         remaining -= u64::try_from(chunk_len).unwrap_or(0);
     }
     Ok(hasher.finalize().into())
@@ -206,13 +225,22 @@ pub(super) fn build_aich_hashset_from_payload(
     payload_path: &Path,
     file_size: u64,
 ) -> Result<Ed2kAichHashset> {
+    build_aich_hashset_from_payload_with_progress(payload_path, file_size, None)
+}
+
+pub(super) fn build_aich_hashset_from_payload_with_progress(
+    payload_path: &Path,
+    file_size: u64,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<Ed2kAichHashset> {
     if file_size == 0 {
         anyhow::bail!("cannot build AICH hashset for zero-sized file");
     }
     let mut file = fs::File::open(payload_path)
         .with_context(|| format!("failed to open AICH payload {}", payload_path.display()))?;
     if file_size <= ED2K_PART_SIZE {
-        let master_hash = build_aich_part_root_from_reader(&mut file, file_size, true)?;
+        let master_hash =
+            build_aich_part_root_from_reader(&mut file, file_size, true, &mut progress)?;
         return Ok(Ed2kAichHashset {
             master_hash,
             part_hashes: Vec::new(),
@@ -220,7 +248,13 @@ pub(super) fn build_aich_hashset_from_payload(
     }
 
     let mut part_hashes = Vec::with_capacity(usize::from(expected_aich_hash_count(file_size)));
-    collect_aich_part_hashes_from_reader(&mut file, file_size, true, &mut part_hashes)?;
+    collect_aich_part_hashes_from_reader(
+        &mut file,
+        file_size,
+        true,
+        &mut part_hashes,
+        &mut progress,
+    )?;
     let master_hash = reconstruct_aich_root_from_part_hashes(file_size, &part_hashes)?;
     Ok(Ed2kAichHashset {
         master_hash,
@@ -233,12 +267,14 @@ fn collect_aich_part_hashes_from_reader(
     size: u64,
     is_left_branch: bool,
     part_hashes: &mut Vec<[u8; 20]>,
+    progress: &mut Option<&mut dyn FnMut(u64)>,
 ) -> Result<()> {
     if size <= ED2K_PART_SIZE {
         part_hashes.push(build_aich_part_root_from_reader(
             file,
             size,
             is_left_branch,
+            progress,
         )?);
         return Ok(());
     }
@@ -246,20 +282,25 @@ fn collect_aich_part_hashes_from_reader(
     let part_count = chunk_count_for_size(size, ED2K_PART_SIZE);
     let left_size = ((part_count + u64::from(is_left_branch)) / 2) * ED2K_PART_SIZE;
     let right_size = size - left_size;
-    collect_aich_part_hashes_from_reader(file, left_size, true, part_hashes)?;
-    collect_aich_part_hashes_from_reader(file, right_size, false, part_hashes)
+    collect_aich_part_hashes_from_reader(file, left_size, true, part_hashes, progress)?;
+    collect_aich_part_hashes_from_reader(file, right_size, false, part_hashes, progress)
 }
 
 fn build_aich_part_root_from_reader(
     file: &mut fs::File,
     part_size: u64,
     is_left_branch: bool,
+    progress: &mut Option<&mut dyn FnMut(u64)>,
 ) -> Result<[u8; 20]> {
-    let block_hashes = read_aich_block_hashes_from_reader(file, part_size)?;
+    let block_hashes = read_aich_block_hashes_from_reader(file, part_size, progress)?;
     build_aich_block_tree_root(part_size, is_left_branch, &block_hashes, 0)
 }
 
-fn read_aich_block_hashes_from_reader(file: &mut fs::File, size: u64) -> Result<Vec<[u8; 20]>> {
+fn read_aich_block_hashes_from_reader(
+    file: &mut fs::File,
+    size: u64,
+    progress: &mut Option<&mut dyn FnMut(u64)>,
+) -> Result<Vec<[u8; 20]>> {
     let mut block_hashes = Vec::with_capacity(
         usize::try_from(chunk_count_for_size(size, ED2K_EMBLOCK_SIZE)).unwrap_or(0),
     );
@@ -273,6 +314,9 @@ fn read_aich_block_hashes_from_reader(file: &mut fs::File, size: u64) -> Result<
         let mut hash = [0u8; 20];
         hash.copy_from_slice(&digest);
         block_hashes.push(hash);
+        if let Some(progress) = progress.as_deref_mut() {
+            progress(u64::try_from(block_len).unwrap_or(0));
+        }
         remaining -= u64::try_from(block_len).unwrap_or(0);
     }
     Ok(block_hashes)

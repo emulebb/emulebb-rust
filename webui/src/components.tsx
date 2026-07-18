@@ -18,14 +18,17 @@ export function StatusPill(props: { value: string }) {
       value.includes("downloading") ||
       value.includes("uploading") ||
       value.includes("monitored") ||
-      value.includes("open")
+      value.includes("open") ||
+      value.includes("complete") ||
+      value === "ok" ||
+      value.includes("published")
     ) {
       return "pill good";
     }
     if (value.includes("error") || value.includes("firewall") || value.includes("banned")) {
       return "pill bad";
     }
-    if (value.includes("paused") || value.includes("idle") || value.includes("queued")) {
+    if (value.includes("paused") || value.includes("idle") || value.includes("queued") || value.includes("active")) {
       return "pill idle";
     }
     return "pill";

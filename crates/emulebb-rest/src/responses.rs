@@ -103,7 +103,7 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
     let throughput = state.core.transfer_throughput_stats();
     let shared_directories = state.core.shared_directories().await;
     let shared_hashing_count = shared_directories.hashing_count;
-    let shared_reload = shared_directories.reload;
+    let shared_directory_reload_progress = shared_directories.reload_progress;
     let shared_hashing_active = shared_hashing_count > 0;
     let shared_file_count = state.core.shared_catalog_count().await;
     let download_file_count = status.transfers.total;
@@ -129,14 +129,14 @@ pub(crate) async fn status_response(state: &RestState) -> Value {
             "hashingCount": shared_hashing_count,
             "deferredHashingActive": shared_hashing_active,
             "interruptedHashingInvalidatedCache": false,
-            "reload": shared_reload.clone()
+            "reloadProgress": shared_directory_reload_progress.clone()
         },
         "runtimeDiagnostics": {
             "processId": std::process::id(),
             "knownFileCount": shared_file_count,
             "sharedFileCount": shared_file_count,
             "sharedHashingCount": shared_hashing_count,
-            "sharedReload": shared_reload,
+            "sharedDirectoryReloadProgress": shared_directory_reload_progress,
             "ed2kPublish": ed2k_publish,
             "kadPublish": kad_publish,
             "downloadFileCount": download_file_count,

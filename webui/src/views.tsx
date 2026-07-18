@@ -40,7 +40,9 @@ import {
   boolField,
   firewallLabel,
   formatBytes,
+  formatDurationMs,
   formatKiBRate,
+  formatPercent,
   formatProgress,
   formatRate,
   lifecycleLabel,
@@ -60,10 +62,13 @@ export function Overview(props: {
   uploads: Upload[];
   uploadQueue: Upload[];
   sharedFiles: SharedFile[];
+  sharedDirectories: SharedDirectories | null;
   kad: KadStatus;
 }) {
   const activeTransfers = props.transfers.filter((item) => item.state !== "completed").length;
   const connectedServers = props.servers.filter((item) => item.connected).length;
+  const reload = props.sharedDirectories?.reloadProgress ?? props.snapshot?.status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? props.snapshot?.status?.sharedStartupCache?.reloadProgress ?? {};
+  const startupStages = startupStageRows(props.snapshot, props.sharedDirectories, props.kad, connectedServers);
   return (
     <section class="view-grid">
       <Metric
@@ -78,6 +83,25 @@ export function Overview(props: {
       <Metric label="Uploads" value={`${props.uploads.length}/${props.uploadQueue.length}`} />
       <Metric label="Shared" value={String(numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length)} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
+
+      <section class="panel wide">
+        <h2>Startup & Indexing</h2>
+        <div class="stage-list">
+          {startupStages.map((stage) => (
+            <div class="stage-row" key={stage.label}>
+              <span>{stage.label}</span>
+              <StatusPill value={stage.status} />
+              <strong>{stage.detail}</strong>
+            </div>
+          ))}
+        </div>
+        <ProgressLine
+          label="Hash reads"
+          completed={reload.completedReadBytes}
+          total={reload.plannedReadBytes}
+          rate={reload.readRateBytesPerSec}
+        />
+      </section>
 
       <section class="panel wide">
         <h2>Network</h2>
@@ -98,6 +122,55 @@ export function Overview(props: {
         <CompactTransferList transfers={props.transfers.slice(0, 8)} />
       </section>
     </section>
+  );
+}
+
+function startupStageRows(
+  snapshot: Snapshot | null,
+  directories: SharedDirectories | null,
+  kad: KadStatus,
+  connectedServers: number
+) {
+  const status = snapshot?.status;
+  const lifecycle = lifecycleLabel(status?.lifecycle);
+  const reload = directories?.reloadProgress ?? status?.runtimeDiagnostics?.sharedDirectoryReloadProgress ?? status?.sharedStartupCache?.reloadProgress ?? {};
+  const ed2kPublish = status?.runtimeDiagnostics?.ed2kPublish;
+  const kadPublish = status?.runtimeDiagnostics?.kadPublish;
+  const ed2kPhase = stringField(ed2kPublish, "phase") || (connectedServers > 0 ? "connected" : "waiting");
+  const kadPhase = stringField(kadPublish, "phase") || (kad.connected ? "connected" : "waiting");
+  return [
+    { label: "Core", status: lifecycle === "running" ? "complete" : lifecycle, detail: lifecycle },
+    {
+      label: "Shared scan",
+      status: reload.running ? (reload.phase ?? "active") : "complete",
+      detail: `${reload.scannedCount ?? 0} scanned`
+    },
+    {
+      label: "Hashing",
+      status: (reload.activeHashCount ?? directories?.hashingCount ?? 0) > 0 ? "active" : "complete",
+      detail: `${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0} files`
+    },
+    { label: "eD2K publish", status: ed2kPhase, detail: ed2kPhase },
+    { label: "Kad publish", status: kad.connected ? "connected" : kadPhase, detail: kadPhase }
+  ];
+}
+
+function ProgressLine(props: { label: string; completed?: number; total?: number; rate?: number }) {
+  const percent = props.total ? Math.min(100, Math.max(0, ((props.completed ?? 0) / props.total) * 100)) : 0;
+  return (
+    <div class="progress-line">
+      <div class="progress-head">
+        <span>{props.label}</span>
+        <strong>{formatPercent(props.completed, props.total)}</strong>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style={{ width: `${percent}%` }} />
+      </div>
+      <div class="progress-foot">
+        <span>{formatBytes(props.completed)} / {formatBytes(props.total)}</span>
+        <span>{formatRate(props.rate)}</span>
+      </div>
+    </div>
   );
 }
 
@@ -429,7 +502,7 @@ export function SharingView(props: {
   const [path, setPath] = useState("");
   const roots = props.directories?.roots ?? [];
   const items = props.directories?.items ?? [];
-  const reload = props.directories?.reload ?? {};
+  const reload = props.directories?.reloadProgress ?? {};
 
   const replaceRoots = (paths: string[]) =>
     props.client.patch("shared-directories", {
@@ -455,6 +528,8 @@ export function SharingView(props: {
       <Metric label="Folders" value={String(items.length)} />
       <Metric label="Hashing" value={String(props.directories?.hashingCount ?? 0)} />
       <Metric label="Reload" value={reload.phase ?? "idle"} />
+      <Metric label="Hashed" value={`${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0}`} />
+      <Metric label="Read Rate" value={formatRate(reload.readRateBytesPerSec)} />
 
       <section class="panel wide sharing-panel">
         <div class="section-title">
@@ -503,24 +578,186 @@ export function SharingView(props: {
         </div>
       </section>
 
-      <section class="panel wide">
-        <h2>Reload Status</h2>
-        <div class="kv">
-          <span>Running</span>
-          <strong>{reload.running ? "yes" : "no"}</strong>
-          <span>Pending</span>
+      <section class="panel wide progress-panel">
+        <div class="section-title">
+          <h2>Reload Progress</h2>
+          <StatusPill value={reload.running ? (reload.phase ?? "running") : "idle"} />
+        </div>
+        <ProgressLine
+          label="Total hashing reads"
+          completed={reload.completedReadBytes}
+          total={reload.plannedReadBytes}
+          rate={reload.readRateBytesPerSec}
+        />
+        <div class="kv progress-kv">
+          <span>Pending reload</span>
           <strong>{reload.pending ? "yes" : "no"}</strong>
           <span>Scanned</span>
           <strong>{reload.scannedCount ?? 0}</strong>
-          <span>Queued</span>
+          <span>Planned</span>
           <strong>{reload.plannedHashCount ?? 0}</strong>
+          <span>Active</span>
+          <strong>{reload.activeHashCount ?? 0}</strong>
+          <span>Recently hashed</span>
+          <strong>{reload.hashedCount ?? 0}</strong>
+          <span>Failed</span>
+          <strong>{reload.failedHashCount ?? 0}</strong>
           <span>Reused</span>
           <strong>{reload.reusedCount ?? 0}</strong>
+          <span>Changed</span>
+          <strong>{reload.changedCount ?? 0}</strong>
+          <span>New</span>
+          <strong>{reload.newCount ?? 0}</strong>
+          <span>Skipped</span>
+          <strong>{reload.skippedIntakeCount ?? 0}</strong>
           <span>Pruned</span>
           <strong>{reload.prunedCount ?? 0}</strong>
         </div>
       </section>
+
+      <section class="panel wide progress-panel">
+        <h2>Hashing Now</h2>
+        <ActiveHashList files={reload.active ?? []} />
+      </section>
+
+      <section class="panel wide">
+        <h2>Per Drive</h2>
+        <DiskProgressTable disks={reload.disks ?? []} />
+      </section>
+
+      <section class="panel wide">
+        <h2>Recently Hashed</h2>
+        <RecentHashTable files={reload.recent ?? []} />
+      </section>
+
+      <section class="panel wide">
+        <h2>Up Next</h2>
+        <QueuedHashTable files={reload.upcoming ?? []} />
+      </section>
     </section>
+  );
+}
+
+function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["active"] }) {
+  const files = props.files ?? [];
+  if (files.length === 0) {
+    return <p class="empty">No files are hashing right now.</p>;
+  }
+  return (
+    <div class="hash-card-list">
+      {files.map((file) => (
+        <div class="hash-card" key={file.id ?? file.path}>
+          <div class="hash-card-title">
+            <strong>{file.name || file.path || "Unnamed file"}</strong>
+            <StatusPill value={file.stage ?? "hashing"} />
+          </div>
+          <p class="path-cell">{file.path}</p>
+          <ProgressLine
+            label={`${file.reason ?? "hash"} on ${file.diskKey ?? "disk"}`}
+            completed={file.readBytes}
+            total={file.readBytesTotal}
+            rate={file.readRateBytesPerSec}
+          />
+          <div class="progress-foot">
+            <span>Stage {formatBytes(file.stageReadBytes)} / {formatBytes(file.stageTotalBytes)}</span>
+            <span>{formatBytes(file.sizeBytes)}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reloadProgress"]>["disks"] }) {
+  const disks = props.disks ?? [];
+  return (
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Drive</th>
+            <th>Files</th>
+            <th>Read</th>
+            <th>Rate</th>
+            <th>Current</th>
+          </tr>
+        </thead>
+        <tbody>
+          {disks.map((disk) => (
+            <tr key={disk.diskKey ?? "disk"}>
+              <td>{disk.diskKey ?? "unknown"}</td>
+              <td>{disk.completedCount ?? 0}/{disk.plannedCount ?? 0} done, {disk.queuedCount ?? 0} queued</td>
+              <td>{formatPercent(disk.completedReadBytes, disk.plannedReadBytes)}</td>
+              <td>{formatRate(disk.readRateBytesPerSec)}</td>
+              <td class="path-cell">{disk.currentPath ?? disk.currentName ?? ""}</td>
+            </tr>
+          ))}
+          {disks.length === 0 && <EmptyRow colSpan={5} text="No drive hashing activity." />}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["recent"] }) {
+  const files = props.files ?? [];
+  return (
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Result</th>
+            <th>Read</th>
+            <th>Rate</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {files.map((file) => (
+            <tr key={file.id ?? file.path}>
+              <td class="path-cell">{file.path ?? file.name}</td>
+              <td><StatusPill value={file.result ?? "unknown"} /></td>
+              <td>{formatBytes(file.readBytes)} / {formatBytes(file.readBytesTotal)}</td>
+              <td>{formatRate(file.averageReadRateBytesPerSec)}</td>
+              <td>{formatDurationMs(file.durationMs)}</td>
+            </tr>
+          ))}
+          {files.length === 0 && <EmptyRow colSpan={5} text="No recently hashed files." />}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["upcoming"] }) {
+  const files = props.files ?? [];
+  return (
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Order</th>
+            <th>File</th>
+            <th>Size</th>
+            <th>Drive</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {files.map((file) => (
+            <tr key={file.id ?? file.path}>
+              <td>{(file.order ?? 0) + 1}</td>
+              <td class="path-cell">{file.path ?? file.name}</td>
+              <td>{formatBytes(file.sizeBytes)}</td>
+              <td>{file.diskKey ?? ""}</td>
+              <td>{file.reason ?? ""}</td>
+            </tr>
+          ))}
+          {files.length === 0 && <EmptyRow colSpan={5} text="No queued hashing work." />}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
