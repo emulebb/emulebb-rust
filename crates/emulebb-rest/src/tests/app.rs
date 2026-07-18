@@ -170,6 +170,58 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
 }
 
 #[tokio::test]
+async fn settings_surface_section_resources_resolve_to_live_get_routes() {
+    let router = test_router();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/app/settings/surface")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let section_resources = value["data"]["sectionResources"].as_array().unwrap();
+
+    for resource in section_resources {
+        let route = resource["route"].as_str().unwrap();
+        assert!(
+            route.starts_with("/api/v1/"),
+            "section resource route must stay in REST v1: {route}"
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(route)
+                    .header("X-API-Key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "section resource route must be a live GET route: {route}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            value.get("data").is_some(),
+            "section resource route must return a data envelope: {route}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn events_endpoint_requires_auth_and_serves_sse() {
     let unauthorized = test_router()
         .oneshot(
