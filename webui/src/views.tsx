@@ -1969,6 +1969,12 @@ type SettingsForm = {
   hostnameLookupMaxLookupsPerTick: string;
   hostnameLookupTickIntervalSecs: string;
   ed2kListenPort: string;
+  ed2kConnectTimeoutSecs: string;
+  ed2kServerConnectTimeoutSecs: string;
+  ed2kCallbackTimeoutSecs: string;
+  ed2kReconnectIntervalSecs: string;
+  ed2kKeepaliveSecs: string;
+  ed2kDeadServerRetries: string;
   kadListenPort: string;
   obfuscationEnabled: boolean;
   ed2kReconnectEnabled: boolean;
@@ -2026,6 +2032,12 @@ const emptySettingsForm: SettingsForm = {
   hostnameLookupMaxLookupsPerTick: "",
   hostnameLookupTickIntervalSecs: "",
   ed2kListenPort: "",
+  ed2kConnectTimeoutSecs: "",
+  ed2kServerConnectTimeoutSecs: "",
+  ed2kCallbackTimeoutSecs: "",
+  ed2kReconnectIntervalSecs: "",
+  ed2kKeepaliveSecs: "",
+  ed2kDeadServerRetries: "",
   kadListenPort: "",
   obfuscationEnabled: false,
   ed2kReconnectEnabled: false,
@@ -2128,12 +2140,18 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
       ed2k: {
         ...(settings.ed2k ?? {}),
         listenPort: optionalPort(form.ed2kListenPort),
+        connectTimeoutSecs: parseNumber(form.ed2kConnectTimeoutSecs),
+        serverConnectTimeoutSecs: parseNumber(form.ed2kServerConnectTimeoutSecs),
+        callbackTimeoutSecs: parseNumber(form.ed2kCallbackTimeoutSecs),
+        reconnectIntervalSecs: parseNumber(form.ed2kReconnectIntervalSecs),
+        keepaliveSecs: parseNumber(form.ed2kKeepaliveSecs),
         obfuscationEnabled: form.obfuscationEnabled,
         reconnectEnabled: form.ed2kReconnectEnabled,
         enableUdpReask: form.enableUdpReask,
         publishEmuleRustIdentity: form.publishEmuleRustIdentity,
         addServersFromServer: form.addServersFromServer,
-        safeServerConnect: form.safeServerConnect
+        safeServerConnect: form.safeServerConnect,
+        deadServerRetries: parseNumber(form.ed2kDeadServerRetries)
       },
       kad: {
         ...(settings.kad ?? {}),
@@ -2236,6 +2254,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
           "core.networkEd2k",
           "core.networkKademlia",
           "ed2k.listenPort",
+          "ed2k.connectTimeoutSecs",
+          "ed2k.keepaliveSecs",
           "kad.listenPort",
           "ed2k.obfuscationEnabled",
           "ed2k.publishEmuleRustIdentity"
@@ -2247,6 +2267,8 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderField("core.maxConnections", "maxConnections", "Max connections")}
               {renderField("core.maxConnectionsPerFiveSeconds", "maxConnectionsPerFiveSeconds", "New connections / 5s")}
               {renderField("ed2k.listenPort", "ed2kListenPort", "eD2K listen port")}
+              {renderField("ed2k.connectTimeoutSecs", "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds")}
+              {renderField("ed2k.keepaliveSecs", "ed2kKeepaliveSecs", "eD2K keepalive seconds")}
               {renderField("kad.listenPort", "kadListenPort", "Kad listen port")}
               {renderToggle("core.networkEd2k", "networkEd2k", "Network eD2K")}
               {renderToggle("core.networkKademlia", "networkKademlia", "Network Kad")}
@@ -2277,7 +2299,11 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
           "core.reconnect",
           "core.safeServerConnect",
           "core.addServersFromServer",
-          "ed2k.reconnectEnabled"
+          "ed2k.reconnectEnabled",
+          "ed2k.serverConnectTimeoutSecs",
+          "ed2k.callbackTimeoutSecs",
+          "ed2k.reconnectIntervalSecs",
+          "ed2k.deadServerRetries"
         ]) && (
           <SettingsControlSection title="Servers">
             <div class="settings-grid">
@@ -2286,6 +2312,10 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
               {renderToggle("core.safeServerConnect", "safeServerConnect", "Safe server connect")}
               {renderToggle("core.addServersFromServer", "addServersFromServer", "Add servers from server")}
               {renderToggle("ed2k.reconnectEnabled", "ed2kReconnectEnabled", "eD2K reconnect")}
+              {renderField("ed2k.serverConnectTimeoutSecs", "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds")}
+              {renderField("ed2k.callbackTimeoutSecs", "ed2kCallbackTimeoutSecs", "Callback timeout seconds")}
+              {renderField("ed2k.reconnectIntervalSecs", "ed2kReconnectIntervalSecs", "Reconnect interval seconds")}
+              {renderField("ed2k.deadServerRetries", "ed2kDeadServerRetries", "Dead server retries")}
             </div>
           </SettingsControlSection>
         )}
@@ -2433,6 +2463,12 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "hostnameLookupMaxLookupsPerTick", "DNS lookups / tick", { min: 1 });
   validateUnsigned(errors, form, "hostnameLookupTickIntervalSecs", "DNS tick seconds", { min: 1 });
   validateUnsigned(errors, form, "ed2kListenPort", "eD2K listen port", { optional: true, min: 1, max: 65535 });
+  validateUnsigned(errors, form, "ed2kConnectTimeoutSecs", "eD2K connect timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kServerConnectTimeoutSecs", "Server connect timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kCallbackTimeoutSecs", "Callback timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kReconnectIntervalSecs", "Reconnect interval seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kKeepaliveSecs", "eD2K keepalive seconds", { min: 1 });
+  validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
   validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
   validateUnsigned(errors, form, "ipFilterLevel", "IP filter level", {});
@@ -2490,6 +2526,12 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     hostnameLookupMaxLookupsPerTick: String(numberField(recordField(settings.daemon, "hostnameLookup"), "maxLookupsPerTick") ?? ""),
     hostnameLookupTickIntervalSecs: String(numberField(recordField(settings.daemon, "hostnameLookup"), "tickIntervalSecs") ?? ""),
     ed2kListenPort: String(numberField(settings.ed2k, "listenPort") ?? ""),
+    ed2kConnectTimeoutSecs: String(numberField(settings.ed2k, "connectTimeoutSecs") ?? ""),
+    ed2kServerConnectTimeoutSecs: String(numberField(settings.ed2k, "serverConnectTimeoutSecs") ?? ""),
+    ed2kCallbackTimeoutSecs: String(numberField(settings.ed2k, "callbackTimeoutSecs") ?? ""),
+    ed2kReconnectIntervalSecs: String(numberField(settings.ed2k, "reconnectIntervalSecs") ?? ""),
+    ed2kKeepaliveSecs: String(numberField(settings.ed2k, "keepaliveSecs") ?? ""),
+    ed2kDeadServerRetries: String(numberField(settings.ed2k, "deadServerRetries") ?? ""),
     kadListenPort: String(numberField(settings.kad, "listenPort") ?? ""),
     obfuscationEnabled: boolField(settings.ed2k, "obfuscationEnabled"),
     ed2kReconnectEnabled: boolField(settings.ed2k, "reconnectEnabled"),

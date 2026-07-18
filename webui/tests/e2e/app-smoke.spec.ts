@@ -86,8 +86,10 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(settingsPanel.getByRole("heading", { name: "VPN Guard" })).toBeVisible();
 
   await expect(settingsPanel.getByText("Max connections")).toHaveCount(0);
+  await expect(settingsPanel.getByText("Server connect timeout seconds")).toHaveCount(0);
   await settingsPanel.getByLabel(/Advanced/).check();
   await expect(settingsPanel.getByLabel("Max connections")).toBeVisible();
+  await expect(settingsPanel.getByLabel("Server connect timeout seconds")).toBeVisible();
 
   const save = settingsPanel.getByRole("button", { name: "Save" });
   const revert = settingsPanel.getByRole("button", { name: "Revert" });
