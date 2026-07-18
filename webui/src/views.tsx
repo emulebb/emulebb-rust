@@ -85,7 +85,7 @@ export function Overview(props: {
       <Metric label="Shared" value={String(numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length)} />
       <Metric label="Kad" value={props.kad.connected ? "Connected" : "Idle"} />
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Startup & Indexing</h2>
         <div class="stage-list">
           {startupStages.map((stage) => (
@@ -104,7 +104,7 @@ export function Overview(props: {
         />
       </section>
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Network</h2>
         <div class="kv">
           <span>Lifecycle</span>
@@ -118,7 +118,7 @@ export function Overview(props: {
         </div>
       </section>
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Recent Transfers</h2>
         <CompactTransferList transfers={props.transfers.slice(0, 8)} />
       </section>
@@ -240,18 +240,18 @@ export function TransfersView(props: {
 
   return (
     <section class="view-stack">
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Transfers</h2>
           <div class="row-actions">
-            <select value={stateFilter} onInput={(event) => setStateFilter(event.currentTarget.value)}>
+            <select class="form-select" value={stateFilter} onInput={(event) => setStateFilter(event.currentTarget.value)}>
               <option value="">All states</option>
               <option value="downloading">Downloading</option>
               <option value="paused">Paused</option>
               <option value="completed">Completed</option>
               <option value="error">Error</option>
             </select>
-            <button
+            <button class="btn"
               type="button"
               onClick={() => {
                 if (window.confirm("Clear completed transfer rows and preserve files?")) {
@@ -274,22 +274,22 @@ export function TransfersView(props: {
             void props.run(createTransfers, "Transfers queued");
           }}
         >
-          <textarea
+          <textarea class="form-control"
             value={ed2kLinks}
             placeholder="One eD2K link per line"
             onInput={(event) => setEd2kLinks(event.currentTarget.value)}
           />
           <label class="check">
-            <input type="checkbox" checked={pausedCreate} onInput={(event) => setPausedCreate(event.currentTarget.checked)} />
+            <input class="form-check-input" type="checkbox" checked={pausedCreate} onInput={(event) => setPausedCreate(event.currentTarget.checked)} />
             Paused
           </label>
-          <button type="submit">
+          <button class="btn" type="submit">
             <Download size={16} />
             Add links
           </button>
         </form>
         <div class="table-wrap">
-          <table>
+          <table class="table table-vcenter card-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -312,7 +312,7 @@ export function TransfersView(props: {
                   <td>{formatProgress(transfer)}</td>
                   <td>{formatKiBRate(transfer.downloadSpeedKiBps) || formatRate(transfer.downloadRateBytesPerSec)}</td>
                   <td>
-                    <select
+                    <select class="form-select"
                       value={String(transfer.categoryId ?? 0)}
                       onInput={(event) => void props.run(() => patchCategory(transfer, event.currentTarget.value), "Category updated")}
                     >
@@ -344,16 +344,16 @@ export function TransfersView(props: {
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Transfer Details</h2>
           <span>{selected?.name ?? (selectedId || "No selection")}</span>
         </div>
-        {detailError && <div class="notice error">{detailError}</div>}
+        {detailError && <div class="notice alert alert-danger">{detailError}</div>}
         <div class="split">
           <JsonPanel value={details} />
           <div class="table-wrap">
-            <table>
+            <table class="table table-vcenter card-table">
               <thead>
                 <tr>
                   <th>Source</th>
@@ -415,7 +415,7 @@ export function SearchView(props: {
   };
 
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Search</h2>
         <span>{props.searches.length} sessions</span>
@@ -424,36 +424,36 @@ export function SearchView(props: {
         event.preventDefault();
         void props.run(startSearch, "Search started");
       }}>
-        <input value={query} placeholder="Search query" onInput={(event) => setQuery(event.currentTarget.value)} />
-        <select value={method} onInput={(event) => setMethod(event.currentTarget.value)}>
+        <input class="form-control" value={query} placeholder="Search query" onInput={(event) => setQuery(event.currentTarget.value)} />
+        <select class="form-select" value={method} onInput={(event) => setMethod(event.currentTarget.value)}>
           <option value="automatic">Automatic</option>
           <option value="server">Server</option>
           <option value="global">Global</option>
           <option value="kad">Kad</option>
         </select>
-        <select value={fileType} onInput={(event) => setFileType(event.currentTarget.value)}>
+        <select class="form-select" value={fileType} onInput={(event) => setFileType(event.currentTarget.value)}>
           <option value="any">Any</option>
           <option value="audio">Audio</option>
           <option value="video">Video</option>
           <option value="archive">Archive</option>
           <option value="document">Document</option>
         </select>
-        <button type="submit"><Search size={16} />Start</button>
+        <button class="btn" type="submit"><Search size={16} />Start</button>
       </form>
       <div class="form-row subtle-row">
-        <select value={categoryId} onInput={(event) => setCategoryId(event.currentTarget.value)}>
+        <select class="form-select" value={categoryId} onInput={(event) => setCategoryId(event.currentTarget.value)}>
           <option value="0">Download uncategorized</option>
           {props.categories.map((category) => (
             <option key={category.id} value={category.id}>Download to {category.name}</option>
           ))}
         </select>
         <label class="check">
-          <input type="checkbox" checked={paused} onInput={(event) => setPaused(event.currentTarget.checked)} />
+          <input class="form-check-input" type="checkbox" checked={paused} onInput={(event) => setPaused(event.currentTarget.checked)} />
           Queue paused
         </label>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>Name</th>
@@ -471,7 +471,7 @@ export function SearchView(props: {
                 <td>{result.sources ?? result.availability ?? 0}</td>
                 <td>{result.fileType ?? ""}</td>
                 <td>
-                  <button
+                  <button class="btn"
                     type="button"
                     onClick={() => void props.run(
                       () => props.client.post(`searches/${props.latestSearch?.id}/results/${result.hash}/operations/download`, {
@@ -532,10 +532,10 @@ export function SharingView(props: {
       <Metric label="Hashed" value={`${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0}`} />
       <Metric label="Read Rate" value={formatRate(reload.readRateBytesPerSec)} />
 
-      <section class="panel wide sharing-panel">
+      <section class="panel card wide sharing-panel">
         <div class="section-title">
           <h2>Shared Folders</h2>
-          <button type="button" onClick={() => void props.run(() => props.client.post("shared-directories/operations/reload"), "Reload queued")}>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("shared-directories/operations/reload"), "Reload queued")}>
             <RefreshCw size={15} />
             Reload
           </button>
@@ -545,11 +545,11 @@ export function SharingView(props: {
           event.preventDefault();
           void props.run(addRoot, "Folder added");
         }}>
-          <input value={path} placeholder="Folder path" onInput={(event) => setPath(event.currentTarget.value)} />
-          <button type="submit"><FolderPlus size={16} />Add</button>
+          <input class="form-control" value={path} placeholder="Folder path" onInput={(event) => setPath(event.currentTarget.value)} />
+          <button class="btn" type="submit"><FolderPlus size={16} />Add</button>
         </form>
         <div class="table-wrap">
-          <table>
+          <table class="table table-vcenter card-table">
             <thead>
               <tr>
                 <th>Folder</th>
@@ -579,7 +579,7 @@ export function SharingView(props: {
         </div>
       </section>
 
-      <section class="panel wide progress-panel">
+      <section class="panel card wide progress-panel">
         <div class="section-title">
           <h2>Reload Progress</h2>
           <StatusPill value={reload.running ? (reload.phase ?? "running") : "idle"} />
@@ -616,22 +616,22 @@ export function SharingView(props: {
         </div>
       </section>
 
-      <section class="panel wide progress-panel">
+      <section class="panel card wide progress-panel">
         <h2>Hashing Now</h2>
         <ActiveHashList files={reload.active ?? []} />
       </section>
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Per Drive</h2>
         <DiskProgressTable disks={reload.disks ?? []} />
       </section>
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Recently Hashed</h2>
         <RecentHashTable files={reload.recent ?? []} />
       </section>
 
-      <section class="panel wide">
+      <section class="panel card wide">
         <h2>Up Next</h2>
         <QueuedHashTable files={reload.upcoming ?? []} />
       </section>
@@ -673,7 +673,7 @@ function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reload
   const disks = props.disks ?? [];
   return (
     <div class="table-wrap">
-      <table>
+      <table class="table table-vcenter card-table">
         <thead>
           <tr>
             <th>Drive</th>
@@ -704,7 +704,7 @@ function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
   const files = props.files ?? [];
   return (
     <div class="table-wrap">
-      <table>
+      <table class="table table-vcenter card-table">
         <thead>
           <tr>
             <th>File</th>
@@ -735,7 +735,7 @@ function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
   const files = props.files ?? [];
   return (
     <div class="table-wrap">
-      <table>
+      <table class="table table-vcenter card-table">
         <thead>
           <tr>
             <th>Order</th>
@@ -804,13 +804,13 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
 
   return (
     <section class="view-stack">
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Shared Files</h2>
           <span>{props.files.length} visible</span>
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="table table-vcenter card-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -836,7 +836,7 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Metadata</h2>
           <span>{selected?.name ?? "No selection"}</span>
@@ -848,7 +848,7 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
           }}>
             <label>
               Priority
-              <select value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
+              <select class="form-select" value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
                 <option value="low">Low</option>
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
@@ -858,23 +858,23 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
             </label>
             <label>
               Rating
-              <input value={rating} inputMode="numeric" onInput={(event) => setRating(event.currentTarget.value)} />
+              <input class="form-control" value={rating} inputMode="numeric" onInput={(event) => setRating(event.currentTarget.value)} />
             </label>
             <label class="wide-field">
               Comment
-              <textarea value={comment} onInput={(event) => setComment(event.currentTarget.value)} />
+              <textarea class="form-control" value={comment} onInput={(event) => setComment(event.currentTarget.value)} />
             </label>
             <label class="wide-field">
               eD2K link
               <div class="copy-row">
-                <input value={linkValue} readOnly />
-                <button type="button" onClick={() => void navigator.clipboard?.writeText(linkValue)}>
+                <input class="form-control" value={linkValue} readOnly />
+                <button class="btn" type="button" onClick={() => void navigator.clipboard?.writeText(linkValue)}>
                   <Clipboard size={15} />
                   Copy
                 </button>
               </div>
             </label>
-            <button type="submit"><Save size={15} />Save</button>
+            <button class="btn" type="submit"><Save size={15} />Save</button>
           </form>
         )}
         <h3>Comments</h3>
@@ -927,14 +927,14 @@ export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; c
         <Metric label="Top File" value={topFile.name} />
         <Metric label="Top Requests" value={String(topFile.count)} />
       </section>
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Upload Queue Inspector</h2>
           <span>{visibleRows.length} clients</span>
         </div>
         <div class="form-row">
-          <input value={filter} placeholder="Filter client, file, hash, software, state" onInput={(event) => setFilter(event.currentTarget.value)} />
-          <select value={sort} onInput={(event) => setSort(event.currentTarget.value)}>
+          <input class="form-control" value={filter} placeholder="Filter client, file, hash, software, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+          <select class="form-select" value={sort} onInput={(event) => setSort(event.currentTarget.value)}>
             <option value="rank">Rank</option>
             <option value="score">Score</option>
             <option value="rate">Rate</option>
@@ -961,13 +961,13 @@ function UploadTable(props: {
   onSelect: (key: string) => void;
 }) {
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>{props.title}</h2>
         <span>{props.rows.length} clients</span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>Client</th>
@@ -1024,10 +1024,10 @@ function UploadTable(props: {
 function UploadPeerInspector(props: { row?: UploadRow }) {
   const upload = props.row?.item;
   if (!props.row || !upload) {
-    return <section class="panel"><p class="empty">No upload peer selected.</p></section>;
+    return <section class="panel card"><p class="empty">No upload peer selected.</p></section>;
   }
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Peer Slot Inspector</h2>
         <span>{upload.userName ?? upload.clientId ?? "Selected peer"}</span>
@@ -1265,7 +1265,7 @@ export function NetworkHealthView(props: {
         <Metric label="Bind Policy" value={bindPolicy.label} />
       </section>
 
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Kad Graph</h2>
           <span>{props.kad.connected ? "connected" : props.kad.running ? "running" : "stopped"}</span>
@@ -1273,12 +1273,12 @@ export function NetworkHealthView(props: {
         <KadGraph nodes={nodes} selectedNodeId={selected?.kind === "Kad" ? selected.key.replace(/^kad:/, "") : ""} onSelect={(nodeId) => setSelectedKey(`kad:${nodeId}`)} />
       </section>
 
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Network Health</h2>
           <span>{rows.length} endpoints</span>
         </div>
-        {loadError && <div class="notice error">{loadError}</div>}
+        {loadError && <div class="notice alert alert-danger">{loadError}</div>}
         <div class="network-summary">
           <div class="kv compact">
             <span>P2P bind</span><strong>{bindPolicy.detail}</strong>
@@ -1286,11 +1286,11 @@ export function NetworkHealthView(props: {
             <span>Blocked DNS</span><strong>{dnsBlocked}</strong>
           </div>
           <div class="form-row">
-            <input value={filter} placeholder="Filter kind, endpoint, IP, host, DNS, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+            <input class="form-control" value={filter} placeholder="Filter kind, endpoint, IP, host, DNS, state" onInput={(event) => setFilter(event.currentTarget.value)} />
           </div>
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="table table-vcenter card-table">
             <thead>
               <tr>
                 <th>Kind</th>
@@ -1374,35 +1374,35 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   });
 
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Servers</h2>
         <div class="row-actions">
-          <button type="button" onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connect started")}><Plug size={15} />Connect</button>
-          <button type="button" onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Servers disconnected")}><Ban size={15} />Disconnect</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connect started")}><Plug size={15} />Connect</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Servers disconnected")}><Ban size={15} />Disconnect</button>
         </div>
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         void props.run(createServer, "Server added");
       }}>
-        <input value={address} placeholder="Address" onInput={(event) => setAddress(event.currentTarget.value)} />
-        <input value={port} placeholder="Port" inputMode="numeric" onInput={(event) => setPort(event.currentTarget.value)} />
-        <input value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <button type="submit"><Server size={16} />Add</button>
+        <input class="form-control" value={address} placeholder="Address" onInput={(event) => setAddress(event.currentTarget.value)} />
+        <input class="form-control" value={port} placeholder="Port" inputMode="numeric" onInput={(event) => setPort(event.currentTarget.value)} />
+        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
+        <button class="btn" type="submit"><Server size={16} />Add</button>
       </form>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         void props.run(() => props.client.post("servers/operations/import-met-url", { url: importUrl }), "Server list import started");
       }}>
-        <input value={importUrl} placeholder="server.met URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
-        <button type="submit"><Download size={16} />Import</button>
+        <input class="form-control" value={importUrl} placeholder="server.met URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
+        <button class="btn" type="submit"><Download size={16} />Import</button>
       </form>
       <div class="form-row">
-        <input value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
+        <input class="form-control" value={filter} placeholder="Filter endpoint, host, IP, name" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>Endpoint</th>
@@ -1510,14 +1510,14 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
   }, [nodes, selectedNodeId]);
 
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Kad</h2>
         <div class="row-actions">
-          <button type="button" onClick={() => void loadNodes()}><RefreshCw size={15} />Refresh</button>
-          <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/start"), "Kad started")}><Play size={15} />Start</button>
-          <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/stop"), "Kad stopped")}><Pause size={15} />Stop</button>
-          <button type="button" onClick={() => void props.run(() => props.client.post("kad/operations/recheck-firewall"), "Kad firewall recheck started")}><Shield size={15} />Recheck</button>
+          <button class="btn" type="button" onClick={() => void loadNodes()}><RefreshCw size={15} />Refresh</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/start"), "Kad started")}><Play size={15} />Start</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/stop"), "Kad stopped")}><Pause size={15} />Stop</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("kad/operations/recheck-firewall"), "Kad firewall recheck started")}><Shield size={15} />Recheck</button>
         </div>
       </div>
       <div class="kv compact">
@@ -1542,22 +1542,22 @@ export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFun
         event.preventDefault();
         void props.run(() => props.client.post("kad/operations/import-nodes-url", { url: importUrl }), "Kad nodes import started");
       }}>
-        <input value={importUrl} placeholder="nodes.dat URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
-        <button type="submit"><Download size={16} />Import</button>
+        <input class="form-control" value={importUrl} placeholder="nodes.dat URL" onInput={(event) => setImportUrl(event.currentTarget.value)} />
+        <button class="btn" type="submit"><Download size={16} />Import</button>
       </form>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
         void props.run(() => props.client.post("kad/operations/bootstrap", { address: bootstrapAddress, port: Number(bootstrapPort) }), "Kad bootstrap started");
       }}>
-        <input value={bootstrapAddress} placeholder="Bootstrap address" onInput={(event) => setBootstrapAddress(event.currentTarget.value)} />
-        <input value={bootstrapPort} inputMode="numeric" placeholder="Port" onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
-        <button type="submit"><Plug size={16} />Bootstrap</button>
+        <input class="form-control" value={bootstrapAddress} placeholder="Bootstrap address" onInput={(event) => setBootstrapAddress(event.currentTarget.value)} />
+        <input class="form-control" value={bootstrapPort} inputMode="numeric" placeholder="Port" onInput={(event) => setBootstrapPort(event.currentTarget.value)} />
+        <button class="btn" type="submit"><Plug size={16} />Bootstrap</button>
       </form>
       <div class="form-row">
-        <input value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+        <input class="form-control" value={filter} placeholder="Filter Kad node, IP, host, state" onInput={(event) => setFilter(event.currentTarget.value)} />
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>IP</th>
@@ -1810,7 +1810,7 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
   };
 
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Categories</h2>
         <span>{props.categories.length} configured</span>
@@ -1819,19 +1819,19 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
         event.preventDefault();
         void props.run(create, "Category created");
       }}>
-        <input value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <input value={path} placeholder="Incoming path" onInput={(event) => setPath(event.currentTarget.value)} />
-        <input value={comment} placeholder="Comment" onInput={(event) => setComment(event.currentTarget.value)} />
-        <select value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
+        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
+        <input class="form-control" value={path} placeholder="Incoming path" onInput={(event) => setPath(event.currentTarget.value)} />
+        <input class="form-control" value={comment} placeholder="Comment" onInput={(event) => setComment(event.currentTarget.value)} />
+        <select class="form-select" value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
           <option value="low">Low</option>
           <option value="normal">Normal</option>
           <option value="high">High</option>
           <option value="veryhigh">Very high</option>
         </select>
-        <button type="submit"><FolderPlus size={16} />Add</button>
+        <button class="btn" type="submit"><FolderPlus size={16} />Add</button>
       </form>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>Name</th>
@@ -1862,10 +1862,10 @@ function CategoryRow(props: { category: Category; client: RestClient; run: RunFu
 
   return (
     <tr>
-      <td><input value={name} onInput={(event) => setName(event.currentTarget.value)} /></td>
-      <td><input value={path} onInput={(event) => setPath(event.currentTarget.value)} /></td>
-      <td><input value={comment} onInput={(event) => setComment(event.currentTarget.value)} /></td>
-      <td><input value={priority} onInput={(event) => setPriority(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={name} onInput={(event) => setName(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={path} onInput={(event) => setPath(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={comment} onInput={(event) => setComment(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={priority} onInput={(event) => setPriority(event.currentTarget.value)} /></td>
       <td>
         <div class="row-actions">
           <Action title="Save" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`categories/${encoded}`, {
@@ -1894,7 +1894,7 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
     setName("");
   };
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Friends</h2>
         <span>{props.friends.length} peers</span>
@@ -1903,12 +1903,12 @@ export function FriendsView(props: { friends: Friend[]; client: RestClient; run:
         event.preventDefault();
         void props.run(create, "Friend added");
       }}>
-        <input value={userHash} placeholder="User hash" onInput={(event) => setUserHash(event.currentTarget.value)} />
-        <input value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
-        <button type="submit"><UserPlus size={16} />Add</button>
+        <input class="form-control" value={userHash} placeholder="User hash" onInput={(event) => setUserHash(event.currentTarget.value)} />
+        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
+        <button class="btn" type="submit"><UserPlus size={16} />Add</button>
       </form>
       <div class="table-wrap">
-        <table>
+        <table class="table table-vcenter card-table">
           <thead>
             <tr>
               <th>Name</th>
@@ -2129,14 +2129,14 @@ export function SettingsView(props: { settings: AppSettings | null; client: Rest
   };
 
   if (!props.settings) {
-    return <section class="panel"><p class="empty">Settings are not loaded.</p></section>;
+    return <section class="panel card"><p class="empty">Settings are not loaded.</p></section>;
   }
 
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Settings</h2>
-        <button type="button" onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
+        <button class="btn" type="button" onClick={() => void props.run(save, "Settings saved; restart daemon for bind, port, NAT, VPN, and filter changes")}>
           <Save size={15} />
           Save
         </button>
@@ -2199,7 +2199,7 @@ function Field(props: { label: string; value: string; onInput: (value: string) =
   return (
     <label>
       {props.label}
-      <input value={props.value} onInput={(event) => props.onInput(event.currentTarget.value)} />
+      <input class="form-control" value={props.value} onInput={(event) => props.onInput(event.currentTarget.value)} />
     </label>
   );
 }
@@ -2207,7 +2207,7 @@ function Field(props: { label: string; value: string; onInput: (value: string) =
 function Toggle(props: { label: string; checked: boolean; onInput: (value: boolean) => void }) {
   return (
     <label class="check">
-      <input type="checkbox" checked={props.checked} onInput={(event) => props.onInput(event.currentTarget.checked)} />
+      <input class="form-check-input" type="checkbox" checked={props.checked} onInput={(event) => props.onInput(event.currentTarget.checked)} />
       {props.label}
     </label>
   );
@@ -2298,24 +2298,24 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; cl
 
   return (
     <section class="view-stack">
-      <section class="panel">
+      <section class="panel card">
         <div class="section-title">
           <h2>Diagnostics</h2>
         </div>
         <div class="row-actions">
           <label class="check">
-            <input type="checkbox" checked={fullMemory} onInput={(event) => setFullMemory(event.currentTarget.checked)} />
+            <input class="form-check-input" type="checkbox" checked={fullMemory} onInput={(event) => setFullMemory(event.currentTarget.checked)} />
             Full memory dump
           </label>
-          <button type="button" onClick={() => void props.run(captureDump, "Diagnostic dump captured")}>
+          <button class="btn" type="button" onClick={() => void props.run(captureDump, "Diagnostic dump captured")}>
             <FileText size={15} />
             Capture dump
           </button>
         </div>
         {dumpPath && <p class="hint">Dump path: {dumpPath}</p>}
         <div class="form-row danger-row">
-          <input value={crashConfirm} placeholder="Type CRASH" onInput={(event) => setCrashConfirm(event.currentTarget.value)} />
-          <button
+          <input class="form-control" value={crashConfirm} placeholder="Type CRASH" onInput={(event) => setCrashConfirm(event.currentTarget.value)} />
+          <button class="btn"
             type="button"
             disabled={crashConfirm !== "CRASH"}
             onClick={() => void props.run(() => props.client.post("diagnostics/crash-tests", { confirmCrash: true }), "Crash test triggered")}
@@ -2323,8 +2323,8 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; cl
             <Ban size={15} />
             Crash test
           </button>
-          <input value={shutdownConfirm} placeholder="Type SHUTDOWN" onInput={(event) => setShutdownConfirm(event.currentTarget.value)} />
-          <button
+          <input class="form-control" value={shutdownConfirm} placeholder="Type SHUTDOWN" onInput={(event) => setShutdownConfirm(event.currentTarget.value)} />
+          <button class="btn"
             type="button"
             disabled={shutdownConfirm !== "SHUTDOWN"}
             onClick={() => void props.run(() => props.client.post("app/shutdown", { confirmShutdown: true }), "Shutdown requested")}
@@ -2334,7 +2334,7 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; cl
           </button>
         </div>
       </section>
-      <section class="panel split">
+      <section class="panel card split">
         <div>
           <h2>App</h2>
           <JsonPanel value={props.app} />
@@ -2350,10 +2350,10 @@ export function DiagnosticsView(props: { app: unknown; capabilities: unknown; cl
 
 export function LogsView(props: { logs: LogRecord[]; client: RestClient; run: RunFunction }) {
   return (
-    <section class="panel">
+    <section class="panel card">
       <div class="section-title">
         <h2>Logs</h2>
-        <button type="button" onClick={() => void props.run(() => props.client.post("logs/operations/clear", { confirmClearLogs: true }), "Logs cleared")}>
+        <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("logs/operations/clear", { confirmClearLogs: true }), "Logs cleared")}>
           <Trash2 size={15} />
           Clear
         </button>

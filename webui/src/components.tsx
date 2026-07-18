@@ -3,9 +3,11 @@ import { useMemo } from "preact/hooks";
 
 export function Metric(props: { label: string; value: string }) {
   return (
-    <section class="metric">
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
+    <section class="metric card">
+      <div class="card-body">
+        <span class="text-secondary">{props.label}</span>
+        <strong>{props.value}</strong>
+      </div>
     </section>
   );
 }
@@ -23,22 +25,22 @@ export function StatusPill(props: { value: string }) {
       value === "ok" ||
       value.includes("published")
     ) {
-      return "pill good";
+      return "status-pill badge bg-success-lt";
     }
     if (value.includes("error") || value.includes("firewall") || value.includes("banned") || value.includes("failed") || value.includes("blocked")) {
-      return "pill bad";
+      return "status-pill badge bg-danger-lt";
     }
     if (value.includes("paused") || value.includes("idle") || value.includes("queued") || value.includes("active")) {
-      return "pill idle";
+      return "status-pill badge bg-warning-lt";
     }
-    return "pill";
+    return "status-pill badge bg-secondary-lt";
   }, [props.value]);
   return <span class={className}>{props.value}</span>;
 }
 
 export function Action(props: { title: string; icon: ComponentChildren; onClick: () => void }) {
   return (
-    <button type="button" class="icon-button" title={props.title} onClick={props.onClick}>
+    <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title={props.title} onClick={props.onClick}>
       {props.icon}
     </button>
   );

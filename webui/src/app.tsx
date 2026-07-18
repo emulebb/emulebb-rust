@@ -53,6 +53,7 @@ import {
   TransfersView,
   UploadsView
 } from "./views";
+import "@tabler/core/dist/css/tabler.min.css";
 import "./styles.css";
 
 const API_KEY_STORAGE = "emulebb.webui.apiKey";
@@ -202,102 +203,118 @@ export function App() {
   const kad: KadStatus = snapshot?.kad ?? {};
 
   return (
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <h1>eMuleBB WebUI</h1>
-          <p>{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
-        </div>
-        <div class="top-actions">
-          <label class="api-key">
-            <KeyRound size={16} />
-            <input
-              type="password"
-              value={apiKeyInput}
-              placeholder="X-API-Key"
-              onInput={(event) => setApiKeyInput(event.currentTarget.value)}
-            />
-          </label>
-          <button type="button" onClick={saveApiKey}>
-            {apiKey ? <Unlock size={16} /> : <Lock size={16} />}
-            Save
-          </button>
-          <button type="button" class="icon-button" title="Clear API key" onClick={clearApiKey}>
-            <Trash2 size={16} />
-          </button>
-          <button type="button" class="icon-button" title="Refresh" onClick={() => void refresh()}>
-            <RefreshCw size={16} class={refreshing ? "spin" : ""} />
-          </button>
+    <div class="page">
+      <header class="navbar navbar-expand-md d-print-none">
+        <div class="container-xl topbar">
+          <div class="navbar-brand app-brand">
+            <span class="brand-mark">eM</span>
+            <div>
+              <h1>eMuleBB WebUI</h1>
+              <p>{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
+            </div>
+          </div>
+          <div class="top-actions navbar-nav flex-row order-md-last">
+            <label class="api-key input-icon">
+              <span class="input-icon-addon"><KeyRound size={16} /></span>
+              <input
+                class="form-control"
+                type="password"
+                value={apiKeyInput}
+                placeholder="X-API-Key"
+                onInput={(event) => setApiKeyInput(event.currentTarget.value)}
+              />
+            </label>
+            <button type="button" class="btn btn-primary" onClick={saveApiKey}>
+              {apiKey ? <Unlock size={16} /> : <Lock size={16} />}
+              Save
+            </button>
+            <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Clear API key" onClick={clearApiKey}>
+              <Trash2 size={16} />
+            </button>
+            <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Refresh" onClick={() => void refresh()}>
+              <RefreshCw size={16} class={refreshing ? "spin" : ""} />
+            </button>
+          </div>
         </div>
       </header>
 
-      <nav class="tabs" aria-label="Primary views">
-        <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
-        <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
-        <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
-        <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
-        <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
-        <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
-        <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
-        <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
-        <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
-        <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
-        <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
-        <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
-        <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
-        <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
-      </nav>
+      <div class="page-wrapper">
+        <div class="page-header d-print-none">
+          <div class="container-xl">
+            <nav class="tabs nav nav-pills card p-2" aria-label="Primary views">
+              <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
+              <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
+              <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
+              <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
+              <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
+              <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
+              <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
+              <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
+              <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
+              <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
+              <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
+              <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
+              <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
+              <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
+            </nav>
+          </div>
+        </div>
 
-      {message && <div class="notice">{message}</div>}
-      {error && <div class="notice error">{error}</div>}
+        <div class="page-body">
+          <div class="container-xl shell">
+            {message && <div class="notice alert alert-success">{message}</div>}
+            {error && <div class="notice alert alert-danger">{error}</div>}
 
-      {tab === "overview" && (
-        <Overview
-          snapshot={snapshot}
-          stats={stats}
-          transfers={transfers}
-          servers={servers}
-          uploads={uploads}
-          uploadQueue={uploadQueue}
-          sharedFiles={sharedFiles}
-          sharedDirectories={sharedDirectories}
-          kad={kad}
-        />
-      )}
-      {tab === "transfers" && <TransfersView transfers={transfers} categories={categories} client={client} run={run} />}
-      {tab === "search" && (
-        <SearchView
-          searches={searches}
-          latestSearch={latestSearch}
-          categories={categories}
-          client={client}
-          run={run}
-          refresh={refresh}
-          setLatestSearch={setLatestSearch}
-        />
-      )}
-      {tab === "sharing" && <SharingView directories={sharedDirectories} client={client} run={run} />}
-      {tab === "shared-files" && <SharedFilesView files={sharedFiles} client={client} run={run} />}
-      {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
-      {tab === "network" && (
-        <NetworkHealthView
-          servers={servers}
-          transfers={transfers}
-          uploads={uploads}
-          uploadQueue={uploadQueue}
-          kad={kad}
-          settings={settings}
-          client={client}
-        />
-      )}
-      {tab === "servers" && <ServersView servers={servers} client={client} run={run} />}
-      {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
-      {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
-      {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}
-      {tab === "settings" && <SettingsView settings={settings} client={client} run={run} />}
-      {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} client={client} run={run} />}
-      {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
-    </main>
+            {tab === "overview" && (
+              <Overview
+                snapshot={snapshot}
+                stats={stats}
+                transfers={transfers}
+                servers={servers}
+                uploads={uploads}
+                uploadQueue={uploadQueue}
+                sharedFiles={sharedFiles}
+                sharedDirectories={sharedDirectories}
+                kad={kad}
+              />
+            )}
+            {tab === "transfers" && <TransfersView transfers={transfers} categories={categories} client={client} run={run} />}
+            {tab === "search" && (
+              <SearchView
+                searches={searches}
+                latestSearch={latestSearch}
+                categories={categories}
+                client={client}
+                run={run}
+                refresh={refresh}
+                setLatestSearch={setLatestSearch}
+              />
+            )}
+            {tab === "sharing" && <SharingView directories={sharedDirectories} client={client} run={run} />}
+            {tab === "shared-files" && <SharedFilesView files={sharedFiles} client={client} run={run} />}
+            {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
+            {tab === "network" && (
+              <NetworkHealthView
+                servers={servers}
+                transfers={transfers}
+                uploads={uploads}
+                uploadQueue={uploadQueue}
+                kad={kad}
+                settings={settings}
+                client={client}
+              />
+            )}
+            {tab === "servers" && <ServersView servers={servers} client={client} run={run} />}
+            {tab === "kad" && <KadView kad={kad} client={client} run={run} />}
+            {tab === "categories" && <CategoriesView categories={categories} client={client} run={run} />}
+            {tab === "friends" && <FriendsView friends={friends} client={client} run={run} />}
+            {tab === "settings" && <SettingsView settings={settings} client={client} run={run} />}
+            {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} client={client} run={run} />}
+            {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -311,7 +328,7 @@ function TabButton(props: {
   return (
     <button
       type="button"
-      class={props.active === props.tab ? "tab active" : "tab"}
+      class={props.active === props.tab ? "tab nav-link active" : "tab nav-link"}
       onClick={() => props.setTab(props.tab)}
     >
       {props.icon}
