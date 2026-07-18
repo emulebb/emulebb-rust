@@ -244,6 +244,7 @@ use shared_directories::{
 mod network_status_defaults;
 mod rest_model;
 mod rest_model_serde;
+pub use emulebb_ed2k::NatStatusSnapshot;
 pub use emulebb_settings::{
     AppSettings, AppSettingsUpdate, CORE_SETTING_SPECS, CoreSettingFieldKind, CoreSettingSpec,
     CoreSettings, CoreSettingsUpdate, SettingSurfaceClass, SettingSurfaceSpec,
@@ -765,6 +766,22 @@ impl EmulebbCore {
     pub fn reload_ip_filter_status(&self) -> Result<IpFilterStatus> {
         let _ = self.reload_ip_filter()?;
         Ok(self.ip_filter_status())
+    }
+
+    pub async fn nat_status(&self) -> NatStatusSnapshot {
+        if let Some(runtime) = self.ed2k_runtime.lock().await.as_ref() {
+            return runtime.nat.status().await.snapshot();
+        }
+        let mut status = emulebb_ed2k::NatStatus::default();
+        if let Some(network) = self.ed2k_network.as_ref() {
+            status.enabled = network.nat_config.enabled;
+            status.bind_ip = network.nat_config.bind_ip.clone();
+            status.igd_ip = network.nat_config.igd_ip.clone();
+            status.minissdpd_socket = network.nat_config.minissdpd_socket.clone();
+            status.ssdp_local_port = network.nat_config.ssdp_local_port;
+            status.external_ip_override = network.nat_config.external_ip_override.clone();
+        }
+        status.snapshot()
     }
 
     pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {

@@ -271,6 +271,45 @@ function dataFor(method: string, path: string): unknown {
           httpProbe: { attempted: true, succeeded: true, publicIp: "203.0.113.10", provider: "http", error: null }
         }
       };
+    case "nat":
+      return {
+        enabled: true,
+        gatewayDiscovered: true,
+        backend: "miniupnpc",
+        bindIp: "192.0.2.10",
+        igdIp: "192.0.2.1",
+        minissdpdSocket: null,
+        ssdpLocalPort: null,
+        externalIpOverride: null,
+        gateway: {
+          backend: "miniupnpc",
+          controlUrl: "http://192.0.2.1:5000/rootDesc.xml",
+          localIp: "192.0.2.10",
+          gatewayIp: "192.0.2.1",
+          externalIp: "203.0.113.10"
+        },
+        mappings: [
+          {
+            name: "ed2k_tcp",
+            protocol: "tcp",
+            localAddr: "192.0.2.10:4662",
+            externalAddr: "203.0.113.10:4662",
+            leaseExpiresInSecs: 1800,
+            backend: "miniupnpc"
+          },
+          {
+            name: "kad_udp",
+            protocol: "udp",
+            localAddr: "192.0.2.10:4672",
+            externalAddr: "203.0.113.10:4672",
+            leaseExpiresInSecs: 1800,
+            backend: "miniupnpc"
+          }
+        ],
+        observedExternalAddresses: ["203.0.113.10"],
+        lastRefreshUnixSecs: 1784390000,
+        lastError: null
+      };
     case "vpn-guard":
       return {
         enabled: true,
@@ -406,6 +445,7 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
           sectionResource("network", "/api/v1/network", "Network", "Live P2P port, binding, interface, and VPN Guard status."),
+          sectionResource("nat", "/api/v1/nat", "NAT", "Live NAT gateway, mapping, external address, and error status."),
           sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
           sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, and egress verdict status."),
           sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")

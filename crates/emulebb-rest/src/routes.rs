@@ -58,6 +58,7 @@ pub fn router_with_shutdown(
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/network", get(network))
+        .route("/api/v1/nat", get(nat))
         .route("/api/v1/vpn-guard", get(vpn_guard))
         .route("/api/v1/categories", get(categories).post(create_category))
         .route(

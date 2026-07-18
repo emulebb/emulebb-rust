@@ -7,9 +7,9 @@
 use std::path::Path as FsPath;
 
 use emulebb_core::{
-    AppInfo, AppLifecycle, LocalShare, NetworkBindingStatus, NetworkStatus, Search, SearchResult,
-    ServerInfo, Status, Transfer, TransferThroughputStats, UploadPolicyMetrics,
-    VpnGuardProbeStatus, VpnGuardStatus,
+    AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
+    Search, SearchResult, ServerInfo, Status, Transfer, TransferThroughputStats,
+    UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use serde_json::{Value, json};
 
@@ -223,6 +223,37 @@ pub(crate) fn vpn_guard_response(guard: &VpnGuardStatus) -> Value {
         "egressBlockReason": guard.egress_block_reason,
         "stunProbe": probe_json(&guard.stun_probe),
         "httpProbe": probe_json(&guard.http_probe)
+    })
+}
+
+pub(crate) fn nat_response(status: &NatStatusSnapshot) -> Value {
+    json!({
+        "enabled": status.enabled,
+        "gatewayDiscovered": status.gateway_discovered,
+        "backend": status.backend,
+        "bindIp": status.bind_ip,
+        "igdIp": status.igd_ip,
+        "minissdpdSocket": status.minissdpd_socket,
+        "ssdpLocalPort": status.ssdp_local_port,
+        "externalIpOverride": status.external_ip_override,
+        "gateway": status.gateway.as_ref().map(|gateway| json!({
+            "backend": gateway.backend,
+            "controlUrl": gateway.control_url,
+            "localIp": gateway.local_ip,
+            "gatewayIp": gateway.gateway_ip,
+            "externalIp": gateway.external_ip
+        })),
+        "mappings": status.mappings.iter().map(|mapping| json!({
+            "name": mapping.name,
+            "protocol": serde_json::to_value(mapping.protocol).expect("transport protocol serializes"),
+            "localAddr": mapping.local_addr.to_string(),
+            "externalAddr": mapping.external_addr.to_string(),
+            "leaseExpiresInSecs": mapping.lease_expires_in_secs,
+            "backend": mapping.backend
+        })).collect::<Vec<_>>(),
+        "observedExternalAddresses": status.observed_external_addresses,
+        "lastRefreshUnixSecs": status.last_refresh_unix_secs,
+        "lastError": status.last_error
     })
 }
 

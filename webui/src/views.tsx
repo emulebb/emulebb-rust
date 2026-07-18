@@ -26,6 +26,7 @@ import {
   KadNode,
   KadStatus,
   LogRecord,
+  NatStatus,
   NetworkStatus,
   Page,
   RestClient,
@@ -2135,6 +2136,7 @@ export function SettingsView(props: {
   settings: AppSettings | null;
   surface: SettingsSurface | null;
   networkStatus: NetworkStatus | null;
+  natStatus: NatStatus | null;
   ipFilterStatus: IpFilterStatus | null;
   vpnGuardStatus: VpnGuardStatus | null;
   client: RestClient;
@@ -2540,6 +2542,12 @@ export function SettingsView(props: {
           "nat.externalIpOverride"
         ]) && (
           <SettingsControlSection title="NAT">
+            <section class="view-grid compact-grid">
+              <Metric label="NAT" value={props.natStatus?.enabled ? "Enabled" : "Off"} />
+              <Metric label="Gateway" value={props.natStatus?.gatewayDiscovered ? "Discovered" : "Missing"} />
+              <Metric label="Mappings" value={String(props.natStatus?.mappings?.length ?? 0)} />
+              <Metric label="NAT Error" value={props.natStatus?.lastError || "None"} />
+            </section>
             <div class="settings-grid">
               {renderToggle("nat.enabled", "natEnabled", "NAT")}
               {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}

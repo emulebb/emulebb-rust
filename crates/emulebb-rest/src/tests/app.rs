@@ -162,6 +162,11 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             && entry["class"] == "existingSectionResource"
             && entry["route"] == "/api/v1/network"
     }));
+    assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "nat"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/nat"
+    }));
 }
 
 #[tokio::test]
@@ -596,6 +601,37 @@ async fn network_returns_runtime_binding_status_directly() {
     assert_eq!(value["data"]["ports"]["serverUdp"], 0);
     assert_eq!(value["data"]["binding"]["resolveResult"], "default");
     assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
+}
+
+#[tokio::test]
+async fn nat_returns_runtime_mapping_status_directly() {
+    let router = test_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nat")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["enabled"], false);
+    assert_eq!(value["data"]["gatewayDiscovered"], false);
+    assert_eq!(value["data"]["gateway"], Value::Null);
+    assert_eq!(value["data"]["mappings"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        value["data"]["observedExternalAddresses"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]

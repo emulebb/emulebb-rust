@@ -225,6 +225,10 @@ pub(crate) async fn network(State(state): State<RestState>) -> impl IntoResponse
     ))
 }
 
+pub(crate) async fn nat(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(nat_response(&state.core.nat_status().await))
+}
+
 pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;

@@ -725,6 +725,13 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         description: "Live P2P port, binding, interface, and VPN Guard status.",
     },
     SettingsSectionResourceSpec {
+        name: "nat",
+        class: SettingSurfaceClass::ExistingSectionResource,
+        route: "/api/v1/nat",
+        ui_section: "NAT",
+        description: "Live NAT gateway, mapping, external address, and error status.",
+    },
+    SettingsSectionResourceSpec {
         name: "ipFilter",
         class: SettingSurfaceClass::ExistingSectionResource,
         route: "/api/v1/ip-filter",

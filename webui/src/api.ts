@@ -625,6 +625,42 @@ export type NetworkStatus = {
   [key: string]: unknown;
 };
 
+export type NatMapping = {
+  name?: string;
+  protocol?: string;
+  localAddr?: string;
+  externalAddr?: string;
+  leaseExpiresInSecs?: number;
+  backend?: string;
+  [key: string]: unknown;
+};
+
+export type NatGateway = {
+  backend?: string;
+  controlUrl?: string;
+  localIp?: string | null;
+  gatewayIp?: string | null;
+  externalIp?: string | null;
+  [key: string]: unknown;
+};
+
+export type NatStatus = {
+  enabled?: boolean;
+  gatewayDiscovered?: boolean;
+  backend?: string | null;
+  bindIp?: string | null;
+  igdIp?: string | null;
+  minissdpdSocket?: string | null;
+  ssdpLocalPort?: number | null;
+  externalIpOverride?: string | null;
+  gateway?: NatGateway | null;
+  mappings?: NatMapping[];
+  observedExternalAddresses?: string[];
+  lastRefreshUnixSecs?: number | null;
+  lastError?: string | null;
+  [key: string]: unknown;
+};
+
 export type IpFilterSettings = {
   enabled?: boolean;
   path?: string | null;

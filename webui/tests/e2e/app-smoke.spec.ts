@@ -120,6 +120,9 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   const metricValue = (label: string) => page.locator(".metric").filter({ has: page.getByText(label, { exact: true }) }).locator("strong");
   await expect(metricValue("Bind")).toHaveText("resolved");
   await expect(metricValue("Interface")).toHaveText("Test Adapter");
+  await expect(metricValue("NAT")).toHaveText("Enabled");
+  await expect(metricValue("Gateway")).toHaveText("Discovered");
+  await expect(metricValue("Mappings")).toHaveText("2");
   await expect(metricValue("Guard")).toHaveText("Enabled");
   await expect(metricValue("Egress")).toHaveText("Verified 203.0.113.10");
   await expect(metricValue("Configured")).toHaveText("Yes");

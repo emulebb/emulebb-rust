@@ -29,7 +29,7 @@ pub(crate) mod transfers;
 pub(crate) mod uploads;
 
 pub(crate) use app::{
-    app, capabilities, capture_diagnostic_dump, diagnostics, events, network, settings,
+    app, capabilities, capture_diagnostic_dump, diagnostics, events, nat, network, settings,
     settings_surface, shutdown_app, snapshot, stats, status, trigger_diagnostic_crash_test,
     update_settings, vpn_guard,
 };
