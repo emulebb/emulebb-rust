@@ -884,21 +884,87 @@ export function SharedFilesView(props: { files: SharedFile[]; client: RestClient
   );
 }
 
+type UploadLane = "active" | "queue";
+
+type UploadRow = {
+  key: string;
+  lane: UploadLane;
+  item: Upload;
+};
+
 export function UploadsView(props: { uploads: Upload[]; uploadQueue: Upload[]; client: RestClient; run: RunFunction }) {
+  const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState("rank");
+  const [selectedKey, setSelectedKey] = useState("");
+  const rows = useMemo(
+    () => [
+      ...props.uploads.map((item) => ({ key: uploadRowKey("active", item), lane: "active" as const, item })),
+      ...props.uploadQueue.map((item) => ({ key: uploadRowKey("queue", item), lane: "queue" as const, item }))
+    ],
+    [props.uploadQueue, props.uploads]
+  );
+  const visibleRows = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    const filtered = needle
+      ? rows.filter((row) => uploadSearchText(row).includes(needle))
+      : rows;
+    return [...filtered].sort((left, right) => compareUploadRows(left, right, sort));
+  }, [filter, rows, sort]);
+  const activeRows = visibleRows.filter((row) => row.lane === "active");
+  const queueRows = visibleRows.filter((row) => row.lane === "queue");
+  const selected = rows.find((row) => row.key === selectedKey) ?? visibleRows[0];
+  const lowIdCount = rows.filter((row) => row.item.lowId).length;
+  const friendSlotCount = rows.filter((row) => row.item.friendSlot).length;
+  const topFile = topRequestedFile(rows);
+
   return (
     <section class="view-stack">
-      <UploadTable title="Active Uploads" items={props.uploads} basePath="uploads" client={props.client} run={props.run} />
-      <UploadTable title="Upload Queue" items={props.uploadQueue} basePath="upload-queue" client={props.client} run={props.run} />
+      <section class="view-grid">
+        <Metric label="Active Slots" value={String(props.uploads.length)} />
+        <Metric label="Waiting" value={String(props.uploadQueue.length)} />
+        <Metric label="Friend Slots" value={String(friendSlotCount)} />
+        <Metric label="LowID Peers" value={String(lowIdCount)} />
+        <Metric label="Top File" value={topFile.name} />
+        <Metric label="Top Requests" value={String(topFile.count)} />
+      </section>
+      <section class="panel">
+        <div class="section-title">
+          <h2>Upload Queue Inspector</h2>
+          <span>{visibleRows.length} clients</span>
+        </div>
+        <div class="form-row">
+          <input value={filter} placeholder="Filter client, file, hash, software, state" onInput={(event) => setFilter(event.currentTarget.value)} />
+          <select value={sort} onInput={(event) => setSort(event.currentTarget.value)}>
+            <option value="rank">Rank</option>
+            <option value="score">Score</option>
+            <option value="rate">Rate</option>
+            <option value="uploaded">Uploaded</option>
+            <option value="wait">Wait</option>
+            <option value="file">File</option>
+          </select>
+        </div>
+      </section>
+      <UploadTable title="Active Uploads" rows={activeRows} basePath="uploads" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
+      <UploadTable title="Upload Queue" rows={queueRows} basePath="upload-queue" client={props.client} run={props.run} selectedKey={selected?.key ?? ""} onSelect={setSelectedKey} />
+      <UploadPeerInspector row={selected} />
     </section>
   );
 }
 
-function UploadTable(props: { title: string; items: Upload[]; basePath: string; client: RestClient; run: RunFunction }) {
+function UploadTable(props: {
+  title: string;
+  rows: UploadRow[];
+  basePath: string;
+  client: RestClient;
+  run: RunFunction;
+  selectedKey: string;
+  onSelect: (key: string) => void;
+}) {
   return (
     <section class="panel">
       <div class="section-title">
         <h2>{props.title}</h2>
-        <span>{props.items.length} clients</span>
+        <span>{props.rows.length} clients</span>
       </div>
       <div class="table-wrap">
         <table>
@@ -906,23 +972,34 @@ function UploadTable(props: { title: string; items: Upload[]; basePath: string; 
             <tr>
               <th>Client</th>
               <th>State</th>
+              <th>Rank</th>
+              <th>Score</th>
               <th>File</th>
+              <th>Parts</th>
               <th>Rate</th>
               <th>Uploaded</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {props.items.map((upload) => {
+            {props.rows.map((row) => {
+              const upload = row.item;
               const clientId = upload.clientId ?? "";
               const encoded = encodeSegment(clientId);
               return (
-                <tr key={clientId}>
-                  <td>{upload.userName ?? clientId}</td>
-                  <td><StatusPill value={upload.uploadState ?? (upload.waitingQueue ? "queued" : "unknown")} /></td>
+                <tr key={row.key} class={props.selectedKey === row.key ? "selected-row" : ""} onClick={() => props.onSelect(row.key)}>
+                  <td>
+                    <button type="button" class="link-button" onClick={() => props.onSelect(row.key)}>
+                      {upload.userName ?? clientId}
+                    </button>
+                  </td>
+                  <td><StatusPill value={uploadState(upload)} /></td>
+                  <td>{upload.queueRank ?? ""}</td>
+                  <td>{upload.score ?? ""}</td>
                   <td>{upload.requestedFileName ?? ""}</td>
+                  <td>{upload.requestedPartsProgressText ?? ""}</td>
                   <td>{formatKiBRate(upload.uploadSpeedKiBps)}</td>
-                  <td>{formatBytes(upload.uploadedBytes)}</td>
+                  <td>{formatBytes(upload.uploadedBytes ?? upload.queueSessionUploaded)}</td>
                   <td>
                     <div class="row-actions">
                       <Action title="Release slot" icon={<Play size={15} />} onClick={() => void props.run(() => props.client.post(`${props.basePath}/${encoded}/operations/release-slot`), "Upload slot released")} />
@@ -936,12 +1013,145 @@ function UploadTable(props: { title: string; items: Upload[]; basePath: string; 
                 </tr>
               );
             })}
-            {props.items.length === 0 && <EmptyRow colSpan={6} text="No clients." />}
+            {props.rows.length === 0 && <EmptyRow colSpan={9} text="No clients." />}
           </tbody>
         </table>
       </div>
     </section>
   );
+}
+
+function UploadPeerInspector(props: { row?: UploadRow }) {
+  const upload = props.row?.item;
+  if (!props.row || !upload) {
+    return <section class="panel"><p class="empty">No upload peer selected.</p></section>;
+  }
+  return (
+    <section class="panel">
+      <div class="section-title">
+        <h2>Peer Slot Inspector</h2>
+        <span>{upload.userName ?? upload.clientId ?? "Selected peer"}</span>
+      </div>
+      <div class="upload-inspector">
+        <div class="kv compact">
+          <span>Lane</span><strong>{props.row.lane === "active" ? "active upload" : "waiting queue"}</strong>
+          <span>State</span><strong>{uploadState(upload)}</strong>
+          <span>Queue rank</span><strong>{upload.queueRank ?? ""}</strong>
+          <span>Score</span><strong>{upload.score ?? ""}</strong>
+          <span>Wait time</span><strong>{formatDurationMs(upload.waitTimeMs)}</strong>
+          <span>Rate</span><strong>{formatKiBRate(upload.uploadSpeedKiBps)}</strong>
+          <span>Uploaded</span><strong>{formatBytes(upload.uploadedBytes)}</strong>
+          <span>Session uploaded</span><strong>{formatBytes(upload.queueSessionUploaded)}</strong>
+        </div>
+        <div class="kv compact">
+          <span>User hash</span><strong>{upload.userHash ?? ""}</strong>
+          <span>Client</span><strong>{[upload.clientSoftware, upload.clientMod].filter(Boolean).join(" ")}</strong>
+          <span>Endpoint</span><strong>{upload.port ? `${upload.address ?? ""}:${upload.port}` : upload.address ?? ""}</strong>
+          <span>LowID</span><strong>{yesNo(upload.lowId)}</strong>
+          <span>Friend slot</span><strong>{yesNo(upload.friendSlot)}</strong>
+          <span>Friend</span><strong>{yesNo(boolField(upload, "friend"))}</strong>
+          <span>Banned</span><strong>{yesNo(boolField(upload, "banned"))}</strong>
+        </div>
+        <div class="kv compact">
+          <span>Requested file</span><strong>{upload.requestedFileName ?? ""}</strong>
+          <span>File hash</span><strong>{upload.requestedFileHash ?? ""}</strong>
+          <span>File size</span><strong>{formatBytes(upload.requestedFileSizeBytes)}</strong>
+          <span>Requested parts</span><strong>{upload.requestedPartsProgressText ?? ""}</strong>
+        </div>
+        <ScoreBreakdown value={upload.scoreBreakdown} />
+      </div>
+    </section>
+  );
+}
+
+function ScoreBreakdown(props: { value?: Record<string, unknown> | null }) {
+  const entries = Object.entries(props.value ?? {});
+  return (
+    <div class="score-box">
+      <h3>Score Breakdown</h3>
+      {entries.length === 0 ? (
+        <p class="empty">No score breakdown for this peer.</p>
+      ) : (
+        <div class="score-grid">
+          {entries.map(([key, value]) => (
+            <div class="score-row" key={key}>
+              <span>{key}</span>
+              <strong>{formatScoreValue(value)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function uploadRowKey(lane: UploadLane, upload: Upload): string {
+  return `${lane}:${upload.clientId ?? upload.userHash ?? upload.address ?? upload.userName ?? ""}`;
+}
+
+function uploadState(upload: Upload): string {
+  return upload.uploadState ?? (upload.uploading ? "uploading" : upload.waitingQueue ? "queued" : "unknown");
+}
+
+function uploadSearchText(row: UploadRow): string {
+  const upload = row.item;
+  return [
+    row.lane,
+    upload.userName,
+    upload.userHash,
+    upload.clientId,
+    upload.clientSoftware,
+    upload.clientMod,
+    upload.address,
+    uploadState(upload),
+    upload.requestedFileName,
+    upload.requestedFileHash,
+    upload.requestedPartsProgressText
+  ].map((value) => String(value ?? "").toLowerCase()).join(" ");
+}
+
+function compareUploadRows(left: UploadRow, right: UploadRow, sort: string): number {
+  if (sort === "score") {
+    return (right.item.score ?? -1) - (left.item.score ?? -1);
+  }
+  if (sort === "rate") {
+    return (right.item.uploadSpeedKiBps ?? -1) - (left.item.uploadSpeedKiBps ?? -1);
+  }
+  if (sort === "uploaded") {
+    return (right.item.uploadedBytes ?? right.item.queueSessionUploaded ?? -1) - (left.item.uploadedBytes ?? left.item.queueSessionUploaded ?? -1);
+  }
+  if (sort === "wait") {
+    return (right.item.waitTimeMs ?? -1) - (left.item.waitTimeMs ?? -1);
+  }
+  if (sort === "file") {
+    return String(left.item.requestedFileName ?? "").localeCompare(String(right.item.requestedFileName ?? ""));
+  }
+  return (left.item.queueRank ?? Number.MAX_SAFE_INTEGER) - (right.item.queueRank ?? Number.MAX_SAFE_INTEGER);
+}
+
+function topRequestedFile(rows: UploadRow[]): { name: string; count: number } {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const name = row.item.requestedFileName || row.item.requestedFileHash || "";
+    if (name) {
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+  }
+  const [name = "", count = 0] = [...counts.entries()].sort((left, right) => right[1] - left[1])[0] ?? [];
+  return { name: name || "none", count };
+}
+
+function formatScoreValue(value: unknown): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  }
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value ?? "");
 }
 
 type NetworkEndpointRow = {
