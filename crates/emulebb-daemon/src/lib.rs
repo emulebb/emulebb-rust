@@ -21,7 +21,7 @@ use emulebb_rest::{RestServerSettings, router_with_shutdown};
 use emulebb_settings::{
     DaemonSettings, Ed2kSettings, Ed2kUploadQueueSettings, IpFilterSettings, KadSettings,
     NatSettings, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER, SECTION_KAD, SECTION_NAT,
-    SECTION_VPN_GUARD, VpnGuardSettings,
+    SECTION_VPN_GUARD, SettingSurfaceClass, SettingSurfaceSpec, VpnGuardSettings,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -68,6 +68,32 @@ pub struct RestBootstrapSettings {
     pub bind_addr: Option<SocketAddr>,
     pub api_key: String,
     pub web_root_dir: Option<PathBuf>,
+}
+
+pub const BOOTSTRAP_SETTINGS_SURFACE: &[SettingSurfaceSpec] = &[
+    bootstrap_setting(
+        "rest.bindAddr",
+        "REST bind socket address. This remains bootstrap-only so the daemon can start safely.",
+    ),
+    bootstrap_setting(
+        "rest.apiKey",
+        "REST API key. This remains bootstrap-only and is not exposed through REST.",
+    ),
+    bootstrap_setting(
+        "rest.webRootDir",
+        "Optional WebUI root override used before the REST server starts.",
+    ),
+];
+
+const fn bootstrap_setting(path: &'static str, description: &'static str) -> SettingSurfaceSpec {
+    SettingSurfaceSpec {
+        path,
+        class: SettingSurfaceClass::BootstrapOnly,
+        restart_required: true,
+        ui_section: "Bootstrap REST",
+        route: "emulebb-rust-settings.toml",
+        description,
+    }
 }
 
 impl Default for DaemonProfile {

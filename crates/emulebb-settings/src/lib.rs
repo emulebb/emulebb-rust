@@ -3,6 +3,12 @@ use std::{error::Error, fmt, net::Ipv4Addr, path::PathBuf};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
+mod surface;
+pub use surface::{
+    SettingSurfaceClass, SettingSurfaceSpec, SettingsSectionResourceSpec,
+    app_settings_surface_inventory, settings_section_resource_inventory,
+};
+
 pub const SECTION_CORE: &str = "core";
 pub const SECTION_DAEMON: &str = "daemon";
 pub const SECTION_ED2K: &str = "ed2k";

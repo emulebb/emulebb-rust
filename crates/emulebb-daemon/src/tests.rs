@@ -1,8 +1,27 @@
 use super::*;
 use emulebb_ed2k::{InterfaceAddressFamily, NetworkInterface, NetworkInterfaceAddress};
+use std::collections::BTreeSet;
 
 fn metadata_store(profile: &DaemonProfile) -> MetadataStore {
     MetadataStore::open(profile.metadata_path()).unwrap()
+}
+
+fn collect_leaf_paths(prefix: &str, value: &serde_json::Value, output: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(object) if !object.is_empty() => {
+            for (key, nested) in object {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                collect_leaf_paths(&path, nested, output);
+            }
+        }
+        _ => {
+            output.insert(prefix.to_string());
+        }
+    }
 }
 
 fn persist_test_server(profile: &DaemonProfile) {
@@ -126,6 +145,27 @@ fn load_requires_explicit_profile_path() {
     let error = DaemonProfile::load(None).unwrap_err().to_string();
 
     assert!(error.contains("--profile is required"));
+}
+
+#[test]
+fn bootstrap_settings_surface_inventory_covers_serialized_toml_fields() {
+    let mut expected = BTreeSet::new();
+    collect_leaf_paths(
+        "",
+        &serde_json::to_value(DaemonBootstrapSettings::default()).unwrap(),
+        &mut expected,
+    );
+    let actual = BOOTSTRAP_SETTINGS_SURFACE
+        .iter()
+        .map(|entry| entry.path.to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(actual, expected);
+    assert!(
+        BOOTSTRAP_SETTINGS_SURFACE
+            .iter()
+            .all(|entry| entry.class == SettingSurfaceClass::BootstrapOnly)
+    );
 }
 
 #[test]
