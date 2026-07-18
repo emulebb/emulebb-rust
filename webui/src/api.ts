@@ -599,6 +599,32 @@ export type VpnGuardStatus = {
   [key: string]: unknown;
 };
 
+export type NetworkPorts = {
+  tcp?: number;
+  udp?: number;
+  serverUdp?: number;
+  [key: string]: unknown;
+};
+
+export type NetworkBinding = {
+  configuredAddress?: string | null;
+  configuredInterfaceId?: string | null;
+  configuredInterfaceName?: string | null;
+  activeConfiguredAddress?: string | null;
+  activeInterfaceId?: string | null;
+  activeInterfaceName?: string | null;
+  activeInterfaceIndex?: number | null;
+  resolveResult?: string;
+  [key: string]: unknown;
+};
+
+export type NetworkStatus = {
+  ports?: NetworkPorts;
+  binding?: NetworkBinding;
+  vpnGuard?: VpnGuardStatus;
+  [key: string]: unknown;
+};
+
 export type IpFilterSettings = {
   enabled?: boolean;
   path?: string | null;
@@ -662,7 +688,7 @@ export type Snapshot = {
   uploads?: Upload[];
   uploadQueue?: Upload[];
   sharedFiles?: SharedFile[];
-  network?: Record<string, unknown>;
+  network?: NetworkStatus;
   logs?: LogRecord[];
   [key: string]: unknown;
 };

@@ -218,6 +218,13 @@ pub(crate) async fn vpn_guard(State(state): State<RestState>) -> impl IntoRespon
     api_ok(vpn_guard_response(&state.core.vpn_guard_status()))
 }
 
+pub(crate) async fn network(State(state): State<RestState>) -> impl IntoResponse {
+    api_ok(network_response(
+        state.core.network_binding_status().as_ref(),
+        &state.core.vpn_guard_status(),
+    ))
+}
+
 pub(crate) async fn stats(State(state): State<RestState>) -> impl IntoResponse {
     let status = state.core.status().await;
     let upload_policy = state.core.upload_policy_metrics().await;

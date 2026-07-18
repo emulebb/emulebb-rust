@@ -26,6 +26,7 @@ import {
   KadNode,
   KadStatus,
   LogRecord,
+  NetworkStatus,
   Page,
   RestClient,
   RuntimeDiagnostics,
@@ -2133,6 +2134,7 @@ const emptySettingsForm: SettingsForm = {
 export function SettingsView(props: {
   settings: AppSettings | null;
   surface: SettingsSurface | null;
+  networkStatus: NetworkStatus | null;
   ipFilterStatus: IpFilterStatus | null;
   vpnGuardStatus: VpnGuardStatus | null;
   client: RestClient;
@@ -2387,6 +2389,12 @@ export function SettingsView(props: {
           "ed2k.publishEmuleRustIdentity"
         ]) && (
           <SettingsControlSection title="Network">
+            <section class="view-grid compact-grid">
+              <Metric label="TCP Port" value={String(props.networkStatus?.ports?.tcp ?? 0)} />
+              <Metric label="UDP Port" value={String(props.networkStatus?.ports?.udp ?? 0)} />
+              <Metric label="Bind" value={networkBindStatusLabel(props.networkStatus)} />
+              <Metric label="Interface" value={networkInterfaceLabel(props.networkStatus)} />
+            </section>
             <div class="settings-grid">
               {renderField("daemon.p2pBindIp", "p2pBindIp", "P2P bind IP")}
               {renderField("daemon.p2pBindInterface", "p2pBindInterface", "P2P bind interface")}
@@ -2597,6 +2605,14 @@ function vpnGuardEgressLabel(status: VpnGuardStatus | null): string {
     return status.publicIp ? `Verified ${status.publicIp}` : "Verified";
   }
   return status.egressBlockReason || "Not verified";
+}
+
+function networkBindStatusLabel(status: NetworkStatus | null): string {
+  return status?.binding?.resolveResult || "default";
+}
+
+function networkInterfaceLabel(status: NetworkStatus | null): string {
+  return status?.binding?.activeInterfaceName || status?.binding?.activeInterfaceId || "default";
 }
 
 function BootstrapSettingsSection(props: { settings: SettingSurfaceSpec[] }) {

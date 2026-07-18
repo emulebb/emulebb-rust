@@ -718,6 +718,13 @@ const SETTINGS_SECTION_RESOURCES: &[SettingsSectionResourceSpec] = &[
         description: "Kad status, bootstrap, import, and control operations.",
     },
     SettingsSectionResourceSpec {
+        name: "network",
+        class: SettingSurfaceClass::ExistingSectionResource,
+        route: "/api/v1/network",
+        ui_section: "Network",
+        description: "Live P2P port, binding, interface, and VPN Guard status.",
+    },
+    SettingsSectionResourceSpec {
         name: "ipFilter",
         class: SettingSurfaceClass::ExistingSectionResource,
         route: "/api/v1/ip-filter",

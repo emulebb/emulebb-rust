@@ -473,6 +473,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("GET", "/api/v1/status")
         | ("GET", "/api/v1/stats")
         | ("GET", "/api/v1/diagnostics")
+        | ("GET", "/api/v1/network")
         | ("GET", "/api/v1/vpn-guard")
         | ("GET", "/api/v1/categories")
         | ("POST", "/api/v1/categories")

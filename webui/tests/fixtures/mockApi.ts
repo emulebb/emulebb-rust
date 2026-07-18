@@ -241,6 +241,36 @@ function dataFor(method: string, path: string): unknown {
         level: 127,
         rangeCount: 3
       };
+    case "network":
+      return {
+        ports: {
+          tcp: 4662,
+          udp: 4672,
+          serverUdp: 4675
+        },
+        binding: {
+          configuredAddress: "192.0.2.10",
+          configuredInterfaceId: "test-adapter",
+          configuredInterfaceName: "Test Adapter",
+          activeConfiguredAddress: "192.0.2.10",
+          activeInterfaceId: "test-adapter",
+          activeInterfaceName: "Test Adapter",
+          activeInterfaceIndex: 12,
+          resolveResult: "resolved"
+        },
+        vpnGuard: {
+          enabled: true,
+          mode: "block",
+          allowedPublicIpCidrs: "203.0.113.0/24",
+          startupBlocked: false,
+          startupBlockReason: "",
+          publicIp: "203.0.113.10",
+          egressVerified: true,
+          egressBlockReason: "",
+          stunProbe: { attempted: true, succeeded: true, publicIp: "203.0.113.10", provider: "stun", error: null },
+          httpProbe: { attempted: true, succeeded: true, publicIp: "203.0.113.10", provider: "http", error: null }
+        }
+      };
     case "vpn-guard":
       return {
         enabled: true,
@@ -375,6 +405,7 @@ function dataFor(method: string, path: string): unknown {
           sectionResource("categories", "/api/v1/categories", "Categories", "Transfer category paths and priorities."),
           sectionResource("servers", "/api/v1/servers", "Servers", "eD2K server repository, import, and connect operations."),
           sectionResource("kad", "/api/v1/kad", "Kad", "Kad status, bootstrap, import, and control operations."),
+          sectionResource("network", "/api/v1/network", "Network", "Live P2P port, binding, interface, and VPN Guard status."),
           sectionResource("ipFilter", "/api/v1/ip-filter", "IP Filter", "IP filter status and live reload operation."),
           sectionResource("vpnGuard", "/api/v1/vpn-guard", "VPN Guard", "VPN Guard startup, binding, and egress verdict status."),
           sectionResource("diagnostics", "/api/v1/diagnostics", "Diagnostics", "Runtime diagnostics.")

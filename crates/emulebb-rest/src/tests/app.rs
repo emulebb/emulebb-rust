@@ -157,6 +157,11 @@ async fn settings_surface_describes_settings_fields_and_section_resources() {
             && entry["class"] == "existingSectionResource"
             && entry["route"] == "/api/v1/vpn-guard"
     }));
+    assert!(section_resources.iter().any(|entry| {
+        entry["name"] == "network"
+            && entry["class"] == "existingSectionResource"
+            && entry["route"] == "/api/v1/network"
+    }));
 }
 
 #[tokio::test]
@@ -566,6 +571,31 @@ async fn vpn_guard_returns_runtime_status_directly() {
     assert_eq!(value["data"]["egressVerified"], false);
     assert_eq!(value["data"]["stunProbe"]["attempted"], false);
     assert_eq!(value["data"]["httpProbe"]["attempted"], false);
+}
+
+#[tokio::test]
+async fn network_returns_runtime_binding_status_directly() {
+    let router = test_router();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["ports"]["tcp"], 0);
+    assert_eq!(value["data"]["ports"]["udp"], 0);
+    assert_eq!(value["data"]["ports"]["serverUdp"], 0);
+    assert_eq!(value["data"]["binding"]["resolveResult"], "default");
+    assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
 }
 
 #[tokio::test]

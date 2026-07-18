@@ -29,6 +29,7 @@ import {
   IpFilterStatus,
   KadStatus,
   LogRecord,
+  NetworkStatus,
   Page,
   RestClient,
   RuntimeDiagnostics,
@@ -92,6 +93,7 @@ const settingsSectionTabs: Record<string, Tab> = {
   servers: "servers",
   kad: "kad",
   diagnostics: "diagnostics",
+  network: "network",
   ipFilter: "settings",
   vpnGuard: "settings"
 };
@@ -113,6 +115,7 @@ export function App() {
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
   const [ipFilterStatus, setIpFilterStatus] = useState<IpFilterStatus | null>(null);
   const [vpnGuardStatus, setVpnGuardStatus] = useState<VpnGuardStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -151,6 +154,7 @@ export function App() {
         nextAppInfo,
         nextCapabilities,
         nextRuntimeDiagnostics,
+        nextNetworkStatus,
         nextIpFilterStatus,
         nextVpnGuardStatus,
         nextSettingsSurface
@@ -167,6 +171,7 @@ export function App() {
         client.get<AppInfo>("app"),
         client.get<unknown>("capabilities"),
         client.get<RuntimeDiagnostics>("diagnostics"),
+        client.get<NetworkStatus>("network"),
         client.get<IpFilterStatus>("ip-filter"),
         client.get<VpnGuardStatus>("vpn-guard"),
         client.get<SettingsSurface>("app/settings/surface")
@@ -175,6 +180,7 @@ export function App() {
       setAppInfo(nextAppInfo);
       setCapabilities(nextCapabilities);
       setRuntimeDiagnostics(nextRuntimeDiagnostics);
+      setNetworkStatus(nextNetworkStatus);
       setIpFilterStatus(nextIpFilterStatus);
       setVpnGuardStatus(nextVpnGuardStatus);
       setSettingsSurface(nextSettingsSurface);
@@ -474,6 +480,7 @@ export function App() {
               <SettingsView
                 settings={settings}
                 surface={settingsSurface}
+                networkStatus={networkStatus}
                 ipFilterStatus={ipFilterStatus}
                 vpnGuardStatus={vpnGuardStatus}
                 client={client}
