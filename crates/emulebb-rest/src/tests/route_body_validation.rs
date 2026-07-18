@@ -314,6 +314,10 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "incomingDir must not be empty",
         ),
         (
+            r#"{"daemon":{"unsupportedSetting":1}}"#,
+            "unknown settings.daemon field: unsupportedSetting",
+        ),
+        (
             r#"{"daemon":{"hostnameLookup":{}}}"#,
             "settings.daemon.hostnameLookup PATCH requires at least one setting",
         ),
@@ -322,16 +326,44 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "settings.daemon.hostnameLookup must be an object",
         ),
         (
+            r#"{"daemon":{"hostnameLookup":{"unsupportedSetting":1}}}"#,
+            "unknown settings.daemon.hostnameLookup field: unsupportedSetting",
+        ),
+        (
             r#"{"ed2k":{}}"#,
             "settings.ed2k PATCH requires at least one setting",
+        ),
+        (
+            r#"{"ed2k":{"unsupportedSetting":1}}"#,
+            "unknown settings.ed2k field: unsupportedSetting",
         ),
         (
             r#"{"ed2k":{"uploadQueue":{}}}"#,
             "settings.ed2k.uploadQueue PATCH requires at least one setting",
         ),
         (
+            r#"{"ed2k":{"uploadQueue":{"unsupportedSetting":1}}}"#,
+            "unknown settings.ed2k.uploadQueue field: unsupportedSetting",
+        ),
+        (
+            r#"{"kad":{"unsupportedSetting":1}}"#,
+            "unknown settings.kad field: unsupportedSetting",
+        ),
+        (
+            r#"{"nat":{"unsupportedSetting":1}}"#,
+            "unknown settings.nat field: unsupportedSetting",
+        ),
+        (
             r#"{"nat":{},"daemon":{"incomingDir":"C:/Incoming"}}"#,
             "settings.nat PATCH requires at least one setting",
+        ),
+        (
+            r#"{"vpnGuard":{"unsupportedSetting":1}}"#,
+            "unknown settings.vpnGuard field: unsupportedSetting",
+        ),
+        (
+            r#"{"ipFilter":{"unsupportedSetting":1}}"#,
+            "unknown settings.ipFilter field: unsupportedSetting",
         ),
     ];
 

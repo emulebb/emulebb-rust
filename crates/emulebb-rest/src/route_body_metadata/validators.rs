@@ -8,6 +8,103 @@ use axum::response::Response;
 use super::{JsonObject, invalid_body_error};
 
 const MAX_TRANSFER_ADD_LINKS: usize = 100;
+const DAEMON_SETTINGS_FIELDS: &[&str] = &[
+    "incomingDir",
+    "p2pBindIp",
+    "p2pBindInterface",
+    "ed2kUserHash",
+    "hostnameLookup",
+];
+const HOSTNAME_LOOKUP_SETTINGS_FIELDS: &[&str] = &[
+    "enabled",
+    "dnsServers",
+    "cacheTtlSecs",
+    "maxLookupsPerTick",
+    "tickIntervalSecs",
+];
+const ED2K_SETTINGS_FIELDS: &[&str] = &[
+    "listenPort",
+    "obfuscationEnabled",
+    "probeSearchTerm",
+    "connectTimeoutSecs",
+    "serverConnectTimeoutSecs",
+    "callbackTimeoutSecs",
+    "reconnectIntervalSecs",
+    "reconnectEnabled",
+    "safeServerConnect",
+    "keepaliveSecs",
+    "sessionRotationSecs",
+    "maxConcurrentDownloads",
+    "maxNewConnectionsPerFiveSeconds",
+    "maxHalfOpenConnections",
+    "maxSourcesPerFile",
+    "maxParallelDownloadPeers",
+    "keywordServerAttemptBudget",
+    "exactHashKeywordServerAttemptBudget",
+    "sourceServerAttemptBudget",
+    "uploadQueue",
+    "downloadLimitBytesPerSec",
+    "enableUdpReask",
+    "publishEmuleRustIdentity",
+    "addServersFromServer",
+    "deadServerRetries",
+];
+const ED2K_UPLOAD_QUEUE_SETTINGS_FIELDS: &[&str] = &[
+    "activeSlots",
+    "elasticPercent",
+    "uploadLimitBytesPerSec",
+    "elasticUnderfillBytesPerSec",
+    "elasticUnderfillSecs",
+    "waitingCapacity",
+    "waitingTimeoutSecs",
+    "grantedTimeoutSecs",
+    "uploadTimeoutSecs",
+    "sessionTransferPercent",
+    "sessionTimeLimitSecs",
+];
+const KAD_SETTINGS_FIELDS: &[&str] = &[
+    "listenPort",
+    "bootstrapMinRoutingContacts",
+    "localStoreEnabled",
+    "localStoreKeywordTtlSecs",
+    "localStoreSourceTtlSecs",
+    "localStoreNotesTtlSecs",
+    "localStoreKeywordCapacity",
+    "localStoreSourceCapacity",
+    "localStoreNotesCapacity",
+    "localStoreSourcePerFileCapacity",
+    "localStoreNotesPerFileCapacity",
+    "publishSharedFilesEnabled",
+    "republishIntervalSecs",
+    "publishContactFanout",
+    "udpFirewallCheckEnabled",
+    "udpFirewallCheckIntervalSecs",
+    "tcpFirewallCheckEnabled",
+    "tcpFirewallCheckIntervalSecs",
+    "buddyEnabled",
+    "routingMaintenanceEnabled",
+    "snoopQueueDedupWindowSecs",
+    "snoopQueueGeneralMaxQueriesPer600s",
+    "snoopQueueGeneralDrainCooldownSecs",
+    "snoopQueueSourceMaxQueriesPer600s",
+    "snoopQueueSourceDrainCooldownSecs",
+    "snoopQueueSourceStopAfterResults",
+];
+const NAT_SETTINGS_FIELDS: &[&str] = &[
+    "enabled",
+    "requireInitialMapping",
+    "backendOrder",
+    "bindIp",
+    "igdIp",
+    "minissdpdSocket",
+    "ssdpLocalPort",
+    "discoveryTimeoutSecs",
+    "leaseDurationSecs",
+    "renewMarginSecs",
+    "externalIpOverride",
+];
+const VPN_GUARD_SETTINGS_FIELDS: &[&str] = &["enabled", "mode", "allowedPublicIpCidrs"];
+const IP_FILTER_SETTINGS_FIELDS: &[&str] = &["enabled", "path", "level"];
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
     search::validate_search_create_body_fields(object)
@@ -35,25 +132,65 @@ pub(super) fn validate_app_settings_patch_body_fields(
             "core" => validate_core_settings_patch_body_fields(section_object)?,
             "daemon" => {
                 validate_non_empty_update_object(section_object, "settings.daemon")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    DAEMON_SETTINGS_FIELDS,
+                    "settings.daemon",
+                )?;
                 validate_daemon_settings_patch_body_fields(section_object)?;
                 validate_nested_settings_update_object(
                     section_object,
                     "hostnameLookup",
                     "settings.daemon.hostnameLookup",
+                    HOSTNAME_LOOKUP_SETTINGS_FIELDS,
                 )?;
             }
             "ed2k" => {
                 validate_non_empty_update_object(section_object, "settings.ed2k")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    ED2K_SETTINGS_FIELDS,
+                    "settings.ed2k",
+                )?;
                 validate_nested_settings_update_object(
                     section_object,
                     "uploadQueue",
                     "settings.ed2k.uploadQueue",
+                    ED2K_UPLOAD_QUEUE_SETTINGS_FIELDS,
                 )?;
             }
-            "kad" => validate_non_empty_update_object(section_object, "settings.kad")?,
-            "nat" => validate_non_empty_update_object(section_object, "settings.nat")?,
-            "vpnGuard" => validate_non_empty_update_object(section_object, "settings.vpnGuard")?,
-            "ipFilter" => validate_non_empty_update_object(section_object, "settings.ipFilter")?,
+            "kad" => {
+                validate_non_empty_update_object(section_object, "settings.kad")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    KAD_SETTINGS_FIELDS,
+                    "settings.kad",
+                )?;
+            }
+            "nat" => {
+                validate_non_empty_update_object(section_object, "settings.nat")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    NAT_SETTINGS_FIELDS,
+                    "settings.nat",
+                )?;
+            }
+            "vpnGuard" => {
+                validate_non_empty_update_object(section_object, "settings.vpnGuard")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    VPN_GUARD_SETTINGS_FIELDS,
+                    "settings.vpnGuard",
+                )?;
+            }
+            "ipFilter" => {
+                validate_non_empty_update_object(section_object, "settings.ipFilter")?;
+                validate_known_settings_update_fields(
+                    section_object,
+                    IP_FILTER_SETTINGS_FIELDS,
+                    "settings.ipFilter",
+                )?;
+            }
             _ => {}
         }
     }
@@ -75,6 +212,7 @@ fn validate_nested_settings_update_object(
     parent: &JsonObject,
     field: &'static str,
     path: &'static str,
+    allowed_fields: &'static [&'static str],
 ) -> Result<(), Box<Response>> {
     let Some(value) = parent.get(field) else {
         return Ok(());
@@ -82,7 +220,21 @@ fn validate_nested_settings_update_object(
     let Some(object) = value.as_object() else {
         return Err(invalid_body_error(format!("{path} must be an object")));
     };
-    validate_non_empty_update_object(object, path)
+    validate_non_empty_update_object(object, path)?;
+    validate_known_settings_update_fields(object, allowed_fields, path)
+}
+
+fn validate_known_settings_update_fields(
+    object: &JsonObject,
+    allowed_fields: &'static [&'static str],
+    path: &str,
+) -> Result<(), Box<Response>> {
+    for name in object.keys() {
+        if !allowed_fields.contains(&name.as_str()) {
+            return Err(invalid_body_error(format!("unknown {path} field: {name}")));
+        }
+    }
+    Ok(())
 }
 
 fn validate_non_empty_update_object(object: &JsonObject, path: &str) -> Result<(), Box<Response>> {
