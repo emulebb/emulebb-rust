@@ -227,6 +227,7 @@ pub(super) fn validate_daemon_settings_patch_body_fields(
     {
         validate_path_text_body_field(Some(incoming_dir), "incomingDir")?;
     }
+    validate_nullable_ipv4_text(object, "p2pBindIp", "settings.daemon.p2pBindIp")?;
     Ok(())
 }
 

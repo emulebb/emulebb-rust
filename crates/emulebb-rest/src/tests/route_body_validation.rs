@@ -314,6 +314,14 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "incomingDir must not be empty",
         ),
         (
+            r#"{"daemon":{"p2pBindIp":"not-an-ip"}}"#,
+            "settings.daemon.p2pBindIp must be an IPv4 address string or null",
+        ),
+        (
+            r#"{"daemon":{"p2pBindIp":203}}"#,
+            "settings.daemon.p2pBindIp must be an IPv4 address string or null",
+        ),
+        (
             r#"{"daemon":{"unsupportedSetting":1}}"#,
             "unknown settings.daemon field: unsupportedSetting",
         ),

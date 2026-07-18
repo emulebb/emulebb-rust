@@ -124,6 +124,11 @@ test("settings use dirty state and advanced surface metadata", async ({ page }) 
   await expect(save).toBeDisabled();
   await settingsPanel.getByLabel("DNS tick seconds").fill("30");
   await expect(settingsPanel.getByText("DNS tick seconds must be at least 5.")).toHaveCount(0);
+  await settingsPanel.getByLabel("P2P bind IP").fill("not-an-ip");
+  await expect(settingsPanel.getByText("P2P bind IP must be an IPv4 address.")).toBeVisible();
+  await expect(save).toBeDisabled();
+  await settingsPanel.getByLabel("P2P bind IP").fill("192.0.2.10");
+  await expect(settingsPanel.getByText("P2P bind IP must be an IPv4 address.")).toHaveCount(0);
   await settingsPanel.getByLabel("UDP firewall interval seconds").fill("59");
   await expect(settingsPanel.getByText("UDP firewall interval seconds must be at least 60.")).toBeVisible();
   await expect(save).toBeDisabled();
