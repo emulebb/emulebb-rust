@@ -144,6 +144,7 @@ pub(super) fn validate_app_settings_patch_body_fields(
                     "settings.daemon.hostnameLookup",
                     HOSTNAME_LOOKUP_SETTINGS_FIELDS,
                 )?;
+                validate_hostname_lookup_settings_patch_body_fields(section_object)?;
             }
             "ed2k" => {
                 validate_non_empty_update_object(section_object, "settings.ed2k")?;
@@ -233,6 +234,57 @@ fn validate_known_settings_update_fields(
         if !allowed_fields.contains(&name.as_str()) {
             return Err(invalid_body_error(format!("unknown {path} field: {name}")));
         }
+    }
+    Ok(())
+}
+
+fn validate_hostname_lookup_settings_patch_body_fields(
+    daemon: &JsonObject,
+) -> Result<(), Box<Response>> {
+    let Some(object) = daemon
+        .get("hostnameLookup")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(());
+    };
+    validate_unsigned_number_min(
+        object,
+        "cacheTtlSecs",
+        "settings.daemon.hostnameLookup.cacheTtlSecs",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "maxLookupsPerTick",
+        "settings.daemon.hostnameLookup.maxLookupsPerTick",
+        1,
+    )?;
+    validate_unsigned_number_min(
+        object,
+        "tickIntervalSecs",
+        "settings.daemon.hostnameLookup.tickIntervalSecs",
+        5,
+    )
+}
+
+fn validate_unsigned_number_min(
+    object: &JsonObject,
+    field: &'static str,
+    path: &'static str,
+    min: u64,
+) -> Result<(), Box<Response>> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number greater than or equal to {min}"
+        )));
+    };
+    if number < min {
+        return Err(invalid_body_error(format!(
+            "{path} must be an unsigned number greater than or equal to {min}"
+        )));
     }
     Ok(())
 }

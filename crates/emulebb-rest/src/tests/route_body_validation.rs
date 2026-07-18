@@ -330,6 +330,22 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             "unknown settings.daemon.hostnameLookup field: unsupportedSetting",
         ),
         (
+            r#"{"daemon":{"hostnameLookup":{"cacheTtlSecs":0}}}"#,
+            "settings.daemon.hostnameLookup.cacheTtlSecs must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"daemon":{"hostnameLookup":{"maxLookupsPerTick":0}}}"#,
+            "settings.daemon.hostnameLookup.maxLookupsPerTick must be an unsigned number greater than or equal to 1",
+        ),
+        (
+            r#"{"daemon":{"hostnameLookup":{"tickIntervalSecs":4}}}"#,
+            "settings.daemon.hostnameLookup.tickIntervalSecs must be an unsigned number greater than or equal to 5",
+        ),
+        (
+            r#"{"daemon":{"hostnameLookup":{"tickIntervalSecs":"5"}}}"#,
+            "settings.daemon.hostnameLookup.tickIntervalSecs must be an unsigned number greater than or equal to 5",
+        ),
+        (
             r#"{"ed2k":{}}"#,
             "settings.ed2k PATCH requires at least one setting",
         ),
