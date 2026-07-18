@@ -73,6 +73,7 @@ impl EmulebbCore {
     }
 
     pub async fn update_app_settings(&self, mut request: AppSettingsUpdate) -> Result<AppSettings> {
+        validate_app_settings_update_paths(&mut request)?;
         let core_update = request.core.take();
         if core_update.is_none() {
             profile_state::persist_app_settings_update(&self.metadata_store, request)?;
@@ -171,4 +172,25 @@ impl EmulebbCore {
             },
         }
     }
+}
+
+fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result<()> {
+    if let Some(daemon) = &mut request.daemon
+        && let Some(path) = &mut daemon.incoming_dir
+    {
+        let text = path.to_string_lossy();
+        let trimmed = text.trim();
+        ensure!(!trimmed.is_empty(), "incomingDir must not be empty");
+        let candidate = long_path(Path::new(trimmed));
+        if let Ok(metadata) = fs::metadata(&candidate) {
+            ensure!(metadata.is_dir(), "incomingDir is not a directory");
+        } else if let Some(parent) = candidate.parent()
+            && !parent.as_os_str().is_empty()
+            && parent.exists()
+        {
+            ensure!(parent.is_dir(), "incomingDir parent is not a directory");
+        }
+        *path = PathBuf::from(trimmed);
+    }
+    Ok(())
 }

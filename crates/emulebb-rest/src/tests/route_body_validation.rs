@@ -296,6 +296,15 @@ async fn core_settings_patch_body_uses_canonical_validation() {
             r#"{"core":{"unsupportedSetting":1}}"#,
             "unknown settings.core field: unsupportedSetting",
         ),
+        (r#"{"daemon":1}"#, "daemon must be an object"),
+        (
+            r#"{"daemon":{"incomingDir":1}}"#,
+            "incomingDir must be a non-empty string path",
+        ),
+        (
+            r#"{"daemon":{"incomingDir":"   "}}"#,
+            "incomingDir must not be empty",
+        ),
     ];
 
     for (body, expected_message) in cases {

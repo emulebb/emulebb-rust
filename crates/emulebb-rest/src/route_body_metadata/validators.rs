@@ -19,6 +19,17 @@ pub(super) fn validate_core_settings_patch_body_fields(
     core_settings::validate_core_settings_patch_body_fields(object)
 }
 
+pub(super) fn validate_daemon_settings_patch_body_fields(
+    object: &JsonObject,
+) -> Result<(), Box<Response>> {
+    if let Some(incoming_dir) = object.get("incomingDir")
+        && !incoming_dir.is_null()
+    {
+        validate_path_text_body_field(Some(incoming_dir), "incomingDir")?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_destructive_confirmation_body_field(
     object: &JsonObject,
     field: &'static str,

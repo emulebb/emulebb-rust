@@ -277,8 +277,8 @@ impl EmulebbCore {
             let path = shared_directory_update_path(root);
             let path = path.trim();
             ensure!(!path.is_empty(), "path must not be empty");
-            let canonical =
-                fs::canonicalize(path).with_context(|| format!("failed to resolve {path}"))?;
+            let canonical = fs::canonicalize(long_path(Path::new(path)))
+                .with_context(|| format!("failed to resolve {path}"))?;
             let metadata = fs::metadata(&canonical)
                 .with_context(|| format!("failed to inspect {}", canonical.display()))?;
             ensure!(metadata.is_dir(), "path is not a directory");

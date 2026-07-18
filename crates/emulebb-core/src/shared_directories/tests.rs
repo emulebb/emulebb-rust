@@ -22,6 +22,32 @@ fn names(mut paths: Vec<PathBuf>) -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn set_shared_directories_canonicalizes_configured_root() {
+    let root = scratch_dir("configured-root");
+    let configured = root.join(".");
+    let expected = fs::canonicalize(long_path(&root))
+        .unwrap()
+        .display()
+        .to_string();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+
+    let directories = core
+        .set_shared_directories(SharedDirectoriesUpdate {
+            roots: vec![SharedDirectoryRootUpdate::Path(
+                configured.display().to_string(),
+            )],
+            confirm_replace_roots: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(directories.roots.len(), 1);
+    assert_eq!(directories.roots[0].path, expected);
+    fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn shared_directory_root_update_rejects_retired_recursive_field() {
     let error = serde_json::from_str::<SharedDirectoriesUpdate>(

@@ -255,6 +255,36 @@ async fn settings_use_typed_get_and_patch_route() {
 }
 
 #[tokio::test]
+async fn settings_patch_rejects_incoming_dir_that_is_not_directory() {
+    let app = test_router();
+    let temp = unique_test_dir("settings-incoming-dir-file");
+    let file = temp.join("not-a-directory.txt");
+    std::fs::write(&file, b"not a directory").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/app/settings")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({"daemon":{"incomingDir": file.display().to_string()}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(value["error"]["message"], "incomingDir is not a directory");
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[tokio::test]
 async fn snapshot_returns_bounded_emulebb_polling_shape() {
     let runtime_dir = unique_test_dir("snapshot");
     let transfer_root = runtime_dir.join("transfers");
