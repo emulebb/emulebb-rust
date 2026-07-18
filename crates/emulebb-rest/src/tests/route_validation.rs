@@ -234,6 +234,10 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
         .await
         .unwrap();
     assert_eq!(unknown_route.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        unknown_route.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
+    );
 
     let method_not_allowed = test_router()
         .oneshot(
@@ -248,6 +252,13 @@ async fn delete_routes_reject_request_bodies_after_route_query_validation() {
         .await
         .unwrap();
     assert_eq!(method_not_allowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        method_not_allowed
+            .headers()
+            .get("x-contract-version")
+            .unwrap(),
+        "1.2.0"
+    );
 }
 
 #[tokio::test]
@@ -452,6 +463,10 @@ async fn webui_history_fallback_does_not_capture_api_routes() {
         .await
         .unwrap();
     assert_eq!(api_unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        api_unknown.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
+    );
     let body = to_bytes(api_unknown.into_body(), usize::MAX).await.unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["message"], "API route not found");
@@ -472,6 +487,10 @@ async fn method_not_allowed_sets_allow_header_and_error_envelope() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        response.headers().get("x-contract-version").unwrap(),
+        "1.2.0"
+    );
     // The Allow header must advertise the method registered for this path.
     let allow = response
         .headers()
