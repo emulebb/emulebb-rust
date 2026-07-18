@@ -273,6 +273,13 @@ function dataFor(method: string, path: string): unknown {
           setting("nat.requireInitialMapping", "advancedControl", true),
           setting("nat.backendOrder", "advancedControl", true),
           setting("nat.bindIp", "advancedControl", true),
+          setting("nat.igdIp", "advancedControl", true),
+          setting("nat.minissdpdSocket", "advancedControl", true),
+          setting("nat.ssdpLocalPort", "advancedControl", true),
+          setting("nat.discoveryTimeoutSecs", "advancedControl", true),
+          setting("nat.leaseDurationSecs", "advancedControl", true),
+          setting("nat.renewMarginSecs", "advancedControl", true),
+          setting("nat.externalIpOverride", "advancedControl", true),
           setting("vpnGuard.enabled", "normalControl", true),
           setting("vpnGuard.mode", "normalControl", true),
           setting("vpnGuard.allowedPublicIpCidrs", "normalControl", true),
@@ -340,7 +347,19 @@ function dataFor(method: string, path: string): unknown {
           buddyEnabled: true,
           routingMaintenanceEnabled: true
         },
-        nat: { enabled: false, requireInitialMapping: true, backendOrder: [] },
+        nat: {
+          enabled: false,
+          requireInitialMapping: true,
+          bindIp: "",
+          backendOrder: [],
+          igdIp: "",
+          minissdpdSocket: "",
+          ssdpLocalPort: 1900,
+          discoveryTimeoutSecs: 5,
+          leaseDurationSecs: 3600,
+          renewMarginSecs: 300,
+          externalIpOverride: ""
+        },
         vpnGuard: { enabled: false, mode: "block", allowedPublicIpCidrs: "" },
         ipFilter: { enabled: false, level: 127 }
       };

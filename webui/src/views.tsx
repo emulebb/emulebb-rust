@@ -1990,6 +1990,13 @@ type SettingsForm = {
   natRequireInitialMapping: boolean;
   natBindIp: string;
   natBackendOrder: string;
+  natIgdIp: string;
+  natMinissdpdSocket: string;
+  natSsdpLocalPort: string;
+  natDiscoveryTimeoutSecs: string;
+  natLeaseDurationSecs: string;
+  natRenewMarginSecs: string;
+  natExternalIpOverride: string;
   vpnGuardEnabled: boolean;
   vpnGuardMode: string;
   vpnGuardAllowedPublicIpCidrs: string;
@@ -2053,6 +2060,13 @@ const emptySettingsForm: SettingsForm = {
   natRequireInitialMapping: false,
   natBindIp: "",
   natBackendOrder: "",
+  natIgdIp: "",
+  natMinissdpdSocket: "",
+  natSsdpLocalPort: "",
+  natDiscoveryTimeoutSecs: "",
+  natLeaseDurationSecs: "",
+  natRenewMarginSecs: "",
+  natExternalIpOverride: "",
   vpnGuardEnabled: false,
   vpnGuardMode: "",
   vpnGuardAllowedPublicIpCidrs: "",
@@ -2168,7 +2182,14 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
         enabled: form.natEnabled,
         requireInitialMapping: form.natRequireInitialMapping,
         bindIp: optionalString(form.natBindIp),
-        backendOrder: form.natBackendOrder.split(",").map((item) => item.trim()).filter(Boolean)
+        backendOrder: form.natBackendOrder.split(",").map((item) => item.trim()).filter(Boolean),
+        igdIp: optionalString(form.natIgdIp),
+        minissdpdSocket: optionalString(form.natMinissdpdSocket),
+        ssdpLocalPort: optionalPort(form.natSsdpLocalPort),
+        discoveryTimeoutSecs: parseNumber(form.natDiscoveryTimeoutSecs),
+        leaseDurationSecs: parseNumber(form.natLeaseDurationSecs),
+        renewMarginSecs: parseNumber(form.natRenewMarginSecs),
+        externalIpOverride: optionalString(form.natExternalIpOverride)
       },
       vpnGuard: {
         ...(settings.vpnGuard ?? {}),
@@ -2338,13 +2359,32 @@ export function SettingsView(props: { settings: AppSettings | null; surface: Set
             </div>
           </SettingsControlSection>
         )}
-        {sectionVisible(["nat.enabled", "nat.requireInitialMapping", "nat.bindIp", "nat.backendOrder"]) && (
+        {sectionVisible([
+          "nat.enabled",
+          "nat.requireInitialMapping",
+          "nat.bindIp",
+          "nat.backendOrder",
+          "nat.igdIp",
+          "nat.minissdpdSocket",
+          "nat.ssdpLocalPort",
+          "nat.discoveryTimeoutSecs",
+          "nat.leaseDurationSecs",
+          "nat.renewMarginSecs",
+          "nat.externalIpOverride"
+        ]) && (
           <SettingsControlSection title="NAT">
             <div class="settings-grid">
               {renderToggle("nat.enabled", "natEnabled", "NAT")}
               {renderToggle("nat.requireInitialMapping", "natRequireInitialMapping", "Require initial NAT mapping")}
               {renderField("nat.bindIp", "natBindIp", "NAT bind IP")}
               {renderField("nat.backendOrder", "natBackendOrder", "NAT backend order")}
+              {renderField("nat.igdIp", "natIgdIp", "Pinned IGD IP")}
+              {renderField("nat.minissdpdSocket", "natMinissdpdSocket", "miniSSDPd socket")}
+              {renderField("nat.ssdpLocalPort", "natSsdpLocalPort", "SSDP local port")}
+              {renderField("nat.discoveryTimeoutSecs", "natDiscoveryTimeoutSecs", "Discovery timeout seconds")}
+              {renderField("nat.leaseDurationSecs", "natLeaseDurationSecs", "Lease duration seconds")}
+              {renderField("nat.renewMarginSecs", "natRenewMarginSecs", "Renew margin seconds")}
+              {renderField("nat.externalIpOverride", "natExternalIpOverride", "External IP override")}
             </div>
           </SettingsControlSection>
         )}
@@ -2471,6 +2511,10 @@ function validateSettingsForm(form: SettingsForm): Map<SettingsTextKey, string> 
   validateUnsigned(errors, form, "ed2kDeadServerRetries", "Dead server retries", {});
   validateUnsigned(errors, form, "kadListenPort", "Kad listen port", { optional: true, min: 1, max: 65535 });
   validateUnsigned(errors, form, "kadRepublishIntervalSecs", "Kad republish seconds", { min: 1 });
+  validateUnsigned(errors, form, "natSsdpLocalPort", "SSDP local port", { optional: true, min: 1, max: 65535 });
+  validateUnsigned(errors, form, "natDiscoveryTimeoutSecs", "Discovery timeout seconds", { min: 1 });
+  validateUnsigned(errors, form, "natLeaseDurationSecs", "Lease duration seconds", { min: 1 });
+  validateUnsigned(errors, form, "natRenewMarginSecs", "Renew margin seconds", { min: 1 });
   validateUnsigned(errors, form, "ipFilterLevel", "IP filter level", {});
   return errors;
 }
@@ -2547,6 +2591,13 @@ function settingsFormFrom(settings: AppSettings): SettingsForm {
     natRequireInitialMapping: boolField(settings.nat, "requireInitialMapping"),
     natBindIp: stringField(settings.nat, "bindIp"),
     natBackendOrder: Array.isArray(settings.nat?.backendOrder) ? settings.nat.backendOrder.join(", ") : "",
+    natIgdIp: stringField(settings.nat, "igdIp"),
+    natMinissdpdSocket: stringField(settings.nat, "minissdpdSocket"),
+    natSsdpLocalPort: String(numberField(settings.nat, "ssdpLocalPort") ?? ""),
+    natDiscoveryTimeoutSecs: String(numberField(settings.nat, "discoveryTimeoutSecs") ?? ""),
+    natLeaseDurationSecs: String(numberField(settings.nat, "leaseDurationSecs") ?? ""),
+    natRenewMarginSecs: String(numberField(settings.nat, "renewMarginSecs") ?? ""),
+    natExternalIpOverride: stringField(settings.nat, "externalIpOverride"),
     vpnGuardEnabled: boolField(settings.vpnGuard, "enabled"),
     vpnGuardMode: stringField(settings.vpnGuard, "mode"),
     vpnGuardAllowedPublicIpCidrs: stringField(settings.vpnGuard, "allowedPublicIpCidrs"),
