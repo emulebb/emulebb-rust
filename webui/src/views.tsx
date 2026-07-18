@@ -1848,8 +1848,13 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
   const [path, setPath] = useState("");
   const [comment, setComment] = useState("");
   const [priority, setPriority] = useState("normal");
+  const nameError = categoryNameError(name);
+  const priorityError = categoryPriorityError(priority);
 
   const create = async () => {
+    if (nameError || priorityError) {
+      return;
+    }
     await props.client.post("categories", {
       name,
       path: optionalString(path),
@@ -1869,19 +1874,24 @@ export function CategoriesView(props: { categories: Category[]; client: RestClie
       </div>
       <form class="form-row" onSubmit={(event) => {
         event.preventDefault();
-        void props.run(create, "Category created");
+        if (!nameError && !priorityError) {
+          void props.run(create, "Category created");
+        }
       }}>
-        <input class="form-control" value={name} placeholder="Name" onInput={(event) => setName(event.currentTarget.value)} />
+        <input class="form-control" value={name} placeholder="Name" aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} />
         <input class="form-control" value={path} placeholder="Incoming path" onInput={(event) => setPath(event.currentTarget.value)} />
         <input class="form-control" value={comment} placeholder="Comment" onInput={(event) => setComment(event.currentTarget.value)} />
         <select class="form-select" value={priority} onInput={(event) => setPriority(event.currentTarget.value)}>
+          <option value="verylow">Very low</option>
           <option value="low">Low</option>
           <option value="normal">Normal</option>
           <option value="high">High</option>
           <option value="veryhigh">Very high</option>
         </select>
-        <button class="btn" type="submit"><FolderPlus size={16} />Add</button>
+        <button class="btn" type="submit" disabled={!name.trim() || Boolean(nameError) || Boolean(priorityError)}><FolderPlus size={16} />Add</button>
       </form>
+      {nameError && <p class="field-error">{nameError}</p>}
+      {priorityError && <p class="field-error">{priorityError}</p>}
       <div class="table-wrap">
         <table class="table table-vcenter card-table">
           <thead>
@@ -1911,13 +1921,15 @@ function CategoryRow(props: { category: Category; client: RestClient; run: RunFu
   const [comment, setComment] = useState(props.category.comment ?? "");
   const [priority, setPriority] = useState(String(props.category.priority ?? "normal"));
   const encoded = String(props.category.id);
+  const nameError = categoryNameError(name);
+  const priorityError = categoryPriorityError(priority);
 
   return (
     <tr>
-      <td><input class="form-control" value={name} onInput={(event) => setName(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={name} aria-invalid={nameError ? "true" : "false"} onInput={(event) => setName(event.currentTarget.value)} /></td>
       <td><input class="form-control" value={path} onInput={(event) => setPath(event.currentTarget.value)} /></td>
       <td><input class="form-control" value={comment} onInput={(event) => setComment(event.currentTarget.value)} /></td>
-      <td><input class="form-control" value={priority} onInput={(event) => setPriority(event.currentTarget.value)} /></td>
+      <td><input class="form-control" value={priority} aria-invalid={priorityError ? "true" : "false"} onInput={(event) => setPriority(event.currentTarget.value)} /></td>
       <td>
         <div class="row-actions">
           <Action title="Save" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`categories/${encoded}`, {
@@ -1925,13 +1937,15 @@ function CategoryRow(props: { category: Category; client: RestClient; run: RunFu
             path: optionalString(path),
             comment,
             priority: categoryPriorityValue(priority)
-          }), "Category saved")} />
+          }), "Category saved")} disabled={!name.trim() || Boolean(nameError) || Boolean(priorityError)} />
           <Action title="Delete" icon={<Trash2 size={15} />} onClick={() => {
             if (window.confirm("Delete this category? Later category IDs will be reindexed.")) {
               void props.run(() => props.client.delete(`categories/${encoded}`), "Category deleted");
             }
           }} />
         </div>
+        {nameError && <p class="field-error">{nameError}</p>}
+        {priorityError && <p class="field-error">{priorityError}</p>}
       </td>
     </tr>
   );
@@ -3210,6 +3224,21 @@ function friendNameError(value: string): string | undefined {
     return "Friend name must not contain control characters.";
   }
   return value.length <= 128 ? undefined : "Friend name must be at most 128 characters.";
+}
+
+function categoryNameError(value: string): string | undefined {
+  return value && !value.trim() ? "Category name must not be empty." : undefined;
+}
+
+function categoryPriorityError(value: string): string | undefined {
+  const normalized = value.trim();
+  if (["verylow", "low", "normal", "high", "veryhigh"].includes(normalized)) {
+    return undefined;
+  }
+  if (/^\d+$/.test(normalized) && Number(normalized) <= 4294967295) {
+    return undefined;
+  }
+  return "Category priority must be verylow, low, normal, high, veryhigh, or a u32 number.";
 }
 
 function optionalPort(value: string): number | null {

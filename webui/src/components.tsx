@@ -38,9 +38,9 @@ export function StatusPill(props: { value: string }) {
   return <span class={className}>{props.value}</span>;
 }
 
-export function Action(props: { title: string; icon: ComponentChildren; onClick: () => void }) {
+export function Action(props: { title: string; icon: ComponentChildren; onClick: () => void; disabled?: boolean }) {
   return (
-    <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title={props.title} onClick={props.onClick}>
+    <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title={props.title} disabled={props.disabled} onClick={props.onClick}>
       {props.icon}
     </button>
   );

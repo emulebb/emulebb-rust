@@ -222,6 +222,45 @@ test("friend create form validates hash and name", async ({ page }) => {
   expect(JSON.parse(friendPost?.body ?? "{}")).toEqual({ userHash: validHash, name: "Harness Peer" });
 });
 
+test("category forms validate names and priority inputs", async ({ page }) => {
+  const requests: RecordedApiRequest[] = [];
+  await page.route("**/api/v1/**", installMockApi(requests));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Categories" }).click();
+  const categoriesPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Categories" }) });
+  const addCategory = categoriesPanel.getByRole("button", { name: "Add" });
+  const initialCategoryPosts = requests.filter((request) => request.method === "POST" && request.path === "categories").length;
+  const initialCategoryPatches = requests.filter((request) => request.method === "PATCH" && request.path === "categories/1").length;
+
+  await expect(addCategory).toBeDisabled();
+  await categoriesPanel.getByPlaceholder("Name").fill("   ");
+  await expect(categoriesPanel.getByText("Category name must not be empty.")).toBeVisible();
+  await expect(addCategory).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "categories").length).toBe(initialCategoryPosts);
+  await categoriesPanel.getByPlaceholder("Name").fill("Media");
+  await categoriesPanel.locator("select").selectOption("verylow");
+  await addCategory.click();
+  await expect(page.getByText("Category created")).toBeVisible();
+  const categoryPost = requests.find((request) => request.method === "POST" && request.path === "categories");
+  expect(categoryPost).toBeDefined();
+  expect(JSON.parse(categoryPost?.body ?? "{}")).toMatchObject({ name: "Media", priority: "verylow" });
+
+  const categoryRow = categoriesPanel.locator("tbody tr").first();
+  const rowInputs = categoryRow.locator("input.form-control");
+  await rowInputs.nth(3).fill("auto");
+  await expect(categoryRow.getByText("Category priority must be verylow, low, normal, high, veryhigh, or a u32 number.")).toBeVisible();
+  await expect(categoryRow.getByTitle("Save")).toBeDisabled();
+  expect(requests.filter((request) => request.method === "PATCH" && request.path === "categories/1").length).toBe(initialCategoryPatches);
+  await rowInputs.nth(3).fill("4294967295");
+  await expect(categoryRow.getByText("Category priority must be verylow, low, normal, high, veryhigh, or a u32 number.")).toHaveCount(0);
+  await categoryRow.getByTitle("Save").click();
+  await expect(page.getByText("Category saved")).toBeVisible();
+  const categoryPatch = requests.find((request) => request.method === "PATCH" && request.path === "categories/1");
+  expect(categoryPatch).toBeDefined();
+  expect(JSON.parse(categoryPatch?.body ?? "{}").priority).toBe(4294967295);
+});
+
 test("settings use dirty state and advanced surface metadata", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
   await page.route("**/api/v1/**", installMockApi(requests));
