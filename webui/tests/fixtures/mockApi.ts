@@ -219,9 +219,14 @@ function dataFor(method: string, path: string): unknown {
     case "upload-queue":
       return { items: [] };
     case "app":
-      return { appName: "eMuleBB", version: "0.1.0-beta.1" };
+      return {
+        name: "eMuleBB",
+        version: "0.1.0-beta.1",
+        apiVersion: "v1",
+        capabilities: { transfers: true, "transfers.sse": true }
+      };
     case "capabilities":
-      return { diagnostics: true };
+      return { contractVersion: "1.2.0", apiVersion: "v1", capabilities: ["transfers", "transfers.sse"] };
     case `transfers/${transferHash}/details`:
       return { hash: transferHash, name: "Sample Transfer.bin" };
     case `transfers/${transferHash}/sources`:

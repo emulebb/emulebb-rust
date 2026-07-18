@@ -181,6 +181,59 @@ async fn create_transfer_uses_canonical_link_and_paused_state() {
 }
 
 #[tokio::test]
+async fn transfer_events_publish_add_update_and_remove() {
+    let core = EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap();
+    let mut events = core.subscribe_transfer_events();
+
+    let transfer = core
+        .create_transfer(TransferCreate {
+            link: Some(
+                "ed2k://|file|Event.Stream.bin|4096|00112233445566778899aabbccddeeff|/".to_string(),
+            ),
+            links: None,
+            category_id: None,
+            category_name: None,
+            paused: Some(true),
+        })
+        .await
+        .unwrap();
+    let added = events.recv().await.unwrap();
+    assert_eq!(added.id, 1);
+    assert_eq!(added.event_type, "transfer.added");
+    assert_eq!(added.transfer.as_ref().unwrap().hash, transfer.hash);
+    assert_eq!(added.hash, None);
+
+    let updated = core
+        .update_transfer(
+            &transfer.hash,
+            TransferUpdate {
+                name: None,
+                priority: Some("high".to_string()),
+                category_id: None,
+                category_name: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let event = events.recv().await.unwrap();
+    assert_eq!(event.id, 2);
+    assert_eq!(event.event_type, "transfer.updated");
+    assert_eq!(event.transfer.as_ref().unwrap().priority, updated.priority);
+
+    let deleted = core
+        .delete_transfer_files(&transfer.hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let event = events.recv().await.unwrap();
+    assert_eq!(event.id, 3);
+    assert_eq!(event.event_type, "transfer.removed");
+    assert!(event.transfer.is_none());
+    assert_eq!(event.hash.as_deref(), Some(deleted.hash.as_str()));
+}
+
+#[tokio::test]
 async fn create_transfer_remembers_ed2k_link_source_hints() {
     let runtime_dir = unique_runtime_dir("emulebb-core-create-transfer-source-hints");
     let transfer_root = runtime_dir.join("transfers");

@@ -9,11 +9,17 @@ use axum::{
     body::Bytes,
     extract::{RawQuery, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use futures_util::stream;
 use serde_json::json;
+use std::convert::Infallible;
 
 use emulebb_core::AppSettingsUpdate;
+use tokio::sync::broadcast;
 
 use crate::handlers::{logs::recent_log_values, prelude::*};
 use crate::without_score_breakdown;
@@ -24,6 +30,51 @@ pub(crate) async fn app(State(state): State<RestState>) -> impl IntoResponse {
 
 pub(crate) async fn capabilities(State(state): State<RestState>) -> impl IntoResponse {
     api_ok(capabilities_response(state.core.app_info()))
+}
+
+pub(crate) async fn events(State(state): State<RestState>) -> impl IntoResponse {
+    let receiver = state.core.subscribe_transfer_events();
+    let core = state.core.clone();
+    let stream = stream::unfold((receiver, core), |(mut receiver, core)| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let data = serde_json::to_string(&event)
+                        .expect("transfer events contain only serializable REST DTOs");
+                    return Some((
+                        Ok::<_, Infallible>(
+                            Event::default()
+                                .id(event.id.to_string())
+                                .event(event.event_type)
+                                .data(data),
+                        ),
+                        (receiver, core),
+                    ));
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    let id = core.reserve_transfer_event_id();
+                    let data = json!({
+                        "id": id,
+                        "type": "sync.reset",
+                        "reason": "lagged",
+                        "missed": missed
+                    })
+                    .to_string();
+                    return Some((
+                        Ok::<_, Infallible>(
+                            Event::default()
+                                .id(id.to_string())
+                                .event("sync.reset")
+                                .data(data),
+                        ),
+                        (receiver, core),
+                    ));
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 pub(crate) async fn shutdown_app(State(state): State<RestState>, body: Bytes) -> impl IntoResponse {

@@ -85,6 +85,16 @@ export type Transfer = {
   [key: string]: unknown;
 };
 
+export type TransferEvent = {
+  id: number;
+  type: "transfer.added" | "transfer.updated" | "transfer.removed" | "sync.reset";
+  transfer?: Transfer;
+  hash?: string;
+  reason?: string;
+  missed?: number;
+  [key: string]: unknown;
+};
+
 export type TransferSource = {
   clientId?: string;
   userName?: string;

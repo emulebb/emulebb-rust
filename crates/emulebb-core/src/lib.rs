@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -81,7 +81,7 @@ use emulebb_metadata::{
 use serde_json::json;
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, broadcast},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -255,9 +255,9 @@ pub use rest_model::{
     HostNameResolution, IndexingStatus, KadNode, LocalShare, LocalShareCreate, NetworkStatus,
     NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferCreate, TransferDetails, TransferPart, TransferSource, TransferStats,
-    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferPart, TransferSource,
+    TransferStats, TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics,
+    UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -290,6 +290,7 @@ const ED2K_HASH_ONLY_QUERY_PREFIX: &str = "ed2k::";
 /// the 5s default discovery timeout, while bounding startup if the gateway is slow
 /// or absent.
 const ED2K_UPNP_INITIAL_RECONCILE_TIMEOUT: Duration = Duration::from_secs(20);
+const TRANSFER_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 struct Ed2kRuntime {
     search_handle: Ed2kServerSearchHandle,
@@ -435,6 +436,8 @@ pub struct EmulebbCore {
     /// `.await` and never while acquiring the `state` lock — so the create
     /// path (state → queue) cannot deadlock against the drain path.
     search_queue: Arc<parking_lot::Mutex<SearchQueue>>,
+    transfer_events: broadcast::Sender<TransferEvent>,
+    next_transfer_event_id: Arc<AtomicU64>,
     state: Arc<Mutex<CoreState>>,
 }
 
@@ -514,6 +517,7 @@ impl EmulebbCore {
             .parent()
             .map(|parent| parent.join("incoming"))
             .unwrap_or_else(|| transfer_root.join("incoming"));
+        let (transfer_events, _) = broadcast::channel(TRANSFER_EVENT_CHANNEL_CAPACITY);
         Ok(Self {
             started_at: Instant::now(),
             version: version.into(),
@@ -548,6 +552,8 @@ impl EmulebbCore {
             kad_publish_diagnostics: kad_publish_diagnostics::new_shared(),
             hostname_lookup_cache: Arc::new(hostname_lookup::HostNameLookupCache::default()),
             search_queue: Arc::new(parking_lot::Mutex::new(SearchQueue::new())),
+            transfer_events,
+            next_transfer_event_id: Arc::new(AtomicU64::new(1)),
             state: Arc::new(Mutex::new(core_state)),
         })
     }
@@ -638,6 +644,11 @@ impl EmulebbCore {
         let mut transfer = self.transfer_from_manifest(&manifest, effective_state_name);
         let mut state = self.state.lock().await;
         apply_persisted_transfer_category(&mut transfer, &manifest, &state.categories);
+        let event_type = if state.transfers.contains_key(&transfer.hash) {
+            "transfer.updated"
+        } else {
+            "transfer.added"
+        };
         if let Some(existing) = state.transfers.get(&transfer.hash) {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
@@ -649,6 +660,7 @@ impl EmulebbCore {
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         drop(state);
+        self.publish_transfer_event(event_type, Some(transfer.clone()), None);
         // Non-paused downloads start immediately: kick the download driver so
         // ED2K source acquisition begins without requiring an explicit resume.
         if !manifest.completed && !matches!(effective_state_name, "paused" | "stopped") {
@@ -672,6 +684,8 @@ impl EmulebbCore {
         state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
+        drop(state);
+        self.publish_transfer_updated(transfer.clone());
         Ok(Some(transfer))
     }
 
@@ -696,6 +710,37 @@ impl EmulebbCore {
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
         Ok(Some(transfer))
+    }
+
+    pub fn subscribe_transfer_events(&self) -> broadcast::Receiver<TransferEvent> {
+        self.transfer_events.subscribe()
+    }
+
+    pub fn reserve_transfer_event_id(&self) -> u64 {
+        self.next_transfer_event_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn publish_transfer_updated(&self, transfer: Transfer) {
+        self.publish_transfer_event("transfer.updated", Some(transfer), None);
+    }
+
+    pub(crate) fn publish_transfer_removed(&self, hash: impl Into<String>) {
+        self.publish_transfer_event("transfer.removed", None, Some(hash.into()));
+    }
+
+    fn publish_transfer_event(
+        &self,
+        event_type: &str,
+        transfer: Option<Transfer>,
+        hash: Option<String>,
+    ) {
+        let id = self.reserve_transfer_event_id();
+        let _ = self.transfer_events.send(TransferEvent {
+            id,
+            event_type: event_type.to_string(),
+            transfer,
+            hash,
+        });
     }
 
     async fn resolve_transfer_category(

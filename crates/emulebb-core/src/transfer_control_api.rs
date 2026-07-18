@@ -34,7 +34,10 @@ impl EmulebbCore {
                 return Ok(None);
             };
             transfer.priority = priority;
-            return Ok(Some(transfer.clone()));
+            let transfer = transfer.clone();
+            drop(state);
+            self.publish_transfer_updated(transfer.clone());
+            return Ok(Some(transfer));
         }
         if request.category_id.is_some() || request.category_name.is_some() {
             let (category_id, category_name) = self
@@ -49,7 +52,10 @@ impl EmulebbCore {
             };
             transfer.category_id = category_id;
             transfer.category_name = category_name;
-            return Ok(Some(transfer.clone()));
+            let transfer = transfer.clone();
+            drop(state);
+            self.publish_transfer_updated(transfer.clone());
+            return Ok(Some(transfer));
         }
         let name = normalize_transfer_name(request.name)?;
         let current = self.state.lock().await.transfers.get(hash).cloned();
@@ -81,6 +87,7 @@ impl EmulebbCore {
             .await
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
+        self.publish_transfer_updated(transfer.clone());
         Ok(Some(transfer))
     }
 
@@ -270,6 +277,7 @@ impl EmulebbCore {
         recheck?;
         match refreshed? {
             Some(transfer) => {
+                self.publish_transfer_updated(transfer.clone());
                 // If the recheck found corruption (now not complete but with
                 // progress), re-engage the download so the demoted parts refetch.
                 if transfer.state == "downloading" {
@@ -309,6 +317,8 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         state.transfers.remove(hash);
         state.unshared_hashes.remove(hash);
+        drop(state);
+        self.publish_transfer_removed(hash);
         Ok(Some(transfer))
     }
 
@@ -348,6 +358,7 @@ impl EmulebbCore {
             .remove_completed_transfer_row(hash)
             .await?;
         self.state.lock().await.transfers.remove(hash);
+        self.publish_transfer_removed(hash);
         Ok(Some(transfer))
     }
 
@@ -366,6 +377,7 @@ impl EmulebbCore {
                 .remove_completed_transfer_row(&hash)
                 .await?;
             self.state.lock().await.transfers.remove(&hash);
+            self.publish_transfer_removed(hash);
         }
         Ok(())
     }

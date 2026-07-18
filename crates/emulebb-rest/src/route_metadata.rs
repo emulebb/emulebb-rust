@@ -466,6 +466,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     match (method, path) {
         ("GET", "/api/v1/app")
         | ("GET", "/api/v1/capabilities")
+        | ("GET", "/api/v1/events")
         | ("GET", "/api/v1/app/settings")
         | ("PATCH", "/api/v1/app/settings")
         | ("GET", "/api/v1/status")

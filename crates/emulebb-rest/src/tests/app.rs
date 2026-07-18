@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use emulebb_core::{EmulebbCore, LocalShareCreate};
 use emulebb_index::FileIndex;
@@ -43,6 +43,7 @@ async fn app_returns_evelope_with_capabilities() {
     assert_eq!(value["data"]["apiVersion"], "v1");
     assert_eq!(value["data"]["name"], "eMuleBB");
     assert_eq!(value["data"]["capabilities"]["transfers"], true);
+    assert_eq!(value["data"]["capabilities"]["transfers.sse"], true);
     assert_eq!(value["data"]["capabilities"]["sharedDirectories"], true);
     assert_eq!(value["data"]["capabilities"]["peerControls"], true);
     assert!(
@@ -77,11 +78,48 @@ async fn capabilities_returns_contract_version_and_capability_list() {
             .any(|capability| capability == "transfers")
     );
     assert!(
+        value["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "transfers.sse")
+    );
+    assert!(
         !value["data"]["capabilities"]
             .as_array()
             .unwrap()
             .iter()
             .any(|capability| capability == "rest.emulebb.v1")
+    );
+}
+
+#[tokio::test]
+async fn events_endpoint_requires_auth_and_serves_sse() {
+    let unauthorized = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
     );
 }
 

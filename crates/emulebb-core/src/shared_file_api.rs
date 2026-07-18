@@ -34,7 +34,16 @@ impl EmulebbCore {
         self.ed2k_transfers
             .remove_completed_transfer_row(&summary.file_hash)
             .await?;
-        self.state.lock().await.transfers.remove(&summary.file_hash);
+        if self
+            .state
+            .lock()
+            .await
+            .transfers
+            .remove(&summary.file_hash)
+            .is_some()
+        {
+            self.publish_transfer_removed(summary.file_hash.clone());
+        }
         self.metadata_store
             .unmark_unshared_file(&summary.file_hash)?;
         self.state
@@ -219,8 +228,12 @@ impl EmulebbCore {
             "shared file metadata row is missing"
         );
         let mut state = self.state.lock().await;
-        state.transfers.remove(&share.hash);
+        let removed = state.transfers.remove(&share.hash).is_some();
         state.unshared_hashes.insert(share.hash.clone());
+        drop(state);
+        if removed {
+            self.publish_transfer_removed(share.hash.clone());
+        }
         self.queue_ed2k_shared_catalog_publish();
         Ok(Some(share))
     }

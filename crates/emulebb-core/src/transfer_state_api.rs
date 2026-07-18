@@ -59,7 +59,10 @@ impl EmulebbCore {
         let mut state = self.state.lock().await;
         let transfer = state.transfers.get_mut(hash)?;
         transfer.state = state_name.to_string();
-        Some(transfer.clone())
+        let transfer = transfer.clone();
+        drop(state);
+        self.publish_transfer_updated(transfer.clone());
+        Some(transfer)
     }
 
     pub(crate) async fn set_transfer_control_state(
@@ -90,6 +93,8 @@ impl EmulebbCore {
         state
             .transfers
             .insert(transfer.hash.clone(), transfer.clone());
+        drop(state);
+        self.publish_transfer_updated(transfer.clone());
         Ok(Some(transfer))
     }
 
