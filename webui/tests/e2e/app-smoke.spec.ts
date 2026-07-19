@@ -89,10 +89,16 @@ test("search create form uses REST-native type tokens", async ({ page }) => {
   await expect(startSearch).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "searches").length).toBe(initialSearchPosts);
 
+  await searchPanel.getByPlaceholder("Search query").fill(`alpha${String.fromCharCode(0x85)}beta`);
+  await expect(searchPanel.getByText("Search query must not contain control characters.")).toBeVisible();
+  await expect(startSearch).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "searches").length).toBe(initialSearchPosts);
+
   await searchPanel.getByPlaceholder("Search query").fill(" alpha   beta ");
   await searchPanel.locator("select").nth(0).selectOption("kad");
   await searchPanel.locator("select").nth(1).selectOption("arc");
   await expect(searchPanel.getByText("Search query must be at most 160 characters.")).toHaveCount(0);
+  await expect(searchPanel.getByText("Search query must not contain control characters.")).toHaveCount(0);
   await startSearch.click();
   await expect(page.getByText("Search started")).toBeVisible();
   const searchPost = requests.find((request) => request.method === "POST" && request.path === "searches");

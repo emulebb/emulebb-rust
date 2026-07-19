@@ -3282,7 +3282,7 @@ function searchQueryValidationError(value: string): string | undefined {
   if (!normalized) {
     return undefined;
   }
-  if (/[\u0000-\u001f\u007f]/.test(normalized)) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(normalized)) {
     return "Search query must not contain control characters.";
   }
   return normalized.length <= 160 ? undefined : "Search query must be at most 160 characters.";
