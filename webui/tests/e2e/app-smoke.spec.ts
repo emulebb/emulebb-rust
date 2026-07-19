@@ -144,9 +144,14 @@ test("transfer add form validates eD2K link batches", async ({ page }) => {
   const linkInput = transfersPanel.getByPlaceholder("One eD2K link per line");
   const addLinks = transfersPanel.getByRole("button", { name: "Add links" });
   const initialTransferPosts = requests.filter((request) => request.method === "POST" && request.path === "transfers").length;
-  const invalidLinkError = "Each transfer link must start with ed2k://, contain no whitespace, and be at most 2048 characters.";
+  const invalidLinkError = "Each transfer link must start with ed2k://, contain no whitespace or control characters, and be at most 2048 characters.";
 
   await linkInput.fill("http://example.invalid/file");
+  await expect(transfersPanel.getByText(invalidLinkError)).toBeVisible();
+  await expect(addLinks).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);
+
+  await linkInput.fill(`ed2k://|file|Sample${String.fromCharCode(0x85)}.bin|1|00112233445566778899aabbccddeeff|/`);
   await expect(transfersPanel.getByText(invalidLinkError)).toBeVisible();
   await expect(addLinks).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "transfers").length).toBe(initialTransferPosts);

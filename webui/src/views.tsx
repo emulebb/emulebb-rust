@@ -3199,7 +3199,7 @@ function arrayField(object: Record<string, unknown> | undefined, key: string): s
   return Array.isArray(value) ? value.map((item) => String(item)) : [];
 }
 
-const TRANSFER_ADD_LINK_TEXT_ERROR = "Each transfer link must start with ed2k://, contain no whitespace, and be at most 2048 characters.";
+const TRANSFER_ADD_LINK_TEXT_ERROR = "Each transfer link must start with ed2k://, contain no whitespace or control characters, and be at most 2048 characters.";
 const URL_IMPORT_TEXT_ERROR = "must start with http:// or https://, include a host, contain no whitespace, and be at most 2048 characters.";
 
 function transferLinksFromText(value: string): string[] {
@@ -3221,7 +3221,7 @@ function transferLinksValidationError(value: string): string | undefined {
 }
 
 function isTransferAddLinkText(value: string): boolean {
-  return value.length <= 2048 && !/[\u0000-\u001f\u007f]/.test(value) && /^[eE][dD]2[kK]:\/\/\S+$/.test(value);
+  return value.length <= 2048 && /^[eE][dD]2[kK]:\/\/[^\s\u0000-\u001f\u007f-\u009f]+$/.test(value);
 }
 
 function parseUrlImportText(value: string): string | null {
