@@ -3200,7 +3200,7 @@ function arrayField(object: Record<string, unknown> | undefined, key: string): s
 }
 
 const TRANSFER_ADD_LINK_TEXT_ERROR = "Each transfer link must start with ed2k://, contain no whitespace or control characters, and be at most 2048 characters.";
-const URL_IMPORT_TEXT_ERROR = "must start with http:// or https://, include a host, contain no whitespace, and be at most 2048 characters.";
+const URL_IMPORT_TEXT_ERROR = "must start with http:// or https://, include a host, contain no whitespace or control characters, and be at most 2048 characters.";
 
 function transferLinksFromText(value: string): string[] {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -3230,8 +3230,7 @@ function parseUrlImportText(value: string): string | null {
     return null;
   }
   return normalized.length <= 2048
-    && !/[\u0000-\u001f\u007f]/.test(normalized)
-    && /^[hH][tT][tT][pP][sS]?:\/\/[^\s/?#][^\s]*$/.test(normalized)
+    && /^[hH][tT][tT][pP][sS]?:\/\/[^\s/?#\u0000-\u001f\u007f-\u009f][^\s\u0000-\u001f\u007f-\u009f]*$/.test(normalized)
     ? normalized
     : null;
 }

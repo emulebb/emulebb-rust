@@ -231,11 +231,16 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   const serversPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Servers" }) });
   const serverImportButton = serversPanel.getByRole("button", { name: "Import" });
   const initialServerImportPosts = requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length;
-  const urlImportError = "must start with http:// or https://, include a host, contain no whitespace, and be at most 2048 characters.";
+  const urlImportError = "must start with http:// or https://, include a host, contain no whitespace or control characters, and be at most 2048 characters.";
   const serverUrlError = `server.met URL ${urlImportError}`;
   const kadUrlError = `nodes.dat URL ${urlImportError}`;
+  const c1ControlUrl = `https://exa${String.fromCharCode(0x85)}mple.invalid/server.met`;
   await expect(serverImportButton).toBeDisabled();
   await serversPanel.getByPlaceholder("server.met URL").fill("ftp://example.invalid/server.met");
+  await expect(serversPanel.getByText(serverUrlError)).toBeVisible();
+  await expect(serverImportButton).toBeDisabled();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length).toBe(initialServerImportPosts);
+  await serversPanel.getByPlaceholder("server.met URL").fill(c1ControlUrl);
   await expect(serversPanel.getByText(serverUrlError)).toBeVisible();
   await expect(serverImportButton).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "servers/operations/import-met-url").length).toBe(initialServerImportPosts);
