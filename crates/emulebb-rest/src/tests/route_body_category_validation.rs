@@ -67,3 +67,37 @@ async fn category_name_body_uses_canonical_selector_validation() {
         }
     }
 }
+
+#[tokio::test]
+async fn category_selector_body_rejects_ambiguous_id_and_name() {
+    let app = test_router();
+    let link = "ed2k://|file|CategorySelector.bin|1|00112233445566778899aabbccddeeff|/";
+    let routes = [
+        (
+            "POST",
+            "/api/v1/transfers",
+            format!(r#"{{"link":"{link}","categoryId":1,"categoryName":"Media"}}"#),
+        ),
+        (
+            "PATCH",
+            "/api/v1/transfers/00112233445566778899aabbccddeeff",
+            r#"{"categoryId":1,"categoryName":"Media"}"#.to_string(),
+        ),
+        (
+            "POST",
+            "/api/v1/searches/1/results/00112233445566778899aabbccddeeff/operations/download",
+            r#"{"categoryId":1,"categoryName":"Media"}"#.to_string(),
+        ),
+    ];
+
+    for (method, uri, body) in routes {
+        assert_invalid_json_response(
+            app.clone(),
+            method,
+            uri,
+            body,
+            "categoryId and categoryName are mutually exclusive",
+        )
+        .await;
+    }
+}

@@ -70,6 +70,11 @@ fn validate_category_selector_body(
     if !uses_category_selector_body(method, path) {
         return Ok(());
     }
+    if object.contains_key("categoryId") && object.contains_key("categoryName") {
+        return Err(invalid_body_error(
+            "categoryId and categoryName are mutually exclusive",
+        ));
+    }
     if let Some(category_id) = object.get("categoryId") {
         let Some(category_id) = category_id.as_u64() else {
             return Err(invalid_body_error("categoryId must be an unsigned number"));
