@@ -23,7 +23,7 @@ async fn shared_directory_roots_survive_core_restart() {
         )
         .unwrap();
         core.set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate::Object {
+            roots: vec![SharedDirectoryRootUpdate {
                 path: shared_root.display().to_string(),
             }],
             confirm_replace_roots: true,
@@ -66,7 +66,7 @@ async fn shared_directory_reload_always_shares_folder_tree() {
     )
     .unwrap();
     core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
+        roots: vec![SharedDirectoryRootUpdate {
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,
@@ -95,7 +95,7 @@ async fn shared_directory_model_expands_folder_tree_items_like_mfc() {
     .unwrap();
     let directories = core
         .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate::Object {
+            roots: vec![SharedDirectoryRootUpdate {
                 path: shared_root.display().to_string(),
             }],
             confirm_replace_roots: true,
@@ -150,7 +150,7 @@ async fn shared_directory_tree_shares_survive_restart_and_reload_new_files() {
         )
         .unwrap();
         core.set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate::Object {
+            roots: vec![SharedDirectoryRootUpdate {
                 path: shared_root.display().to_string(),
             }],
             confirm_replace_roots: true,
@@ -247,7 +247,7 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     )
     .unwrap();
     core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
+        roots: vec![SharedDirectoryRootUpdate {
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,
@@ -349,7 +349,7 @@ async fn sharing_complete_directory_never_delivers_to_incoming_or_piece_store() 
     .with_incoming_dir(incoming_dir.clone());
 
     core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
+        roots: vec![SharedDirectoryRootUpdate {
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,
@@ -430,7 +430,7 @@ async fn reload_skips_unchanged_files_and_rehashes_only_changed_or_new() {
     .unwrap();
     // `set_shared_directories` kicks the initial detached reload; let it finish.
     core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
+        roots: vec![SharedDirectoryRootUpdate {
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,

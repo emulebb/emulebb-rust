@@ -799,8 +799,8 @@ export class RestClient {
     return this.request<T>("PATCH", path, body);
   }
 
-  async delete<T>(path: string): Promise<T> {
-    return this.request<T>("DELETE", path);
+  async delete<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>("DELETE", path, body);
   }
 
   async streamTransferEvents(

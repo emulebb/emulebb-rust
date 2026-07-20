@@ -914,11 +914,11 @@ async fn shared_directories_patch_body_uses_canonical_root_validation() {
         (r#"{"roots":"C:/Shared"}"#, "roots must be an array"),
         (
             r#"{"roots":[1],"confirmReplaceRoots":true}"#,
-            "path must be a non-empty string path",
+            "shared-directory root must be an object with path",
         ),
         (
             r#"{"roots":["   "],"confirmReplaceRoots":true}"#,
-            "path must not be empty",
+            "shared-directory root must be an object with path",
         ),
         (
             r#"{"roots":[{}],"confirmReplaceRoots":true}"#,
@@ -932,6 +932,10 @@ async fn shared_directories_patch_body_uses_canonical_root_validation() {
             r#"{"roots":[{"path":"C:/Shared","depth":1}],"confirmReplaceRoots":true}"#,
             "unknown shared-directory root field: depth",
         ),
+        (
+            r#"{"roots":[{"path":"C:/Shared","recursive":true}],"confirmReplaceRoots":true}"#,
+            "unknown shared-directory root field: recursive",
+        ),
     ];
 
     for (body, expected_message) in cases {
@@ -943,6 +947,26 @@ async fn shared_directories_patch_body_uses_canonical_root_validation() {
             expected_message,
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn shared_directory_root_operation_body_uses_canonical_validation() {
+    let app = test_router();
+    let uri = "/api/v1/shared-directories/roots";
+    let cases = [
+        (r#"{}"#, "path must be a non-empty string path"),
+        (r#"{"path":1}"#, "path must be a non-empty string path"),
+        (r#"{"path":"   "}"#, "path must not be empty"),
+        (
+            r#"{"path":"C:/Shared","recursive":true}"#,
+            "unknown JSON field: recursive",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        assert_invalid_json_response(app.clone(), "POST", uri, body.to_string(), expected_message)
+            .await;
     }
 }
 
@@ -983,7 +1007,7 @@ async fn destructive_confirmation_bodies_use_canonical_validation() {
         (
             "PATCH",
             "/api/v1/shared-directories",
-            r#"{"roots":["C:/Shared"],"confirmReplaceRoots":false}"#,
+            r#"{"roots":[{"path":"C:/Shared"}],"confirmReplaceRoots":false}"#,
             "confirmReplaceRoots must be true",
         ),
     ];

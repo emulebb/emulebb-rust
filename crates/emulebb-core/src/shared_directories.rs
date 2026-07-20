@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::long_path;
 use emulebb_index::IndexedSharedDirectoryRoot;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 /// One configured shared-directory root exposed through the eMuleBB REST contract.
@@ -179,46 +179,10 @@ pub struct SharedDirectoriesUpdate {
 }
 
 /// Shared-directory root input accepted by the REST API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum SharedDirectoryRootUpdate {
-    Path(String),
-    Object { path: String },
-}
-
-impl<'de> Deserialize<'de> for SharedDirectoryRootUpdate {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match serde_json::Value::deserialize(deserializer)? {
-            serde_json::Value::String(path) => Ok(Self::Path(path)),
-            serde_json::Value::Object(object) => {
-                if let Some(name) = object.keys().find(|name| name.as_str() != "path") {
-                    return Err(serde::de::Error::custom(format!(
-                        "unknown shared-directory root field: {name}"
-                    )));
-                }
-                let path = object
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| serde::de::Error::custom("path must be a string"))?;
-                Ok(Self::Object {
-                    path: path.to_string(),
-                })
-            }
-            _ => Err(serde::de::Error::custom(
-                "shared-directory root must be a string path or object with path",
-            )),
-        }
-    }
-}
-
-pub(crate) fn shared_directory_update_path(root: SharedDirectoryRootUpdate) -> String {
-    match root {
-        SharedDirectoryRootUpdate::Path(path) => path,
-        SharedDirectoryRootUpdate::Object { path } => path,
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedDirectoryRootUpdate {
+    pub path: String,
 }
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {

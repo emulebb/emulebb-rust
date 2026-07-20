@@ -200,10 +200,12 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     let runtime_dir = unique_test_dir("shared-directories-contract");
     let transfer_root = runtime_dir.join("transfers");
     let shared_root = runtime_dir.join("shared-root");
+    let extra_root = runtime_dir.join("extra-root");
     let nested_root = shared_root.join("nested");
     let top_level_file = shared_root.join("Top.Level.bin");
     let nested_file = nested_root.join("Nested.bin");
     std::fs::create_dir_all(&nested_root).unwrap();
+    std::fs::create_dir_all(&extra_root).unwrap();
     std::fs::write(&top_level_file, b"top level shared payload").unwrap();
     std::fs::write(&nested_file, b"nested shared payload").unwrap();
     let core = Arc::new(
@@ -268,6 +270,73 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
             .expect("hashingCount is an integer")
             >= 0
     );
+
+    let add_body = format!(
+        r#"{{"path":"{}"}}"#,
+        extra_root.display().to_string().replace('\\', "\\\\")
+    );
+    let add_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-directories/roots")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(add_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_response.status(), StatusCode::OK);
+    let body = to_bytes(add_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["roots"].as_array().unwrap().len(), 2);
+
+    let add_again_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shared-directories/roots")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(add_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add_again_response.status(), StatusCode::OK);
+    let body = to_bytes(add_again_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["roots"].as_array().unwrap().len(), 2);
+
+    let remove_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/v1/shared-directories/roots?path={}",
+                    encode_query_value(&extra_root.display().to_string())
+                ))
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let remove_status = remove_response.status();
+    let body = to_bytes(remove_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(remove_status, StatusCode::OK, "{value}");
+    assert_eq!(value["data"]["roots"].as_array().unwrap().len(), 1);
 
     let get_response = app
         .clone()
@@ -360,6 +429,18 @@ fn unique_test_dir(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("create test dir");
     path
+}
+
+fn encode_query_value(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                vec![char::from(byte)]
+            }
+            _ => format!("%{byte:02X}").chars().collect::<Vec<_>>(),
+        })
+        .collect()
 }
 
 fn rust_test_tmp_root() -> std::path::PathBuf {

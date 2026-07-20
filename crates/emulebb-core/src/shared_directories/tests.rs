@@ -35,9 +35,9 @@ async fn set_shared_directories_canonicalizes_configured_root() {
 
     let directories = core
         .set_shared_directories(SharedDirectoriesUpdate {
-            roots: vec![SharedDirectoryRootUpdate::Path(
-                configured.display().to_string(),
-            )],
+            roots: vec![SharedDirectoryRootUpdate {
+                path: configured.display().to_string(),
+            }],
             confirm_replace_roots: true,
         })
         .await
@@ -58,7 +58,7 @@ fn shared_directory_root_update_rejects_retired_recursive_field() {
     assert!(
         error
             .to_string()
-            .contains("unknown shared-directory root field: recursive"),
+            .contains("unknown field `recursive`, expected `path`"),
         "unexpected error: {error}"
     );
 }

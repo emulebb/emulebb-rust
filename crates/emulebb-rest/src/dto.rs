@@ -77,6 +77,12 @@ pub(crate) struct SnapshotQuery {
     pub(crate) limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SharedDirectoryRootQuery {
+    pub(crate) path: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PageQuery {

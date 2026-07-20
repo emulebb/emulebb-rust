@@ -79,7 +79,7 @@ async fn live_monitor_auto_shares_and_auto_removes_a_dropped_file() {
     // (re)starts the monitor; we also call start explicitly per the feature's
     // public entry to prove it is idempotent.
     core.set_shared_directories(SharedDirectoriesUpdate {
-        roots: vec![SharedDirectoryRootUpdate::Object {
+        roots: vec![SharedDirectoryRootUpdate {
             path: shared_root.display().to_string(),
         }],
         confirm_replace_roots: true,

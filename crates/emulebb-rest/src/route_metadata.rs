@@ -500,6 +500,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         | ("POST", "/api/v1/searches")
         | ("GET", "/api/v1/shared-directories")
         | ("PATCH", "/api/v1/shared-directories")
+        | ("POST", "/api/v1/shared-directories/roots")
         | ("POST", "/api/v1/shared-directories/operations/reload")
         | ("GET", "/api/v1/uploads")
         | ("GET", "/api/v1/upload-queue")
@@ -518,6 +519,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/transfers") => Some(TRANSFERS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
+        ("DELETE", "/api/v1/shared-directories/roots") => Some(&["path"]),
         _ => route_query_fields_for_parameterized(method, path),
     }
 }

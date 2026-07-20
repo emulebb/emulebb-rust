@@ -50,8 +50,9 @@ pub(crate) use servers::{
     servers_disconnect, servers_import_met_url, update_server,
 };
 pub(crate) use shared_files::{
-    reload_shared_directories, shared_directories, shared_file, shared_file_comments,
-    shared_file_ed2k_link, shared_files, update_shared_directories, update_shared_file,
+    add_shared_directory_root, reload_shared_directories, remove_shared_directory_root,
+    shared_directories, shared_file, shared_file_comments, shared_file_ed2k_link, shared_files,
+    update_shared_directories, update_shared_file,
 };
 pub(crate) use transfers::{
     clear_completed_transfers, create_transfer, transfer, transfer_delete, transfer_delete_files,

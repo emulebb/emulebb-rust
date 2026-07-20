@@ -12,7 +12,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use emulebb_core::{SharedDirectoriesUpdate, SharedFileUpdate};
+use emulebb_core::{SharedDirectoriesUpdate, SharedDirectoryRootUpdate, SharedFileUpdate};
 
 use crate::handlers::prelude::*;
 
@@ -52,6 +52,46 @@ pub(crate) async fn update_shared_directories(
         Err(response) => return *response,
     };
     match state.core.set_shared_directories(request).await {
+        Ok(directories) => api_ok(directories).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn add_shared_directory_root(
+    State(state): State<RestState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let request = match parse_required_json_body::<SharedDirectoryRootUpdate>(&body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    match state.core.add_shared_directory_root(&request.path).await {
+        Ok(directories) => api_ok(directories).into_response(),
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
+pub(crate) async fn remove_shared_directory_root(
+    State(state): State<RestState>,
+    RawQuery(raw_query): RawQuery,
+) -> impl IntoResponse {
+    let query = match parse_optional_query::<SharedDirectoryRootQuery>(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let Some(path) = query.path else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "path is required",
+        )
+        .into_response();
+    };
+    match state.core.remove_shared_directory_root(&path).await {
         Ok(directories) => api_ok(directories).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()

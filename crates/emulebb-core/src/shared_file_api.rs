@@ -274,15 +274,7 @@ impl EmulebbCore {
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
         for root in request.roots {
-            let path = shared_directory_update_path(root);
-            let path = path.trim();
-            ensure!(!path.is_empty(), "path must not be empty");
-            let canonical = fs::canonicalize(long_path(Path::new(path)))
-                .with_context(|| format!("failed to resolve {path}"))?;
-            let metadata = fs::metadata(&canonical)
-                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
-            ensure!(metadata.is_dir(), "path is not a directory");
-            let canonical_path = canonical.display().to_string();
+            let canonical_path = canonical_shared_directory_root(&root.path)?;
             if seen.insert(canonical_path.clone()) {
                 roots.push(SharedDirectoryRoot {
                     path: canonical_path,
@@ -292,6 +284,46 @@ impl EmulebbCore {
                 });
             }
         }
+        self.replace_shared_directory_roots(roots).await
+    }
+
+    pub async fn add_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
+        let canonical_path = canonical_shared_directory_root(path)?;
+        let mut roots = self.state.lock().await.shared_directories.clone();
+        if !roots
+            .iter()
+            .any(|root| root.path.eq_ignore_ascii_case(&canonical_path))
+        {
+            roots.push(SharedDirectoryRoot {
+                path: canonical_path,
+                monitor_owned: false,
+                shareable: true,
+                accessible: true,
+            });
+        }
+        self.replace_shared_directory_roots(dedupe_shared_directory_roots(roots))
+            .await
+    }
+
+    pub async fn remove_shared_directory_root(&self, path: &str) -> Result<SharedDirectories> {
+        let canonical_path = removable_shared_directory_root(path)?;
+        let roots = self
+            .state
+            .lock()
+            .await
+            .shared_directories
+            .iter()
+            .filter(|root| !root.path.eq_ignore_ascii_case(&canonical_path))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.replace_shared_directory_roots(dedupe_shared_directory_roots(roots))
+            .await
+    }
+
+    async fn replace_shared_directory_roots(
+        &self,
+        roots: Vec<SharedDirectoryRoot>,
+    ) -> Result<SharedDirectories> {
         self.index.lock().await.replace_shared_directory_roots(
             &roots
                 .iter()
@@ -332,4 +364,37 @@ impl EmulebbCore {
     pub fn stop_shared_directory_monitor(&self) {
         shared_dir_monitor::stop_shared_directory_monitor(self);
     }
+}
+
+fn canonical_shared_directory_root(path: &str) -> Result<String> {
+    let path = path.trim();
+    ensure!(!path.is_empty(), "path must not be empty");
+    let canonical = fs::canonicalize(long_path(Path::new(path)))
+        .with_context(|| format!("failed to resolve {path}"))?;
+    let metadata = fs::metadata(&canonical)
+        .with_context(|| format!("failed to inspect {}", canonical.display()))?;
+    ensure!(metadata.is_dir(), "path is not a directory");
+    Ok(canonical.display().to_string())
+}
+
+fn removable_shared_directory_root(path: &str) -> Result<String> {
+    let path = path.trim();
+    ensure!(!path.is_empty(), "path must not be empty");
+    match fs::canonicalize(long_path(Path::new(path))) {
+        Ok(canonical) => {
+            let metadata = fs::metadata(&canonical)
+                .with_context(|| format!("failed to inspect {}", canonical.display()))?;
+            ensure!(metadata.is_dir(), "path is not a directory");
+            Ok(canonical.display().to_string())
+        }
+        Err(_) => Ok(path.to_string()),
+    }
+}
+
+fn dedupe_shared_directory_roots(roots: Vec<SharedDirectoryRoot>) -> Vec<SharedDirectoryRoot> {
+    let mut seen = HashSet::new();
+    roots
+        .into_iter()
+        .filter(|root| seen.insert(root.path.to_ascii_lowercase()))
+        .collect()
 }

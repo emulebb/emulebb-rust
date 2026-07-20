@@ -546,23 +546,17 @@ export function SharingView(props: {
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
 
-  const replaceRoots = (paths: string[]) =>
-    props.client.patch("shared-directories", {
-      roots: paths.map((rootPath) => ({ path: rootPath })),
-      confirmReplaceRoots: true
-    });
-
   const addRoot = async () => {
     const nextPath = path.trim();
     if (!nextPath || pathError) {
       return;
     }
-    await replaceRoots([...roots.map((root) => root.path), nextPath]);
+    await props.client.post("shared-directories/roots", { path: nextPath });
     setPath("");
   };
 
   const removeRoot = (rootPath: string) =>
-    replaceRoots(roots.filter((root) => root.path !== rootPath).map((root) => root.path));
+    props.client.delete(`shared-directories/roots?path=${encodeURIComponent(rootPath)}`);
 
   return (
     <section class="view-grid">

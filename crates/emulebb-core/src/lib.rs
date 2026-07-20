@@ -238,7 +238,7 @@ pub use shared_directories::{
 };
 use shared_directories::{
     refresh_shared_directory_row, reload_progress_snapshot, shared_directory_from_index,
-    shared_directory_items, shared_directory_to_index, shared_directory_update_path,
+    shared_directory_items, shared_directory_to_index,
 };
 
 mod network_status_defaults;

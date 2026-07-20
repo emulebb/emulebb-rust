@@ -132,6 +132,10 @@ pub fn router_with_shutdown(
             get(shared_directories).patch(update_shared_directories),
         )
         .route(
+            "/api/v1/shared-directories/roots",
+            post(add_shared_directory_root).delete(remove_shared_directory_root),
+        )
+        .route(
             "/api/v1/shared-directories/operations/reload",
             post(reload_shared_directories),
         )
