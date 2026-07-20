@@ -43,17 +43,17 @@ cc = "1"
 embed-manifest = "1.5"
 encoding_rs = "0.8"
 flate2 = "1"
-fs4 = "0.13"
+fs4 = "1.1"
 futures-util = "0.3"
 hex = "0.4"
-if-addrs = "0.13"
+if-addrs = "0.15"
 ipnet = "2"
 ipconfig = "0.3"
-md4 = "0.10"
-md5 = "0.7"
+md4 = "0.11"
+md5 = "0.8"
 notify = "8"
 notify-debouncer-full = "0.7"
-num-bigint = "0.4"
+num-bigint = "0.5"
 parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
@@ -62,8 +62,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
-sha1 = { version = "0.10", features = ["oid"] }
-sha2 = "0.10"
+sha1 = { version = "0.11", features = ["oid"] }
+sha2 = "0.11"
 slint = { version = "1.17.1", default-features = false, features = [
     "accessibility",
     "backend-default",
@@ -74,12 +74,12 @@ slint = { version = "1.17.1", default-features = false, features = [
 ] }
 slint-build = "1.17.1"
 socket2 = "0.6"
-thiserror = "1"
+thiserror = "2"
 tempfile = "3"
 tokio = "1"
 tokio-stream = "0.1"
 tokio-util = "0.7"
-toml = "0.9"
+toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
