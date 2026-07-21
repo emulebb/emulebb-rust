@@ -992,10 +992,10 @@ fn validate_shared_upload_priority_body_field(
     };
     if !matches!(
         priority,
-        "auto" | "verylow" | "low" | "normal" | "high" | "release"
+        "auto" | "not-published" | "verylow" | "low" | "normal" | "high" | "release"
     ) {
         return Err(invalid_body_error(
-            "priority must be one of auto, verylow, low, normal, high, release",
+            "priority must be one of auto, not-published, verylow, low, normal, high, release",
         ));
     }
     Ok(())

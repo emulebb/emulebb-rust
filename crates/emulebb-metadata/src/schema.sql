@@ -69,7 +69,7 @@ CREATE TABLE known_files (
     aich_hashset_acquired INTEGER NOT NULL DEFAULT 0 CHECK(aich_hashset_acquired IN (0, 1)),
     aich_root BLOB CHECK(aich_root IS NULL OR length(aich_root) = 20),
     upload_priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(upload_priority IN ('auto', 'verylow', 'low', 'normal', 'high', 'release')),
+        CHECK(upload_priority IN ('auto', 'not-published', 'verylow', 'low', 'normal', 'high', 'release')),
     auto_upload_priority INTEGER NOT NULL DEFAULT 0 CHECK(auto_upload_priority IN (0, 1)),
     comment TEXT NOT NULL DEFAULT '',
     rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),

@@ -852,7 +852,7 @@ async fn shared_file_patch_body_uses_canonical_priority_validation() {
         (r#"{"priority":1}"#, "priority must be a string"),
         (
             r#"{"priority":"veryhigh"}"#,
-            "priority must be one of auto, verylow, low, normal, high, release",
+            "priority must be one of auto, not-published, verylow, low, normal, high, release",
         ),
     ];
 

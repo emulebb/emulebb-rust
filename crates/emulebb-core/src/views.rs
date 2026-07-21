@@ -444,9 +444,11 @@ pub(crate) fn validate_url_import(url: &str) -> Result<String> {
 pub(crate) fn validate_shared_upload_priority(priority: &str) -> Result<(&str, bool)> {
     match priority {
         "auto" => Ok((priority, true)),
-        "verylow" | "low" | "normal" | "high" | "release" => Ok((priority, false)),
+        "not-published" | "verylow" | "low" | "normal" | "high" | "release" => {
+            Ok((priority, false))
+        }
         _ => Err(anyhow::anyhow!(
-            "priority must be one of auto, verylow, low, normal, high, release"
+            "priority must be one of auto, not-published, verylow, low, normal, high, release"
         )),
     }
 }

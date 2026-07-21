@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 const KADEMLIA_PUBLISH_JITTER_WINDOW_SECS: i64 = 2;
+pub const NOT_PUBLISHED_UPLOAD_PRIORITY: &str = "not-published";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SharedPublishRank {
@@ -47,6 +48,10 @@ pub fn shared_publish_rank(input: SharedPublishRankInput<'_>) -> SharedPublishRa
         last_publish_unix_ms: input.last_publish_unix_ms,
         sequence: input.sequence,
     }
+}
+
+pub fn shared_file_publish_enabled(priority: &str) -> bool {
+    priority != NOT_PUBLISHED_UPLOAD_PRIORITY
 }
 
 pub fn compare_shared_publish_rank(
@@ -288,6 +293,13 @@ mod tests {
         assert_eq!(mfc_real_upload_priority("high", false, 0), 3);
         assert_eq!(mfc_real_upload_priority("veryhigh", false, 0), 4);
         assert_eq!(mfc_real_upload_priority("release", false, 0), 4);
+    }
+
+    #[test]
+    fn not_published_priority_suppresses_publish_selection() {
+        assert!(!shared_file_publish_enabled("not-published"));
+        assert!(shared_file_publish_enabled("verylow"));
+        assert!(shared_file_publish_enabled("release"));
     }
 
     #[test]

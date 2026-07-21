@@ -24,6 +24,7 @@ pub(crate) fn upload_priority_score(priority: &str, auto: bool, queued_count: u6
     };
     match effective {
         "verylow" => VERY_LOW_FILE_PRIORITY_SCORE,
+        "not-published" => VERY_LOW_FILE_PRIORITY_SCORE,
         "low" => LOW_FILE_PRIORITY_SCORE,
         "high" => HIGH_FILE_PRIORITY_SCORE,
         "release" | "veryhigh" => RELEASE_FILE_PRIORITY_SCORE,

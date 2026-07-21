@@ -47,7 +47,8 @@ use emulebb_ed2k::{
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
-        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
+        SharedPublishRank, SharedPublishRankInput, compare_shared_publish_rank,
+        shared_file_publish_enabled, shared_publish_rank,
     },
 };
 #[cfg(test)]
@@ -3244,17 +3245,16 @@ fn shared_file_notes_changed(
 /// OP_OFFERFILES set or per-file offer content, and therefore warrants re-running
 /// the rate-limited shared-catalog offer session. Only the SET of offered files
 /// (a share/unshare) or a file's completion state is offer content; a file's
-/// name/size/hash are fixed and cannot be edited. A metadata PATCH touches only
-/// priority and comment/rating, none of which are offer content: priority merely
+/// name/size/hash are fixed and cannot be edited. A regular priority PATCH only
 /// reorders a future full offer (oracle `CKnownFile::SetUpPriority` emits no
-/// re-offer, KnownFile.cpp:1395-1402) and comment/rating are Kad-notes content
-/// with their own trigger (Publish-G1), so such a PATCH passes both flags `false`
-/// and must not queue a redundant no-op offer session (Publish-G3).
+/// re-offer, KnownFile.cpp:1395-1402), but toggling not-published changes the
+/// offer candidate set.
 fn shared_file_change_requires_ed2k_reoffer(
     share_status_changed: bool,
     completion_changed: bool,
+    publish_status_changed: bool,
 ) -> bool {
-    share_status_changed || completion_changed
+    share_status_changed || completion_changed || publish_status_changed
 }
 
 /// Drain the pending NOTES-reset queue into the loop-local schedule, resetting
@@ -4446,14 +4446,18 @@ fn kad_keyword_publish_candidate_from_shared_entry(
 /// excluded. Mirrors the oracle SOURCE loop admitting partfiles (no
 /// `IsPartFile()` filter, SharedFileList.cpp:3371-3388).
 fn kad_source_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
-    !entry.compatibility_hint && entry.is_servable()
+    !entry.compatibility_hint
+        && shared_file_publish_enabled(&entry.upload_priority)
+        && entry.is_servable()
 }
 
 /// Whether a shared-catalog entry may be published under a Kad KEYWORD: a
 /// completed file only (oracle `!IsPartFile()`, SharedFileList.cpp:3313), never
 /// an in-progress partfile.
 fn kad_keyword_publish_eligible(entry: &Ed2kSharedEntry) -> bool {
-    !entry.compatibility_hint && entry.verified_complete
+    !entry.compatibility_hint
+        && shared_file_publish_enabled(&entry.upload_priority)
+        && entry.verified_complete
 }
 
 /// Cheap per-tick read of the SOURCE-publishable file hashes (servable files that

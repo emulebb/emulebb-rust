@@ -2087,6 +2087,7 @@ mod tests {
         assert_eq!(upload_priority_score("high", false, 0), 9);
         assert_eq!(upload_priority_score("veryhigh", false, 0), 18);
         assert_eq!(upload_priority_score("release", false, 0), 18);
+        assert_eq!(upload_priority_score("not-published", false, 0), 2);
         // Auto empty/short queue -> HIGH (9), matching the publish ranker's HIGH
         // resolution, NOT the NORMAL (7) it used to collapse to.
         assert_eq!(upload_priority_score("normal", true, 0), 9);

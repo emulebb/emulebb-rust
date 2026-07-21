@@ -251,6 +251,28 @@ fn large_file_offered_only_to_largefiles_server() {
 }
 
 #[test]
+fn not_published_files_are_excluded_from_offer_catalog() {
+    let mut published = shared_entry(1);
+    published.upload_priority = "high".to_string();
+    let mut suppressed = shared_entry(2);
+    suppressed.upload_priority = "not-published".to_string();
+    let catalog = vec![published.clone(), suppressed.clone()];
+    let published_hash = popular_hash_offer_file(&published).unwrap().0;
+    let suppressed_hash = popular_hash_offer_file(&suppressed).unwrap().0;
+
+    let ranked = ranked_offer_files(&catalog, true);
+    assert_eq!(ranked, vec![popular_hash_offer_file(&published).unwrap()]);
+
+    let offered =
+        offered_files_catalog_at_cursor(&catalog, 0, MAX_OFFER_FILES_PER_ADVERTISEMENT, true);
+    assert_eq!(offered.total_entries, 1);
+    assert_eq!(offered.entries[0].0, published_hash);
+
+    let already_published = HashSet::from([published_hash, suppressed_hash]);
+    assert_eq!(offer_files_published_count(&catalog, &already_published), 1);
+}
+
+#[test]
 fn empty_share_advertises_zero_files_without_a_placeholder() {
     // Stock parity: an empty share sends a 0-file OP_OFFERFILES, not a
     // fabricated sample entry.

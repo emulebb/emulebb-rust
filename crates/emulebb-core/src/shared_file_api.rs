@@ -157,6 +157,9 @@ impl EmulebbCore {
         if priority.is_none() && comment_rating.is_none() {
             anyhow::bail!("shared-file PATCH requires priority, comment, or rating");
         }
+        let publish_status_changed = priority.as_ref().is_some_and(|(priority, _)| {
+            shared_file_publish_enabled(priority) != shared_file_publish_enabled(&share.priority)
+        });
         // A comment/rating change resets the Kad NOTES clock (oracle
         // `SetLastPublishTimeKadNotes(0)`, KnownFile.cpp:1340,1360) so the edited
         // note republishes promptly; a priority-only PATCH does NOT. Detect an
@@ -201,12 +204,9 @@ impl EmulebbCore {
                 }
             }
         }
-        // A metadata PATCH mutates only priority/comment/rating -- none of which
-        // are in the eD2k offer set or per-file offer content -- so it changes
-        // neither the share status nor the completion state and must not spin up a
-        // redundant re-offer session (Publish-G3). Comment/rating already have
-        // their own Kad-notes trigger above.
-        if shared_file_change_requires_ed2k_reoffer(false, false) {
+        // A regular priority-only PATCH only reorders a future full offer, but
+        // toggling not-published changes the offer candidate set.
+        if shared_file_change_requires_ed2k_reoffer(false, false, publish_status_changed) {
             self.queue_ed2k_shared_catalog_publish();
         }
         Ok(self.share(hash).await)

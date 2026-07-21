@@ -14,7 +14,8 @@ use crate::{
     ed2k_tcp::Ed2kHelloIdentity,
     ed2k_transfer::{Ed2kSharedCatalog, Ed2kSharedEntry},
     shared_publish_rank::{
-        SharedPublishRankInput, compare_shared_publish_rank, shared_publish_rank,
+        SharedPublishRankInput, compare_shared_publish_rank, shared_file_publish_enabled,
+        shared_publish_rank,
     },
 };
 
@@ -465,6 +466,7 @@ fn offer_files_published_count(
 ) -> usize {
     shared_catalog
         .iter()
+        .filter(|entry| shared_file_publish_enabled(&entry.upload_priority))
         .filter_map(popular_hash_offer_file)
         .filter(|entry| already_published.contains(&entry.0))
         .count()
@@ -498,6 +500,9 @@ fn ranked_offer_files(
         .iter()
         .enumerate()
         .filter_map(|(sequence, entry)| {
+            if !shared_file_publish_enabled(&entry.upload_priority) {
+                return None;
+            }
             // Stock SharedFileList.cpp:2649 excludes a large file (>4GB, high
             // dword != 0) from the offer candidate set entirely when the server
             // lacks large-file TCP support (`!IsLargeFile() ||
