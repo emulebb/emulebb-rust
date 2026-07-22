@@ -2,7 +2,8 @@ import { Transfer } from "./api";
 
 export function formatProgress(transfer: Transfer): string {
   if (typeof transfer.progress === "number") {
-    return `${Math.min(100, Math.max(0, transfer.progress)).toFixed(1)}%`;
+    const percent = transfer.progress <= 1 ? transfer.progress * 100 : transfer.progress;
+    return `${Math.min(100, Math.max(0, percent)).toFixed(1)}%`;
   }
   const size = transfer.sizeBytes ?? 0;
   if (!size) {

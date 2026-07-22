@@ -31,6 +31,8 @@ describe("format helpers", () => {
   });
 
   it("prefers explicit progress and clamps it", () => {
+    expect(formatProgress({ hash: "hash", progress: 1 })).toBe("100.0%");
+    expect(formatProgress({ hash: "hash", progress: 0.3829 })).toBe("38.3%");
     expect(formatProgress({ hash: "hash", progress: 123 })).toBe("100.0%");
     expect(formatProgress({ hash: "hash", progress: -4 })).toBe("0.0%");
   });
