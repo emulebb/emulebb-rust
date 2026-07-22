@@ -278,7 +278,7 @@ async fn detached_reload_hashes_whole_library_without_caller_driving_it() {
     assert_eq!(progress.hashed_count, FILE_COUNT);
     assert_eq!(progress.failed_hash_count, 0);
     assert!(progress.planned_hash_bytes > 0);
-    assert_eq!(progress.planned_read_bytes, progress.planned_hash_bytes * 2);
+    assert_eq!(progress.planned_read_bytes, progress.planned_hash_bytes);
     assert!(!progress.recent.is_empty());
     assert!(!progress.disks.is_empty());
 

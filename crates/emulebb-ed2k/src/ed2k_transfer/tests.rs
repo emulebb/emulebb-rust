@@ -596,6 +596,43 @@ fn build_aich_hashset_matches_stock_tracing_harness_large_roundtrip_fixture() {
     );
 }
 
+#[test]
+fn combined_payload_hashsets_match_separate_md4_and_aich_builders() {
+    let root = unique_test_dir("ed2k-transfer-combined-hashsets");
+    fs::create_dir_all(&root).unwrap();
+    for (name, size) in [
+        ("small", 8192usize),
+        (
+            "large",
+            usize::try_from(ED2K_PART_SIZE + ED2K_EMBLOCK_SIZE + 7).unwrap(),
+        ),
+    ] {
+        let payload_path = Path::new(&root).join(format!("{name}.bin"));
+        write_repeating_pattern_file(&payload_path, size, b"Combined.Hash.Input");
+
+        let (separate_hash, separate_md4_hashset) =
+            super::build_md4_hashset_from_payload(&payload_path, size as u64).unwrap();
+        let separate_aich =
+            super::build_aich_hashset_from_payload(&payload_path, size as u64).unwrap();
+        let mut progress_bytes = 0u64;
+        let mut progress = |read_delta: u64| {
+            progress_bytes = progress_bytes.saturating_add(read_delta);
+        };
+        let combined = super::build_md4_and_aich_hashsets_from_payload_with_progress(
+            &payload_path,
+            size as u64,
+            Some(&mut progress),
+        )
+        .unwrap();
+
+        assert_eq!(combined.file_hash, separate_hash);
+        assert_eq!(combined.md4_hashset, separate_md4_hashset);
+        assert_eq!(combined.aich_hashset.master_hash, separate_aich.master_hash);
+        assert_eq!(combined.aich_hashset.part_hashes, separate_aich.part_hashes);
+        assert_eq!(progress_bytes, size as u64);
+    }
+}
+
 #[tokio::test]
 async fn ingest_local_file_marks_payload_complete_with_stock_aich_identity() {
     let root = unique_test_dir("ed2k-transfer-local-ingest");
@@ -668,11 +705,11 @@ async fn ingest_local_file_reports_md4_and_aich_read_progress() {
     );
     assert_eq!(
         events.last().map(|event| event.file_bytes_read),
-        Some(summary.file_size * 2)
+        Some(summary.file_size)
     );
     assert_eq!(
         events.last().map(|event| event.file_bytes_total),
-        Some(summary.file_size * 2)
+        Some(summary.file_size)
     );
 }
 

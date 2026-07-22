@@ -73,9 +73,12 @@ use download_coordinator::{
 pub use download_coordinator::{Ed2kDownloadCoordinatorConfig, MAX_SOURCES_FILE_UDP};
 use download_throttle::Ed2kDownloadThrottle;
 pub use download_throttle::Ed2kDownloadThrottleReservation;
-#[cfg(test)]
-use hashset::build_aich_hashset_from_payload;
 pub(crate) use hashset::decode_aich_hash_hex;
+#[cfg(test)]
+use hashset::{
+    build_aich_hashset_from_payload, build_md4_and_aich_hashsets_from_payload_with_progress,
+    build_md4_hashset_from_payload,
+};
 pub use inbound_admission::Ed2kInboundConnectionGuard;
 pub use ingest::{LocalIngestProgressEvent, LocalIngestProgressObserver, LocalIngestProgressStage};
 use manifest::Ed2kManifestCheckpointState;

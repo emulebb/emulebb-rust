@@ -9,9 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::long_path::long_path;
 
-use super::hashset::{
-    build_aich_hashset_from_payload_with_progress, build_md4_hashset_from_payload_with_progress,
-};
+use super::hashset::build_md4_and_aich_hashsets_from_payload_with_progress;
 use super::manifest::{piece_count, rebuild_verified_ranges};
 use super::{
     Ed2kLocalIngestSummary, Ed2kPieceState, Ed2kResumeManifest, Ed2kTransferRuntime,
@@ -110,34 +108,51 @@ impl Ed2kTransferRuntime {
             anyhow::bail!("local ED2K ingest does not support zero-sized payloads");
         }
 
-        // Hash OFF the manifest lock AND off the async runtime. MD4/AICH read
-        // and hash the whole (potentially many-GB) file with blocking `std::fs`,
+        // Hash OFF the manifest lock AND off the async runtime. MD4/AICH hash
+        // the whole (potentially many-GB) file with blocking `std::fs`,
         // which on a slow disk takes far longer than any HTTP timeout. Holding
         // the manifest lock across that froze every REST read (they funneled through
         // `manifests()`), and running the blocking hash inline starved a tokio
-        // worker. We therefore compute both hashsets under `spawn_blocking` with no
-        // lock held, and only take the manifest lock for the short write below.
-        let md4_len = metadata.len();
-        let md4_path = source_path.clone();
-        let md4_observer = observer.clone();
-        let (file_hash, md4_hashset) = tokio::task::spawn_blocking(move || {
-            let mut md4_read = 0u64;
-            let mut progress = move |bytes_read: u64| {
-                md4_read = md4_read.saturating_add(bytes_read);
-                if let Some(observer) = md4_observer.as_ref() {
+        // worker. We therefore compute both hashsets in one sequential read under
+        // `spawn_blocking` with no lock held, and only take the manifest lock for the
+        // short write below.
+        let hash_len = metadata.len();
+        let hash_path = source_path.clone();
+        let hash_observer = observer.clone();
+        let hashsets = tokio::task::spawn_blocking(move || {
+            let mut bytes_read_total = 0u64;
+            let progress_observer = hash_observer.clone();
+            let mut progress = move |read_delta: u64| {
+                bytes_read_total = bytes_read_total.saturating_add(read_delta);
+                if let Some(observer) = progress_observer.as_ref() {
                     observer(LocalIngestProgressEvent {
                         stage: LocalIngestProgressStage::Md4,
-                        stage_bytes_read: md4_read,
-                        stage_bytes_total: md4_len,
-                        file_bytes_read: md4_read,
-                        file_bytes_total: md4_len.saturating_mul(2),
+                        stage_bytes_read: bytes_read_total,
+                        stage_bytes_total: hash_len,
+                        file_bytes_read: bytes_read_total,
+                        file_bytes_total: hash_len,
                     });
                 }
             };
-            build_md4_hashset_from_payload_with_progress(&md4_path, md4_len, Some(&mut progress))
+            let hashsets = build_md4_and_aich_hashsets_from_payload_with_progress(
+                &hash_path,
+                hash_len,
+                Some(&mut progress),
+            )?;
+            if let Some(observer) = hash_observer.as_ref() {
+                observer(LocalIngestProgressEvent {
+                    stage: LocalIngestProgressStage::Aich,
+                    stage_bytes_read: hash_len,
+                    stage_bytes_total: hash_len,
+                    file_bytes_read: hash_len,
+                    file_bytes_total: hash_len,
+                });
+            }
+            Ok::<_, anyhow::Error>(hashsets)
         })
         .await
-        .context("MD4 hashing task panicked")??;
+        .context("ED2K/AICH hashing task panicked")??;
+        let file_hash = hashsets.file_hash;
         let job = new_transfer_job(file_hash, display_name.to_string(), metadata.len());
         let transfer_dir = self.transfer_dir(&job.file_hash);
         tokio::fs::create_dir_all(&transfer_dir)
@@ -156,28 +171,8 @@ impl Ed2kTransferRuntime {
         // read path resolves to the original file and finished-file delivery
         // skips it (delivery is download-only). The transfer dir still exists to
         // hold the resume manifest; only the payload bytes are never duplicated.
-        // AICH/MD4 are computed straight from the original file.
-        let aich_len = metadata.len();
-        let aich_path = source_path.clone();
-        let aich_observer = observer.clone();
-        let aich_hashset = tokio::task::spawn_blocking(move || {
-            let mut aich_read = 0u64;
-            let mut progress = move |bytes_read: u64| {
-                aich_read = aich_read.saturating_add(bytes_read);
-                if let Some(observer) = aich_observer.as_ref() {
-                    observer(LocalIngestProgressEvent {
-                        stage: LocalIngestProgressStage::Aich,
-                        stage_bytes_read: aich_read,
-                        stage_bytes_total: aich_len,
-                        file_bytes_read: aich_len.saturating_add(aich_read),
-                        file_bytes_total: aich_len.saturating_mul(2),
-                    });
-                }
-            };
-            build_aich_hashset_from_payload_with_progress(&aich_path, aich_len, Some(&mut progress))
-        })
-        .await
-        .context("AICH hashing task panicked")??;
+        // AICH/MD4 are computed straight from the original file in the single read
+        // pass above.
         let mut manifest = Ed2kResumeManifest::new(&job);
         manifest.source_path = Some(source_path.display().to_string());
         // Record the source file's last-modified time so the incremental
@@ -188,10 +183,15 @@ impl Ed2kTransferRuntime {
         manifest.source_mtime_ms = source_mtime_ms(&metadata);
         manifest.completed = true;
         manifest.md4_hashset_acquired = true;
-        manifest.md4_hashset = md4_hashset.iter().map(hex::encode).collect();
+        manifest.md4_hashset = hashsets.md4_hashset.iter().map(hex::encode).collect();
         manifest.aich_hashset_acquired = true;
-        manifest.aich_root = Some(hex::encode(aich_hashset.master_hash));
-        manifest.aich_hashset = aich_hashset.part_hashes.iter().map(hex::encode).collect();
+        manifest.aich_root = Some(hex::encode(hashsets.aich_hashset.master_hash));
+        manifest.aich_hashset = hashsets
+            .aich_hashset
+            .part_hashes
+            .iter()
+            .map(hex::encode)
+            .collect();
         manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
             .map(|piece_index| Ed2kPieceState {
                 piece_index,

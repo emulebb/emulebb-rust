@@ -9,6 +9,13 @@ use emulebb_kad_proto::Ed2kHash;
 use super::{
     ED2K_EMBLOCK_SIZE, ED2K_PART_SIZE, Ed2kAichHashset, Ed2kResumeManifest, PAYLOAD_FILE_NAME,
 };
+
+pub(super) struct Ed2kPayloadHashsets {
+    pub file_hash: Ed2kHash,
+    pub md4_hashset: Vec<[u8; 16]>,
+    pub aich_hashset: Ed2kAichHashset,
+}
+
 pub(super) fn expected_md4_hash_count(file_size: u64) -> u16 {
     if file_size == 0 {
         return 0;
@@ -84,6 +91,119 @@ pub(super) fn build_md4_hashset_from_payload_with_progress(
         Ed2kHash::from_bytes(file_hasher.finalize().into()),
         part_hashes,
     ))
+}
+
+pub(super) fn build_md4_and_aich_hashsets_from_payload_with_progress(
+    payload_path: &Path,
+    file_size: u64,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<Ed2kPayloadHashsets> {
+    if file_size == 0 {
+        anyhow::bail!("cannot build ED2K/AICH hashsets for zero-sized file");
+    }
+    let mut file = fs::File::open(payload_path).with_context(|| {
+        format!(
+            "failed to open ED2K/AICH payload {}",
+            payload_path.display()
+        )
+    })?;
+    let aich_part_specs = aich_part_specs_for_size(file_size)?;
+    let mut md4_part_hashes = Vec::with_capacity(
+        usize::try_from(chunk_count_for_size(file_size, ED2K_PART_SIZE) + 1).unwrap_or(0),
+    );
+    let mut aich_part_hashes = Vec::with_capacity(aich_part_specs.len());
+    let mut buffer = vec![0u8; usize::try_from(ED2K_EMBLOCK_SIZE).unwrap_or(0)];
+
+    for spec in &aich_part_specs {
+        let mut md4_hasher = Md4::new();
+        let mut block_hashes = Vec::with_capacity(
+            usize::try_from(chunk_count_for_size(spec.size, ED2K_EMBLOCK_SIZE)).unwrap_or(0),
+        );
+        let mut remaining = spec.size;
+        while remaining > 0 {
+            let chunk_len = usize::try_from(remaining.min(ED2K_EMBLOCK_SIZE)).unwrap_or(0);
+            file.read_exact(&mut buffer[..chunk_len])
+                .context("failed to read ED2K/AICH payload data")?;
+            md4_hasher.update(&buffer[..chunk_len]);
+            let digest = Sha1::digest(&buffer[..chunk_len]);
+            let mut hash = [0u8; 20];
+            hash.copy_from_slice(&digest);
+            block_hashes.push(hash);
+            if let Some(progress) = progress.as_deref_mut() {
+                progress(u64::try_from(chunk_len).unwrap_or(0));
+            }
+            remaining -= u64::try_from(chunk_len).unwrap_or(0);
+        }
+        md4_part_hashes.push(md4_hasher.finalize().into());
+        aich_part_hashes.push(build_aich_block_tree_root(
+            spec.size,
+            spec.is_left_branch,
+            &block_hashes,
+            0,
+        )?);
+    }
+
+    let (file_hash, md4_hashset) = if file_size < ED2K_PART_SIZE {
+        (Ed2kHash::from_bytes(md4_part_hashes[0]), Vec::new())
+    } else {
+        if file_size.is_multiple_of(ED2K_PART_SIZE) {
+            md4_part_hashes.push(Md4::new().finalize().into());
+        }
+        let mut file_hasher = Md4::new();
+        for part_hash in &md4_part_hashes {
+            file_hasher.update(part_hash);
+        }
+        (
+            Ed2kHash::from_bytes(file_hasher.finalize().into()),
+            md4_part_hashes,
+        )
+    };
+    let aich_hashset = if file_size <= ED2K_PART_SIZE {
+        Ed2kAichHashset {
+            master_hash: aich_part_hashes[0],
+            part_hashes: Vec::new(),
+        }
+    } else {
+        Ed2kAichHashset {
+            master_hash: reconstruct_aich_root_from_part_hashes(file_size, &aich_part_hashes)?,
+            part_hashes: aich_part_hashes,
+        }
+    };
+    Ok(Ed2kPayloadHashsets {
+        file_hash,
+        md4_hashset,
+        aich_hashset,
+    })
+}
+
+struct AichPartSpec {
+    size: u64,
+    is_left_branch: bool,
+}
+
+fn aich_part_specs_for_size(file_size: u64) -> Result<Vec<AichPartSpec>> {
+    let mut specs = Vec::with_capacity(usize::from(expected_aich_hash_count(file_size)).max(1));
+    collect_aich_part_specs(file_size, true, &mut specs)?;
+    Ok(specs)
+}
+
+fn collect_aich_part_specs(
+    size: u64,
+    is_left_branch: bool,
+    specs: &mut Vec<AichPartSpec>,
+) -> Result<()> {
+    if size <= ED2K_PART_SIZE {
+        specs.push(AichPartSpec {
+            size,
+            is_left_branch,
+        });
+        return Ok(());
+    }
+    let part_count = chunk_count_for_size(size, ED2K_PART_SIZE);
+    let left_size = ((part_count + u64::from(is_left_branch)) / 2) * ED2K_PART_SIZE;
+    let right_size = size - left_size;
+    collect_aich_part_specs(left_size, true, specs)?;
+    collect_aich_part_specs(right_size, false, specs)
 }
 
 fn read_md4_digest_from_reader(

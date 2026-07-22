@@ -637,7 +637,7 @@ impl ReloadPlanStats {
             failed_hash_count: 0,
             planned_hash_bytes: self.planned_hash_bytes,
             completed_hash_bytes: 0,
-            planned_read_bytes: self.planned_hash_bytes.saturating_mul(2),
+            planned_read_bytes: self.planned_hash_bytes,
             completed_read_bytes: 0,
             read_rate_bytes_per_sec: 0,
             started_at_ms: None,
@@ -682,7 +682,7 @@ fn current_time_ms() -> i64 {
 }
 
 fn target_read_bytes_total(file_size: u64) -> u64 {
-    file_size.saturating_mul(2)
+    file_size
 }
 
 fn target_name(path: &Path) -> String {
@@ -998,7 +998,7 @@ fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
         diagnostics.failed_hash_count = 0;
         diagnostics.planned_hash_bytes = planned_hash_bytes;
         diagnostics.completed_hash_bytes = 0;
-        diagnostics.planned_read_bytes = planned_hash_bytes.saturating_mul(2);
+        diagnostics.planned_read_bytes = planned_hash_bytes;
         diagnostics.completed_read_bytes = 0;
         diagnostics.read_rate_bytes_per_sec = 0;
         diagnostics.active.clear();
