@@ -26,6 +26,7 @@ use emulebb_settings::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
@@ -35,6 +36,8 @@ mod vpn_guard_monitor;
 
 pub const PROFILE_SETTINGS_FILE: &str = "emulebb-rust-settings.toml";
 pub const PROFILE_METADATA_FILE: &str = "emulebb-rust-metadata.db";
+
+const REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -598,6 +601,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     let rest_bind_addr = profile.rest_bind_addr()?;
     let listener = tokio::net::TcpListener::bind(rest_bind_addr).await?;
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
+    spawn_regular_diagnostic_summary(Arc::clone(&core));
 
     // Start the live auto-pickup monitor first, then run the initial
     // scan-on-demand pickup of files that are already present. Keeping both
@@ -659,6 +663,51 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     graceful_teardown(&core).await;
     serve_result?;
     Ok(())
+}
+
+fn spawn_regular_diagnostic_summary(core: Arc<EmulebbCore>) {
+    tokio::spawn(async move {
+        log_regular_diagnostic_summary(&core).await;
+        let mut interval = tokio::time::interval(REGULAR_DIAGNOSTIC_SUMMARY_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            log_regular_diagnostic_summary(&core).await;
+        }
+    });
+}
+
+async fn log_regular_diagnostic_summary(core: &EmulebbCore) {
+    let status = core.status().await;
+    let upload_policy = core.upload_policy_metrics().await;
+    let throughput = core.transfer_throughput_stats();
+    let shared_hashing_count = core.shared_directories().await.hashing_count;
+    let vpn_guard = core.vpn_guard_status();
+    info!(
+        uptime_secs = status.uptime_secs,
+        vpn_guard_enabled = vpn_guard.enabled,
+        vpn_guard_startup_blocked = vpn_guard.startup_blocked,
+        vpn_guard_egress_verified = vpn_guard.egress_verified,
+        vpn_guard_http_attempted = vpn_guard.http_probe.attempted,
+        vpn_guard_http_succeeded = vpn_guard.http_probe.succeeded,
+        vpn_guard_stun_attempted = vpn_guard.stun_probe.attempted,
+        vpn_guard_stun_succeeded = vpn_guard.stun_probe.succeeded,
+        ed2k_connected = status.ed2k.connected,
+        ed2k_high_id = status.ed2k.connected && !status.ed2k.firewalled.unwrap_or(false),
+        kad_connected = status.kad.connected,
+        active_uploads = upload_policy.active_sessions,
+        waiting_uploads = upload_policy.waiting_sessions,
+        upload_speed_kibps = upload_policy.upload_rate_bytes_per_sec as f64 / 1024.0,
+        session_uploaded_bytes = throughput.session_uploaded_bytes,
+        active_downloads = status.transfers.active,
+        completed_downloads = status.transfers.completed,
+        total_downloads = status.transfers.total,
+        download_speed_kibps = throughput.download_rate_bytes_per_sec as f64 / 1024.0,
+        session_downloaded_bytes = throughput.session_downloaded_bytes,
+        shared_hashing_count,
+        "regular startup HTTP public IPv4 STUN ED2K Kad publish upload download diagnostic summary"
+    );
 }
 
 fn parse_user_hash(value: &str) -> Result<[u8; 16]> {

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const LOG_CAPACITY: usize = 500;
+const LOG_CAPACITY: usize = 2000;
 
 /// One captured log line in the eMuleBB `LogEntry` shape.
 #[derive(Debug, Clone)]
