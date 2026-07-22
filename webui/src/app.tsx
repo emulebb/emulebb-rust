@@ -70,6 +70,7 @@ const SNAPSHOT_LIMIT = 500;
 const LOG_LIMIT = 300;
 const REFRESH_INTERVAL_MS = 3000;
 const EVENT_STREAM_RETRY_MS = 3000;
+const EVENT_STREAM_REFRESH_THROTTLE_MS = 1000;
 
 type Tab =
   | "overview"
@@ -137,6 +138,7 @@ export function App() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
 
   useEffect(() => {
@@ -147,77 +149,19 @@ export function App() {
     setRefreshing(true);
     setError("");
     try {
-      const [
-        nextSnapshot,
-        nextLogs,
-        nextSharedDirectories,
-        nextSharedFiles,
-        nextCategories,
-        nextFriends,
-        nextSettings,
-        nextUploads,
-        nextUploadQueue,
-        nextAppInfo,
-        nextCapabilities,
-        nextRuntimeDiagnostics,
-        nextTransferEventDiagnostics,
-        nextNetworkStatus,
-        nextNatStatus,
-        nextIpFilterStatus,
-        nextVpnGuardStatus,
-        nextSettingsSurface
-      ] = await Promise.all([
-        client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`),
-        client.get<Page<LogRecord> | LogRecord[]>(`logs?limit=${LOG_LIMIT}`),
-        client.get<SharedDirectories>("shared-directories"),
-        client.get<Page<SharedFile>>(`shared-files?limit=${SNAPSHOT_LIMIT}`),
-        client.get<Page<Category>>("categories"),
-        client.get<Page<Friend>>("friends"),
-        client.get<AppSettings>("app/settings"),
-        client.get<Page<Upload>>("uploads"),
-        client.get<Page<Upload>>(`upload-queue?limit=${SNAPSHOT_LIMIT}&includeScoreBreakdown=true`),
-        client.get<AppInfo>("app"),
-        client.get<unknown>("capabilities"),
-        client.get<RuntimeDiagnostics>("diagnostics"),
-        client.get<TransferEventRuntimeDiagnostics>("events/status"),
-        client.get<NetworkStatus>("network"),
-        client.get<NatStatus>("nat"),
-        client.get<IpFilterStatus>("ip-filter"),
-        client.get<VpnGuardStatus>("vpn-guard"),
-        client.get<SettingsSurface>("app/settings/surface")
-      ]);
+      const nextSnapshot = await client.get<Snapshot>(`snapshot?limit=${SNAPSHOT_LIMIT}`);
       setSnapshot(nextSnapshot);
-      setAppInfo(nextAppInfo);
-      setCapabilities(nextCapabilities);
-      setRuntimeDiagnostics({
-        ...nextRuntimeDiagnostics,
-        transferEvents: nextTransferEventDiagnostics
-      });
-      setNetworkStatus(nextNetworkStatus);
-      setNatStatus(nextNatStatus);
-      setIpFilterStatus(nextIpFilterStatus);
-      setVpnGuardStatus(nextVpnGuardStatus);
-      setSettingsSurface(nextSettingsSurface);
-      setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
-      setSharedDirectories(nextSharedDirectories);
-      setSharedFiles(nextSharedFiles.items ?? nextSnapshot.sharedFiles ?? []);
-      setCategories(nextCategories.items ?? []);
-      setFriends(nextFriends.items ?? []);
-      setSettings(nextSettings);
-      setUploads(nextUploads.items ?? nextSnapshot.uploads ?? []);
-      setUploadQueue(nextUploadQueue.items ?? nextSnapshot.uploadQueue ?? []);
+      setAppInfo((current) => current ?? nextSnapshot.app ?? null);
+      setLogs(nextSnapshot.logs ?? []);
+      setSharedFiles(nextSnapshot.sharedFiles ?? []);
+      setUploads(nextSnapshot.uploads ?? []);
+      setUploadQueue(nextSnapshot.uploadQueue ?? []);
+      setRefreshGeneration((value) => value + 1);
 
       const searches = nextSnapshot.searches ?? [];
       const recent = searches[0];
       if (recent?.id !== undefined) {
-        try {
-          const search = await client.get<SearchItem>(
-            `searches/${recent.id}?limit=250&includeEvidence=false&exactTotal=true`
-          );
-          setLatestSearch(search);
-        } catch {
-          setLatestSearch(recent);
-        }
+        setLatestSearch(recent);
       } else {
         setLatestSearch(null);
       }
@@ -229,10 +173,269 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const loadStaticMetadata = async () => {
+      try {
+        const [nextAppInfo, nextCapabilities] = await Promise.all([
+          client.get<AppInfo>("app"),
+          client.get<unknown>("capabilities")
+        ]);
+        if (!cancelled) {
+          setAppInfo(nextAppInfo);
+          setCapabilities(nextCapabilities);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadStaticMetadata();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!["transfers", "search", "categories"].includes(tab)) {
+      return;
+    }
+    let cancelled = false;
+    const loadCategories = async () => {
+      try {
+        const nextCategories = await client.get<Page<Category>>("categories");
+        if (!cancelled) {
+          setCategories(nextCategories.items ?? []);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadCategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "friends") {
+      return;
+    }
+    let cancelled = false;
+    const loadFriends = async () => {
+      try {
+        const nextFriends = await client.get<Page<Friend>>("friends");
+        if (!cancelled) {
+          setFriends(nextFriends.items ?? []);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadFriends();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "sharing") {
+      return;
+    }
+    let cancelled = false;
+    const loadSharing = async () => {
+      try {
+        const nextSharedDirectories = await client.get<SharedDirectories>("shared-directories");
+        if (!cancelled) {
+          setSharedDirectories(nextSharedDirectories);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadSharing();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "shared-files") {
+      return;
+    }
+    let cancelled = false;
+    const loadSharedFiles = async () => {
+      try {
+        const nextSharedFiles = await client.get<Page<SharedFile>>(`shared-files?limit=${SNAPSHOT_LIMIT}`);
+        if (!cancelled) {
+          setSharedFiles(nextSharedFiles.items ?? []);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadSharedFiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "uploads") {
+      return;
+    }
+    let cancelled = false;
+    const loadUploads = async () => {
+      try {
+        const [nextUploads, nextUploadQueue] = await Promise.all([
+          client.get<Page<Upload>>("uploads"),
+          client.get<Page<Upload>>(`upload-queue?limit=${SNAPSHOT_LIMIT}`)
+        ]);
+        if (!cancelled) {
+          setUploads(nextUploads.items ?? []);
+          setUploadQueue(nextUploadQueue.items ?? []);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadUploads();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (!["settings", "network"].includes(tab)) {
+      return;
+    }
+    let cancelled = false;
+    const loadSettings = async () => {
+      try {
+        const [nextSettings, nextNetworkStatus, nextNatStatus, nextIpFilterStatus, nextVpnGuardStatus, nextSettingsSurface] = await Promise.all([
+          client.get<AppSettings>("app/settings"),
+          client.get<NetworkStatus>("network"),
+          client.get<NatStatus>("nat"),
+          client.get<IpFilterStatus>("ip-filter"),
+          client.get<VpnGuardStatus>("vpn-guard"),
+          client.get<SettingsSurface>("app/settings/surface")
+        ]);
+        if (!cancelled) {
+          setSettings(nextSettings);
+          setNetworkStatus(nextNetworkStatus);
+          setNatStatus(nextNatStatus);
+          setIpFilterStatus(nextIpFilterStatus);
+          setVpnGuardStatus(nextVpnGuardStatus);
+          setSettingsSurface(nextSettingsSurface);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadSettings();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "diagnostics") {
+      return;
+    }
+    let cancelled = false;
+    const loadDiagnostics = async () => {
+      try {
+        const [nextRuntimeDiagnostics, nextTransferEventDiagnostics] = await Promise.all([
+          client.get<RuntimeDiagnostics>("diagnostics"),
+          client.get<TransferEventRuntimeDiagnostics>("events/status")
+        ]);
+        if (!cancelled) {
+          setRuntimeDiagnostics({
+            ...nextRuntimeDiagnostics,
+            transferEvents: nextTransferEventDiagnostics
+          });
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadDiagnostics();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "logs") {
+      return;
+    }
+    let cancelled = false;
+    const loadLogs = async () => {
+      try {
+        const nextLogs = await client.get<Page<LogRecord> | LogRecord[]>(`logs?limit=${LOG_LIMIT}`);
+        if (!cancelled) {
+          setLogs(Array.isArray(nextLogs) ? nextLogs : nextLogs.items ?? []);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(errorMessage(caught));
+        }
+      }
+    };
+    void loadLogs();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration]);
+
+  useEffect(() => {
+    if (tab !== "search") {
+      return;
+    }
+    const recent = snapshot?.searches?.[0];
+    if (recent?.id === undefined) {
+      return;
+    }
+    let cancelled = false;
+    const loadRecentSearch = async () => {
+      try {
+        const search = await client.get<SearchItem>(
+          `searches/${recent.id}?limit=250&includeEvidence=false&exactTotal=true`
+        );
+        if (!cancelled) {
+          setLatestSearch(search);
+        }
+      } catch {
+        if (!cancelled) {
+          setLatestSearch(recent);
+        }
+      }
+    };
+    void loadRecentSearch();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshGeneration, snapshot?.searches]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
@@ -281,7 +484,7 @@ export function App() {
       refreshTimer = window.setTimeout(() => {
         refreshTimer = undefined;
         void runScheduledRefresh();
-      }, 100);
+      }, EVENT_STREAM_REFRESH_THROTTLE_MS);
     };
 
     const runStream = async () => {
