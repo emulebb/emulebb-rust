@@ -42,8 +42,9 @@ pub(crate) fn status(
     } else {
         None
     };
-    // Active dual-plane egress verdict (eMuleBB PublicIpProbe): when blocking with
-    // a CIDR gate, each attempted bound probe must resolve an allowlisted public IP.
+    // Active egress verdict: when blocking with a CIDR gate, at least one bound
+    // public IPv4 probe (STUN UDP or HTTP TCP) must resolve an allowlisted public
+    // IP. Any successful probe that resolves an out-of-range IP still fails closed.
     let egress_block = blocking
         .then(|| egress_probe_block_reason(guard, report))
         .flatten();
@@ -52,11 +53,13 @@ pub(crate) fn status(
     let learned_block = blocking
         .then(|| public_ip_block_reason(guard, public_ip))
         .flatten();
+    let cidr_gate = !guard.allowed_public_ip_cidrs.trim().is_empty();
+    let egress_verified =
+        blocking && cidr_gate && egress_block.is_none() && egress_probe_verified(guard, report);
     let startup_block_reason = interface_block_reason
         .or(egress_block.clone())
         .or(learned_block)
         .unwrap_or_default();
-    let cidr_gate = !guard.allowed_public_ip_cidrs.trim().is_empty();
     let probed_ip = report
         .http
         .public_ip
@@ -70,18 +73,17 @@ pub(crate) fn status(
         startup_blocked: !startup_block_reason.is_empty(),
         startup_block_reason,
         public_ip: probed_ip,
-        egress_verified: blocking && cidr_gate && egress_block.is_none(),
+        egress_verified,
         egress_block_reason: egress_block.unwrap_or_default(),
         stun_probe: probe_status(&report.stun),
         http_probe: probe_status(&report.http),
     }
 }
 
-/// Dual-probe egress verdict — eMuleBB `VpnGuardPolicySeams::IsProbeResultAllowed`
-/// (`!bPublicIpCheckRequired || (bProbeSucceeded && bPublicIpAllowed)`) applied to
-/// both the STUN and HTTP bound probes. With no CIDR gate there is nothing to
-/// verify (`None`). An unattempted probe is skipped (the monitor attempts it each
-/// cycle); an attempted probe must have succeeded and resolved an allowlisted IP.
+/// Bound egress verdict. With no CIDR gate there is nothing to verify (`None`).
+/// Unattempted probes are skipped. A successful out-of-range probe fails closed;
+/// otherwise one successful allowlisted probe is enough, so a transient STUN-only
+/// or HTTP-only provider outage does not sink the whole P2P startup.
 pub(crate) fn egress_probe_block_reason(
     guard: &VpnGuardConfig,
     report: &EgressProbeReport,
@@ -89,19 +91,43 @@ pub(crate) fn egress_probe_block_reason(
     if guard.allowed_public_ip_cidrs.trim().is_empty() {
         return None;
     }
+    let mut attempted_failures = Vec::new();
+    let mut allowlisted_success = false;
     for (label, probe) in [("STUN", &report.stun), ("HTTP", &report.http)] {
         if !probe.attempted {
             continue;
         }
         if !probe.succeeded {
             let detail = probe.error.as_deref().unwrap_or("no public IP resolved");
-            return Some(format!("VPN Guard {label} egress probe failed: {detail}"));
+            attempted_failures.push(format!("{label}: {detail}"));
+            continue;
         }
         if let Some(reason) = public_ip_block_reason(guard, probe.public_ip) {
             return Some(format!("{label} egress {reason}"));
         }
+        allowlisted_success = true;
     }
-    None
+    if allowlisted_success {
+        return None;
+    }
+    if attempted_failures.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "VPN Guard bound public IPv4 probes failed: {}",
+            attempted_failures.join("; ")
+        ))
+    }
+}
+
+pub(crate) fn egress_probe_verified(guard: &VpnGuardConfig, report: &EgressProbeReport) -> bool {
+    if guard.allowed_public_ip_cidrs.trim().is_empty() {
+        return false;
+    }
+    [report.stun.public_ip, report.http.public_ip]
+        .into_iter()
+        .flatten()
+        .any(|ip| public_ip_block_reason(guard, Some(ip)).is_none())
 }
 
 fn is_blocking_mode(guard: &VpnGuardConfig) -> bool {
@@ -264,12 +290,13 @@ mod tests {
         let guard = guard("176.10.104.0/22");
         let allowed = Ipv4Addr::new(176, 10, 104, 9);
         let leaked = Ipv4Addr::new(8, 8, 8, 8);
-        // Both probes resolve an allowlisted IP → verified.
+        // Both probes resolve an allowlisted IP -> verified.
         let ok = EgressProbeReport {
             stun: probe(true, Some(allowed), true),
             http: probe(true, Some(allowed), true),
         };
         assert!(egress_probe_block_reason(&guard, &ok).is_none());
+        assert!(egress_probe_verified(&guard, &ok));
         // HTTP probe resolves an out-of-allowlist IP → a leak is reported.
         let leak = EgressProbeReport {
             stun: probe(true, Some(allowed), true),
@@ -280,24 +307,35 @@ mod tests {
                 .unwrap()
                 .contains("HTTP egress")
         );
+        assert!(egress_probe_verified(&guard, &leak));
     }
 
     #[test]
-    fn egress_verdict_fails_closed_on_probe_failure_but_skips_unattempted() {
+    fn egress_verdict_accepts_one_successful_probe_but_fails_when_all_attempts_fail() {
         let guard = guard("176.10.104.0/22");
-        // An attempted-but-failed probe fails closed (could not verify egress).
+        let allowed = Ipv4Addr::new(176, 10, 104, 9);
+        // STUN can be down while HTTP verifies the same bound IPv4 egress.
+        let http_only = EgressProbeReport {
+            stun: probe(false, None, true),
+            http: probe(true, Some(allowed), true),
+        };
+        assert!(egress_probe_block_reason(&guard, &http_only).is_none());
+        assert!(egress_probe_verified(&guard, &http_only));
+        // All attempted probes failing still fails closed.
         let failed = EgressProbeReport {
             stun: probe(false, None, true),
-            http: BoundProbeResult::default(),
+            http: probe(false, None, true),
         };
         assert!(
             egress_probe_block_reason(&guard, &failed)
                 .unwrap()
-                .contains("STUN egress probe failed")
+                .contains("bound public IPv4 probes failed")
         );
-        // A not-yet-attempted probe is skipped (monitor attempts it each cycle).
+        assert!(!egress_probe_verified(&guard, &failed));
+        // A not-yet-attempted probe is skipped and is not verified.
         let unattempted = EgressProbeReport::default();
         assert!(egress_probe_block_reason(&guard, &unattempted).is_none());
+        assert!(!egress_probe_verified(&guard, &unattempted));
     }
 
     #[test]

@@ -870,7 +870,7 @@ pub struct VpnGuardStatus {
     pub startup_block_reason: String,
     /// The probe-confirmed public egress IPv4 (from the HTTP/STUN probes), when known.
     pub public_ip: Option<String>,
-    /// Whether the dual bound egress probes both resolved an allowlisted public IP.
+    /// Whether a bound egress probe resolved an allowlisted public IP with no observed leak.
     pub egress_verified: bool,
     /// Why the egress is not verified (empty when verified or no CIDR gate).
     pub egress_block_reason: String,

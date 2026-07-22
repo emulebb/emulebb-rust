@@ -9,6 +9,7 @@ impl EmulebbCore {
     }
 
     pub async fn start_kad(&self) -> Result<NetworkStatus> {
+        tracing::info!("Kad start requested");
         // The Kademlia network must be enabled (eMule thePrefs.GetNetworkKademlia());
         // when off, Kad is refused / not started.
         ensure!(
@@ -17,10 +18,16 @@ impl EmulebbCore {
         );
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {
+            tracing::warn!(
+                reason = %guard.startup_block_reason,
+                "Kad start blocked by VPN Guard"
+            );
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
         }
         self.set_kad_running(true).await;
-        Ok(kad_status_from_running(self.state.lock().await.kad_running))
+        let status = kad_status_from_running(self.state.lock().await.kad_running);
+        tracing::info!(running = status.running, "Kad start accepted");
+        Ok(status)
     }
 
     pub async fn bootstrap_kad(&self, address: &str, port: u16) -> Result<NetworkStatus> {

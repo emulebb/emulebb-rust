@@ -48,6 +48,14 @@ pub const DEFAULT_STUN_SERVERS: &[(&str, u16)] = &[
     ("stun.nextcloud.com", 3478),
 ];
 
+/// Detailed result for VPN Guard/reporting callers that need to name the winning
+/// STUN server instead of only the reflexive IPv4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StunProbeOutcome {
+    pub endpoint: SocketAddrV4,
+    pub server: String,
+}
+
 /// Race [`DEFAULT_STUN_SERVERS`] from a socket bound to `bind_ip` and return the
 /// first reflexive public IPv4 observed. Fails only if every server fails.
 ///
@@ -55,9 +63,9 @@ pub const DEFAULT_STUN_SERVERS: &[(&str, u16)] = &[
 /// so the probe is egress-pinned exactly like the eD2k/Kad sockets; pass an
 /// unspecified address (`0.0.0.0`) for a default-route baseline probe.
 pub async fn stun_probe(bind_ip: Ipv4Addr, timeout: Duration) -> Result<Ipv4Addr> {
-    stun_probe_servers(DEFAULT_STUN_SERVERS, bind_ip, timeout)
+    stun_probe_servers_detailed(DEFAULT_STUN_SERVERS, bind_ip, timeout)
         .await
-        .map(|endpoint| *endpoint.ip())
+        .map(|outcome| *outcome.endpoint.ip())
 }
 
 /// Race an explicit server set, returning the first reflexive endpoint (ip:port).
@@ -69,30 +77,54 @@ pub async fn stun_probe_servers(
     bind_ip: Ipv4Addr,
     timeout: Duration,
 ) -> Result<SocketAddrV4> {
+    stun_probe_servers_detailed(servers, bind_ip, timeout)
+        .await
+        .map(|outcome| outcome.endpoint)
+}
+
+/// Race an explicit server set, returning the first reflexive endpoint plus the
+/// server label. The error contains every failed server attempt so operational
+/// logs and REST errors show the real fallback behavior.
+pub async fn stun_probe_servers_detailed(
+    servers: &[(&'static str, u16)],
+    bind_ip: Ipv4Addr,
+    timeout: Duration,
+) -> Result<StunProbeOutcome> {
     let mut set = tokio::task::JoinSet::new();
     for &(host, port) in servers {
         set.spawn(async move {
             // Bound the whole per-server probe (DNS + connect + send + recv) with
             // one deadline, consistent with the libtorrent/eMuleBB probes.
-            match tokio::time::timeout(timeout, probe_one(host, port, bind_ip)).await {
+            let label = format!("{host}:{port}");
+            let result = match tokio::time::timeout(timeout, probe_one(host, port, bind_ip)).await {
                 Ok(result) => result,
-                Err(_) => Err(anyhow!("STUN probe to {host}:{port} timed out")),
-            }
+                Err(_) => Err(anyhow!("timed out")),
+            };
+            (label, result)
         });
     }
 
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut errors = Vec::new();
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok(Ok(endpoint)) => {
+            Ok((label, Ok(endpoint))) => {
                 set.abort_all();
-                return Ok(endpoint);
+                return Ok(StunProbeOutcome {
+                    endpoint,
+                    server: label,
+                });
             }
-            Ok(Err(err)) => last_err = Some(err),
-            Err(err) => last_err = Some(anyhow!("STUN probe task failed: {err}")),
+            Ok((label, Err(err))) => {
+                errors.push(format!("{label}: {err:#}"));
+            }
+            Err(err) => errors.push(format!("task: {err}")),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("no STUN servers configured")))
+    if errors.is_empty() {
+        Err(anyhow!("no STUN servers configured"))
+    } else {
+        Err(anyhow!("{}", errors.join("; ")))
+    }
 }
 
 /// NAT mapping behavior, classified by comparing the external port this socket is
@@ -416,6 +448,20 @@ mod tests {
             classify_mapping_ports(Some(50000), None),
             NatMappingBehavior::Inconclusive
         );
+    }
+
+    #[tokio::test]
+    async fn detailed_stun_probe_reports_every_failed_server() {
+        let err = stun_probe_servers_detailed(
+            &[("invalid.invalid", 3478), ("also.invalid", 3478)],
+            Ipv4Addr::new(203, 0, 113, 234),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("unassigned bind IP must make every attempted server fail");
+        let text = err.to_string();
+        assert!(text.contains("invalid.invalid:3478"));
+        assert!(text.contains("also.invalid:3478"));
     }
 
     #[tokio::test]

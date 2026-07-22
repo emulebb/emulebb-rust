@@ -21,6 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpSocket;
+use tracing::{info, warn};
 
 use crate::networking::require_bind_if_index;
 
@@ -82,20 +83,36 @@ pub async fn http_probe(bind_ip: Ipv4Addr, timeout: Duration) -> BoundProbeResul
         Ok(index) => index,
         Err(err) => return BoundProbeResult::failure("http".to_string(), err.to_string()),
     };
-    let mut last = BoundProbeResult::failure("http".to_string(), "no HTTP providers".to_string());
+    let mut attempts = Vec::new();
     for &(host, path) in HTTP_PROVIDERS {
         let provider = format!("http://{host}{path}");
+        info!(provider = %provider, bind_ip = %bind_ip, bind_if_index, "VPN Guard HTTP public IPv4 probe attempt");
         match tokio::time::timeout(timeout, http_probe_one(bind_ip, bind_if_index, host, path))
             .await
         {
-            Ok(Ok(ip)) => return BoundProbeResult::success(ip, provider),
-            Ok(Err(err)) => last = BoundProbeResult::failure(provider, err.to_string()),
+            Ok(Ok(ip)) => {
+                info!(provider = %provider, bind_ip = %bind_ip, bind_if_index, public_ip = %ip, "VPN Guard HTTP public IPv4 probe succeeded");
+                return BoundProbeResult::success(ip, provider);
+            }
+            Ok(Err(err)) => {
+                let detail = err.to_string();
+                warn!(provider = %provider, bind_ip = %bind_ip, bind_if_index, error = %detail, "VPN Guard HTTP public IPv4 probe failed");
+                attempts.push(format!("{provider}: {detail}"));
+            }
             Err(_) => {
-                last = BoundProbeResult::failure(provider, "HTTP probe timed out".to_string())
+                warn!(provider = %provider, bind_ip = %bind_ip, bind_if_index, "VPN Guard HTTP public IPv4 probe timed out");
+                attempts.push(format!("{provider}: HTTP probe timed out"));
             }
         }
     }
-    last
+    BoundProbeResult::failure(
+        "http".to_string(),
+        if attempts.is_empty() {
+            "no HTTP providers".to_string()
+        } else {
+            attempts.join("; ")
+        },
+    )
 }
 
 /// One provider: resolve, bind + egress-pin the TCP socket, connect(:80), send a
@@ -157,9 +174,24 @@ async fn http_probe_one(
 
 /// UDP/STUN egress leg: delegate to the bound + egress-pinned STUN probe.
 pub async fn stun_probe_bound(bind_ip: Ipv4Addr, timeout: Duration) -> BoundProbeResult {
-    match crate::stun::stun_probe(bind_ip, timeout).await {
-        Ok(ip) => BoundProbeResult::success(ip, "stun".to_string()),
-        Err(err) => BoundProbeResult::failure("stun".to_string(), err.to_string()),
+    info!(bind_ip = %bind_ip, server_count = crate::stun::DEFAULT_STUN_SERVERS.len(), "VPN Guard STUN public IPv4 probe starting");
+    match crate::stun::stun_probe_servers_detailed(
+        crate::stun::DEFAULT_STUN_SERVERS,
+        bind_ip,
+        timeout,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            let ip = *outcome.endpoint.ip();
+            info!(provider = %outcome.server, bind_ip = %bind_ip, public_ip = %ip, "VPN Guard STUN public IPv4 probe succeeded");
+            BoundProbeResult::success(ip, outcome.server)
+        }
+        Err(err) => {
+            let detail = err.to_string();
+            warn!(bind_ip = %bind_ip, error = %detail, "VPN Guard STUN public IPv4 probe failed");
+            BoundProbeResult::failure("stun".to_string(), detail)
+        }
     }
 }
 

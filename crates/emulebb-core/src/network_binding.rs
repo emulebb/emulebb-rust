@@ -55,8 +55,23 @@ impl EmulebbCore {
             return;
         }
         let timeout = std::time::Duration::from_secs(6);
-        let stun = emulebb_ed2k::public_ip_probe::stun_probe_bound(bind_ip, timeout).await;
-        let http = emulebb_ed2k::public_ip_probe::http_probe(bind_ip, timeout).await;
+        tracing::info!(
+            bind_ip = %bind_ip,
+            "VPN Guard egress probe starting (STUN UDP and HTTP IPv4)"
+        );
+        let (stun, http) = tokio::join!(
+            emulebb_ed2k::public_ip_probe::stun_probe_bound(bind_ip, timeout),
+            emulebb_ed2k::public_ip_probe::http_probe(bind_ip, timeout),
+        );
+        tracing::info!(
+            stun_succeeded = stun.succeeded,
+            stun_provider = %stun.provider,
+            stun_public_ip = ?stun.public_ip,
+            http_succeeded = http.succeeded,
+            http_provider = %http.provider,
+            http_public_ip = ?http.public_ip,
+            "VPN Guard egress probe finished"
+        );
         if let Ok(mut report) = self.vpn_guard_egress.lock() {
             *report = vpn_guard::EgressProbeReport { stun, http };
         }

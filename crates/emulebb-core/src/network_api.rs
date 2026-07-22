@@ -90,6 +90,10 @@ impl EmulebbCore {
     }
 
     async fn connect_ed2k_to_server(&self, endpoint: Option<&str>) -> Result<NetworkStatus> {
+        tracing::info!(
+            endpoint = endpoint.unwrap_or("auto"),
+            "ED2K connect requested"
+        );
         let core_settings = self.state.lock().await.core_settings.clone();
         // The eD2k network must be enabled (eMule thePrefs.GetNetworkED2K()); when
         // off, the server connect is refused and no eD2k auto-ops run.
@@ -100,6 +104,10 @@ impl EmulebbCore {
         let kad_network_enabled = core_settings.network_kademlia;
         let guard = self.vpn_guard_status();
         if guard.startup_blocked {
+            tracing::warn!(
+                reason = %guard.startup_block_reason,
+                "ED2K connect blocked by VPN Guard"
+            );
             anyhow::bail!("blocked by VPN guard: {}", guard.startup_block_reason);
         }
         let Some(network) = self.ed2k_network.clone() else {
@@ -143,7 +151,13 @@ impl EmulebbCore {
                 runtime.server_reconnect_signal.notify_one();
             }
             drop(runtime_guard);
-            return Ok(self.ed2k_status().await);
+            let status = self.ed2k_status().await;
+            tracing::info!(
+                running = status.running,
+                connected = status.connected,
+                "ED2K connect request applied to running runtime"
+            );
+            return Ok(status);
         }
 
         // Start this session's background-download task set from empty (FIX B3):
@@ -561,7 +575,13 @@ impl EmulebbCore {
         });
         drop(runtime_guard);
         self.queue_ed2k_shared_catalog_publish();
-        Ok(self.ed2k_status().await)
+        let status = self.ed2k_status().await;
+        tracing::info!(
+            running = status.running,
+            connected = status.connected,
+            "ED2K runtime started for connect request"
+        );
+        Ok(status)
     }
 
     pub async fn disconnect_ed2k(&self) -> NetworkStatus {
