@@ -22,6 +22,30 @@ fn names(mut paths: Vec<PathBuf>) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn split_hash_targets_by_worker_bounds_and_balances_lanes() {
+    let lanes = split_hash_targets_by_worker((0..10).collect::<Vec<_>>(), 4);
+    assert_eq!(lanes.len(), 4);
+    assert_eq!(
+        lanes.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![3, 3, 2, 2]
+    );
+    assert_eq!(lanes[0], vec![0, 4, 8]);
+    assert_eq!(lanes[1], vec![1, 5, 9]);
+    assert_eq!(lanes[2], vec![2, 6]);
+    assert_eq!(lanes[3], vec![3, 7]);
+
+    assert_eq!(
+        split_hash_targets_by_worker(vec![1, 2, 3], 1),
+        vec![vec![1, 2, 3]]
+    );
+    assert_eq!(
+        split_hash_targets_by_worker(vec![1, 2, 3], 0),
+        vec![vec![1, 2, 3]]
+    );
+    assert!(split_hash_targets_by_worker::<u8>(Vec::new(), 4).is_empty());
+}
+
 #[tokio::test]
 async fn set_shared_directories_canonicalizes_configured_root() {
     let root = scratch_dir("configured-root");
