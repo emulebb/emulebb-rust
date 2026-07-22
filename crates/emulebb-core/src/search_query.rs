@@ -146,7 +146,7 @@ pub(crate) fn search_result_from_ed2k(
         name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
-        complete_sources: 0,
+        complete_sources: file.source_count.unwrap_or_default(),
         file_type: file_type.clone(),
         complete: false,
         directory: String::new(),
@@ -172,7 +172,7 @@ pub(crate) fn search_result_from_kad(
         name,
         size_bytes: result.size.unwrap_or_default(),
         sources: result.source_count.unwrap_or_default(),
-        complete_sources: 0,
+        complete_sources: result.source_count.unwrap_or_default(),
         file_type: "unknown".to_string(),
         complete: false,
         directory: String::new(),
@@ -294,6 +294,30 @@ mod tests {
         assert_eq!(result.name, "Sample File.bin");
         assert_eq!(result.size_bytes, 1234);
         assert_eq!(result.sources, 9);
+        assert_eq!(result.complete_sources, 9);
         assert_eq!(result.file_type, "unknown");
+    }
+
+    #[test]
+    fn ed2k_result_maps_network_source_tag_to_complete_sources() {
+        let req = request();
+        let file_hash = Ed2kHash::from_bytes([0x22; 16]);
+        let result = search_result_from_ed2k(
+            "43",
+            &req,
+            Ed2kSearchFile {
+                file_hash,
+                file_name: Some("Server Result.pdf".to_string()),
+                file_size: Some(4096),
+                file_type: Some("doc".to_string()),
+                source_count: Some(5),
+            },
+        );
+
+        assert_eq!(result.search_id, "43");
+        assert_eq!(result.hash, file_hash.to_string());
+        assert_eq!(result.sources, 5);
+        assert_eq!(result.complete_sources, 5);
+        assert_eq!(result.file_type, "doc");
     }
 }
