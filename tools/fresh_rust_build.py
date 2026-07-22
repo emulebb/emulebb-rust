@@ -141,8 +141,8 @@ def assert_outside_workspace(path: Path, workspace_root: Path, label: str) -> No
 
 def remove_profile_outputs(directory: Path, names: tuple[str, ...]) -> None:
     for name in names:
-        artifact = directory / executable_name(name)
-        artifact.unlink(missing_ok=True)
+        for artifact in staged_artifact_names(name):
+            (directory / artifact).unlink(missing_ok=True)
 
 
 def clean_target_dir(env: dict[str, str]) -> None:
@@ -166,6 +166,13 @@ def stage_release_outputs(outputs: dict[str, Path], stage_bin_dir: Path) -> None
         shutil.copyfile(source, destination)
         os.utime(destination, None)
         print(f"staged {destination}", flush=True)
+        pdb_source = release_pdb_path(source, name)
+        if pdb_source is not None:
+            for pdb_artifact in staged_pdb_names(name):
+                pdb_destination = stage_bin_dir / pdb_artifact
+                shutil.copyfile(pdb_source, pdb_destination)
+                os.utime(pdb_destination, None)
+                print(f"staged {pdb_destination}", flush=True)
 
 
 def stage_webui(stage_dir: Path) -> None:
@@ -174,6 +181,34 @@ def stage_webui(stage_dir: Path) -> None:
 
 def executable_name(name: str) -> str:
     return f"{name}{EXE_SUFFIX}"
+
+
+def pdb_name(name: str) -> str:
+    return f"{name}.pdb"
+
+
+def cargo_pdb_name(name: str) -> str:
+    return f"{name.replace('-', '_')}.pdb"
+
+
+def staged_artifact_names(name: str) -> tuple[str, ...]:
+    return (executable_name(name), *staged_pdb_names(name))
+
+
+def staged_pdb_names(name: str) -> tuple[str, ...]:
+    names = (pdb_name(name), cargo_pdb_name(name))
+    return tuple(dict.fromkeys(names))
+
+
+def release_pdb_path(executable: Path, name: str) -> Path | None:
+    candidates = (
+        executable.with_suffix(".pdb"),
+        executable.with_name(cargo_pdb_name(name)),
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def run(command: list[str], env: dict[str, str]) -> None:
