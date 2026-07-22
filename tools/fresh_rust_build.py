@@ -15,9 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEBUG_BINARIES = ("emulebb-rust", "emulebb-rust-ui", "emulebb-nat-diagnostic")
 RELEASE_BINARIES = (
     "emulebb-rust",
-    "emulebb-rust-ui",
     "emulebb-rust-diagnostics",
     "emulebb-nat-diagnostic",
+)
+STALE_RELEASE_STAGE_ARTIFACTS = (
+    "emulebb-rust-ui.exe",
+    "emulebb-rust-ui.pdb",
+    "emulebb_rust_ui.pdb",
 )
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 
@@ -54,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.force_rebuild:
         clean_target_dir(env)
     remove_profile_outputs(stage_bin_dir, RELEASE_BINARIES)
+    remove_stale_release_stage_artifacts(stage_bin_dir)
 
     run(["cargo", "build", "--workspace", "--locked"], env)
     verify_profile_outputs(target_dir / "debug", DEBUG_BINARIES)
@@ -143,6 +148,11 @@ def remove_profile_outputs(directory: Path, names: tuple[str, ...]) -> None:
     for name in names:
         for artifact in staged_artifact_names(name):
             (directory / artifact).unlink(missing_ok=True)
+
+
+def remove_stale_release_stage_artifacts(directory: Path) -> None:
+    for artifact in STALE_RELEASE_STAGE_ARTIFACTS:
+        (directory / artifact).unlink(missing_ok=True)
 
 
 def clean_target_dir(env: dict[str, str]) -> None:

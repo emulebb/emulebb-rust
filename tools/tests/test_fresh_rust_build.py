@@ -40,3 +40,20 @@ def test_remove_profile_outputs_removes_stale_staged_and_cargo_pdb_names(tmp_pat
     assert not (tmp_path / "emulebb-rust-diagnostics.exe").exists()
     assert not (tmp_path / "emulebb-rust-diagnostics.pdb").exists()
     assert not (tmp_path / "emulebb_rust_diagnostics.pdb").exists()
+
+
+def test_remove_stale_release_stage_artifacts_prunes_dead_slint_ui(tmp_path: Path) -> None:
+    for name in (
+        "emulebb-rust-ui.exe",
+        "emulebb-rust-ui.pdb",
+        "emulebb_rust_ui.pdb",
+        "emulebb-rust.exe",
+    ):
+        (tmp_path / name).write_bytes(b"old")
+
+    FRESH_BUILD.remove_stale_release_stage_artifacts(tmp_path)
+
+    assert not (tmp_path / "emulebb-rust-ui.exe").exists()
+    assert not (tmp_path / "emulebb-rust-ui.pdb").exists()
+    assert not (tmp_path / "emulebb_rust_ui.pdb").exists()
+    assert (tmp_path / "emulebb-rust.exe").exists()

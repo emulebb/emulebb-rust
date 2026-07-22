@@ -41,6 +41,13 @@ jobs:
           ref: ${{ env.MINIUPNP_REF }}
           path: .ci/emulebb-miniupnp
 
+      - name: Checkout emulebb-tooling release scope
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: main
+          path: .ci/emulebb-tooling
+
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20 # 1.97.0
 
@@ -72,8 +79,8 @@ jobs:
           RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
         run: >-
           python tools/package_release_zip.py
-          --target-dir "$CARGO_TARGET_DIR/release"
-          --webui-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin/webui"
+          --target-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin"
+          --release-scope "$GITHUB_WORKSPACE/.ci/emulebb-tooling/docs/products/emulebb-rust/RELEASE-SCOPE.md"
           --out "$RELEASE_OUT_DIR"
 
       - name: Publish to the GitHub release
@@ -83,5 +90,7 @@ jobs:
         with:
           files: |
             ${{ env.RELEASE_OUT_DIR }}/*.zip
+            ${{ env.RELEASE_OUT_DIR }}/*.manifest.json
+            ${{ env.RELEASE_OUT_DIR }}/*.sbom.spdx.json
             ${{ env.RELEASE_OUT_DIR }}/SHA256SUMS
           fail_on_unmatched_files: true
