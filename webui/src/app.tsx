@@ -354,7 +354,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab]);
 
   useEffect(() => {
     if (tab !== "diagnostics") {

@@ -1233,6 +1233,17 @@ export function NetworkHealthView(props: {
   const [filter, setFilter] = useState("");
   const [selectedKey, setSelectedKey] = useState("");
   const [loadError, setLoadError] = useState("");
+  const sourceTargets = useMemo(
+    () => props.transfers
+      .filter((transfer) => transfer.state !== "completed")
+      .slice(0, 12)
+      .map((transfer) => ({
+        hash: transfer.hash,
+        name: transfer.name
+      })),
+    [props.transfers]
+  );
+  const sourceTargetSignature = sourceTargets.map((transfer) => transfer.hash).join("|");
 
   useEffect(() => {
     let cancelled = false;
@@ -1242,21 +1253,18 @@ export function NetworkHealthView(props: {
         const [nodePage, sourcePages] = await Promise.all([
           props.client.get<Page<KadNode>>("kad/nodes?limit=300"),
           Promise.all(
-            props.transfers
-              .filter((transfer) => transfer.state !== "completed")
-              .slice(0, 12)
-              .map(async (transfer) => {
-                try {
-                  const page = await props.client.get<Page<TransferSource>>(`transfers/${transfer.hash}/sources`);
-                  return (page.items ?? []).map((source) => ({
-                    ...source,
-                    transferHash: transfer.hash,
-                    transferName: transfer.name
-                  }));
-                } catch {
-                  return [] as NetworkTransferSource[];
-                }
-              })
+            sourceTargets.map(async (transfer) => {
+              try {
+                const page = await props.client.get<Page<TransferSource>>(`transfers/${transfer.hash}/sources`);
+                return (page.items ?? []).map((source) => ({
+                  ...source,
+                  transferHash: transfer.hash,
+                  transferName: transfer.name
+                }));
+              } catch {
+                return [] as NetworkTransferSource[];
+              }
+            })
           )
         ]);
         if (!cancelled) {
@@ -1273,7 +1281,7 @@ export function NetworkHealthView(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.client, props.kad.contactCount, props.kad.connected, props.transfers]);
+  }, [props.client, props.kad.contactCount, props.kad.connected, sourceTargetSignature]);
 
   const bindPolicy = networkBindPolicy(props.settings);
   const rows = useMemo(
