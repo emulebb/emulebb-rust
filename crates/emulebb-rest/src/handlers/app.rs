@@ -53,24 +53,20 @@ pub(crate) async fn events(
                     (receiver, core, None),
                 ));
             }
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        return Some((
-                            Ok::<_, Infallible>(sse_event(event)),
-                            (receiver, core, None),
-                        ));
-                    }
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        let event =
-                            TransferEvent::reset_lagged(core.reserve_transfer_event_id(), missed);
-                        return Some((
-                            Ok::<_, Infallible>(sse_event(event)),
-                            (receiver, core, None),
-                        ));
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
+            match receiver.recv().await {
+                Ok(event) => Some((
+                    Ok::<_, Infallible>(sse_event(event)),
+                    (receiver, core, None),
+                )),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    let event =
+                        TransferEvent::reset_lagged(core.reserve_transfer_event_id(), missed);
+                    Some((
+                        Ok::<_, Infallible>(sse_event(event)),
+                        (receiver, core, None),
+                    ))
                 }
+                Err(broadcast::error::RecvError::Closed) => None,
             }
         },
     );

@@ -389,7 +389,8 @@ fn completion_state(complete: bool) -> &'static str {
     if complete { "complete" } else { "incomplete" }
 }
 
-pub(crate) fn search_result_response(result: &SearchResult) -> Value {
+#[cfg(test)]
+fn search_result_response(result: &SearchResult) -> Value {
     search_result_response_with_options(result, true)
 }
 
