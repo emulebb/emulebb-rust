@@ -483,8 +483,8 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
     text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
     required = {
         "EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}": "explicit workspace root",
-        "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out": "external workspace output root",
-        "CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target": "external Cargo target",
+        "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out": "external workspace output root",
+        "CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target": "external Cargo target",
         "RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist": "external release archive",
         '--target-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin"': "explicit staged package target",
         '--release-scope "$GITHUB_WORKSPACE/.ci/emulebb-tooling/docs/products/emulebb-rust/RELEASE-SCOPE.md"': "release scope input",

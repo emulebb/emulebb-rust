@@ -219,8 +219,8 @@ class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """
 EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
+CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
 RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
 --target-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin"
 --release-scope "$GITHUB_WORKSPACE/.ci/emulebb-tooling/docs/products/emulebb-rust/RELEASE-SCOPE.md"

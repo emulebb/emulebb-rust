@@ -26,8 +26,8 @@ jobs:
     runs-on: windows-latest
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
