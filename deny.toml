@@ -22,6 +22,9 @@ ignore = [
     # RUSTSEC-2026-0192 — `ttf-parser` is unmaintained. The latest Slint release
     # still resolves it through its font/rendering stack, with no safe upgrade.
     "RUSTSEC-2026-0192",
+    # RUSTSEC-2026-0206 — `rustybuzz` is unmaintained. It is transitive through
+    # the latest Slint/resvg rendering stack, with no safe upgrade available yet.
+    "RUSTSEC-2026-0206",
     # RUSTSEC-2026-0194/0195 affect quick-xml 0.39 while parsing attacker-controlled
     # XML. Our only path is the latest wayland-scanner, which uses it at build time
     # on trusted Wayland protocol files and currently requires quick-xml ^0.39.
