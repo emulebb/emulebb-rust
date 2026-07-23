@@ -461,6 +461,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
     const PAGE: &[&str] = &["offset", "limit"];
     const TRANSFERS: &[&str] = &["state", "categoryId", "offset", "limit"];
     const CONFIRM: &[&str] = &["confirm"];
+    const SHARED_DIRECTORY_ROOT: &[&str] = &["path"];
     const UPLOAD_QUEUE: &[&str] = &["offset", "limit", "includeScoreBreakdown"];
 
     match (method, path) {
@@ -519,7 +520,7 @@ fn route_query_fields(method: &str, path: &str) -> Option<&'static [&'static str
         ("GET", "/api/v1/transfers") => Some(TRANSFERS),
         ("GET", "/api/v1/logs") => Some(SNAPSHOT),
         ("DELETE", "/api/v1/searches") => Some(CONFIRM),
-        ("DELETE", "/api/v1/shared-directories/roots") => Some(&["path"]),
+        ("DELETE", "/api/v1/shared-directories/roots") => Some(SHARED_DIRECTORY_ROOT),
         _ => route_query_fields_for_parameterized(method, path),
     }
 }
