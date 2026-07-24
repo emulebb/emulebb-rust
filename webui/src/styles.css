@@ -161,10 +161,9 @@ td {
   align-items: center;
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 0.25rem;
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
+  overflow-x: visible;
 }
 
 .tab {
@@ -172,6 +171,7 @@ td {
   display: inline-flex;
   flex: 0 0 auto;
   gap: 6px;
+  white-space: nowrap;
   width: auto;
 }
 
