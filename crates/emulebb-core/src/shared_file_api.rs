@@ -247,16 +247,8 @@ impl EmulebbCore {
             .iter()
             .map(refresh_shared_directory_row)
             .collect::<Vec<_>>();
-        let items = shared_directory_items(roots.clone()).await;
-        let monitor_owned = items
-            .iter()
-            .filter(|item| item.monitor_owned)
-            .map(|item| item.path.clone())
-            .collect::<Vec<_>>();
         SharedDirectories {
             roots,
-            items,
-            monitor_owned,
             // Files still pending the initial hash in the background reload worker.
             hashing_count: shared_directories::hashing_count_snapshot(self),
             reload_progress: reload_progress_snapshot(self),

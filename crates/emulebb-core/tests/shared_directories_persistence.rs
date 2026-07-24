@@ -79,7 +79,7 @@ async fn shared_directory_reload_always_shares_folder_tree() {
 }
 
 #[tokio::test]
-async fn shared_directory_model_expands_folder_tree_items_like_mfc() {
+async fn shared_directory_model_reports_configured_roots_only() {
     let runtime_dir = unique_test_dir("shared-directory-tree-items");
     let transfer_root = runtime_dir.join("transfers");
     let metadata_path = runtime_dir.join("metadata.sqlite");
@@ -107,27 +107,10 @@ async fn shared_directory_model_expands_folder_tree_items_like_mfc() {
         .unwrap()
         .display()
         .to_string();
-    let expected_nested = fs::canonicalize(&nested_root)
-        .unwrap()
-        .display()
-        .to_string();
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected_root);
     assert!(!directories.roots[0].monitor_owned);
-
-    assert_eq!(
-        directories
-            .items
-            .iter()
-            .map(|item| (item.path.as_str(), item.monitor_owned))
-            .collect::<Vec<_>>(),
-        vec![
-            (expected_root.as_str(), false),
-            (expected_nested.as_str(), true)
-        ]
-    );
-    assert_eq!(directories.monitor_owned, vec![expected_nested]);
 }
 
 #[tokio::test]

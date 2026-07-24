@@ -2,6 +2,9 @@ import { expect, test } from "@playwright/test";
 
 import { installMockApi, type RecordedApiRequest } from "../fixtures/mockApi";
 
+const longSharedRoot =
+  "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
 });
@@ -35,8 +38,10 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("1");
   await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("1");
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Recursive Coverage" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Nested", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: longSharedRoot, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Recursive Coverage" })).toHaveCount(0);
+  const sharingPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Folders" }) });
+  await expect.poll(async () => sharingPanel.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   await expect(page.getByRole("heading", { name: "Reload Progress" })).toBeVisible();
   await expect(page.getByRole("paragraph").filter({ hasText: "C:\\Sample\\Shared\\Hashing Now.bin" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Queued Next.bin", exact: true })).toBeVisible();
@@ -146,7 +151,7 @@ test("shared folder add form validates root paths", async ({ page }) => {
   expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);
 
   page.once("dialog", (dialog) => dialog.accept());
-  await sharingPanel.getByTitle("Remove").click();
+  await sharingPanel.getByTitle("Remove").first().click();
   await expect(page.getByText("Folder removed")).toBeVisible();
   const sharedDirectoryDelete = requests.find((request) => request.method === "DELETE" && request.path === "shared-directories/roots");
   expect(sharedDirectoryDelete).toBeDefined();

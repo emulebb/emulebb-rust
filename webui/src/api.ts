@@ -331,7 +331,6 @@ export type SharedFile = {
 
 export type SharedDirectoryRoot = {
   path: string;
-  monitorOwned?: boolean;
   shareable?: boolean;
   accessible?: boolean;
   [key: string]: unknown;
@@ -435,8 +434,6 @@ export type SharedDirectoryHashDiskProgress = {
 
 export type SharedDirectories = {
   roots?: SharedDirectoryRoot[];
-  items?: SharedDirectoryRoot[];
-  monitorOwned?: string[];
   hashingCount?: number;
   reloadProgress?: SharedDirectoryReloadProgress;
   [key: string]: unknown;

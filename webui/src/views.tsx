@@ -546,8 +546,6 @@ export function SharingView(props: {
 }) {
   const [path, setPath] = useState("");
   const roots = props.directories?.roots ?? [];
-  const items = props.directories?.items ?? [];
-  const recursiveItems = items.filter((item) => item.monitorOwned);
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
   const sharedFileCount = numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length;
@@ -568,7 +566,6 @@ export function SharingView(props: {
   return (
     <section class="view-grid">
       <Metric label="Roots" value={String(roots.length)} />
-      <Metric label="Recursive Folders" value={String(items.length || roots.length)} />
       <Metric label="Shared Files" value={String(sharedFileCount)} />
       <Metric label="Shared Bytes" value={formatBytes(sharedBytes)} />
       <Metric label="Active Uploads" value={String(props.uploads.length)} />
@@ -602,19 +599,19 @@ export function SharingView(props: {
         {pathError && <p class="field-error">{pathError}</p>}
         <h3 class="panel-subhead">Configured Roots</h3>
         <div class="table-wrap">
-          <table class="table table-vcenter card-table">
+          <table class="table table-vcenter card-table root-table">
             <thead>
               <tr>
-                <th>Folder</th>
-                <th>Mode</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th class="root-path-column">Folder</th>
+                <th class="root-mode-column">Mode</th>
+                <th class="root-status-column">Status</th>
+                <th class="root-actions-column">Actions</th>
               </tr>
             </thead>
             <tbody>
               {roots.map((root) => (
                 <tr key={root.path}>
-                  <td class="path-cell">{root.path}</td>
+                  <td class="path-cell" title={root.path}>{root.path}</td>
                   <td>Folder tree</td>
                   <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "monitored"} /></td>
                   <td>
@@ -627,32 +624,6 @@ export function SharingView(props: {
                 </tr>
               ))}
               {roots.length === 0 && <EmptyRow colSpan={4} text="No shared folders." />}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel card wide">
-        <div class="section-title">
-          <h2>Recursive Coverage</h2>
-          <span>{recursiveItems.length} monitored child folders</span>
-        </div>
-        <div class="table-wrap">
-          <table class="table table-vcenter card-table">
-            <thead>
-              <tr>
-                <th>Folder</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recursiveItems.map((item) => (
-                <tr key={item.path}>
-                  <td class="path-cell">{item.path}</td>
-                  <td><StatusPill value={item.accessible === false || item.shareable === false ? "unavailable" : "monitored"} /></td>
-                </tr>
-              ))}
-              {recursiveItems.length === 0 && <EmptyRow colSpan={2} text="No monitored child folders." />}
             </tbody>
           </table>
         </div>

@@ -568,6 +568,26 @@ td {
   overflow-wrap: anywhere;
 }
 
+.root-table {
+  table-layout: fixed;
+}
+
+.root-path-column {
+  width: auto;
+}
+
+.root-mode-column {
+  width: 112px;
+}
+
+.root-status-column {
+  width: 116px;
+}
+
+.root-actions-column {
+  width: 82px;
+}
+
 .empty-cell {
   color: var(--tblr-secondary);
   text-align: center;

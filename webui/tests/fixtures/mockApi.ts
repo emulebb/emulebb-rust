@@ -10,6 +10,8 @@ export type RecordedApiRequest = {
 
 const transferHash = "00112233445566778899AABBCCDDEEFF";
 const sharedFileHash = "FFEEDDCCBBAA99887766554433221100";
+const longSharedRoot =
+  "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
 const snapshot = {
   app: { version: "0.1.0-beta.1" },
@@ -164,10 +166,9 @@ function dataFor(method: string, path: string): unknown {
       return { items: [{ timestamp: "2026-01-01T00:00:00Z", level: "INFO", message: "Sample log entry" }] };
     case "shared-directories":
       return {
-        roots: [{ path: "C:\\Sample\\Shared", monitorOwned: false, shareable: true, accessible: true }],
-        items: [
-          { path: "C:\\Sample\\Shared", monitorOwned: false, shareable: true, accessible: true },
-          { path: "C:\\Sample\\Shared\\Nested", monitorOwned: true, shareable: true, accessible: true }
+        roots: [
+          { path: "C:\\Sample\\Shared", shareable: true, accessible: true },
+          { path: longSharedRoot, shareable: true, accessible: true }
         ],
         hashingCount: 1,
         reloadProgress: {

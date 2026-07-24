@@ -259,7 +259,9 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["roots"][0]["accessible"], true);
-    assert_eq!(value["data"]["roots"][0]["monitorOwned"], false);
+    assert!(value["data"]["roots"][0].get("monitorOwned").is_none());
+    assert!(value["data"].get("items").is_none());
+    assert!(value["data"].get("monitorOwned").is_none());
     // A PATCH now kicks a detached background scan + hash of the files already
     // present under the new roots, so `hashingCount` reflects that queued work
     // (it drains to 0 in the background; the two files are picked up below). It is
@@ -358,6 +360,8 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     assert!(value["data"]["reloadProgress"]["plannedReadBytes"].is_u64());
     assert!(value["data"]["reloadProgress"]["active"].is_array());
     assert!(value["data"]["reloadProgress"]["disks"].is_array());
+    assert!(value["data"].get("items").is_none());
+    assert!(value["data"].get("monitorOwned").is_none());
 
     let reload_response = app
         .clone()
