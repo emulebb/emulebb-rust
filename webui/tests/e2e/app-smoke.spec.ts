@@ -45,6 +45,7 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   await expect(page.getByRole("heading", { name: "Reload Progress" })).toBeVisible();
   await expect(page.getByRole("paragraph").filter({ hasText: "C:\\Sample\\Shared\\Hashing Now.bin" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Queued Next.bin", exact: true })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("\\\\?\\");
 
   expect(requests.some((request) => request.path === "snapshot")).toBe(true);
 });

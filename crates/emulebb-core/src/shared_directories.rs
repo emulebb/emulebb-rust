@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
-use emulebb_ed2k::long_path::long_path;
+use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::IndexedSharedDirectoryRoot;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -188,7 +188,7 @@ pub struct SharedDirectoryRootUpdate {
 
 pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> SharedDirectoryRoot {
     SharedDirectoryRoot {
-        path: root.path,
+        path: normal_path_display(&root.path),
         monitor_owned: false,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -197,7 +197,7 @@ pub(crate) fn shared_directory_from_index(root: IndexedSharedDirectoryRoot) -> S
 
 pub(crate) fn shared_directory_to_index(root: &SharedDirectoryRoot) -> IndexedSharedDirectoryRoot {
     IndexedSharedDirectoryRoot {
-        path: root.path.clone(),
+        path: normal_path_display(&root.path),
         monitor_owned: root.monitor_owned,
         shareable: root.shareable,
         accessible: root.accessible,
@@ -205,10 +205,10 @@ pub(crate) fn shared_directory_to_index(root: &SharedDirectoryRoot) -> IndexedSh
 }
 
 pub(crate) fn refresh_shared_directory_row(root: &SharedDirectoryRoot) -> SharedDirectoryRoot {
-    let path = Path::new(&root.path);
+    let path = long_path(Path::new(&root.path));
     let accessible = path.is_dir();
     SharedDirectoryRoot {
-        path: root.path.clone(),
+        path: normal_path_display(&root.path),
         monitor_owned: root.monitor_owned,
         shareable: accessible,
         accessible,
@@ -883,12 +883,16 @@ fn target_to_queued_file(target: &ReloadHashTarget) -> SharedDirectoryHashQueued
     SharedDirectoryHashQueuedFile {
         id: target.id.clone(),
         disk_key: target.disk_key.clone(),
-        path: target.path.display().to_string(),
+        path: display_path(&target.path),
         name: target_name(&target.path),
         size_bytes: target.file_size,
         reason: target.reason.clone(),
         order: target.order,
     }
+}
+
+fn display_path(path: &Path) -> String {
+    normal_path_display(&path.display().to_string())
 }
 
 fn record_hash_queue(core: &EmulebbCore, targets: &[ReloadHashTarget]) {
@@ -957,7 +961,7 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
         diagnostics.active.push(SharedDirectoryHashActiveFile {
             id: target.id.clone(),
             disk_key: target.disk_key.clone(),
-            path: target.path.display().to_string(),
+            path: display_path(&target.path),
             name: target_name(&target.path),
             size_bytes: target.file_size,
             reason: target.reason.clone(),
@@ -978,7 +982,7 @@ fn record_hash_target_started(core: &EmulebbCore, target: &ReloadHashTarget) {
         {
             disk.active_count += 1;
             disk.queued_count = disk.queued_count.saturating_sub(1);
-            disk.current_path = Some(target.path.display().to_string());
+            disk.current_path = Some(display_path(&target.path));
             disk.current_name = Some(target_name(&target.path));
             disk.current_stage = Some("md4".to_string());
         }
@@ -1089,7 +1093,7 @@ fn record_hash_target_finished(
             SharedDirectoryHashRecentFile {
                 id: target.id.clone(),
                 disk_key: target.disk_key.clone(),
-                path: target.path.display().to_string(),
+                path: display_path(&target.path),
                 name: target_name(&target.path),
                 size_bytes: target.file_size,
                 reason: target.reason.clone(),

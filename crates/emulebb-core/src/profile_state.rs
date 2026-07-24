@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use emulebb_ed2k::long_path::normal_path_display;
 use emulebb_metadata::{MetadataCategory, MetadataFriend, MetadataServer, MetadataStore};
 use emulebb_settings::{
     AppSettings, AppSettingsUpdate, SECTION_CORE, SECTION_DAEMON, SECTION_ED2K, SECTION_IP_FILTER,
@@ -114,9 +115,11 @@ pub(crate) fn persist_core_settings(
 }
 
 pub(crate) fn load_app_settings(metadata: &MetadataStore) -> Result<AppSettings> {
+    let mut daemon = load_settings_section(metadata, SECTION_DAEMON)?;
+    normalize_daemon_settings_paths(&mut daemon);
     Ok(AppSettings {
         core: load_core_settings(metadata)?,
-        daemon: load_settings_section(metadata, SECTION_DAEMON)?,
+        daemon,
         ed2k: load_settings_section(metadata, SECTION_ED2K)?,
         kad: load_settings_section(metadata, SECTION_KAD)?,
         nat: load_settings_section(metadata, SECTION_NAT)?,
@@ -255,10 +258,17 @@ fn category_from_metadata(category: MetadataCategory) -> Category {
     Category {
         id: category.id,
         name: category.name,
-        path: category.path,
+        path: category.path.as_deref().map(normal_path_display),
         comment: category.comment,
         priority: category.sort_order,
         color: category.color,
+    }
+}
+
+fn normalize_daemon_settings_paths(settings: &mut emulebb_settings::DaemonSettings) {
+    if let Some(path) = settings.incoming_dir.as_mut() {
+        let display = normal_path_display(&path.display().to_string());
+        *path = std::path::PathBuf::from(display);
     }
 }
 

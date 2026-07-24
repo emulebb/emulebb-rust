@@ -10,6 +10,7 @@ use emulebb_core::{
     AppInfo, AppLifecycle, LocalShare, NatStatusSnapshot, NetworkBindingStatus, NetworkStatus,
     Search, SearchResult, ServerInfo, Status, Transfer, TransferEventDiagnostics,
     TransferThroughputStats, UploadPolicyMetrics, VpnGuardProbeStatus, VpnGuardStatus,
+    normal_path_display,
 };
 use serde_json::{Value, json};
 
@@ -555,21 +556,23 @@ pub(crate) fn shared_file_response(share: &LocalShare) -> SharedFileResponse {
 
 pub(crate) fn managed_shared_file_path(share: &LocalShare) -> String {
     if let Some(source_path) = share.source_path.as_ref().filter(|path| !path.is_empty()) {
-        return source_path.clone();
+        return normal_path_display(source_path);
     }
     let path = FsPath::new(&share.transfer_dir);
     if path.is_dir() {
-        path.join("pieces.bin").display().to_string()
+        normal_path_display(&path.join("pieces.bin").display().to_string())
     } else {
-        share.transfer_dir.clone()
+        normal_path_display(&share.transfer_dir)
     }
 }
 
 pub(crate) fn shared_file_directory(path: &str) -> String {
-    FsPath::new(path)
-        .parent()
-        .map(|directory| directory.display().to_string())
-        .unwrap_or_default()
+    normal_path_display(
+        &FsPath::new(path)
+            .parent()
+            .map(|directory| directory.display().to_string())
+            .unwrap_or_default(),
+    )
 }
 
 pub(crate) fn bulk_result_from_transfer(transfer: &Transfer) -> BulkOperationResult {
@@ -618,7 +621,7 @@ mod tests {
                 .to_string(),
             aich_root: String::new(),
             transfer_dir: "transfers".to_string(),
-            source_path: Some("shared/Synthetic.Shared.bin".to_string()),
+            source_path: Some(r"\\?\C:\shared\Synthetic.Shared.bin".to_string()),
             priority: "normal".to_string(),
             auto_upload_priority: false,
             all_time_uploaded_bytes: 4096,
@@ -634,8 +637,8 @@ mod tests {
         assert_eq!(response.all_time_requests, 7);
         assert_eq!(response.all_time_accepts, 5);
         assert_eq!(response.all_time_transferred, 4096);
-        assert_eq!(response.path, "shared/Synthetic.Shared.bin");
-        assert_eq!(response.directory, "shared");
+        assert_eq!(response.path, r"C:\shared\Synthetic.Shared.bin");
+        assert_eq!(response.directory, r"C:\shared");
     }
 
     #[test]

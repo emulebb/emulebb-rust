@@ -17,6 +17,7 @@ use chrono::Utc;
 use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 #[cfg(test)]
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
+pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
     DirectCallbackArgs, NatManager, NatManagerBuilder, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
@@ -43,7 +44,6 @@ use emulebb_ed2k::{
         Ed2kUploadSessionPhaseSnapshot, new_transfer_job,
     },
     kad_firewall::{FirewallUdpPacketOutcome, FirewalledResponseOutcome, KadFirewallState},
-    long_path::long_path,
     reachability::ExternalReachability,
     reask_command_channel, reask_event_channel, run_ed2k_udp_reask_loop,
     shared_publish_rank::{
@@ -6156,7 +6156,7 @@ fn local_share_from_summary(
         part_count: ed2k_part_count(summary.file_size),
         aich_root: summary.aich_root,
         transfer_dir: summary.transfer_dir,
-        source_path: summary.source_path,
+        source_path: summary.source_path.as_deref().map(normal_path_display),
         priority: "normal".to_string(),
         auto_upload_priority: false,
         all_time_uploaded_bytes: 0,

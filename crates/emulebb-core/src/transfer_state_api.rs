@@ -9,10 +9,11 @@ impl EmulebbCore {
         let parts_total = manifest.pieces.len() as u32;
         // A share-in-place file lives at (and is served from) its original path;
         // a real download reports its internal piece-store payload path.
+        let display_path = manifest.source_path.as_deref().map(normal_path_display);
         let mut transfer = transfer_from_manifest(
             manifest,
             state_name,
-            manifest.source_path.clone().unwrap_or_else(|| {
+            display_path.unwrap_or_else(|| {
                 self.ed2k_transfers
                     .payload_path(&manifest.file_hash)
                     .display()

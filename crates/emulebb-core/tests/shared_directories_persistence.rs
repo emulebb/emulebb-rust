@@ -5,6 +5,7 @@ use std::{
 };
 
 use emulebb_core::{EmulebbCore, LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
+use emulebb_ed2k::long_path::normal_path_display;
 use emulebb_index::FileIndex;
 
 #[tokio::test]
@@ -43,6 +44,7 @@ async fn shared_directory_roots_survive_core_restart() {
         .unwrap()
         .display()
         .to_string();
+    let expected_path = normal_path_display(&expected_path);
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected_path);
@@ -107,6 +109,7 @@ async fn shared_directory_model_reports_configured_roots_only() {
         .unwrap()
         .display()
         .to_string();
+    let expected_root = normal_path_display(&expected_root);
 
     assert_eq!(directories.roots.len(), 1);
     assert_eq!(directories.roots[0].path, expected_root);

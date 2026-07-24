@@ -41,6 +41,24 @@ pub fn long_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Convert a Windows verbatim long-path string back to its normal user-facing form.
+///
+/// This is for API/UI display only. Filesystem access should keep using
+/// [`long_path`] at the operator content boundaries that need `MAX_PATH` bypass.
+#[must_use]
+pub fn normal_path_display(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':') {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(windows)]
 fn windows_long_path(path: &Path) -> PathBuf {
     use std::path::{Component, Prefix};
@@ -241,5 +259,41 @@ mod tests {
         assert_eq!(long_path(absolute), PathBuf::from(absolute));
         let relative = Path::new("shared/file.bin");
         assert_eq!(long_path(relative), PathBuf::from(relative));
+    }
+
+    #[test]
+    fn normal_display_strips_verbatim_drive_prefix() {
+        assert_eq!(
+            normal_path_display(r"\\?\C:\Users\op\shared\file.bin"),
+            r"C:\Users\op\shared\file.bin"
+        );
+    }
+
+    #[test]
+    fn normal_display_strips_verbatim_unc_prefix() {
+        assert_eq!(
+            normal_path_display(r"\\?\UNC\server\share\dir\file.bin"),
+            r"\\server\share\dir\file.bin"
+        );
+    }
+
+    #[test]
+    fn normal_display_keeps_normal_paths_unchanged() {
+        assert_eq!(
+            normal_path_display(r"C:\Users\op\shared\file.bin"),
+            r"C:\Users\op\shared\file.bin"
+        );
+        assert_eq!(
+            normal_path_display(r"\\server\share\dir\file.bin"),
+            r"\\server\share\dir\file.bin"
+        );
+    }
+
+    #[test]
+    fn normal_display_leaves_non_drive_verbatim_paths_unchanged() {
+        assert_eq!(
+            normal_path_display(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.bin"),
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\file.bin"
+        );
     }
 }

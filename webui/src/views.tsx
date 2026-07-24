@@ -611,7 +611,7 @@ export function SharingView(props: {
             <tbody>
               {roots.map((root) => (
                 <tr key={root.path}>
-                  <td class="path-cell" title={root.path}>{root.path}</td>
+                  <td class="path-cell" title={displayPath(root.path)}>{displayPath(root.path)}</td>
                   <td>Folder tree</td>
                   <td><StatusPill value={root.accessible === false || root.shareable === false ? "unavailable" : "monitored"} /></td>
                   <td>
@@ -709,10 +709,10 @@ function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadPro
       {files.map((file) => (
         <div class="hash-card" key={file.id ?? file.path}>
           <div class="hash-card-title">
-            <strong>{file.name || file.path || "Unnamed file"}</strong>
+            <strong>{file.name || displayPath(file.path) || "Unnamed file"}</strong>
             <StatusPill value={file.stage ?? "hashing"} />
           </div>
-          <p class="path-cell">{file.path}</p>
+          <p class="path-cell">{displayPath(file.path)}</p>
           <ProgressLine
             label={`${file.reason ?? "hash"} on ${file.diskKey ?? "disk"}`}
             completed={file.readBytes}
@@ -750,7 +750,7 @@ function DiskProgressTable(props: { disks: NonNullable<SharedDirectories["reload
               <td>{disk.completedCount ?? 0}/{disk.plannedCount ?? 0} done, {disk.queuedCount ?? 0} queued</td>
               <td>{formatPercent(disk.completedReadBytes, disk.plannedReadBytes)}</td>
               <td>{formatRate(disk.readRateBytesPerSec)}</td>
-              <td class="path-cell">{disk.currentPath ?? disk.currentName ?? ""}</td>
+              <td class="path-cell">{displayPath(disk.currentPath) || disk.currentName || ""}</td>
             </tr>
           ))}
           {disks.length === 0 && <EmptyRow colSpan={5} text="No drive hashing activity." />}
@@ -777,7 +777,7 @@ function RecentHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
         <tbody>
           {files.map((file) => (
             <tr key={file.id ?? file.path}>
-              <td class="path-cell">{file.path ?? file.name}</td>
+              <td class="path-cell">{displayPath(file.path) || file.name}</td>
               <td><StatusPill value={file.result ?? "unknown"} /></td>
               <td>{formatBytes(file.readBytes)} / {formatBytes(file.readBytesTotal)}</td>
               <td>{formatRate(file.averageReadRateBytesPerSec)}</td>
@@ -809,7 +809,7 @@ function QueuedHashTable(props: { files: NonNullable<SharedDirectories["reloadPr
           {files.map((file) => (
             <tr key={file.id ?? file.path}>
               <td>{(file.order ?? 0) + 1}</td>
-              <td class="path-cell">{file.path ?? file.name}</td>
+              <td class="path-cell">{displayPath(file.path) || file.name}</td>
               <td>{formatBytes(file.sizeBytes)}</td>
               <td>{file.diskKey ?? ""}</td>
               <td>{file.reason ?? ""}</td>
@@ -3257,6 +3257,22 @@ function parseUrlImportText(value: string): string | null {
     && /^[hH][tT][tT][pP][sS]?:\/\/[^\s/?#\u0000-\u001f\u007f-\u009f][^\s\u0000-\u001f\u007f-\u009f]*$/.test(normalized)
     ? normalized
     : null;
+}
+
+function displayPath(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
+  if (value.startsWith("\\\\?\\UNC\\")) {
+    return `\\\\${value.slice("\\\\?\\UNC\\".length)}`;
+  }
+  if (value.startsWith("\\\\?\\")) {
+    const rest = value.slice("\\\\?\\".length);
+    if (rest[1] === ":") {
+      return rest;
+    }
+  }
+  return value;
 }
 
 function urlImportError(value: string, label: string): string | undefined {

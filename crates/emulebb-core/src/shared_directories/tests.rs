@@ -54,6 +54,7 @@ async fn set_shared_directories_canonicalizes_configured_root() {
         .unwrap()
         .display()
         .to_string();
+    let expected = normal_path_display(&expected);
     let core =
         EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
 

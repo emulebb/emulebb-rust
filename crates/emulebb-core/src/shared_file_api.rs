@@ -109,7 +109,7 @@ impl EmulebbCore {
                 .transfer_dir_path(&entry.file_hash)
                 .display()
                 .to_string(),
-            source_path: entry.source_path.clone(),
+            source_path: entry.source_path.as_deref().map(normal_path_display),
             priority: entry.upload_priority.clone(),
             auto_upload_priority: entry.auto_upload_priority,
             all_time_uploaded_bytes: entry.all_time_uploaded_bytes,
@@ -366,7 +366,7 @@ fn canonical_shared_directory_root(path: &str) -> Result<String> {
     let metadata = fs::metadata(&canonical)
         .with_context(|| format!("failed to inspect {}", canonical.display()))?;
     ensure!(metadata.is_dir(), "path is not a directory");
-    Ok(canonical.display().to_string())
+    Ok(normal_path_display(&canonical.display().to_string()))
 }
 
 fn removable_shared_directory_root(path: &str) -> Result<String> {
@@ -377,9 +377,9 @@ fn removable_shared_directory_root(path: &str) -> Result<String> {
             let metadata = fs::metadata(&canonical)
                 .with_context(|| format!("failed to inspect {}", canonical.display()))?;
             ensure!(metadata.is_dir(), "path is not a directory");
-            Ok(canonical.display().to_string())
+            Ok(normal_path_display(&canonical.display().to_string()))
         }
-        Err(_) => Ok(path.to_string()),
+        Err(_) => Ok(normal_path_display(path)),
     }
 }
 

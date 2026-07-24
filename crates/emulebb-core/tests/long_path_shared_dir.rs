@@ -19,7 +19,7 @@ use std::{
 };
 
 use emulebb_core::{EmulebbCore, LocalShare, SharedDirectoriesUpdate, SharedDirectoryRootUpdate};
-use emulebb_ed2k::long_path::long_path;
+use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_index::FileIndex;
 
 /// Build a deep directory path under `base` whose total length exceeds 260
@@ -110,6 +110,13 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     })
     .await
     .expect("configuring the deep (>260) shared root must succeed via the verbatim form");
+    let expected_display_root = normal_path_display(&configured_root);
+    let directories = core.shared_directories().await;
+    assert_eq!(directories.roots[0].path, expected_display_root);
+    assert!(
+        !directories.roots[0].path.starts_with(r"\\?\"),
+        "shared root display path must not expose the verbatim prefix"
+    );
 
     let shares = core
         .reload_shared_directories()
@@ -127,6 +134,16 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     let share_a = require_share(&shares, "deep-top-a.bin");
     let share_b = require_share(&shares, "deep-top-b.bin");
     let nested_share = require_share(&shares, "deep-nested.bin");
+    for share in [&share_a, &share_b, &nested_share] {
+        let source_path = share
+            .source_path
+            .as_deref()
+            .expect("share-in-place file must report a source path");
+        assert!(
+            !source_path.starts_with(r"\\?\"),
+            "shared-file display path must not expose the verbatim prefix"
+        );
+    }
     assert_valid_hash(&share_a);
     assert_valid_hash(&share_b);
     assert_valid_hash(&nested_share);
@@ -149,6 +166,13 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
         nested_share.hash,
         "deep-nested.bin must appear in the shared catalog with its ingested hash",
     );
+    let progress = core.shared_directories().await.reload_progress;
+    for recent in progress.recent {
+        assert!(
+            !recent.path.starts_with(r"\\?\"),
+            "recent hash progress path must not expose the verbatim prefix"
+        );
+    }
 
     // Clean up the deep tree through the verbatim form (a plain remove_dir_all
     // would fail past MAX_PATH on a machine without LongPathsEnabled).

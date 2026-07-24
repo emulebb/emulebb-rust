@@ -7,7 +7,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use emulebb_core::{EmulebbCore, LocalShareCreate};
+use emulebb_core::{EmulebbCore, LocalShareCreate, long_path, normal_path_display};
 use emulebb_index::FileIndex;
 use emulebb_rest::{RestServerSettings, router};
 use serde_json::Value;
@@ -201,6 +201,8 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     let transfer_root = runtime_dir.join("transfers");
     let shared_root = runtime_dir.join("shared-root");
     let extra_root = runtime_dir.join("extra-root");
+    let shared_root_input = long_path(&shared_root).display().to_string();
+    let expected_shared_root = normal_path_display(&shared_root_input);
     let nested_root = shared_root.join("nested");
     let top_level_file = shared_root.join("Top.Level.bin");
     let nested_file = nested_root.join("Nested.bin");
@@ -229,7 +231,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
                 .header("Content-Type", "application/json")
                 .body(Body::from(format!(
                     r#"{{"roots":["{}"],"confirmReplaceRoots":false}}"#,
-                    shared_root.display().to_string().replace('\\', "\\\\")
+                    shared_root_input.replace('\\', "\\\\")
                 )))
                 .unwrap(),
         )
@@ -247,7 +249,7 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
                 .header("Content-Type", "application/json")
                 .body(Body::from(format!(
                     r#"{{"roots":[{{"path":"{}"}}],"confirmReplaceRoots":true}}"#,
-                    shared_root.display().to_string().replace('\\', "\\\\")
+                    shared_root_input.replace('\\', "\\\\")
                 )))
                 .unwrap(),
         )
@@ -258,6 +260,13 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
         .await
         .unwrap();
     let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["roots"][0]["path"], expected_shared_root);
+    assert!(
+        !value["data"]["roots"][0]["path"]
+            .as_str()
+            .unwrap()
+            .starts_with(r"\\?\")
+    );
     assert_eq!(value["data"]["roots"][0]["accessible"], true);
     assert!(value["data"]["roots"][0].get("monitorOwned").is_none());
     assert!(value["data"].get("items").is_none());

@@ -11,7 +11,7 @@ export type RecordedApiRequest = {
 const transferHash = "00112233445566778899AABBCCDDEEFF";
 const sharedFileHash = "FFEEDDCCBBAA99887766554433221100";
 const longSharedRoot =
-  "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
+  "\\\\?\\F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
 const snapshot = {
   app: { version: "0.1.0-beta.1" },
@@ -195,7 +195,7 @@ function dataFor(method: string, path: string): unknown {
             {
               id: "hash-000002",
               diskKey: "C:",
-              path: "C:\\Sample\\Shared\\Hashing Now.bin",
+              path: "\\\\?\\C:\\Sample\\Shared\\Hashing Now.bin",
               name: "Hashing Now.bin",
               sizeBytes: 4096,
               reason: "new",
@@ -227,7 +227,7 @@ function dataFor(method: string, path: string): unknown {
             {
               id: "hash-000003",
               diskKey: "C:",
-              path: "C:\\Sample\\Shared\\Queued Next.bin",
+              path: "\\\\?\\C:\\Sample\\Shared\\Queued Next.bin",
               name: "Queued Next.bin",
               sizeBytes: 4096,
               reason: "changed",
@@ -245,7 +245,7 @@ function dataFor(method: string, path: string): unknown {
               plannedReadBytes: 24576,
               completedReadBytes: 12288,
               readRateBytesPerSec: 4096,
-              currentPath: "C:\\Sample\\Shared\\Hashing Now.bin",
+              currentPath: "\\\\?\\C:\\Sample\\Shared\\Hashing Now.bin",
               currentName: "Hashing Now.bin",
               currentStage: "aich"
             }

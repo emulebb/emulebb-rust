@@ -191,7 +191,7 @@ fn validate_app_settings_update_paths(request: &mut AppSettingsUpdate) -> Result
         {
             ensure!(parent.is_dir(), "incomingDir parent is not a directory");
         }
-        *path = PathBuf::from(trimmed);
+        *path = PathBuf::from(normal_path_display(trimmed));
     }
     Ok(())
 }
