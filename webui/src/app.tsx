@@ -675,7 +675,17 @@ export function App() {
                 setLatestSearch={setLatestSearch}
               />
             )}
-            {tab === "sharing" && <SharingView directories={sharedDirectories} client={client} run={run} />}
+            {tab === "sharing" && (
+              <SharingView
+                directories={sharedDirectories}
+                stats={stats}
+                sharedFiles={sharedFiles}
+                uploads={uploads}
+                uploadQueue={uploadQueue}
+                client={client}
+                run={run}
+              />
+            )}
             {tab === "shared-files" && <SharedFilesView files={sharedFiles} client={client} run={run} />}
             {tab === "uploads" && <UploadsView uploads={uploads} uploadQueue={uploadQueue} client={client} run={run} />}
             {tab === "network" && (

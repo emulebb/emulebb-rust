@@ -3,6 +3,7 @@ import type { Route } from "@playwright/test";
 export type RecordedApiRequest = {
   method: string;
   path: string;
+  query: string;
   headers: Record<string, string>;
   body: string | null;
 };
@@ -80,8 +81,24 @@ const snapshot = {
   searches: [],
   servers: [{ endpoint: "192.0.2.10:4661", name: "Sample Server", connected: true }],
   kad: { enabled: true, connected: true, firewalled: false },
-  uploads: [],
-  uploadQueue: [],
+  uploads: [
+    {
+      clientId: "active-upload-peer",
+      userName: "Active Upload Peer",
+      uploadState: "uploading",
+      uploading: true,
+      requestedFileName: "Shared Sample.bin"
+    }
+  ],
+  uploadQueue: [
+    {
+      clientId: "waiting-upload-peer",
+      userName: "Waiting Upload Peer",
+      uploadState: "queued",
+      waitingQueue: true,
+      requestedFileName: "Shared Sample.bin"
+    }
+  ],
   sharedFiles: [{ hash: sharedFileHash, name: "Shared Sample.bin", sizeBytes: 4096 }]
 };
 
@@ -93,6 +110,7 @@ export function installMockApi(requests: RecordedApiRequest[]) {
     requests.push({
       method: request.method(),
       path,
+      query: url.search,
       headers: request.headers(),
       body: request.postData()
     });
@@ -146,8 +164,11 @@ function dataFor(method: string, path: string): unknown {
       return { items: [{ timestamp: "2026-01-01T00:00:00Z", level: "INFO", message: "Sample log entry" }] };
     case "shared-directories":
       return {
-        roots: [{ path: "C:\\Sample\\Shared", monitorOwned: true, shareable: true, accessible: true }],
-        items: [],
+        roots: [{ path: "C:\\Sample\\Shared", monitorOwned: false, shareable: true, accessible: true }],
+        items: [
+          { path: "C:\\Sample\\Shared", monitorOwned: false, shareable: true, accessible: true },
+          { path: "C:\\Sample\\Shared\\Nested", monitorOwned: true, shareable: true, accessible: true }
+        ],
         hashingCount: 1,
         reloadProgress: {
           phase: "hashing",
@@ -556,8 +577,9 @@ function dataFor(method: string, path: string): unknown {
         ipFilter: { enabled: false, level: 127 }
       };
     case "uploads":
+      return { items: snapshot.uploads };
     case "upload-queue":
-      return { items: [] };
+      return { items: snapshot.uploadQueue };
     case "app":
       return {
         name: "eMuleBB",

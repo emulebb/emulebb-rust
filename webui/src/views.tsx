@@ -537,14 +537,21 @@ export function SearchView(props: {
 
 export function SharingView(props: {
   directories: SharedDirectories | null;
+  stats: Record<string, unknown>;
+  sharedFiles: SharedFile[];
+  uploads: Upload[];
+  uploadQueue: Upload[];
   client: RestClient;
   run: RunFunction;
 }) {
   const [path, setPath] = useState("");
   const roots = props.directories?.roots ?? [];
   const items = props.directories?.items ?? [];
+  const recursiveItems = items.filter((item) => item.monitorOwned);
   const reload = props.directories?.reloadProgress ?? {};
   const pathError = sharedRootPathError(path);
+  const sharedFileCount = numberField(props.stats, "sharedFiles") ?? props.sharedFiles.length;
+  const sharedBytes = numberField(props.stats, "sharedBytes");
 
   const addRoot = async () => {
     const nextPath = path.trim();
@@ -561,7 +568,11 @@ export function SharingView(props: {
   return (
     <section class="view-grid">
       <Metric label="Roots" value={String(roots.length)} />
-      <Metric label="Folders" value={String(items.length)} />
+      <Metric label="Recursive Folders" value={String(items.length || roots.length)} />
+      <Metric label="Shared Files" value={String(sharedFileCount)} />
+      <Metric label="Shared Bytes" value={formatBytes(sharedBytes)} />
+      <Metric label="Active Uploads" value={String(props.uploads.length)} />
+      <Metric label="Waiting Uploads" value={String(props.uploadQueue.length)} />
       <Metric label="Hashing" value={String(props.directories?.hashingCount ?? 0)} />
       <Metric label="Reload" value={reload.phase ?? "idle"} />
       <Metric label="Hashed" value={`${reload.hashedCount ?? 0}/${reload.plannedHashCount ?? 0}`} />
@@ -570,22 +581,26 @@ export function SharingView(props: {
       <section class="panel card wide sharing-panel">
         <div class="section-title">
           <h2>Shared Folders</h2>
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("shared-directories/operations/reload"), "Reload queued")}>
-            <RefreshCw size={15} />
-            Reload
-          </button>
+          <div class="row-actions">
+            <StatusPill value={sharingRunState(reload, props.directories?.hashingCount ?? 0)} />
+            <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("shared-directories/operations/reload"), "Reload queued")}>
+              <RefreshCw size={15} />
+              Reload
+            </button>
+          </div>
         </div>
-        <p class="hint">Folder trees are always recursive and monitored. Single-file sharing is not supported.</p>
+        <p class="hint">Server folder trees are recursive and monitored.</p>
         <form class="form-row" onSubmit={(event) => {
           event.preventDefault();
           if (!pathError) {
             void props.run(addRoot, "Folder added");
           }
         }}>
-          <input class="form-control" value={path} placeholder="Folder path" aria-invalid={pathError ? "true" : "false"} onInput={(event) => setPath(event.currentTarget.value)} />
-          <button class="btn" type="submit" disabled={!path.trim() || Boolean(pathError)}><FolderPlus size={16} />Add</button>
+          <input class="form-control share-root-input" value={path} placeholder="Server folder path" aria-label="Server folder path" aria-invalid={pathError ? "true" : "false"} onInput={(event) => setPath(event.currentTarget.value)} />
+          <button class="btn" type="submit" disabled={!path.trim() || Boolean(pathError)}><FolderPlus size={16} />Add root</button>
         </form>
         {pathError && <p class="field-error">{pathError}</p>}
+        <h3 class="panel-subhead">Configured Roots</h3>
         <div class="table-wrap">
           <table class="table table-vcenter card-table">
             <thead>
@@ -612,6 +627,32 @@ export function SharingView(props: {
                 </tr>
               ))}
               {roots.length === 0 && <EmptyRow colSpan={4} text="No shared folders." />}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel card wide">
+        <div class="section-title">
+          <h2>Recursive Coverage</h2>
+          <span>{recursiveItems.length} monitored child folders</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-vcenter card-table">
+            <thead>
+              <tr>
+                <th>Folder</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recursiveItems.map((item) => (
+                <tr key={item.path}>
+                  <td class="path-cell">{item.path}</td>
+                  <td><StatusPill value={item.accessible === false || item.shareable === false ? "unavailable" : "monitored"} /></td>
+                </tr>
+              ))}
+              {recursiveItems.length === 0 && <EmptyRow colSpan={2} text="No monitored child folders." />}
             </tbody>
           </table>
         </div>
@@ -675,6 +716,16 @@ export function SharingView(props: {
       </section>
     </section>
   );
+}
+
+function sharingRunState(reload: NonNullable<SharedDirectories["reloadProgress"]>, hashingCount: number): string {
+  if (reload.pending) {
+    return "queued";
+  }
+  if (reload.running || hashingCount > 0) {
+    return reload.phase ?? "hashing";
+  }
+  return "monitored";
 }
 
 function ActiveHashList(props: { files: NonNullable<SharedDirectories["reloadProgress"]>["active"] }) {

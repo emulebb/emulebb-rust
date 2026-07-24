@@ -28,7 +28,12 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
 
   await page.getByRole("button", { name: "Sharing" }).click();
   await expect(page.getByRole("heading", { name: "Shared Folders" })).toBeVisible();
+  await expect(page.locator("section.metric", { hasText: "Shared Files" }).locator("strong")).toHaveText("1");
+  await expect(page.locator("section.metric", { hasText: "Active Uploads" }).locator("strong")).toHaveText("1");
+  await expect(page.locator("section.metric", { hasText: "Waiting Uploads" }).locator("strong")).toHaveText("1");
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Recursive Coverage" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Nested", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Reload Progress" })).toBeVisible();
   await expect(page.getByRole("paragraph").filter({ hasText: "C:\\Sample\\Shared\\Hashing Now.bin" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "C:\\Sample\\Shared\\Queued Next.bin", exact: true })).toBeVisible();
@@ -116,22 +121,33 @@ test("shared folder add form validates root paths", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sharing" }).click();
   const sharingPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Shared Folders" }) });
-  const addFolder = sharingPanel.getByRole("button", { name: "Add" });
+  const addFolder = sharingPanel.getByRole("button", { name: "Add root" });
   const initialSharedDirectoryPosts = requests.filter((request) => request.method === "POST" && request.path === "shared-directories/roots").length;
 
   await expect(addFolder).toBeDisabled();
-  await sharingPanel.getByPlaceholder("Folder path").fill("   ");
+  await sharingPanel.getByPlaceholder("Server folder path").fill("   ");
   await expect(sharingPanel.getByText("Folder path must not be empty.")).toBeVisible();
   await expect(addFolder).toBeDisabled();
   expect(requests.filter((request) => request.method === "POST" && request.path === "shared-directories/roots").length).toBe(initialSharedDirectoryPosts);
 
-  await sharingPanel.getByPlaceholder("Folder path").fill(" C:\\More\\Shared ");
+  await sharingPanel.getByPlaceholder("Server folder path").fill(" C:\\More\\Shared ");
   await expect(sharingPanel.getByText("Folder path must not be empty.")).toHaveCount(0);
   await addFolder.click();
   await expect(page.getByText("Folder added")).toBeVisible();
   const sharedDirectoryPost = requests.find((request) => request.method === "POST" && request.path === "shared-directories/roots");
   expect(sharedDirectoryPost).toBeDefined();
   expect(JSON.parse(sharedDirectoryPost?.body ?? "{}")).toEqual({ path: "C:\\More\\Shared" });
+
+  await sharingPanel.getByRole("button", { name: "Reload" }).click();
+  await expect(page.getByText("Reload queued")).toBeVisible();
+  expect(requests.some((request) => request.method === "POST" && request.path === "shared-directories/operations/reload")).toBe(true);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await sharingPanel.getByTitle("Remove").click();
+  await expect(page.getByText("Folder removed")).toBeVisible();
+  const sharedDirectoryDelete = requests.find((request) => request.method === "DELETE" && request.path === "shared-directories/roots");
+  expect(sharedDirectoryDelete).toBeDefined();
+  expect(new URLSearchParams(sharedDirectoryDelete?.query ?? "").get("path")).toBe("C:\\Sample\\Shared");
 });
 
 test("transfer add form validates eD2K link batches", async ({ page }) => {
