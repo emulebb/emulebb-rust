@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
+use emulebb_metadata::MetadataImportedKnownFileEntry;
 
 use crate::long_path::long_path;
 
@@ -208,6 +209,77 @@ impl Ed2kTransferRuntime {
         rebuild_verified_ranges(&mut manifest);
         // Only the manifest write needs the manifest lock; held briefly (no hashing
         // under it), so concurrent REST reads of `manifests()` are not starved.
+        let _guard = self.lock_manifest(&manifest.file_hash).await;
+        self.store_manifest_unlocked(&manifest).await?;
+        self.upsert_verified_catalog_entry(&manifest).await;
+        drop(_guard);
+
+        Ok(Ed2kLocalIngestSummary {
+            file_hash: manifest.file_hash,
+            display_name: manifest.display_name,
+            file_size: manifest.file_size,
+            md4_hashset_count: manifest.md4_hashset.len(),
+            aich_root: manifest.aich_root.unwrap_or_default(),
+            aich_hashset_count: manifest.aich_hashset.len(),
+            transfer_dir: transfer_dir.display().to_string(),
+            source_path: manifest.source_path,
+        })
+    }
+
+    /// Promote a pathless stock eMule ``known.met`` row after a shared-directory
+    /// scan finds a unique file-name/size/mtime identity match.
+    pub async fn promote_imported_known_file(
+        &self,
+        entry: MetadataImportedKnownFileEntry,
+        source_path: &Path,
+        source_mtime_ms: Option<i64>,
+    ) -> Result<Ed2kLocalIngestSummary> {
+        if entry.display_name.trim().is_empty() {
+            anyhow::bail!("imported known file requires a non-empty canonical name");
+        }
+        let source_path = long_path(source_path);
+        let job = super::Ed2kTransferJob {
+            file_hash: entry.file_hash.clone(),
+            display_name: entry.display_name.clone(),
+            file_size: entry.file_size,
+            piece_size: super::ED2K_PART_SIZE,
+        };
+        let transfer_dir = self.transfer_dir(&job.file_hash);
+        tokio::fs::create_dir_all(&transfer_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create ED2K transfer directory {}",
+                    transfer_dir.display()
+                )
+            })?;
+
+        let mut manifest = Ed2kResumeManifest::new(&job);
+        manifest.source_path = Some(source_path.display().to_string());
+        manifest.source_mtime_ms = source_mtime_ms;
+        manifest.completed = true;
+        manifest.md4_hashset_acquired = true;
+        manifest.md4_hashset = entry.md4_hashset.clone();
+        manifest.aich_hashset_acquired = entry.aich_root.is_some();
+        manifest.aich_root = entry.aich_root.clone();
+        manifest.aich_hashset = entry.aich_hashset.clone();
+        manifest.upload_priority = entry.upload_priority.clone();
+        manifest.auto_upload_priority = entry.auto_upload_priority;
+        manifest.pieces = (0..piece_count(manifest.file_size, manifest.piece_size))
+            .map(|piece_index| Ed2kPieceState {
+                piece_index,
+                state: Ed2kTransferState::Verified,
+                bytes_written: expected_piece_length(
+                    manifest.file_size,
+                    manifest.piece_size,
+                    u64::from(piece_index),
+                ),
+                block_bitmap: None,
+                ich_corrupted: false,
+            })
+            .collect();
+        rebuild_verified_ranges(&mut manifest);
+
         let _guard = self.lock_manifest(&manifest.file_hash).await;
         self.store_manifest_unlocked(&manifest).await?;
         self.upsert_verified_catalog_entry(&manifest).await;

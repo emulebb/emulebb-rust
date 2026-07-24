@@ -198,6 +198,103 @@ async fn incremental_reload_reuses_imported_share_not_yet_active() {
     fs::remove_dir_all(&root).ok();
 }
 
+#[tokio::test]
+async fn incremental_reload_promotes_unique_pathless_imported_known_file() {
+    let root = scratch_dir("imported-known-pathless");
+    let source = root.join("Imported.Known.bin");
+    fs::write(&source, b"known payload").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    let imported = MetadataImportedKnownFileEntry {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        display_name: "Imported.Known.bin".to_string(),
+        file_size: size,
+        modified_s: mtime_ms.unwrap() / 1000,
+        md4_hashset: Vec::new(),
+        aich_root: None,
+        aich_hashset: Vec::new(),
+        upload_priority: "release".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 1234,
+        all_time_upload_requests: 9,
+        all_time_upload_accepts: 4,
+        last_upload_request_ms: 1_700_000_001_000,
+    };
+    core.metadata_store
+        .upsert_imported_known_file(&imported)
+        .unwrap();
+
+    let plan = plan_incremental_reload(&core, vec![source.clone()])
+        .await
+        .unwrap();
+
+    assert!(plan.to_hash.is_empty());
+    assert_eq!(plan.imported_known_promotions.len(), 1);
+    assert_eq!(plan.stats.planned_hash_count, 0);
+    assert_eq!(plan.stats.reused_count, 1);
+
+    let promoted = promote_imported_known_share(
+        &core,
+        plan.imported_known_promotions.into_iter().next().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(promoted.hash, imported.file_hash);
+    let share = core.share(&imported.file_hash).await.unwrap();
+    assert_eq!(share.priority, "release");
+    assert_eq!(share.all_time_uploaded_bytes, 1234);
+    assert_eq!(
+        share.source_path.as_deref(),
+        Some(source.display().to_string().as_str())
+    );
+    assert_eq!(core.ed2k_transfers.shared_catalog_count().await, 1);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn incremental_reload_hashes_ambiguous_pathless_imported_known_identity() {
+    let root = scratch_dir("imported-known-ambiguous");
+    let source = root.join("Ambiguous.Known.bin");
+    fs::write(&source, b"ambiguous payload").unwrap();
+    let core =
+        EmulebbCore::new_in_memory("test", emulebb_index::FileIndex::in_memory().unwrap()).unwrap();
+    let (_, size, mtime_ms) = Ed2kTransferRuntime::scanned_source_identity(&source).unwrap();
+    for file_hash in [
+        "00112233445566778899aabbccddeeff",
+        "ffeeddccbbaa99887766554433221100",
+    ] {
+        core.metadata_store
+            .upsert_imported_known_file(&MetadataImportedKnownFileEntry {
+                file_hash: file_hash.to_string(),
+                display_name: "Ambiguous.Known.bin".to_string(),
+                file_size: size,
+                modified_s: mtime_ms.unwrap() / 1000,
+                md4_hashset: Vec::new(),
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 0,
+                all_time_upload_requests: 0,
+                all_time_upload_accepts: 0,
+                last_upload_request_ms: 0,
+            })
+            .unwrap();
+    }
+
+    let plan = plan_incremental_reload(&core, vec![source.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(plan.to_hash.len(), 1);
+    assert!(plan.imported_known_promotions.is_empty());
+    assert_eq!(plan.stats.planned_hash_count, 1);
+    assert_eq!(plan.stats.new_count, 1);
+    assert_eq!(plan.stats.reused_count, 0);
+    fs::remove_dir_all(&root).ok();
+}
+
 /// A completed DOWNLOAD delivered into a shared dir has NO share-in-place
 /// source row, so it used to look brand-new on reload and its whole payload
 /// was re-hashed just to reshare content it already hashed while downloading

@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use emulebb_ed2k::ed2k_transfer::LocalIngestProgressEvent;
 use emulebb_ed2k::long_path::{long_path, normal_path_display};
-use emulebb_index::IndexedSharedDirectoryRoot;
+use emulebb_index::{IndexedFile, IndexedSharedDirectoryRoot};
+use emulebb_metadata::MetadataImportedKnownFileEntry;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -494,6 +495,12 @@ struct ReusedReloadShare {
     stale_hashes: Vec<String>,
 }
 
+struct ImportedKnownPromotion {
+    entry: MetadataImportedKnownFileEntry,
+    source_path: PathBuf,
+    source_mtime_ms: Option<i64>,
+}
+
 struct ReloadPlan {
     /// Files that are new, changed (size/mtime), or whose persisted manifest has
     /// no recorded mtime yet -- each gets hashed via `share_local_file`.
@@ -502,6 +509,9 @@ struct ReloadPlan {
     /// resolve their `Localshare`s for the reload result so an unchanged file
     /// still appears in the returned set.
     reused_shares: Vec<ReusedReloadShare>,
+    /// Scanned files that match a unique pathless stock ``known.met`` identity
+    /// and can be promoted without reading payload bytes.
+    imported_known_promotions: Vec<ImportedKnownPromotion>,
     /// Persisted share-in-place hashes whose source path is no longer part of
     /// the current filtered scan and must be removed from serving/publishing.
     pruned_hashes: Vec<String>,
@@ -672,6 +682,10 @@ async fn plan_incremental_reload(
     // pruned): recognized by delivered path + (size, mtime) so an unchanged
     // delivered file is a cache hit instead of a needless whole-payload re-hash.
     let delivered_index = core.ed2k_transfers.delivered_reuse_index().await?;
+    let imported_known_index = core
+        .ed2k_transfers
+        .imported_known_file_identity_index()
+        .await?;
     let failure_entries = load_shared_source_failures(core).await?;
     tokio::task::spawn_blocking(move || {
         let failures = failure_entries
@@ -684,6 +698,7 @@ async fn plan_incremental_reload(
         };
         let mut to_hash = Vec::new();
         let mut reused_shares = Vec::new();
+        let mut imported_known_promotions = Vec::new();
         let mut scanned_source_keys = HashSet::with_capacity(file_paths.len());
         for path in file_paths {
             // Stat the scanned file with the same long-path normalization the
@@ -749,35 +764,56 @@ async fn plan_incremental_reload(
                         // download already computed this hashset, so reuse it
                         // (oracle FindKnownFile) rather than re-hashing the whole
                         // payload. Reuse-only: this never contributes to pruning.
-                        None => {
-                            match delivered_index.get(&key) {
-                                Some(entry)
-                                    if entry.file_size == size
-                                        && entry.source_mtime_ms.is_some()
-                                        && entry.source_mtime_ms == mtime_ms =>
+                        None => match delivered_index.get(&key) {
+                            Some(entry)
+                                if entry.file_size == size
+                                    && entry.source_mtime_ms.is_some()
+                                    && entry.source_mtime_ms == mtime_ms =>
+                            {
+                                stats.reused_count += 1;
+                                reused_shares.push(ReusedReloadShare {
+                                    file_hash: entry.file_hash.clone(),
+                                    source_path: path.clone(),
+                                    stale_hashes: Vec::new(),
+                                });
+                            }
+                            // Stock known.met has no paths. Promote only a
+                            // unique exact eMule identity match; duplicate
+                            // `(name, size, mtime_s)` rows deliberately fall
+                            // through to hashing.
+                            _ => {
+                                if let (Some(display_name), Some(mtime_ms)) =
+                                    (path.file_name().and_then(|name| name.to_str()), mtime_ms)
                                 {
-                                    stats.reused_count += 1;
-                                    reused_shares.push(ReusedReloadShare {
-                                        file_hash: entry.file_hash.clone(),
-                                        source_path: path.clone(),
-                                        stale_hashes: Vec::new(),
-                                    });
+                                    let modified_s = mtime_ms / 1000;
+                                    let identity = (display_name.to_string(), size, modified_s);
+                                    if let Some(entries) = imported_known_index.get(&identity) {
+                                        if entries.len() == 1 {
+                                            stats.reused_count += 1;
+                                            imported_known_promotions.push(
+                                                ImportedKnownPromotion {
+                                                    entry: entries[0].clone(),
+                                                    source_path: path,
+                                                    source_mtime_ms: Some(mtime_ms),
+                                                },
+                                            );
+                                            continue;
+                                        }
+                                    }
                                 }
                                 // Brand-new path: hash it, nothing stale to clean up.
-                                _ => {
-                                    stats.planned_hash_count += 1;
-                                    stats.new_count += 1;
-                                    to_hash.push(reload_hash_target(
-                                        path,
-                                        key,
-                                        size,
-                                        mtime_ms,
-                                        Vec::new(),
-                                        "new",
-                                    ));
-                                }
+                                stats.planned_hash_count += 1;
+                                stats.new_count += 1;
+                                to_hash.push(reload_hash_target(
+                                    path,
+                                    key,
+                                    size,
+                                    mtime_ms,
+                                    Vec::new(),
+                                    "new",
+                                ));
                             }
-                        }
+                        },
                     }
                 }
                 None => {
@@ -821,6 +857,7 @@ async fn plan_incremental_reload(
         ReloadPlan {
             to_hash,
             reused_shares,
+            imported_known_promotions,
             pruned_hashes,
             stats,
         }
@@ -1165,6 +1202,9 @@ pub(crate) async fn reload_shared_directories(core: &EmulebbCore) -> Result<Vec<
         register_monitor_shared_hash(core, reused.source_path.clone(), &reused.file_hash).await;
         forget_stale_shares(core, &reused.stale_hashes, &reused.file_hash).await;
     }
+    for promotion in plan.imported_known_promotions {
+        shares.push(promote_imported_known_share(core, promotion).await?);
+    }
     forget_stale_shares(core, &plan.pruned_hashes, "").await;
     for target in plan.to_hash {
         let source_path = target.path.clone();
@@ -1205,6 +1245,48 @@ async fn register_monitor_shared_hash(core: &EmulebbCore, source_path: PathBuf, 
         .await
         .monitor_shared_hashes
         .insert(key, hash.to_string());
+}
+
+async fn promote_imported_known_share(
+    core: &EmulebbCore,
+    promotion: ImportedKnownPromotion,
+) -> Result<LocalShare> {
+    let imported_entry = promotion.entry;
+    let source_path = promotion.source_path;
+    let summary = core
+        .ed2k_transfers
+        .promote_imported_known_file(
+            imported_entry.clone(),
+            &source_path,
+            promotion.source_mtime_ms,
+        )
+        .await?;
+    core.metadata_store
+        .unmark_unshared_file(&summary.file_hash)?;
+    core.metadata_store
+        .apply_imported_known_file_stats(&summary.file_hash, &imported_entry)?;
+    core.state
+        .lock()
+        .await
+        .unshared_hashes
+        .remove(&summary.file_hash);
+    core.index.lock().await.upsert_file(&IndexedFile {
+        ed2k_hash: summary.file_hash.clone(),
+        name: summary.display_name.clone(),
+        size_bytes: summary.file_size,
+        content_type: crate::ed2k_file_type_search_term(&summary.display_name)
+            .unwrap_or("unknown")
+            .to_string(),
+        availability_score: 1,
+    })?;
+    register_monitor_shared_hash(core, source_path, &summary.file_hash).await;
+    core.queue_ed2k_shared_catalog_publish();
+    core.share(&summary.file_hash).await.with_context(|| {
+        format!(
+            "promoted share {} is missing after import",
+            summary.file_hash
+        )
+    })
 }
 
 /// Drop previous identities for the same share-in-place source path so modified
@@ -1316,6 +1398,14 @@ async fn run_shared_directories_reload_job(core: EmulebbCore) -> Result<()> {
 
     for reused in &plan.reused_shares {
         forget_stale_shares(&core, &reused.stale_hashes, &reused.file_hash).await;
+    }
+    for promotion in plan.imported_known_promotions {
+        if let Err(error) = promote_imported_known_share(&core, promotion).await {
+            tracing::warn!(
+                error = %error,
+                "failed to promote imported stock known.met shared file (skipping)",
+            );
+        }
     }
     forget_stale_shares(&core, &plan.pruned_hashes, "").await;
 

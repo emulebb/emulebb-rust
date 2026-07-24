@@ -32,8 +32,8 @@ pub use search_store::normalized_search_query;
 pub use store::MetadataStore;
 pub use text::normalize_search_text;
 pub use transfer_model::{
-    MetadataDeliveredReuseEntry, MetadataShareInPlaceReloadEntry, MetadataSharedSourceFailure,
-    MetadataTransferCatalogEntry, MetadataTransferCounts, MetadataTransferManifest,
-    MetadataTransferPiece, MetadataTransferPublishEntry, MetadataTransferRange,
-    MetadataTransferShareEntry, MetadataTransferSource,
+    MetadataDeliveredReuseEntry, MetadataImportedKnownFileEntry, MetadataShareInPlaceReloadEntry,
+    MetadataSharedSourceFailure, MetadataTransferCatalogEntry, MetadataTransferCounts,
+    MetadataTransferManifest, MetadataTransferPiece, MetadataTransferPublishEntry,
+    MetadataTransferRange, MetadataTransferShareEntry, MetadataTransferSource,
 };

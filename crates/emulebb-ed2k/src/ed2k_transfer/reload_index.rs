@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
+use emulebb_metadata::MetadataImportedKnownFileEntry;
 
 use super::{Ed2kReloadIndexEntry, Ed2kTransferRuntime};
 
@@ -85,6 +86,46 @@ impl Ed2kTransferRuntime {
                     source_mtime_ms: entry.delivered_mtime_ms,
                 },
             );
+        }
+        Ok(index)
+    }
+
+    /// Return pathless stock ``known.met`` rows whose exact stock identity
+    /// matches one scanned file: file name, byte size, and whole-second mtime.
+    pub async fn imported_known_file_identity_matches(
+        &self,
+        display_name: String,
+        file_size: u64,
+        modified_s: i64,
+    ) -> Result<Vec<MetadataImportedKnownFileEntry>> {
+        let metadata = self.metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            metadata.imported_known_file_identity_matches(&display_name, file_size, modified_s)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
+    }
+
+    /// Build a pathless stock ``known.met`` lookup keyed by exact
+    /// `(file_name, file_size, modified_s)`. The caller must only trust a key
+    /// when it maps to exactly one row.
+    pub async fn imported_known_file_identity_index(
+        &self,
+    ) -> Result<HashMap<(String, u64, i64), Vec<MetadataImportedKnownFileEntry>>> {
+        let metadata = self.metadata.clone();
+        let entries = tokio::task::spawn_blocking(move || metadata.imported_known_file_entries())
+            .await
+            .map_err(anyhow::Error::from)??;
+        let mut index = HashMap::new();
+        for entry in entries {
+            index
+                .entry((
+                    entry.display_name.clone(),
+                    entry.file_size,
+                    entry.modified_s,
+                ))
+                .or_insert_with(Vec::new)
+                .push(entry);
         }
         Ok(index)
     }

@@ -123,6 +123,28 @@ pub struct MetadataDeliveredReuseEntry {
     pub delivered_mtime_ms: Option<i64>,
 }
 
+/// One pathless stock eMule ``known.met`` row imported into a Rust profile.
+///
+/// Stock ``known.met`` records do not carry a directory path. Rust can safely
+/// reuse one only after a configured shared-root scan finds exactly one file
+/// with the same file name, byte size, and whole-second mtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataImportedKnownFileEntry {
+    pub file_hash: String,
+    pub display_name: String,
+    pub file_size: u64,
+    pub modified_s: i64,
+    pub md4_hashset: Vec<String>,
+    pub aich_root: Option<String>,
+    pub aich_hashset: Vec<String>,
+    pub upload_priority: String,
+    pub auto_upload_priority: bool,
+    pub all_time_uploaded_bytes: u64,
+    pub all_time_upload_requests: u64,
+    pub all_time_upload_accepts: u64,
+    pub last_upload_request_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataSharedSourceFailure {
     pub source_path: String,

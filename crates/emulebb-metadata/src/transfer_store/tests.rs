@@ -384,6 +384,75 @@ fn transfer_manifest_clears_matching_shared_source_failure() {
 }
 
 #[test]
+fn imported_known_file_identity_matches_roundtrip_pathless_stock_rows() {
+    let store = MetadataStore::in_memory().unwrap();
+    let entry = MetadataImportedKnownFileEntry {
+        file_hash: "00112233445566778899aabbccddeeff".to_string(),
+        display_name: "Known.Payload.bin".to_string(),
+        file_size: 1024,
+        modified_s: 1_700_000_000,
+        md4_hashset: vec!["11111111111111111111111111111111".to_string()],
+        aich_root: Some("2222222222222222222222222222222222222222".to_string()),
+        aich_hashset: vec!["3333333333333333333333333333333333333333".to_string()],
+        upload_priority: "high".to_string(),
+        auto_upload_priority: false,
+        all_time_uploaded_bytes: 1234,
+        all_time_upload_requests: 9,
+        all_time_upload_accepts: 4,
+        last_upload_request_ms: 1_700_000_001_000,
+    };
+
+    store.upsert_imported_known_file(&entry).unwrap();
+
+    assert_eq!(
+        store
+            .imported_known_file_identity_matches("Known.Payload.bin", 1024, 1_700_000_000)
+            .unwrap(),
+        vec![entry]
+    );
+    assert!(
+        store
+            .imported_known_file_identity_matches("known.payload.bin", 1024, 1_700_000_000)
+            .unwrap()
+            .is_empty(),
+        "stock FindKnownFile uses exact file-name equality"
+    );
+}
+
+#[test]
+fn imported_known_file_identity_matches_returns_ambiguous_rows() {
+    let store = MetadataStore::in_memory().unwrap();
+    for hash in [
+        "00112233445566778899aabbccddeeff",
+        "ffeeddccbbaa99887766554433221100",
+    ] {
+        store
+            .upsert_imported_known_file(&MetadataImportedKnownFileEntry {
+                file_hash: hash.to_string(),
+                display_name: "Ambiguous.Payload.bin".to_string(),
+                file_size: 1024,
+                modified_s: 1_700_000_000,
+                md4_hashset: Vec::new(),
+                aich_root: None,
+                aich_hashset: Vec::new(),
+                upload_priority: "normal".to_string(),
+                auto_upload_priority: false,
+                all_time_uploaded_bytes: 0,
+                all_time_upload_requests: 0,
+                all_time_upload_accepts: 0,
+                last_upload_request_ms: 0,
+            })
+            .unwrap();
+    }
+
+    let matches = store
+        .imported_known_file_identity_matches("Ambiguous.Payload.bin", 1024, 1_700_000_000)
+        .unwrap();
+
+    assert_eq!(matches.len(), 2);
+}
+
+#[test]
 fn delete_transfer_manifest_removes_transfer_rows() {
     let store = MetadataStore::in_memory().unwrap();
     let manifest = MetadataTransferManifest {
