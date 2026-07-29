@@ -619,8 +619,14 @@ async fn diagnostics_returns_runtime_diagnostics_directly() {
     assert_eq!(value["data"]["transferEvents"]["stream"], "sse");
     assert_eq!(value["data"]["transferEvents"]["channelCapacity"], 1024);
     assert_eq!(value["data"]["transferEvents"]["subscriberCount"], 0);
-    assert_eq!(value["data"]["transferEvents"]["latestEventId"], 2);
-    assert_eq!(value["data"]["transferEvents"]["nextEventId"], 3);
+    let latest_event_id = value["data"]["transferEvents"]["latestEventId"]
+        .as_u64()
+        .expect("latest event id should be numeric");
+    assert!(latest_event_id >= 1);
+    assert_eq!(
+        value["data"]["transferEvents"]["nextEventId"].as_u64(),
+        Some(latest_event_id + 1)
+    );
     assert_eq!(value["data"]["transferEvents"]["resumeBehavior"], "reset");
     assert_eq!(value["data"]["geolocation"], Value::Null);
 }

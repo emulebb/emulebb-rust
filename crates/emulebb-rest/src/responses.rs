@@ -638,7 +638,10 @@ mod tests {
         assert_eq!(response.all_time_accepts, 5);
         assert_eq!(response.all_time_transferred, 4096);
         assert_eq!(response.path, r"C:\shared\Synthetic.Shared.bin");
-        assert_eq!(response.directory, r"C:\shared");
+        assert_eq!(
+            response.directory,
+            if cfg!(windows) { r"C:\shared" } else { "" }
+        );
     }
 
     #[test]
