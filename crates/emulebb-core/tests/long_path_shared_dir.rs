@@ -110,7 +110,9 @@ async fn long_path_shared_directory_files_are_scanned_ingested_and_shared() {
     })
     .await
     .expect("configuring the deep (>260) shared root must succeed via the verbatim form");
-    let expected_display_root = normal_path_display(&configured_root);
+    let expected_display_root = fs::canonicalize(long_path(Path::new(&configured_root)))
+        .map(|path| normal_path_display(&path.display().to_string()))
+        .expect("configured shared root should canonicalize");
     let directories = core.shared_directories().await;
     assert_eq!(directories.roots[0].path, expected_display_root);
     assert!(
