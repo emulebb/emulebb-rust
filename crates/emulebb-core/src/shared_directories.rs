@@ -787,18 +787,16 @@ async fn plan_incremental_reload(
                                 {
                                     let modified_s = mtime_ms / 1000;
                                     let identity = (display_name.to_string(), size, modified_s);
-                                    if let Some(entries) = imported_known_index.get(&identity) {
-                                        if entries.len() == 1 {
-                                            stats.reused_count += 1;
-                                            imported_known_promotions.push(
-                                                ImportedKnownPromotion {
-                                                    entry: entries[0].clone(),
-                                                    source_path: path,
-                                                    source_mtime_ms: Some(mtime_ms),
-                                                },
-                                            );
-                                            continue;
-                                        }
+                                    if let Some(entries) = imported_known_index.get(&identity)
+                                        && entries.len() == 1
+                                    {
+                                        stats.reused_count += 1;
+                                        imported_known_promotions.push(ImportedKnownPromotion {
+                                            entry: entries[0].clone(),
+                                            source_path: path,
+                                            source_mtime_ms: Some(mtime_ms),
+                                        });
+                                        continue;
                                     }
                                 }
                                 // Brand-new path: hash it, nothing stale to clean up.
