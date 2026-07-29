@@ -25,6 +25,10 @@ contract live in
 `EMULEBB_WORKSPACE_ROOT\repos\emulebb-tooling\docs\products\emulebb-rust`.
 The repo-local `docs` directory is only a pointer.
 
+New contributors should start with [`CONTRIBUTING.md`](CONTRIBUTING.md), the
+public eMuleBB Suite board, and starter issues labeled `good first issue` or
+`help wanted`.
+
 ## 0.0.x Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
