@@ -202,7 +202,9 @@ async fn shared_directories_use_emulebb_contract_and_reload_files() {
     let shared_root = runtime_dir.join("shared-root");
     let extra_root = runtime_dir.join("extra-root");
     let shared_root_input = long_path(&shared_root).display().to_string();
-    let expected_shared_root = normal_path_display(&shared_root_input);
+    let expected_shared_root = std::fs::canonicalize(long_path(&shared_root))
+        .map(|path| normal_path_display(&path.display().to_string()))
+        .expect("shared root should canonicalize");
     let nested_root = shared_root.join("nested");
     let top_level_file = shared_root.join("Top.Level.bin");
     let nested_file = nested_root.join("Nested.bin");
