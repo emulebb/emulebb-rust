@@ -106,6 +106,13 @@ const APP_SETTINGS_SECTION_SURFACE: &[SettingSurfaceSpec] = &[
         "Persisted local eD2K identity override.",
     ),
     app_setting(
+        "daemon.initialSharedDirectoryReload",
+        SettingSurfaceClass::AdvancedControl,
+        true,
+        "Storage",
+        "Run the initial shared-root scan and hash pass on daemon startup.",
+    ),
+    app_setting(
         "daemon.hostnameLookup.enabled",
         SettingSurfaceClass::AdvancedControl,
         false,

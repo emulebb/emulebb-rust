@@ -50,6 +50,7 @@ pub struct DaemonProfile {
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
+    pub initial_shared_directory_reload: bool,
     pub kad: KadSettings,
     pub kad_bootstrap_endpoints: Vec<String>,
     pub ed2k: Ed2kRuntimeConfig,
@@ -82,6 +83,7 @@ impl Default for DaemonProfile {
             p2p_bind_ip: daemon.p2p_bind_ip,
             p2p_bind_interface: daemon.p2p_bind_interface,
             ed2k_user_hash: daemon.ed2k_user_hash,
+            initial_shared_directory_reload: daemon.initial_shared_directory_reload,
             kad: KadSettings::default(),
             kad_bootstrap_endpoints: Vec::new(),
             ed2k: Ed2kRuntimeConfig::default(),
@@ -132,6 +134,7 @@ impl DaemonProfile {
             p2p_bind_ip: settings.daemon.p2p_bind_ip,
             p2p_bind_interface: settings.daemon.p2p_bind_interface,
             ed2k_user_hash: settings.daemon.ed2k_user_hash,
+            initial_shared_directory_reload: settings.daemon.initial_shared_directory_reload,
             kad: settings.kad,
             kad_bootstrap_endpoints: settings.kad_bootstrap_endpoints,
             ed2k: settings.ed2k,
@@ -603,16 +606,18 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
     info!("emulebb-rust REST listening on {}", rest_bind_addr);
     spawn_regular_diagnostic_summary(Arc::clone(&core));
 
-    // Start the live auto-pickup monitor first, then run the initial
-    // scan-on-demand pickup of files that are already present. Keeping both
-    // steps in one detached task avoids the startup race where a file created
-    // after a scan pass but before watcher registration could be missed until a
-    // later reload. REST is already bound, and hashing remains detached in
-    // `reload_shared_directories_detached`, so readiness never waits on a large
-    // library hash.
+    // Start the live auto-pickup monitor first. Most profiles also run the
+    // initial scan-on-demand pickup of files that are already present; imported
+    // stock profiles can disable that boot reload after seeding exact manifests
+    // from known.met/shareddir.dat so startup does not hash a large library.
     let sharing_core = Arc::clone(&core);
+    let initial_shared_directory_reload = profile.initial_shared_directory_reload;
     tokio::spawn(async move {
         sharing_core.start_shared_directory_monitor().await;
+        if !initial_shared_directory_reload {
+            tracing::info!("initial shared-directory reload disabled by daemon settings");
+            return;
+        }
         if let Err(error) = sharing_core.reload_shared_directories_detached().await {
             tracing::warn!(%error, "initial shared-directory scan failed; continuing");
         }

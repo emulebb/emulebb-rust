@@ -358,7 +358,7 @@ pub struct CoreSettingsUpdate {
     pub network_ed2k: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct DaemonSettings {
     /// Global finished-file delivery directory (eMule Incoming folder). When a
@@ -368,6 +368,7 @@ pub struct DaemonSettings {
     pub p2p_bind_ip: Option<Ipv4Addr>,
     pub p2p_bind_interface: Option<String>,
     pub ed2k_user_hash: Option<String>,
+    pub initial_shared_directory_reload: bool,
     pub hostname_lookup: HostnameLookupSettings,
 }
 
@@ -595,6 +596,8 @@ pub struct DaemonSettingsUpdate {
         skip_serializing_if = "Option::is_none"
     )]
     pub ed2k_user_hash: Option<NullableUpdate<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_shared_directory_reload: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname_lookup: Option<HostnameLookupSettingsUpdate>,
 }
@@ -926,6 +929,19 @@ impl Default for Ed2kSettings {
     }
 }
 
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            incoming_dir: None,
+            p2p_bind_ip: None,
+            p2p_bind_interface: None,
+            ed2k_user_hash: None,
+            initial_shared_directory_reload: true,
+            hostname_lookup: HostnameLookupSettings::default(),
+        }
+    }
+}
+
 impl Default for HostnameLookupSettings {
     fn default() -> Self {
         Self {
@@ -1157,6 +1173,7 @@ impl DaemonSettingsUpdate {
             && self.p2p_bind_ip.is_none()
             && self.p2p_bind_interface.is_none()
             && self.ed2k_user_hash.is_none()
+            && self.initial_shared_directory_reload.is_none()
             && self
                 .hostname_lookup
                 .as_ref()
@@ -1287,6 +1304,9 @@ pub fn apply_daemon_settings_update(settings: &mut DaemonSettings, update: Daemo
     apply_nullable_update(&mut settings.p2p_bind_ip, update.p2p_bind_ip);
     apply_nullable_update(&mut settings.p2p_bind_interface, update.p2p_bind_interface);
     apply_nullable_update(&mut settings.ed2k_user_hash, update.ed2k_user_hash);
+    if let Some(value) = update.initial_shared_directory_reload {
+        settings.initial_shared_directory_reload = value;
+    }
     if let Some(hostname_lookup) = update.hostname_lookup {
         apply_hostname_lookup_settings_update(&mut settings.hostname_lookup, hostname_lookup);
     }
@@ -1579,6 +1599,7 @@ impl From<DaemonSettings> for DaemonSettingsUpdate {
             p2p_bind_ip: Some(nullable_from_option(settings.p2p_bind_ip)),
             p2p_bind_interface: Some(nullable_from_option(settings.p2p_bind_interface)),
             ed2k_user_hash: Some(nullable_from_option(settings.ed2k_user_hash)),
+            initial_shared_directory_reload: Some(settings.initial_shared_directory_reload),
             hostname_lookup: Some(settings.hostname_lookup.into()),
         }
     }

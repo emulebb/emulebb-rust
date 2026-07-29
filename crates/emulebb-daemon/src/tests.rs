@@ -202,6 +202,12 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     );
     put_setting(
         &metadata,
+        SECTION_DAEMON,
+        "initialSharedDirectoryReload",
+        serde_json::json!(false),
+    );
+    put_setting(
+        &metadata,
         SECTION_KAD,
         "listenPort",
         serde_json::json!(41002),
@@ -342,6 +348,7 @@ fn load_parses_bootstrap_toml_and_db_runtime_config() {
     assert_eq!(profile.profile_dir, profile_dir);
     assert_eq!(profile.p2p_bind_ip, Some("192.0.2.10".parse().unwrap()));
     assert_eq!(profile.p2p_bind_interface.as_deref(), Some("Ethernet"));
+    assert!(!profile.initial_shared_directory_reload);
     assert_eq!(
         profile.rest.bind_addr,
         Some("192.0.2.10:13301".parse().unwrap())
