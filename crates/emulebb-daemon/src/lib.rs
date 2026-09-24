@@ -344,16 +344,16 @@ fn default_profile_dir() -> Result<PathBuf> {
         let home = env::var_os("HOME").context(
             "cannot choose the default profile: neither XDG_CONFIG_HOME nor HOME is set",
         )?;
-        return Ok(PathBuf::from(home).join(".config").join("emulebb-rust"));
+        Ok(PathBuf::from(home).join(".config").join("emulebb-rust"))
     }
     #[cfg(target_os = "macos")]
     {
         let home =
             env::var_os("HOME").context("cannot choose the default profile: HOME is not set")?;
-        return Ok(PathBuf::from(home)
+        Ok(PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("emulebb-rust"));
+            .join("emulebb-rust"))
     }
     #[cfg(target_os = "windows")]
     {
