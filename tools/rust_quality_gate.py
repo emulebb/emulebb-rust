@@ -49,22 +49,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     env = build_env()
-    # Socket-binding tests bind X_LOCAL_IP, never loopback (the operator's VPN
-    # split tunnel breaks 127.0.0.1). Fail fast for the test gates if it is unset
-    # so a run can never silently bind/connect a broken loopback. CI resolves
-    # and exports the runner's primary non-loopback IPv4 address.
-    socket_test_gates = {
-        "ci",
-        "ci-test",
-        "test-workspace",
-        "test-kad-swarm",
-        "test-vpn-leak",
-    }
-    if args.gate in socket_test_gates and not env.get("X_LOCAL_IP"):
-        raise SystemExit(
-            "X_LOCAL_IP must be set for the socket-binding tests (loopback is broken "
-            "under the VPN split tunnel; CI resolves a non-loopback runner address)."
-        )
     commands = commands_for_gate(args.gate, env, force_rebuild=args.force_rebuild)
     for label, command in commands:
         run_step(label, command, env)

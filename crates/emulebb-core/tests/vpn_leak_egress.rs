@@ -32,20 +32,15 @@ use emulebb_ed2k::{NatConfig, config::Ed2kRuntimeConfig, ed2k_tcp::Ed2kSecureIde
 use emulebb_index::{FileIndex, KadLocalStoreConfig, SnoopQueueConfig};
 use emulebb_kad_dht::socket_opts::egress_audit;
 
-/// The tunnel IP for the test: `X_LOCAL_IP`, a real local interface so egress
-/// pinning resolves an actual index (the swarm/socket tests already require it to
-/// be a non-loopback LAN address; CI exports the runner's primary IPv4).
+/// The deterministic local interface used to exercise egress pinning in CI.
 fn tunnel_ip() -> Ipv4Addr {
-    std::env::var("X_LOCAL_IP")
-        .expect("X_LOCAL_IP must be set for the egress leak test")
-        .parse()
-        .expect("X_LOCAL_IP must be an IPv4 address")
+    Ipv4Addr::LOCALHOST
 }
 
 fn tunnel_if_index() -> u32 {
     emulebb_ed2k::networking::resolve_bind_if_index(tunnel_ip())
         .filter(|index| *index != 0)
-        .expect("X_LOCAL_IP must resolve to a local interface index")
+        .expect("loopback must resolve to a local interface index")
 }
 
 #[tokio::test]

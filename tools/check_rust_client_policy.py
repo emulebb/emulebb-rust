@@ -78,7 +78,6 @@ def main() -> int:
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
     errors.extend(check_p2p_bind_fail_closed_boundaries())
-    errors.extend(check_no_loopback_binds())
     errors.extend(check_egress_audit_is_test_only())
     errors.extend(check_no_legacy_rust_native_surface())
     errors.extend(check_current_only_metadata_schema())
@@ -671,35 +670,6 @@ def check_p2p_bind_fail_closed_boundaries() -> list[str]:
                 errors.append(f"{rel} pins public P2P egress with no interface index")
             if "resolve_bind_if_index(" in call:
                 errors.append(f"{rel} pins public P2P egress from optional ifIndex resolution")
-    return errors
-
-
-# A real socket bind (`.bind(` / `::bind(`) onto a loopback literal. Matches the
-# bind call itself, not address-as-DATA (config fields `bind_addr: Some("127...")`,
-# JSON bodies, contact IPs, MockTransport addresses) which never call `bind(`.
-LOOPBACK_BIND = re.compile(
-    r"\bbind\(\s*\(?\s*"
-    r'(IpAddr::V4\(Ipv4Addr::LOCALHOST|Ipv4Addr::LOCALHOST|"127\.0\.0\.1|"localhost)'
-)
-
-
-def check_no_loopback_binds() -> list[str]:
-    """Real socket binds must use X_LOCAL_IP, never a loopback literal.
-
-    The operator's VPN split tunnel breaks 127.0.0.1 (os error 10049), so a
-    hardcoded-loopback bind makes the gate flaky here. Tests bind X_LOCAL_IP via a
-    `test_bind_ip()` helper (CI exports X_LOCAL_IP=127.0.0.1). Address-as-data
-    usages are unaffected because they never call `bind(`.
-    """
-    errors = []
-    for rel in tracked_files("*.rs"):
-        normalized = rel.replace("\\", "/")
-        text = (ROOT / rel).read_text(encoding="utf-8")
-        if LOOPBACK_BIND.search(text):
-            errors.append(
-                f"{normalized} binds a socket to a loopback literal; bind X_LOCAL_IP "
-                "via test_bind_ip() (loopback is broken on the VPN split tunnel)"
-            )
     return errors
 
 

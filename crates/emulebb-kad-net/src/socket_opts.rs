@@ -96,13 +96,8 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, UdpSocket};
 
-    // LAN test binds use X_LOCAL_IP, never loopback (the VPN split tunnel breaks
-    // 127.0.0.1 -> os error 10049). CI exports X_LOCAL_IP=127.0.0.1.
     fn test_bind_ip() -> Ipv4Addr {
-        std::env::var("X_LOCAL_IP")
-            .expect("X_LOCAL_IP must be set for socket-binding tests (loopback is broken here)")
-            .parse()
-            .expect("X_LOCAL_IP must be an IPv4 address")
+        Ipv4Addr::LOCALHOST
     }
 
     #[test]

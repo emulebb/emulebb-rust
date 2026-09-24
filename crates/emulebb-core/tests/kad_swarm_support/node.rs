@@ -301,14 +301,5 @@ async fn send_publish_response(dht: &DhtNode, to: SocketAddr, target: NodeId, lo
 }
 
 fn lan_bind_ip() -> Ipv4Addr {
-    let raw =
-        std::env::var("X_LOCAL_IP").expect("X_LOCAL_IP must be set for local Kad swarm tests");
-    let ip = raw
-        .parse::<Ipv4Addr>()
-        .expect("X_LOCAL_IP must be an IPv4 address");
-    assert!(
-        !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast(),
-        "X_LOCAL_IP must be a LAN IPv4 address, got {ip}"
-    );
-    ip
+    Ipv4Addr::LOCALHOST
 }

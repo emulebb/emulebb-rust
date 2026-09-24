@@ -10,7 +10,6 @@ mod rendering;
 mod worker;
 
 use std::cmp::Ordering;
-use std::env;
 use std::rc::Rc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -516,10 +515,7 @@ fn server_form(ui: &MainWindow) -> ServerForm {
 }
 
 fn default_base_url() -> String {
-    match env::var("X_LOCAL_IP") {
-        Ok(ip) if !ip.trim().is_empty() => format!("http://{}:4711/api/v1", ip.trim()),
-        _ => "http://192.0.2.1:4711/api/v1".to_string(),
-    }
+    "http://127.0.0.1:4711/api/v1".to_string()
 }
 
 fn apply_saved_state(ui: &MainWindow, state: &ui_state::UiState) {

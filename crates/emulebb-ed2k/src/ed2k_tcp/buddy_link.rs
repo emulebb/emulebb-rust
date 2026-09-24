@@ -446,8 +446,7 @@ mod tests {
     async fn buddy_link_stops_and_stops_pinging_when_cancelled() {
         // A fake buddy peer that accepts the connection and then stays silent, so
         // the driver would otherwise idle on its ping/read timers indefinitely.
-        // Bind X_LOCAL_IP (never a loopback literal: the VPN split tunnel breaks
-        // 127.0.0.1). CI exports X_LOCAL_IP=127.0.0.1.
+        // Keep the fake peer on the same-machine loopback boundary.
         let bind_ip = crate::test_bind_ip();
         let listener = TcpListener::bind((bind_ip, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();

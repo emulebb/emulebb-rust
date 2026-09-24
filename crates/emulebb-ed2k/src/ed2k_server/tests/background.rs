@@ -500,10 +500,7 @@ async fn server_obfuscation_handshake_encrypts_login_request() {
     });
 
     let state = Arc::new(RwLock::new(Ed2kServerState::default()));
-    // Bind the client socket to the SAME address the listener is on
-    // (`test_bind_ip()` / X_LOCAL_IP). A hardcoded loopback source cannot reach a
-    // listener bound to a non-loopback X_LOCAL_IP on Windows, which is exactly the
-    // configuration CI uses (the swarm harness forbids a loopback X_LOCAL_IP).
+    // Bind the client socket to the same loopback address as the listener.
     let mut session = ServerSession::connect(
         crate::test_bind_ip(),
         endpoint,
