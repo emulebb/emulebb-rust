@@ -260,7 +260,8 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   const serverUrlError = `server.met URL ${urlImportError}`;
   const kadUrlError = `nodes.dat URL ${urlImportError}`;
   const c1ControlUrl = `https://exa${String.fromCharCode(0x85)}mple.invalid/server.met`;
-  await expect(serverImportButton).toBeDisabled();
+  await expect(serversPanel.getByPlaceholder("server.met URL")).toHaveValue("https://upd.emule-security.org/server.met");
+  await expect(serverImportButton).toBeEnabled();
   await serversPanel.getByPlaceholder("server.met URL").fill("ftp://example.invalid/server.met");
   await expect(serversPanel.getByText(serverUrlError)).toBeVisible();
   await expect(serverImportButton).toBeDisabled();
@@ -281,7 +282,8 @@ test("section resource import forms validate HTTP URLs", async ({ page }) => {
   const kadPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "Kad" }) });
   const kadImportButton = kadPanel.getByRole("button", { name: "Import" });
   const initialKadImportPosts = requests.filter((request) => request.method === "POST" && request.path === "kad/operations/import-nodes-url").length;
-  await expect(kadImportButton).toBeDisabled();
+  await expect(kadPanel.getByPlaceholder("nodes.dat URL")).toHaveValue("https://upd.emule-security.org/nodes.dat");
+  await expect(kadImportButton).toBeEnabled();
   await kadPanel.getByPlaceholder("nodes.dat URL").fill("https:///nodes.dat");
   await expect(kadPanel.getByText(kadUrlError)).toBeVisible();
   await expect(kadImportButton).toBeDisabled();

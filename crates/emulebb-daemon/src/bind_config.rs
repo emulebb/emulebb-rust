@@ -33,7 +33,10 @@ impl DaemonProfile {
         if let Some(candidate) = self.p2p_bind_ip {
             return Ok(candidate);
         }
-        bail!("p2pBindIp or p2pBindInterface is required when ED2K servers are configured");
+        if !self.vpn_guard_blocks_p2p() {
+            return resolve_default_route_ip(interfaces);
+        }
+        bail!("p2pBindIp or p2pBindInterface is required when VPN Guard blocks public P2P");
     }
 
     pub(crate) fn vpn_binding_confirmed(
@@ -46,6 +49,30 @@ impl DaemonProfile {
 
     fn vpn_guard_blocks_p2p(&self) -> bool {
         self.vpn_guard.enabled && self.vpn_guard.mode.eq_ignore_ascii_case("block")
+    }
+}
+
+fn resolve_default_route_ip(interfaces: &[NetworkInterface]) -> Result<Ipv4Addr> {
+    let candidates = interfaces
+        .iter()
+        .filter(|iface| iface.has_default_route && !iface.is_loopback)
+        .flat_map(|iface| {
+            iface.addresses.iter().filter_map(|address| {
+                matches!(address.family, InterfaceAddressFamily::Ipv4)
+                    .then(|| address.address.parse::<Ipv4Addr>().ok())
+                    .flatten()
+                    .filter(|address| !address.is_loopback() && !address.is_unspecified())
+            })
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [address] => Ok(*address),
+        [] => bail!(
+            "p2pBindIp or p2pBindInterface is required because no default-route IPv4 interface was detected"
+        ),
+        _ => bail!(
+            "p2pBindIp or p2pBindInterface is required because multiple default-route IPv4 interfaces were detected"
+        ),
     }
 }
 

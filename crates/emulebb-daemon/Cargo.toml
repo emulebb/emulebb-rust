@@ -40,10 +40,13 @@ clap.workspace = true
 emulebb-core = { path = "../emulebb-core" }
 emulebb-ed2k = { path = "../emulebb-ed2k" }
 emulebb-index = { path = "../emulebb-index" }
+emulebb-kad-dht = { path = "../emulebb-kad-dht" }
 emulebb-metadata = { path = "../emulebb-metadata" }
 emulebb-rest = { path = "../emulebb-rest" }
 emulebb-settings = { path = "../emulebb-settings" }
+futures-util.workspace = true
 hex.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

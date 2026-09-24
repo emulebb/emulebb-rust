@@ -1416,7 +1416,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
   const [address, setAddress] = useState("");
   const [port, setPort] = useState("4661");
   const [name, setName] = useState("");
-  const [importUrl, setImportUrl] = useState("");
+  const [importUrl, setImportUrl] = useState("https://upd.emule-security.org/server.met");
   const [filter, setFilter] = useState("");
   const [selectedEndpoint, setSelectedEndpoint] = useState("");
   const serverAddress = address.trim();
@@ -1569,7 +1569,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
 export function KadView(props: { kad: KadStatus; client: RestClient; run: RunFunction }) {
   const [bootstrapAddress, setBootstrapAddress] = useState("");
   const [bootstrapPort, setBootstrapPort] = useState("4662");
-  const [importUrl, setImportUrl] = useState("");
+  const [importUrl, setImportUrl] = useState("https://upd.emule-security.org/nodes.dat");
   const [nodes, setNodes] = useState<KadNode[]>([]);
   const [filter, setFilter] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");

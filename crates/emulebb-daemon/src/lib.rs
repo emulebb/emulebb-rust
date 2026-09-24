@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -30,6 +31,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 mod bind_config;
+mod discovery_bootstrap;
 pub mod log_layer;
 pub use log_layer::LogBufferLayer;
 mod vpn_guard_monitor;
@@ -107,9 +109,18 @@ impl Default for RestBootstrapSettings {
 
 impl DaemonProfile {
     pub fn load(profile_dir: Option<PathBuf>) -> Result<Self> {
-        let profile_dir =
-            profile_dir.context("--profile is required; profile directory owns settings and DB")?;
+        let implicit_profile = profile_dir.is_none();
+        let profile_dir = match profile_dir {
+            Some(profile_dir) => profile_dir,
+            None => default_profile_dir()?,
+        };
         let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
+        let created_default_profile = if implicit_profile && !settings_path.exists() {
+            create_default_profile_bootstrap(&profile_dir, &settings_path)?;
+            true
+        } else {
+            false
+        };
         if !settings_path.exists() {
             bail!(
                 "profile settings file does not exist: {}",
@@ -127,6 +138,9 @@ impl DaemonProfile {
                     profile_dir.display()
                 )
             })?;
+        if created_default_profile {
+            seed_default_profile_network_settings(&metadata)?;
+        }
         let settings = load_settings(&metadata)?;
         let profile = Self {
             profile_dir,
@@ -180,7 +194,10 @@ impl DaemonProfile {
         metadata: &MetadataStore,
         detected_interfaces: &[emulebb_ed2k::NetworkInterface],
     ) -> Result<Option<Ed2kNetworkConfig>> {
-        if !self.has_network_bootstrap(metadata)? {
+        // A profile with neither listener configured is intentionally REST-only.
+        // Discovery data is not a configuration gate: an empty first-run profile
+        // must still be able to import servers and start Kad without a restart.
+        if self.ed2k.listen_port.is_none() && self.kad.listen_port.is_none() {
             return Ok(None);
         }
         let bind_ip = self.resolve_p2p_bind_ip_from_interfaces(detected_interfaces)?;
@@ -204,6 +221,7 @@ impl DaemonProfile {
             secure_ident,
             kad_local_store: kad_local_store_config(&self.kad),
             kad_snoop_queue: kad_snoop_queue_config(&self.kad),
+            kad_nodes_dat: discovery_bootstrap::load_valid_nodes_dat(&self.profile_dir)?,
             kad_bootstrap_endpoints: self.kad_bootstrap_endpoints.clone(),
             kad_bootstrap_min_routing_contacts: self.kad.bootstrap_min_routing_contacts.max(1),
             kad_publish_shared_files: self.kad.publish_shared_files_enabled,
@@ -234,16 +252,6 @@ impl DaemonProfile {
                 .flatten(),
             ip_filter_level: self.ip_filter.level,
         }))
-    }
-
-    fn has_network_bootstrap(&self, metadata: &MetadataStore) -> Result<bool> {
-        if !self.kad_bootstrap_endpoints.is_empty() {
-            return Ok(true);
-        }
-        Ok(metadata
-            .load_servers()?
-            .into_iter()
-            .any(|server| server.enabled && server.port != 0 && !server.address.is_empty()))
     }
 
     /// Loads the configured `ipfilter.dat` into an `IpFilter`. Returns an empty
@@ -325,6 +333,70 @@ impl DaemonProfile {
         }
         Ok(Some(default_root))
     }
+}
+
+fn default_profile_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(path) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(path).join("emulebb-rust"));
+        }
+        let home = env::var_os("HOME").context(
+            "cannot choose the default profile: neither XDG_CONFIG_HOME nor HOME is set",
+        )?;
+        return Ok(PathBuf::from(home).join(".config").join("emulebb-rust"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home =
+            env::var_os("HOME").context("cannot choose the default profile: HOME is not set")?;
+        return Ok(PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("emulebb-rust"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let app_data = env::var_os("LOCALAPPDATA")
+            .context("cannot choose the default profile: LOCALAPPDATA is not set")?;
+        Ok(PathBuf::from(app_data).join("emulebb-rust"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        bail!("--profile is required on this platform")
+    }
+}
+
+fn create_default_profile_bootstrap(
+    profile_dir: &std::path::Path,
+    settings_path: &std::path::Path,
+) -> Result<()> {
+    fs::create_dir_all(profile_dir)
+        .with_context(|| format!("failed to create default profile {}", profile_dir.display()))?;
+    let api_key = uuid::Uuid::new_v4().simple().to_string();
+    let text = format!("[rest]\nbindAddr = \"127.0.0.1:4711\"\napiKey = \"{api_key}\"\n");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options
+        .open(settings_path)
+        .with_context(|| format!("failed to create {}", settings_path.display()))?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("failed to write {}", settings_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", settings_path.display()))?;
+    eprintln!("Created eMuleBB profile at {}", profile_dir.display());
+    eprintln!("WebUI: http://127.0.0.1:4711/  API key: {api_key}");
+    Ok(())
+}
+
+fn seed_default_profile_network_settings(metadata: &MetadataStore) -> Result<()> {
+    if !metadata.has_settings_section(SECTION_ED2K)? {
+        metadata.put_setting_json(SECTION_ED2K, "listenPort", "4662")?;
+    }
+    if !metadata.has_settings_section(SECTION_KAD)? {
+        metadata.put_setting_json(SECTION_KAD, "listenPort", "4672")?;
+    }
+    Ok(())
 }
 
 fn validate_web_root_dir(path: &std::path::Path, label: &str) -> Result<()> {
@@ -574,6 +646,7 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         .with_context(|| format!("failed to create {}", profile.profile_dir.display()))?;
     let index = FileIndex::open(profile.metadata_path())?;
     let metadata_store = index.metadata_store();
+    discovery_bootstrap::seed_empty_discovery(&metadata_store, &profile.profile_dir).await?;
     let ed2k_network = profile.ed2k_network_config(&metadata_store)?;
     let ed2k_network_configured = ed2k_network.is_some();
     let vpn_guard_monitor = ed2k_network

@@ -252,6 +252,7 @@ impl EmulebbCore {
             obfuscation_enabled: network.ed2k.obfuscation_enabled,
             bootstrap_min_routing_contacts: network.kad_bootstrap_min_routing_contacts.max(1),
             max_concurrent_searches: KAD_SHARED_FILE_PUBLISH_DHT_SEARCH_CAP,
+            nodes_dat: network.kad_nodes_dat.clone(),
             nodes_text: configured_bootstrap_endpoints_text.clone(),
             class_budgets: kad_rpc_class_budgets(),
             // Pin Kad UDP egress to the VPN bind interface (IP_UNICAST_IF).

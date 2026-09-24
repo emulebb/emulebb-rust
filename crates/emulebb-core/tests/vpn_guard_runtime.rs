@@ -52,6 +52,7 @@ fn test_network_config(root: &Path) -> Ed2kNetworkConfig {
         ),
         kad_local_store: KadLocalStoreConfig::default(),
         kad_snoop_queue: SnoopQueueConfig::default(),
+        kad_nodes_dat: None,
         kad_bootstrap_endpoints: Vec::new(),
         kad_bootstrap_min_routing_contacts: 10,
         kad_publish_shared_files: true,

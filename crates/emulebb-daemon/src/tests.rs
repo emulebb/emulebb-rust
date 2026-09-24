@@ -142,10 +142,26 @@ fn put_setting(metadata: &MetadataStore, section: &str, key: &str, value: serde_
 }
 
 #[test]
-fn load_requires_explicit_profile_path() {
-    let error = DaemonProfile::load(None).unwrap_err().to_string();
+fn default_profile_bootstrap_creates_loopback_settings_and_network_ports() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profile");
+    let settings_path = profile_dir.join(PROFILE_SETTINGS_FILE);
 
-    assert!(error.contains("--profile is required"));
+    create_default_profile_bootstrap(&profile_dir, &settings_path).unwrap();
+    let text = fs::read_to_string(settings_path).unwrap();
+    assert!(text.contains("bindAddr = \"127.0.0.1:4711\""));
+    assert!(text.contains("apiKey = \""));
+
+    let metadata = MetadataStore::open(profile_dir.join(PROFILE_METADATA_FILE)).unwrap();
+    seed_default_profile_network_settings(&metadata).unwrap();
+    assert_eq!(
+        metadata.load_settings_section(SECTION_ED2K).unwrap(),
+        vec![("listenPort".to_string(), "4662".to_string())]
+    );
+    assert_eq!(
+        metadata.load_settings_section(SECTION_KAD).unwrap(),
+        vec![("listenPort".to_string(), "4672".to_string())]
+    );
 }
 
 #[test]
@@ -722,7 +738,7 @@ fn web_root_dir_rejects_configured_directory_without_index() {
 }
 
 #[test]
-fn ed2k_network_config_is_absent_without_servers() {
+fn ed2k_network_config_is_absent_without_listener_settings() {
     let temp = tempfile::tempdir().unwrap();
     let profile = DaemonProfile {
         profile_dir: temp.path().to_path_buf(),
@@ -989,6 +1005,20 @@ fn p2p_bind_interface_only_keeps_no_configured_ip_override() {
 
     assert_eq!(bind_ip, "10.44.55.66".parse::<Ipv4Addr>().unwrap());
     assert_eq!(profile.p2p_bind_ip, None);
+}
+
+#[test]
+fn direct_profile_uses_the_single_default_route_ipv4() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = profile_with_server(temp.path().to_path_buf(), None);
+    let mut default_route = iface("Ethernet", "192.0.2.10");
+    default_route.has_default_route = true;
+
+    let bind_ip = profile
+        .resolve_p2p_bind_ip_from_interfaces(&[iface("Offline", "198.51.100.20"), default_route])
+        .unwrap();
+
+    assert_eq!(bind_ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
 }
 
 #[test]

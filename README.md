@@ -104,11 +104,20 @@ on top of the fail-closed VPN gates.
 
 ## Binding Contract
 
-Run the daemon with `--profile <dir>`. The daemon reads REST bootstrap settings
-from `<dir>\emulebb-rust-settings.toml` and opens its SQLite repository at
-`<dir>\emulebb-rust-metadata.db`. The TOML file is control-plane bootstrap only:
-REST `bindAddr` is required there, while runtime/network settings live in the
+Run the daemon directly or pass `--profile <dir>`. Without `--profile`, the
+daemon creates a local-only profile under `$XDG_CONFIG_HOME/emulebb-rust` on
+Linux (falling back to `~/.config/emulebb-rust`), the platform application-data
+directory on Windows, or `~/Library/Application Support/emulebb-rust` on macOS.
+It prints the generated WebUI API key on first launch. An explicit profile must
+already contain `emulebb-rust-settings.toml`; its SQLite repository is
+`emulebb-rust-metadata.db`. The TOML file is control-plane bootstrap only: REST
+`bindAddr` is required there, while runtime/network settings live in the
 database and are exposed through `/api/v1/app/settings`.
+
+When an enabled server list or persisted Kad bootstrap file is empty, startup
+downloads and validates the same trusted defaults used by eMuleBB MFC. Existing
+server data and non-empty `nodes.dat` files are never replaced. An offline or
+failed bootstrap does not prevent the daemon and WebUI from starting.
 
 The daemon serves the browser WebUI from a `webui` directory beside
 `emulebb-rust.exe` when that directory exists. Set `[rest].webRootDir` to an

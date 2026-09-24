@@ -792,6 +792,8 @@ pub struct Ed2kNetworkConfig {
     pub secure_ident: Arc<Ed2kSecureIdent>,
     pub kad_local_store: KadLocalStoreConfig,
     pub kad_snoop_queue: SnoopQueueConfig,
+    /// Validated persisted `nodes.dat` bytes used to seed a new Kad runtime.
+    pub kad_nodes_dat: Option<Vec<u8>>,
     pub kad_bootstrap_endpoints: Vec<String>,
     pub kad_bootstrap_min_routing_contacts: usize,
     pub kad_publish_shared_files: bool,
