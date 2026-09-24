@@ -11,7 +11,7 @@ use super::types::{
 };
 
 fn read_kad_search_entry_id(cursor: &mut Cursor<&[u8]>) -> Result<Ed2kHash, ProtoError> {
-    let entry_id = cursor.read_le::<NodeId>()?;
+    let entry_id = BinReaderExt::read_le::<NodeId>(cursor)?;
     Ok(Ed2kHash::from_bytes(entry_id.to_be_bytes()))
 }
 
@@ -30,14 +30,14 @@ pub(super) fn read_search_res(cursor: &mut Cursor<&[u8]>) -> Result<SearchRes, P
     // - eMule srchybrid/kademlia/net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_RES
     // - eMule srchybrid/kademlia/io/DataIO.cpp CDataIO::ReadStringUTF8(bool bOptACP)
     // - aMule src/kademlia/net/KademliaUDPListener.cpp ProcessSearchResponse
-    let sender_id = cursor.read_le::<NodeId>()?;
-    let target = cursor.read_le::<NodeId>()?;
-    let count = cursor.read_le::<u16>()?;
+    let sender_id = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let count = BinReaderExt::read_le::<u16>(cursor)?;
     let mut results = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
         let entry_id = read_kad_search_entry_id(cursor)?;
-        let tag_count = cursor.read_le::<u8>()?;
+        let tag_count = BinReaderExt::read_le::<u8>(cursor)?;
         let mut tags = Vec::with_capacity(tag_count as usize);
         for _ in 0..tag_count {
             tags.push(Tag::read_with_mode(
@@ -75,11 +75,11 @@ pub(super) fn write_search_res(
 }
 
 pub(super) fn read_find_buddy_res(cursor: &mut Cursor<&[u8]>) -> Result<FindBuddyRes, ProtoError> {
-    let buddy_id = cursor.read_le::<NodeId>()?;
-    let client_hash = cursor.read_le::<Ed2kHash>()?;
-    let tcp_port = cursor.read_le::<u16>()?;
+    let buddy_id = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let client_hash = BinReaderExt::read_le::<Ed2kHash>(cursor)?;
+    let tcp_port = BinReaderExt::read_le::<u16>(cursor)?;
     let connect_options = if cursor.position() < cursor.get_ref().len() as u64 {
-        Some(cursor.read_le::<u8>()?)
+        Some(BinReaderExt::read_le::<u8>(cursor)?)
     } else {
         None
     };
@@ -106,10 +106,10 @@ pub(super) fn write_find_buddy_res(
 }
 
 pub(super) fn read_publish_res(cursor: &mut Cursor<&[u8]>) -> Result<PublishRes, ProtoError> {
-    let target = cursor.read_le::<NodeId>()?;
-    let load = cursor.read_le::<u8>()?;
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let load = BinReaderExt::read_le::<u8>(cursor)?;
     let options = if cursor.position() < cursor.get_ref().len() as u64 {
-        Some(cursor.read_le::<u8>()?)
+        Some(BinReaderExt::read_le::<u8>(cursor)?)
     } else {
         None
     };
@@ -134,8 +134,8 @@ pub(super) fn write_publish_res(
 }
 
 pub(super) fn read_search_key_req(cursor: &mut Cursor<&[u8]>) -> Result<SearchKeyReq, ProtoError> {
-    let target = cursor.read_le::<NodeId>()?;
-    let start_position = cursor.read_le::<u16>()?;
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let start_position = BinReaderExt::read_le::<u16>(cursor)?;
     let mut restrictive_payload = Vec::new();
     cursor
         .read_to_end(&mut restrictive_payload)
@@ -161,17 +161,17 @@ pub(super) fn write_search_key_req(
 pub(super) fn read_search_source_req(
     cursor: &mut Cursor<&[u8]>,
 ) -> Result<SearchSourceReq, ProtoError> {
-    let target = cursor.read_le::<NodeId>()?;
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
     let remaining = cursor
         .get_ref()
         .len()
         .saturating_sub(cursor.position() as usize);
     let (start_position, size) = match remaining {
-        4 => (0, u64::from(cursor.read_le::<u32>()?)),
-        8 => (0, cursor.read_le::<u64>()?),
+        4 => (0, u64::from(BinReaderExt::read_le::<u32>(cursor)?)),
+        8 => (0, BinReaderExt::read_le::<u64>(cursor)?),
         10 => {
-            let start_position = cursor.read_le::<u16>()? & 0x7FFF;
-            (start_position, cursor.read_le::<u64>()?)
+            let start_position = BinReaderExt::read_le::<u16>(cursor)? & 0x7FFF;
+            (start_position, BinReaderExt::read_le::<u64>(cursor)?)
         }
         _ => return Err(ProtoError::BufferTooShort),
     };

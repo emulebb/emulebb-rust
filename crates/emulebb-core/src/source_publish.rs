@@ -73,7 +73,12 @@ fn emule_buddy_source_type(file_size: u64) -> u8 {
 
 pub(crate) fn emule_kad_chunk_order(bytes: [u8; 16]) -> [u8; 16] {
     let mut ordered = [0u8; 16];
-    for (dst, src) in ordered.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
+    for (dst, src) in ordered
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(bytes.as_chunks::<4>().0.iter())
+    {
         dst.copy_from_slice(&[src[3], src[2], src[1], src[0]]);
     }
     ordered

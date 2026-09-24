@@ -80,7 +80,7 @@ use rsa::{
     rand_core::OsRng,
     signature::Verifier,
 };
-use sha1::Sha1;
+use sha1_legacy::Sha1;
 use std::collections::VecDeque;
 use std::io::{self, Write as _};
 use std::{

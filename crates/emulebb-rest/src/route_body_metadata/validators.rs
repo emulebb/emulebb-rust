@@ -639,7 +639,7 @@ fn decode_lowercase_hex_16(text: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut bytes = [0; 16];
-    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let hi = lowercase_hex_nibble(pair[0])?;
         let lo = lowercase_hex_nibble(pair[1])?;
         bytes[index] = (hi << 4) | lo;

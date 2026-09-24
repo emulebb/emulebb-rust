@@ -13,7 +13,7 @@ use rsa::{
     rand_core::OsRng,
     signature::{RandomizedSigner, SignatureEncoding, Verifier},
 };
-use sha1::Sha1;
+use sha1_legacy::Sha1;
 
 use super::{
     ED2K_SECURE_IDENT_KEY_AND_SIGNATURE_NEEDED, ED2K_SECURE_IDENT_KEY_BITS, Ed2kTransport,

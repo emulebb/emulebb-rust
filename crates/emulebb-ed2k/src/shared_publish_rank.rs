@@ -198,7 +198,7 @@ fn decode_hex_hash_bytes(file_hash: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut bytes = [0u8; 16];
-    for (index, chunk) in input.chunks_exact(2).enumerate() {
+    for (index, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         bytes[index] = (high << 4) | low;

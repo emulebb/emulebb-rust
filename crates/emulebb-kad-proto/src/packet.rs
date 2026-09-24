@@ -179,27 +179,27 @@ impl KadPacket {
         let packet = match op {
             opcode::BOOTSTRAP_REQ => KadPacket::BootstrapReq,
             opcode::BOOTSTRAP_RES => {
-                let p = cursor.read_le::<BootstrapRes>()?;
+                let p = BinReaderExt::read_le::<BootstrapRes>(&mut cursor)?;
                 KadPacket::BootstrapRes(p)
             }
             opcode::HELLO_REQ => {
-                let p = cursor.read_le::<HelloReq>()?;
+                let p = BinReaderExt::read_le::<HelloReq>(&mut cursor)?;
                 KadPacket::HelloReq(p)
             }
             opcode::HELLO_RES => {
-                let p = cursor.read_le::<HelloRes>()?;
+                let p = BinReaderExt::read_le::<HelloRes>(&mut cursor)?;
                 KadPacket::HelloRes(p)
             }
             opcode::HELLO_RES_ACK => {
-                let p = cursor.read_le::<HelloResAck>()?;
+                let p = BinReaderExt::read_le::<HelloResAck>(&mut cursor)?;
                 KadPacket::HelloResAck(p)
             }
             opcode::REQ => {
-                let p = cursor.read_le::<Req>()?;
+                let p = BinReaderExt::read_le::<Req>(&mut cursor)?;
                 KadPacket::Req(p)
             }
             opcode::RES => {
-                let p = cursor.read_le::<Res>()?;
+                let p = BinReaderExt::read_le::<Res>(&mut cursor)?;
                 KadPacket::Res(p)
             }
             opcode::SEARCH_KEY_REQ => {
@@ -211,7 +211,7 @@ impl KadPacket {
                 KadPacket::SearchSourceReq(p)
             }
             opcode::SEARCH_NOTES_REQ => {
-                let p = cursor.read_le::<SearchNotesReq>()?;
+                let p = BinReaderExt::read_le::<SearchNotesReq>(&mut cursor)?;
                 KadPacket::SearchNotesReq(p)
             }
             opcode::SEARCH_RES => {
@@ -219,15 +219,15 @@ impl KadPacket {
                 KadPacket::SearchRes(p)
             }
             opcode::PUBLISH_KEY_REQ => {
-                let p = cursor.read_le::<PublishKeyReq>()?;
+                let p = BinReaderExt::read_le::<PublishKeyReq>(&mut cursor)?;
                 KadPacket::PublishKeyReq(p)
             }
             opcode::PUBLISH_SOURCE_REQ => {
-                let p = cursor.read_le::<PublishSourceReq>()?;
+                let p = BinReaderExt::read_le::<PublishSourceReq>(&mut cursor)?;
                 KadPacket::PublishSourceReq(p)
             }
             opcode::PUBLISH_NOTES_REQ => {
-                let p = cursor.read_le::<PublishNotesReq>()?;
+                let p = BinReaderExt::read_le::<PublishNotesReq>(&mut cursor)?;
                 KadPacket::PublishNotesReq(p)
             }
             opcode::PUBLISH_RES => {
@@ -238,16 +238,16 @@ impl KadPacket {
             opcode::PUBLISH_RES_ACK => KadPacket::PublishResAck,
             opcode::FIREWALLED_REQ => {
                 require_body_len(op, body, 2)?;
-                let p = cursor.read_le::<FirewalledReq>()?;
+                let p = BinReaderExt::read_le::<FirewalledReq>(&mut cursor)?;
                 KadPacket::FirewalledReq(p)
             }
             opcode::FIREWALLED2_REQ => {
-                let p = cursor.read_le::<Firewalled2Req>()?;
+                let p = BinReaderExt::read_le::<Firewalled2Req>(&mut cursor)?;
                 KadPacket::Firewalled2Req(p)
             }
             opcode::FIREWALLED_RES => {
                 require_body_len(op, body, 4)?;
-                let p = cursor.read_le::<FirewalledRes>()?;
+                let p = BinReaderExt::read_le::<FirewalledRes>(&mut cursor)?;
                 KadPacket::FirewalledRes(p)
             }
             opcode::FIREWALLED_ACK_RES => {
@@ -256,12 +256,12 @@ impl KadPacket {
             }
             opcode::FIREWALLUDP => {
                 require_min_body_len(op, body, 3)?;
-                let p = cursor.read_le::<FirewallUdp>()?;
+                let p = BinReaderExt::read_le::<FirewallUdp>(&mut cursor)?;
                 KadPacket::FirewallUdp(p)
             }
             opcode::FINDBUDDY_REQ => {
                 require_min_body_len(op, body, 34)?;
-                let p = cursor.read_le::<FindBuddyReq>()?;
+                let p = BinReaderExt::read_le::<FindBuddyReq>(&mut cursor)?;
                 KadPacket::FindBuddyReq(p)
             }
             opcode::FINDBUDDY_RES => {
@@ -271,13 +271,13 @@ impl KadPacket {
             }
             opcode::CALLBACK_REQ => {
                 require_min_body_len(op, body, 34)?;
-                let p = cursor.read_le::<CallbackReq>()?;
+                let p = BinReaderExt::read_le::<CallbackReq>(&mut cursor)?;
                 KadPacket::CallbackReq(p)
             }
             opcode::PING => KadPacket::Ping,
             opcode::PONG => {
                 require_min_body_len(op, body, 2)?;
-                let p = cursor.read_le::<Pong>()?;
+                let p = BinReaderExt::read_le::<Pong>(&mut cursor)?;
                 KadPacket::Pong(p)
             }
             other => KadPacket::Unknown {

@@ -890,12 +890,12 @@ export component MainWindow inherits Window {
                 settings-scroll := ScrollView {
                     width: parent.width;
                     height: parent.height;
-                    viewport-width: max(parent.width, 960px);
-                    viewport-height: 720px;
+                    content-width: max(parent.width, 960px);
+                    content-height: 720px;
 
                     settings-content := Rectangle {
-                        width: parent.viewport-width;
-                        height: parent.viewport-height;
+                        width: parent.content-width;
+                        height: parent.content-height;
                         background: ClassicTheme.panel-face;
 
                         VerticalLayout {
