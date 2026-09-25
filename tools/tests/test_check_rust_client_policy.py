@@ -222,12 +222,12 @@ class TestReleaseOutputPaths(unittest.TestCase):
     def test_accepts_external_release_paths(self) -> None:
         workflow = """
 EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
-CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
+EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 path: .ci/emulebb-tooling
 working-directory: .ci/emulebb-build
 package-emulebb-rust-ci --release-version 0.1.0-beta.1 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
-path: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v0.1.0-beta.1
+path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.1
 assemble-emulebb-rust-release-ci
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
