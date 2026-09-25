@@ -208,6 +208,22 @@ impl Ed2kTransferRuntime {
             entry.last_payload_at = Some(now);
             entry.window.record(now, byte_count);
         }
+        #[cfg(feature = "packet-diagnostics")]
+        let software = entry.client_software.clone();
+        drop(sources);
+        #[cfg(feature = "packet-diagnostics")]
+        if byte_count > 0 {
+            // WHY: a discovered source or packet receive does not prove usable
+            // cross-client transfer; record bytes only after the block path
+            // accepted them, keyed to the same peer and file as its HELLO tag.
+            crate::diag_event::emit(
+                "sched",
+                "download_payload_accepted",
+                "info",
+                serde_json::json!({ "fileHash": file_hash, "peer": peer.to_string() }),
+                serde_json::json!({ "bytes": byte_count, "clientSoftware": software }),
+            );
+        }
     }
 
     /// Record the peer's advertised per-part availability (OP_FILESTATUS).
@@ -309,7 +325,18 @@ impl Ed2kTransferRuntime {
                 client_software: None,
             });
         entry.last_seen_at = now;
+        #[cfg(feature = "packet-diagnostics")]
+        let diagnostic_software = software.clone();
         entry.client_software = Some(software);
+        drop(sources);
+        #[cfg(feature = "packet-diagnostics")]
+        crate::diag_event::emit(
+            "sched",
+            "download_source_software",
+            "info",
+            serde_json::json!({ "fileHash": file_hash, "peer": peer.to_string() }),
+            serde_json::json!({ "clientSoftware": diagnostic_software }),
+        );
     }
 
     /// Drop the live-source registry for a file (e.g. on transfer removal).
