@@ -1,0 +1,26 @@
+name: emulebb-rust-beta-test
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.0
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
+    env_file: .env.gluetun.local
+    ports:
+      - "127.0.0.1:14711:4711/tcp"
+    restart: unless-stopped
+  emulebb-rust:
+    image: ghcr.io/emulebb/emulebb-rust:0.1.0-beta.1
+    network_mode: service:gluetun
+    depends_on:
+      - gluetun
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: UTC
+    volumes:
+      - emulebb-rust-config:/config
+      - emulebb-rust-data:/data
+    restart: unless-stopped
+volumes:
+  emulebb-rust-config:
+  emulebb-rust-data:

@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -12,6 +13,13 @@ use tracing_subscriber::{EnvFilter, fmt};
 struct Cli {
     #[arg(short, long)]
     profile: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Override the REST listener for this run (for example, inside a container)"
+    )]
+    rest_bind_addr: Option<SocketAddr>,
+    #[arg(long, help = "Override the finished-download directory for this run")]
+    incoming_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -23,5 +31,12 @@ async fn main() -> Result<()> {
         .with(LogBufferLayer.with_filter(LevelFilter::INFO))
         .init();
     let cli = Cli::parse();
-    run(DaemonProfile::load(cli.profile)?).await
+    let mut profile = DaemonProfile::load(cli.profile)?;
+    if let Some(bind_addr) = cli.rest_bind_addr {
+        profile.rest.bind_addr = Some(bind_addr);
+    }
+    if let Some(incoming_dir) = cli.incoming_dir {
+        profile.incoming_dir = Some(incoming_dir);
+    }
+    run(profile).await
 }

@@ -1,0 +1,11 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+mkdir -p /config /data/ed2k
+if [[ -z ${LSIO_NON_ROOT_USER:-} ]]; then
+    chown abc:abc /config /data/ed2k
+    exec s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-rust \
+        --rest-bind-addr 0.0.0.0:4711 --incoming-dir /data/ed2k
+fi
+exec /usr/lib/emulebb-rust/emulebb-rust \
+    --rest-bind-addr 0.0.0.0:4711 --incoming-dir /data/ed2k
