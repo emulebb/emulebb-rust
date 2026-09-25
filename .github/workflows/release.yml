@@ -106,6 +106,7 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+          RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Retain build diagnostics
         if: always()
