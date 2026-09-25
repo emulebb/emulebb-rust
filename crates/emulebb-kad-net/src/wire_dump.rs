@@ -19,6 +19,7 @@ use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Instant;
 use tracing::warn;
 
 const EMULEBB_RUST_TMP_DIR_ENV: &str = "EMULEBB_RUST_TMP_DIR";
@@ -420,16 +421,21 @@ fn udp_dump_writer() -> Option<&'static UdpDumpWriter> {
     UDP_DUMP_WRITER.get_or_init(init_udp_dump_writer).as_ref()
 }
 
-/// Flush a buffered JSONL dump writer once per `DUMP_FLUSH_EVERY` records (and on
-/// the very first record) instead of on every packet, so the per-packet write()
-/// syscall can no longer block the Kad receive loop under an inbound flood.
+/// Flush on the first packet, at most once per second during light traffic,
+/// and every `DUMP_FLUSH_EVERY` packets during a flood. Live monitors must see
+/// low-rate request/response exchanges before the daemon exits.
 fn maybe_periodic_flush(guard: &mut BufWriter<File>, path: &Path) {
     static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
-    if SINCE_FLUSH
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(DUMP_FLUSH_EVERY)
-        && let Err(error) = guard.flush()
-    {
+    static START: OnceLock<Instant> = OnceLock::new();
+    static LAST_FLUSH_MS: AtomicU64 = AtomicU64::new(0);
+    let count = SINCE_FLUSH.fetch_add(1, Ordering::Relaxed);
+    let elapsed_ms = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    let due = count.is_multiple_of(DUMP_FLUSH_EVERY)
+        || elapsed_ms.saturating_sub(LAST_FLUSH_MS.load(Ordering::Relaxed)) >= 1_000;
+    if due {
+        LAST_FLUSH_MS.store(elapsed_ms, Ordering::Relaxed);
+    }
+    if due && let Err(error) = guard.flush() {
         warn!(
             "failed to flush Kad UDP dump writer at {}: {}",
             path.display(),
