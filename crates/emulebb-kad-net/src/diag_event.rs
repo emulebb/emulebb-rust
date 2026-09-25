@@ -45,6 +45,15 @@ const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
 const DIAG_FLUSH_EVERY: u64 = 256;
 
 static DIAG_EVENT_WRITER: OnceLock<Option<DiagEventWriter>> = OnceLock::new();
+#[cfg(feature = "packet-diagnostics")]
+static SHARED_DIAG_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serializes all Kad and ED2K append writers sharing one diagnostic JSONL file.
+/// A buffered Kad flush may contain only part of a record on some filesystems.
+#[cfg(feature = "packet-diagnostics")]
+pub fn shared_file_lock() -> &'static Mutex<()> {
+    &SHARED_DIAG_FILE_LOCK
+}
 
 #[derive(Debug)]
 struct DiagEventWriter {
@@ -101,6 +110,10 @@ pub fn emit(
         warn!("failed to encode diag_event line");
         return;
     };
+    let Ok(_shared_guard) = shared_file_lock().lock() else {
+        warn!("failed to lock shared diag_event file");
+        return;
+    };
     let Ok(mut guard) = writer.writer.lock() else {
         warn!("failed to lock diag_event writer");
         return;
@@ -114,10 +127,8 @@ pub fn emit(
     }
     // Flush periodically, not per event: a per-event flush() is a blocking write()
     // syscall, and emit() runs per inbound Kad packet (the flood path that starved
-    // the control plane). The BufWriter still flushes when full (always complete
-    // lines, since we only write_all whole lines); the small default buffer keeps
-    // each flush a single append-atomic write to this shared file, so the kad/ed2k
-    // shims never interleave a partial line.
+    // the control plane). The shared lock above remains held across any internal
+    // BufWriter flush, which can split a line on DrvFS or other filesystems.
     static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
     if SINCE_FLUSH
         .fetch_add(1, Ordering::Relaxed)

@@ -1465,6 +1465,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "emulebb-kad-dht",
+ "emulebb-kad-net",
  "emulebb-kad-proto",
  "emulebb-metadata",
  "emulebb-miniupnpc",

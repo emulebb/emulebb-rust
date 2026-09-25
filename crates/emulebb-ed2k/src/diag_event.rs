@@ -99,6 +99,9 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) {
+    let Ok(_shared_guard) = emulebb_kad_net::diag_event::shared_file_lock().lock() else {
+        return;
+    };
     let Ok(mut guard) = writer().lock() else {
         return;
     };

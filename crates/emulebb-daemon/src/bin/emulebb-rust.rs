@@ -20,6 +20,8 @@ struct Cli {
     rest_bind_addr: Option<SocketAddr>,
     #[arg(long, help = "Override the finished-download directory for this run")]
     incoming_dir: Option<PathBuf>,
+    #[arg(long, help = "Bind P2P traffic to this named interface for this run")]
+    p2p_bind_interface: Option<String>,
 }
 
 #[tokio::main]
@@ -37,6 +39,9 @@ async fn main() -> Result<()> {
     }
     if let Some(incoming_dir) = cli.incoming_dir {
         profile.incoming_dir = Some(incoming_dir);
+    }
+    if let Some(interface) = cli.p2p_bind_interface {
+        profile.p2p_bind_interface = Some(interface);
     }
     run(profile).await
 }

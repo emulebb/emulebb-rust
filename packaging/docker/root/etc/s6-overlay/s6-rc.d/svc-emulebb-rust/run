@@ -2,10 +2,12 @@
 set -euo pipefail
 
 mkdir -p /config /data/ed2k
+args=(--rest-bind-addr 0.0.0.0:4711 --incoming-dir /data/ed2k)
+if [[ -n ${EMULEBB_RUST_P2P_INTERFACE:-} ]]; then
+    args+=(--p2p-bind-interface "$EMULEBB_RUST_P2P_INTERFACE")
+fi
 if [[ -z ${LSIO_NON_ROOT_USER:-} ]]; then
     chown abc:abc /config /data/ed2k
-    exec s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-rust \
-        --rest-bind-addr 0.0.0.0:4711 --incoming-dir /data/ed2k
+    exec s6-setuidgid abc /usr/lib/emulebb-rust/emulebb-rust "${args[@]}"
 fi
-exec /usr/lib/emulebb-rust/emulebb-rust \
-    --rest-bind-addr 0.0.0.0:4711 --incoming-dir /data/ed2k
+exec /usr/lib/emulebb-rust/emulebb-rust "${args[@]}"

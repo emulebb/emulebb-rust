@@ -8,6 +8,7 @@ services:
       VPN_SERVICE_PROVIDER: custom
       VPN_TYPE: openvpn
       OPENVPN_CUSTOM_CONFIG: /gluetun/custom.conf
+      FIREWALL_INPUT_PORTS: "4711"
     volumes:
       - ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/custom.conf:/gluetun/custom.conf:ro
       - ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/ca.pem:/gluetun/ca.pem:ro
@@ -20,11 +21,13 @@ services:
     image: ghcr.io/emulebb/emulebb-rust:0.1.0-beta.1
     network_mode: service:gluetun
     depends_on:
-      - gluetun
+      gluetun:
+        condition: service_healthy
     environment:
       PUID: "1000"
       PGID: "1000"
       TZ: UTC
+      EMULEBB_RUST_P2P_INTERFACE: tun0
     volumes:
       - emulebb-rust-config:/config
       - emulebb-rust-data:/data
