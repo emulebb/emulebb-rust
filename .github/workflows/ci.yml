@@ -25,8 +25,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
