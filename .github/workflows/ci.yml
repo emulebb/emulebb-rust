@@ -68,6 +68,16 @@ jobs:
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
         run: python tools/rust_quality_gate.py ci-test
 
+      - name: Retain tested beta build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emulebb-rust-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            ${{ env.EMULEBB_WORKSPACE_OUTPUT_ROOT }}/tools/emulebb-rust/bin/
+            !${{ env.EMULEBB_WORKSPACE_OUTPUT_ROOT }}/tools/emulebb-rust/bin/*.pdb
+          if-no-files-found: error
+          retention-days: 14
+
   quality:
     name: policy + format + clippy
     runs-on: ubuntu-latest
