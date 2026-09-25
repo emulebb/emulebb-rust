@@ -5,6 +5,11 @@ eD2K/Kad core. It owns the Rust-forward `/api/v1` contract, runs as a headless
 daemon, and serves the embedded browser SPA WebUI from packaged static assets.
 It keeps local client state plus indexing data in SQLite.
 
+This is a Rust-native successor to the Windows eMuleBB MFC fork, not a
+line-by-line port or an MFC REST-contract mirror. Stock/community eMule peers
+are the primary wire-compatibility target. The separate maintained aMule client
+is a cross-platform source and offline-fixture reference in this workspace.
+
 The repository began from earlier Kad and ED2K work, but it is intentionally a
 local client product. The 0.0.x line does not expose a coordinator API.
 
