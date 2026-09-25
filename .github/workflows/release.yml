@@ -33,8 +33,8 @@ jobs:
           - {os: macos, arch: ARM64, runner: macos-15}
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
       EMULEBB_RUST_REPO: ${{ github.workspace }}
       EMULEBB_TOOLING_REPO: ${{ github.workspace }}/.ci/emulebb-tooling
       MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
@@ -107,11 +107,11 @@ jobs:
         with:
           name: emulebb-rust-package-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.zip
-            ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.deb
-            ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.AppImage
-            ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.dmg
-            ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.json
+            ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.zip
+            ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.deb
+            ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.AppImage
+            ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.dmg
+            ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.json
           if-no-files-found: error
           retention-days: 30
 
@@ -120,7 +120,7 @@ jobs:
     needs: native-package
     runs-on: ubuntu-24.04
     env:
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
       EMULEBB_RUST_REPO: ${{ github.workspace }}
     steps:
       - name: Checkout candidate
@@ -146,15 +146,15 @@ jobs:
         with:
           pattern: emulebb-rust-package-*
           merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          path: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Build OCI archive without publishing
         working-directory: .ci/emulebb-build
-        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Retain image candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: emulebb-rust-image-candidate
-          path: ${{ runner.temp }}/emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
+          path: ${{ github.workspace }}/../emulebb-rust-out/artifacts/emulebb-rust-v${{ env.RELEASE_VERSION }}-multiarch.oci.tar
           if-no-files-found: error
           retention-days: 30
 
@@ -167,7 +167,7 @@ jobs:
       contents: read
       packages: write
     env:
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
       EMULEBB_RUST_REPO: ${{ github.workspace }}
     steps:
       - name: Require the approved beta tag
@@ -200,10 +200,10 @@ jobs:
         with:
           pattern: emulebb-rust-package-*
           merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          path: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Push the verified versioned image
         working-directory: .ci/emulebb-build
-        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --push
+        run: python -m emule_workspace package-emulebb-rust-image-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --push
 
   publish-native:
     name: Publish verified native beta assets
@@ -213,7 +213,7 @@ jobs:
     permissions:
       contents: write
     env:
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
     steps:
       - name: Require the approved beta tag
         shell: bash
@@ -235,13 +235,13 @@ jobs:
         with:
           pattern: emulebb-rust-package-*
           merge-multiple: true
-          path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
+          path: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}
       - name: Verify complete set and write SHA256SUMS
         working-directory: emulebb-build
-        run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+        run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
       - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           prerelease: true
-          files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
+          files: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true
