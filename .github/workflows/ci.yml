@@ -25,8 +25,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     strategy:
       fail-fast: false
       matrix:
@@ -62,9 +60,13 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
 
       - name: Rust build/test gate
         env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
         run: python tools/rust_quality_gate.py ci-test
 
@@ -73,8 +75,8 @@ jobs:
         with:
           name: emulebb-rust-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           path: |
-            ${{ env.EMULEBB_WORKSPACE_OUTPUT_ROOT }}/tools/emulebb-rust/bin/
-            !${{ env.EMULEBB_WORKSPACE_OUTPUT_ROOT }}/tools/emulebb-rust/bin/*.pdb
+            ${{ runner.temp }}/emulebb-rust-out/tools/emulebb-rust/bin/
+            !${{ runner.temp }}/emulebb-rust-out/tools/emulebb-rust/bin/*.pdb
           if-no-files-found: error
           retention-days: 14
 
@@ -83,8 +85,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
-      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
-      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
     steps:
       - name: Checkout emulebb-rust
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -120,6 +120,8 @@ jobs:
 
       - name: Rust quality gate
         env:
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+          CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           MINIUPNP_ROOT: ${{ github.workspace }}/.ci/emulebb-miniupnp
         run: python tools/rust_quality_gate.py quick
 
