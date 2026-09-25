@@ -4,7 +4,15 @@ services:
     image: qmcgaw/gluetun:v3.41.0
     cap_add: [NET_ADMIN]
     devices: [/dev/net/tun:/dev/net/tun]
-    env_file: .env.gluetun.local
+    environment:
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: openvpn
+      OPENVPN_CUSTOM_CONFIG: /gluetun/custom.conf
+    volumes:
+      - ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/custom.conf:/gluetun/custom.conf:ro
+      - ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/ca.pem:/gluetun/ca.pem:ro
+      - ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/StaticKey.pem:/gluetun/StaticKey.pem:ro
+    secrets: [openvpn_user, openvpn_password]
     ports:
       - "127.0.0.1:14711:4711/tcp"
     restart: unless-stopped
@@ -24,3 +32,8 @@ services:
 volumes:
   emulebb-rust-config:
   emulebb-rust-data:
+secrets:
+  openvpn_user:
+    file: ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/openvpn_user
+  openvpn_password:
+    file: ${EMULEBB_TEST_VPN_PRIVATE_ROOT:?provide an existing read-only VPN private path}/openvpn_password
