@@ -104,8 +104,9 @@ after a toolchain or native dependency investigation.
 
 Compatibility proof for this line is local and deterministic first: Rust to
 Rust, stock-compatible eD2K/Kad interop witnesses, and REST conformance against
-the Rust OpenAPI contract. Public hide.me live-wire proof is a smoke lane layered
-on top of the fail-closed VPN gates.
+the Rust OpenAPI contract. Public-network diagnostics may use a direct
+connection; VPN use is optional. An explicit interface bind is fail-closed, but
+the beta does not claim native VPN leak safety without separate platform proof.
 
 ## Binding Contract
 
@@ -132,6 +133,23 @@ resolved from the profile directory. Browser API calls use the existing
 
 Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.
+
+## Beta.1 candidate artifacts
+
+The manual [release workflow](.github/workflows/release.yml) retains unsigned
+candidate artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,
+DEB/AppImage, and app-in-DMG packages include the daemon and browser WebUI. It
+also builds a Linux amd64/arm64 OCI image without publishing it. An approved
+`rust-v0.1.0-beta.1` tag is required to publish versioned GitHub Release and
+GHCR assets; the workflow does not publish a `latest` image.
+
+The image uses LinuxServer's s6 base and supports `PUID`/`PGID`, `/config` for
+profile state, and `/data/ed2k` for completed downloads. It serves the WebUI
+and REST API on port 4711. The optional
+[Gluetun Compose example](packaging/docker/compose.gluetun.example.yaml) uses
+an independent tunnel and read-only operator credentials; it binds Rust P2P to
+`tun0` through `EMULEBB_RUST_P2P_INTERFACE`. It is not a requirement for direct
+internet beta testing and does not alter an existing P2P Compose stack.
 
 ## Licensing
 

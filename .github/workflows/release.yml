@@ -159,7 +159,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: d1745169bcbfb6908cb6e22665e8fe8fe0a2eba9
+          ref: efd723fe82521c1178be713c0cd28a650f0df496
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
