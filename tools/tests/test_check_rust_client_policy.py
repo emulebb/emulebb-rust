@@ -216,15 +216,19 @@ class TestOmissionRegistry(unittest.TestCase):
 
 
 class TestReleaseOutputPaths(unittest.TestCase):
+    def test_current_workflow_keeps_release_outputs_external(self) -> None:
+        self.assertEqual(CHECKER.check_release_output_paths(), [])
+
     def test_accepts_external_release_paths(self) -> None:
         workflow = """
 EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
 EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out
 CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target
-RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
---target-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin"
---release-scope "$GITHUB_WORKSPACE/.ci/emulebb-tooling/docs/products/emulebb-rust/RELEASE-SCOPE.md"
---out "$RELEASE_OUT_DIR"
+path: .ci/emulebb-tooling
+working-directory: .ci/emulebb-build
+package-emulebb-rust-ci --release-version 0.1.0-beta.1 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
+path: ${{ github.workspace }}/../emulebb-rust-out/release/rust-v0.1.0-beta.1
+assemble-emulebb-rust-release-ci
 """
         self.assertEqual(CHECKER.check_release_output_paths(workflow), [])
 
@@ -232,7 +236,7 @@ RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 7)
+        self.assertEqual(len(errors), 9)
 
 
 if __name__ == "__main__":

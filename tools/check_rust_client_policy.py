@@ -484,10 +484,12 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}": "explicit workspace root",
         "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ github.workspace }}/../emulebb-rust-out": "external workspace output root",
         "CARGO_TARGET_DIR: ${{ github.workspace }}/../emulebb-rust-out/builds/rust/target": "external Cargo target",
-        "RELEASE_OUT_DIR: ${{ runner.temp }}/emulebb-rust-dist": "external release archive",
-        '--target-dir "$EMULEBB_WORKSPACE_OUTPUT_ROOT/tools/emulebb-rust/bin"': "explicit staged package target",
-        '--release-scope "$GITHUB_WORKSPACE/.ci/emulebb-tooling/docs/products/emulebb-rust/RELEASE-SCOPE.md"': "release scope input",
-        '--out "$RELEASE_OUT_DIR"': "explicit external package output",
+        "path: .ci/emulebb-tooling": "release scope checkout",
+        "working-directory: .ci/emulebb-build": "workspace packaging owner",
+        "package-emulebb-rust-ci --release-version": "orchestrated native packaging",
+        "--target-os ${{ matrix.os }} --platform ${{ matrix.arch }}": "six-target package selection",
+        "${{ github.workspace }}/../emulebb-rust-out/release/": "external release assets",
+        "assemble-emulebb-rust-release-ci": "verified release assembly",
     }
     return [
         f".github/workflows/release.yml is missing {description} configuration"
