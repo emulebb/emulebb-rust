@@ -1,8 +1,10 @@
 //! Local network interface inventory and bind selection helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::net::IpAddr;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use if_addrs::{IfAddr, get_if_addrs};
@@ -88,6 +90,7 @@ pub struct NetworkReport {
 /// Returns local network interfaces with address and common routing hints.
 pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
     let mut by_name = HashMap::<String, NetworkInterface>::new();
+    let default_routes = platform_default_route_interfaces();
     for iface in get_if_addrs()? {
         let IfAddr::V4(ref v4) = iface.addr else {
             continue;
@@ -105,8 +108,7 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
             });
         entry.is_vpn_candidate =
             entry.is_vpn_candidate || entry.description.as_deref().is_some_and(is_vpn_like);
-        entry.has_default_route =
-            entry.has_default_route || platform_has_default_route(&iface.name);
+        entry.has_default_route = default_routes.contains(&iface.name);
         entry.addresses.push(NetworkInterfaceAddress {
             family: InterfaceAddressFamily::Ipv4,
             address: v4.ip.to_string(),
@@ -252,31 +254,83 @@ fn platform_description(_interface_name: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn platform_has_default_route(interface_name: &str) -> bool {
+fn platform_default_route_interfaces() -> HashSet<String> {
     ipconfig::get_adapters()
         .ok()
         .into_iter()
         .flatten()
-        .find(|adapter| adapter.adapter_name() == interface_name)
-        .is_some_and(|adapter| {
+        .filter(|adapter| {
             adapter
                 .gateways()
                 .iter()
                 .any(|gateway| *gateway != IpAddr::from([0, 0, 0, 0]))
         })
+        .map(|adapter| adapter.adapter_name().to_string())
+        .collect()
 }
 
-#[cfg(not(windows))]
-fn platform_has_default_route(_interface_name: &str) -> bool {
-    false
+#[cfg(target_os = "linux")]
+fn platform_default_route_interfaces() -> HashSet<String> {
+    std::fs::read_to_string("/proc/net/route")
+        .map(|routes| parse_linux_default_route_interfaces(&routes))
+        .unwrap_or_default()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_default_route_interfaces(routes: &str) -> HashSet<String> {
+    routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let columns = line.split_whitespace().collect::<Vec<_>>();
+            if columns.len() < 8 {
+                return None;
+            }
+            let destination = u32::from_str_radix(columns[1], 16).ok()?;
+            let flags = u32::from_str_radix(columns[3], 16).ok()?;
+            let mask = u32::from_str_radix(columns[7], 16).ok()?;
+            (destination == 0 && mask == 0 && flags & 1 != 0).then(|| columns[0].to_string())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_default_route_interfaces() -> HashSet<String> {
+    Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| parse_macos_default_route_interface(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_default_route_interface(route: &str) -> HashSet<String> {
+    route
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| {
+            (key.trim() == "interface")
+                .then(|| value.split_whitespace().next().map(str::to_string))
+                .flatten()
+        })
+        .into_iter()
+        .collect()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn platform_default_route_interfaces() -> HashSet<String> {
+    HashSet::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         InterfaceAddressFamily, InterfaceSelectionState, NetworkInterface, NetworkInterfaceAddress,
-        ResolvedInterfaceBindingReport, build_interface_binding_report, recommend_interface,
-        require_bind_if_index, resolve_bind_if_index, resolve_bind_ip,
+        ResolvedInterfaceBindingReport, build_interface_binding_report,
+        parse_linux_default_route_interfaces, parse_macos_default_route_interface,
+        recommend_interface, require_bind_if_index, resolve_bind_if_index, resolve_bind_ip,
     };
     use if_addrs::IfAddr;
 
@@ -292,6 +346,27 @@ mod tests {
             is_vpn_candidate: vpn,
             has_default_route: default_route,
         }
+    }
+
+    #[test]
+    fn linux_default_route_inventory_requires_an_up_zero_mask_route() {
+        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+                      eth0 00000000 0100000A 0003 0 0 0 00000000 0 0 0\n\
+                      tun0 00000000 00000000 0000 0 0 0 00000000 0 0 0\n\
+                      eth1 00000000 00000000 0001 0 0 0 00FFFFFF 0 0 0\n";
+        assert_eq!(
+            parse_linux_default_route_interfaces(routes),
+            ["eth0".to_string()].into()
+        );
+    }
+
+    #[test]
+    fn macos_default_route_inventory_reads_interface_field() {
+        let route = "   route to: default\ndestination: default\n    gateway: 192.0.2.1\n  interface: en0\n";
+        assert_eq!(
+            parse_macos_default_route_interface(route),
+            ["en0".to_string()].into()
+        );
     }
 
     #[test]
