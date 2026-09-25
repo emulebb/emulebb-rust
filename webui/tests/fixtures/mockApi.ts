@@ -162,6 +162,8 @@ function dataFor(method: string, path: string): unknown {
       return snapshot.status.runtimeDiagnostics.transferEvents;
     case "snapshot":
       return snapshot;
+    case "kad/nodes":
+      return { items: [] };
     case "logs":
       return { items: [{ timestamp: "2026-01-01T00:00:00Z", level: "INFO", message: "Sample log entry" }] };
     case "shared-directories":
