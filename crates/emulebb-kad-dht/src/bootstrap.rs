@@ -338,7 +338,10 @@ mod tests {
         let contacts = parse_nodes_dat(&data).unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
-        assert_eq!(contacts[0].ip, "10.1.2.3".parse::<std::net::Ipv4Addr>().unwrap());
+        assert_eq!(
+            contacts[0].ip,
+            "10.1.2.3".parse::<std::net::Ipv4Addr>().unwrap()
+        );
     }
 
     #[test]

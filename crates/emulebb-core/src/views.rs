@@ -94,7 +94,11 @@ pub(crate) fn transfer_from_manifest(
     let stopped = state_name == "stopped";
     let emitted_state = if stopped { "paused" } else { state_name };
     Transfer {
-        ed2k_link: format_ed2k_file_link(&manifest.display_name, manifest.file_size, &manifest.file_hash),
+        ed2k_link: format_ed2k_file_link(
+            &manifest.display_name,
+            manifest.file_size,
+            &manifest.file_hash,
+        ),
         hash: manifest.file_hash.clone(),
         name: manifest.display_name.clone(),
         path: payload_path,

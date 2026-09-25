@@ -99,7 +99,11 @@ impl EmulebbCore {
             name: entry.display_name.clone(),
             size_bytes: entry.file_size,
             part_count: entry.part_count,
-            ed2k_link: format_ed2k_file_link(&entry.display_name, entry.file_size, &entry.file_hash),
+            ed2k_link: format_ed2k_file_link(
+                &entry.display_name,
+                entry.file_size,
+                &entry.file_hash,
+            ),
             aich_root: entry.aich_root.clone().unwrap_or_default(),
             transfer_dir: self
                 .ed2k_transfers

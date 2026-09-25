@@ -267,14 +267,14 @@ pub use rest_model::{
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
     download_priority_score, enrich_sources_with_live, ensure_category_selector_is_unambiguous,
-    format_ed2k_file_link,
-    kad_status_from_running, manifest_default_state_name, normalize_transfer_name,
-    preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
-    source_by_client_id, source_friend_name, transfer_create_links, transfer_create_state_name,
-    transfer_from_manifest, transfer_parts_from_manifest, transfer_sources_from_manifest,
-    validate_server_priority, validate_server_update, validate_shared_file_comment_rating,
-    validate_shared_upload_priority, validate_source_client_id, validate_transfer_priority,
-    validate_transfer_update_family, validate_url_import,
+    format_ed2k_file_link, kad_status_from_running, manifest_default_state_name,
+    normalize_transfer_name, preserve_transfer_public_metadata, server_endpoint_from_create,
+    server_info_from_parts, source_by_client_id, source_friend_name, transfer_create_links,
+    transfer_create_state_name, transfer_from_manifest, transfer_parts_from_manifest,
+    transfer_sources_from_manifest, validate_server_priority, validate_server_update,
+    validate_shared_file_comment_rating, validate_shared_upload_priority,
+    validate_source_client_id, validate_transfer_priority, validate_transfer_update_family,
+    validate_url_import,
 };
 
 const LOCAL_KEYWORD_SEARCH_RESPONSE_LIMIT: usize = 300;
@@ -6147,7 +6147,11 @@ fn local_share_from_summary(
     summary: emulebb_ed2k::ed2k_transfer::Ed2kLocalIngestSummary,
 ) -> LocalShare {
     LocalShare {
-        ed2k_link: format_ed2k_file_link(&summary.display_name, summary.file_size, &summary.file_hash),
+        ed2k_link: format_ed2k_file_link(
+            &summary.display_name,
+            summary.file_size,
+            &summary.file_hash,
+        ),
         hash: summary.file_hash,
         name: summary.display_name,
         size_bytes: summary.file_size,

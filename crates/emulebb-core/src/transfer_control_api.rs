@@ -78,7 +78,8 @@ impl EmulebbCore {
             preserve_transfer_public_metadata(&mut transfer, existing);
         }
         transfer.name = name;
-        transfer.ed2k_link = format_ed2k_file_link(&transfer.name, transfer.size_bytes, &transfer.hash);
+        transfer.ed2k_link =
+            format_ed2k_file_link(&transfer.name, transfer.size_bytes, &transfer.hash);
         self.state
             .lock()
             .await
