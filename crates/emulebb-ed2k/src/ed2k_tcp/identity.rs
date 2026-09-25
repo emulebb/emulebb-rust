@@ -7,9 +7,9 @@ use std::{
 use anyhow::{Context, Result};
 use rsa::{
     RsaPrivateKey, RsaPublicKey,
-    pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey},
+    pkcs1::DecodeRsaPublicKey,
     pkcs1v15::{Signature, SigningKey, VerifyingKey},
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey},
+    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
     rand_core::OsRng,
     signature::{RandomizedSigner, SignatureEncoding, Verifier},
 };
@@ -76,15 +76,11 @@ impl Ed2kSecureIdent {
     }
 
     pub(super) fn from_private_key(private_key: RsaPrivateKey) -> Result<Self> {
-        // eMule serializes the public key with Crypto++ `GetMaterial().Save()`,
-        // which emits the *bare* PKCS#1 `RSAPublicKey` DER (no SPKI
-        // `AlgorithmIdentifier` wrapper). `CClientCredits::SetSecureIdent`
-        // REJECTS any key longer than `MAXPUBKEYSIZE` (80 bytes), and an SPKI
-        // wrapper pushes a 512-bit key to ~94 bytes — so emitting SPKI here
-        // made stock eMule silently drop our key and never credit us. Emit the
-        // PKCS#1 form on the wire and assert it fits the stock cap.
+        // WHY: MFC's Crypto++ GetMaterial().Save() emits SPKI DER, and its
+        // VerifyIdent rejects bare PKCS#1 with a decoder exception. Mirror the
+        // observed OP_PUBLICKEY form while keeping the stock 80-byte limit.
         let public_key_der = RsaPublicKey::from(&private_key)
-            .to_pkcs1_der()
+            .to_public_key_der()
             .context("failed to encode ED2K secure-ident public key")?
             .as_bytes()
             .to_vec();
@@ -101,7 +97,7 @@ impl Ed2kSecureIdent {
         })
     }
 
-    /// Our bare PKCS#1 `RSAPublicKey` DER bytes — the exact bytes we send in
+    /// Our SPKI DER bytes — the exact bytes we send in
     /// `OP_PUBLICKEY`, so an inbound signature must be verified over them (eMule
     /// signs over the recipient's public key, `m_abyMyPublicKey`).
     pub(super) fn public_key_der(&self) -> &[u8] {
@@ -278,16 +274,13 @@ pub(super) fn decode_signature_payload(payload: &[u8]) -> Result<SecureIdentSign
     })
 }
 
-/// Parse a peer's secure-ident public key. eMule (and now we) serialize the RSA
-/// public key with Crypto++ `GetMaterial().Save()` (a bare PKCS#1 `RSAPublicKey`
-/// DER, no SPKI `AlgorithmIdentifier` wrapper — it must fit `MAXPUBKEYSIZE` = 80
-/// bytes). We still accept the SPKI form as a fallback so we interoperate with
-/// any older client that emitted SPKI keys.
+/// Parse a peer's secure-ident public key. Stock eMule uses SPKI DER; accept
+/// bare PKCS#1 as well for peers that emit that alternate form.
 fn parse_peer_public_key(bytes: &[u8]) -> Result<RsaPublicKey> {
-    if let Ok(key) = RsaPublicKey::from_pkcs1_der(bytes) {
+    if let Ok(key) = RsaPublicKey::from_public_key_der(bytes) {
         return Ok(key);
     }
-    RsaPublicKey::from_public_key_der(bytes)
+    RsaPublicKey::from_pkcs1_der(bytes)
         .context("peer secure-ident public key is neither PKCS#1 nor SPKI DER")
 }
 
