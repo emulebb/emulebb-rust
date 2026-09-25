@@ -489,6 +489,7 @@ def check_release_output_paths(workflow_text: str | None = None) -> list[str]:
         "package-emulebb-rust-ci --release-version": "orchestrated native packaging",
         "--target-os ${{ matrix.os }} --platform ${{ matrix.arch }}": "six-target package selection",
         "smoke-rust-release-package.py": "native package and WebUI smoke",
+        "smoke-rust-container.py": "first-run LinuxServer image smoke",
         "${{ runner.temp }}/emulebb-rust-out/release/": "external release assets",
         "assemble-emulebb-rust-release-ci": "verified release assembly",
     }

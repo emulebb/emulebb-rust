@@ -228,6 +228,7 @@ path: .ci/emulebb-tooling
 working-directory: .ci/emulebb-build
 package-emulebb-rust-ci --release-version 0.1.0-beta.1 --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
 smoke-rust-release-package.py
+smoke-rust-container.py
 path: ${{ runner.temp }}/emulebb-rust-out/release/rust-v0.1.0-beta.1
 assemble-emulebb-rust-release-ci
 """
@@ -237,7 +238,7 @@ assemble-emulebb-rust-release-ci
         errors = CHECKER.check_release_output_paths(
             "python tools/package_release_zip.py --target-dir target/release --out dist"
         )
-        self.assertEqual(len(errors), 10)
+        self.assertEqual(len(errors), 11)
 
 
 if __name__ == "__main__":
