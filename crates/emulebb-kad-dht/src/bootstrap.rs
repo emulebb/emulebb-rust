@@ -19,8 +19,8 @@ struct NodesDatEntry {
     version: u8,
 }
 
-/// Extended 34-byte entry used by modern eMule/aMule:
-/// basic (25) + contact_type (1) + last_seen (4) + udp_key (4).
+/// eMule nodes.dat v2 contact: basic (25) + CKadUDPKey (key and IP,
+/// 4 bytes each) + IP-verified flag (1 byte).
 #[derive(BinRead, BinWrite, Debug, Clone)]
 #[brw(little)]
 struct NodesDatEntryExt {
@@ -29,9 +29,9 @@ struct NodesDatEntryExt {
     udp_port: u16,
     tcp_port: u16,
     version: u8,
-    _contact_type: u8,
-    _last_seen: u32,
     udp_key: u32,
+    _udp_key_ip: u32,
+    _verified: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub struct BootstrapContact {
 /// Parse a nodes.dat file in any of the known eMule/aMule formats:
 ///
 /// - **Modern** (most common): `[0x00000000][version=2][count]` + 34-byte entries
-///   (basic 25 bytes + contact_type + last_seen + udp_key)
+///   (basic 25 bytes + CKadUDPKey 8 bytes + verified flag)
 /// - **Version 2**: `[version=2][count]` + 25- or 34-byte entries
 /// - **Version 3**: `[version=3][bootstrap_edition][count]` + 25- or 34-byte entries
 /// - **Old / legacy**: first u32 IS the count (no version header), 25-byte entries
@@ -265,9 +265,9 @@ pub fn encode_nodes_dat(contacts: &[BootstrapContact]) -> Result<Vec<u8>, DhtErr
             udp_port: contact.udp_port,
             tcp_port: contact.tcp_port,
             version: contact.version,
-            _contact_type: 2,
-            _last_seen: 0,
             udp_key: contact.udp_key.value(),
+            _udp_key_ip: 0,
+            _verified: 0,
         };
         cursor
             .write_le(&entry)
@@ -294,9 +294,9 @@ mod tests {
 
     fn make_ext_entry(ip: [u8; 4], udp: u16, tcp: u16, ver: u8, udp_key: u32) -> Vec<u8> {
         let mut e = make_basic_entry(ip, udp, tcp, ver);
-        e.push(2u8); // contact_type
-        e.extend_from_slice(&0u32.to_le_bytes()); // last_seen
         e.extend_from_slice(&udp_key.to_le_bytes());
+        e.extend_from_slice(&0u32.to_le_bytes()); // CKadUDPKey bound IP
+        e.push(1); // IP verified
         e // 34 bytes
     }
 
@@ -325,6 +325,20 @@ mod tests {
         );
         assert_eq!(contacts[1].udp_port, 4673);
         assert_eq!(contacts[1].udp_key, KadUdpKey::new(0x5566_7788));
+    }
+
+    #[test]
+    fn test_parse_mfc_v2_verified_contact_does_not_turn_flag_into_udp_key() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend(make_ext_entry([10, 1, 2, 3], 4672, 4662, 5, 0));
+
+        let contacts = parse_nodes_dat(&data).unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
+        assert_eq!(contacts[0].ip, "10.1.2.3".parse::<std::net::Ipv4Addr>().unwrap());
     }
 
     #[test]
