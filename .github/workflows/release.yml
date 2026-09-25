@@ -99,6 +99,8 @@ jobs:
           echo "ARCH=$tool_arch" >> "$GITHUB_ENV"
       - name: Assert release build excludes test-only features
         run: python tools/check_rust_client_policy.py
+      - name: Prepare inherited build output directory
+        run: python -c "from pathlib import Path; import os; Path(os.environ['CARGO_TARGET_DIR']).mkdir(parents=True, exist_ok=True)"
       - name: Build and package native release asset
         working-directory: .ci/emulebb-build
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
