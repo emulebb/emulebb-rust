@@ -1,7 +1,15 @@
 use super::{
     ServerLiveDetails, apply_server_connection_flags, apply_server_live_details,
-    kad_status_from_running, server_info_from_parts,
+    format_ed2k_file_link, kad_status_from_running, server_info_from_parts,
 };
+
+#[test]
+fn ed2k_link_escapes_stock_filename_bytes() {
+    assert_eq!(
+        format_ed2k_file_link("Linux Guide é%.pdf", 123, "aabb"),
+        "ed2k://|file|Linux%20Guide%20%C3%A9%25.pdf|123|aabb|/",
+    );
+}
 
 #[test]
 fn kad_status_running_is_bootstrapping_until_connected() {

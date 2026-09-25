@@ -267,6 +267,7 @@ pub use rest_model::{
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
     download_priority_score, enrich_sources_with_live, ensure_category_selector_is_unambiguous,
+    format_ed2k_file_link,
     kad_status_from_running, manifest_default_state_name, normalize_transfer_name,
     preserve_transfer_public_metadata, server_endpoint_from_create, server_info_from_parts,
     source_by_client_id, source_friend_name, transfer_create_links, transfer_create_state_name,
@@ -6146,10 +6147,7 @@ fn local_share_from_summary(
     summary: emulebb_ed2k::ed2k_transfer::Ed2kLocalIngestSummary,
 ) -> LocalShare {
     LocalShare {
-        ed2k_link: format!(
-            "ed2k://|file|{}|{}|{}|/",
-            summary.display_name, summary.file_size, summary.file_hash
-        ),
+        ed2k_link: format_ed2k_file_link(&summary.display_name, summary.file_size, &summary.file_hash),
         hash: summary.file_hash,
         name: summary.display_name,
         size_bytes: summary.file_size,
@@ -6270,7 +6268,10 @@ fn parse_ed2k_link(link: &str) -> Result<ParsedEd2kLink> {
     anyhow::ensure!(parts.len() >= 3, "invalid ED2K file link");
     Ok(ParsedEd2kLink {
         file_hash: parts[2].to_ascii_lowercase(),
-        name: parts[0].to_string(),
+        name: percent_encoding::percent_decode_str(parts[0])
+            .decode_utf8()
+            .context("ED2K file name is not valid UTF-8")?
+            .into_owned(),
         size_bytes: parts[1].parse()?,
         sources: parse_ed2k_link_sources(parts.iter().skip(3).copied()),
     })

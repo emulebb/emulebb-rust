@@ -55,6 +55,7 @@ notify = "8"
 notify-debouncer-full = "0.7"
 num-bigint = "0.5"
 parking_lot = "0.12"
+percent-encoding = "2.3"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
 rsa = "0.9"

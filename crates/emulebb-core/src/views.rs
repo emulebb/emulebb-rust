@@ -12,11 +12,27 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, ensure};
 use emulebb_ed2k::ed2k_transfer::{Ed2kLiveSource, Ed2kResumeManifest, Ed2kTransferState};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::{
     NetworkStatus, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Transfer,
     TransferCreate, TransferPart, TransferSource, TransferUpdate,
 };
+
+// MFC EncodeUrlUtf8 escapes spaces, percent signs, and UTF-8 bytes in ED2K
+// file names. Escaping the field separator also keeps locally named files
+// parseable without changing the surrounding stock link shape.
+const ED2K_LINK_NAME_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'%').add(b'|');
+
+/// Emit a stock-shaped eD2K link with a UTF-8-safe, delimiter-safe file name.
+pub(crate) fn format_ed2k_file_link(name: &str, size: u64, hash: &str) -> String {
+    format!(
+        "ed2k://|file|{}|{}|{}|/",
+        utf8_percent_encode(name, ED2K_LINK_NAME_ENCODE_SET),
+        size,
+        hash,
+    )
+}
 
 // Builds one Transfer view from a resume manifest plus a handful of live-overlay
 // scalars (speed/sources/parts/bytes). The inputs are distinct primitives with no
@@ -78,10 +94,7 @@ pub(crate) fn transfer_from_manifest(
     let stopped = state_name == "stopped";
     let emitted_state = if stopped { "paused" } else { state_name };
     Transfer {
-        ed2k_link: format!(
-            "ed2k://|file|{}|{}|{}|/",
-            manifest.display_name, manifest.file_size, manifest.file_hash
-        ),
+        ed2k_link: format_ed2k_file_link(&manifest.display_name, manifest.file_size, &manifest.file_hash),
         hash: manifest.file_hash.clone(),
         name: manifest.display_name.clone(),
         path: payload_path,

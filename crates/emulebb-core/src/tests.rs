@@ -6,6 +6,15 @@ use md4::{Digest, Md4};
 use super::*;
 use crate::source_publish::emule_high_id_source_type;
 
+#[test]
+fn ed2k_link_parser_decodes_stock_utf8_filename() {
+    let link = "ed2k://|file|Linux%20Guide%20%C3%A9%25.pdf|123|00112233445566778899aabbccddeeff|/";
+    let parsed = parse_ed2k_link(link).expect("stock encoded ED2K link");
+    assert_eq!(parsed.name, "Linux Guide é%.pdf");
+    assert_eq!(parsed.size_bytes, 123);
+    assert_eq!(parsed.file_hash, "00112233445566778899aabbccddeeff");
+}
+
 mod core_config;
 mod download_scheduler;
 mod download_source_policy;

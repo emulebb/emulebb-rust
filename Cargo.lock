@@ -1415,6 +1415,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "parking_lot",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
