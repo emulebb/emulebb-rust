@@ -59,6 +59,12 @@ jobs:
           repository: emulebb/emulebb-tooling
           ref: aab9ebc3138779540164a5c93afdc3f9ba9dfcf4
           path: .ci/emulebb-tooling
+      - name: Checkout pinned package smoke harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: aa552f6021f36cd8d8c89e4538d1f2a361f58512
+          path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
       - name: Set up Python
@@ -108,6 +114,8 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
           RUSTUP_TOOLCHAIN: "1.98.1"
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
+      - name: Smoke native package and embedded WebUI
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Retain build diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -117,6 +125,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - name: Retain package and provenance
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: emulebb-rust-package-${{ matrix.os }}-${{ matrix.arch }}
@@ -126,7 +135,7 @@ jobs:
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.AppImage
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.dmg
             ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   image-candidate:
