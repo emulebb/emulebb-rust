@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: d7a59c85d8a86ee88ab178d7c1ae1f73e00e210f
+          ref: 42896ef2efb34cb20288aff0d2d8707086e69d9f
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -73,6 +73,9 @@ jobs:
           python-version: "3.12"
       - name: Install pinned workspace CLI dependencies
         run: python -m pip install click==8.4.1 pydantic==2.13.4
+      - name: Install pinned rendered WebUI smoke dependency
+        if: matrix.os == 'windows' && matrix.arch == 'x64'
+        run: python -m pip install playwright==1.59.0 && python -m playwright install chromium
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -116,6 +119,9 @@ jobs:
         run: python -m emule_workspace package-emulebb-rust-ci --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
       - name: Smoke native package and embedded WebUI
         run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }}
+      - name: Render native package WebUI and prove stale-key recovery
+        if: matrix.os == 'windows' && matrix.arch == 'x64'
+        run: python .ci/emulebb-build-tests/scripts/smoke-rust-release-package.py --release-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}" --release-version ${{ env.RELEASE_VERSION }} --target-os ${{ matrix.os }} --platform ${{ matrix.arch }} --render-webui
       - name: Retain build diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
