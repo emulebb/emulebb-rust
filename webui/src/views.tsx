@@ -1465,7 +1465,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
       <div class="section-title">
         <h2>Servers</h2>
         <div class="row-actions">
-          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connect started")}><Plug size={15} />Connect</button>
+          <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/connect"), "Server connection queued")}><Plug size={15} />Connect</button>
           <button class="btn" type="button" onClick={() => void props.run(() => props.client.post("servers/operations/disconnect"), "Servers disconnected")}><Ban size={15} />Disconnect</button>
         </div>
       </div>
@@ -1527,7 +1527,7 @@ export function ServersView(props: { servers: ServerItem[]; client: RestClient; 
                   <td>{server.ping ? `${server.ping} ms` : ""}</td>
                   <td>
                     <div class="row-actions">
-                      <Action title="Connect" icon={<Plug size={15} />} onClick={() => void props.run(() => props.client.post(`servers/${encoded}/operations/connect`), "Server connect started")} />
+                      <Action title="Connect" icon={<Plug size={15} />} onClick={() => void props.run(() => props.client.post(`servers/${encoded}/operations/connect`), "Server connection queued")} />
                       <Action title="Enable" icon={<Play size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { enabled: true }), "Server enabled")} />
                       <Action title="Disable" icon={<Pause size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { enabled: false }), "Server disabled")} />
                       <Action title="Toggle static" icon={<Save size={15} />} onClick={() => void props.run(() => props.client.patch(`servers/${encoded}`, { static: !server.static }), "Server updated")} />

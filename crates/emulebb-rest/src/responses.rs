@@ -347,6 +347,29 @@ pub(crate) async fn server_status_response(state: &RestState) -> Value {
     server_status_value(&status, &servers)
 }
 
+pub(crate) async fn server_connect_acknowledgement(state: &RestState) -> Value {
+    let status = state.core.status().await;
+    let servers = state.core.servers().await;
+    server_connect_acknowledgement_value(&status, &servers)
+}
+
+fn server_connect_acknowledgement_value(status: &Status, servers: &[ServerInfo]) -> Value {
+    let mut response = server_status_value(status, servers);
+    let connected = response["connected"].as_bool().unwrap_or(false);
+    let object = response
+        .as_object_mut()
+        .expect("server status response must be an object");
+    object.insert("operationQueued".to_string(), Value::Bool(true));
+    if !connected {
+        // The core accepted the command and launched/notified the asynchronous
+        // server loop. That worker may not have published its first endpoint yet,
+        // so its instantaneous telemetry must not turn a successful POST into a
+        // misleading disconnected-and-idle acknowledgement.
+        object.insert("connecting".to_string(), Value::Bool(true));
+    }
+    response
+}
+
 pub(crate) fn server_status_value(status: &Status, servers: &[ServerInfo]) -> Value {
     let current_server = servers
         .iter()
@@ -606,8 +629,9 @@ mod tests {
     use emulebb_index::FileIndex;
 
     use super::{
-        kad_response, network_response, search_result_response, server_status_value,
-        shared_file_response, stats_response,
+        kad_response, network_response, search_result_response,
+        server_connect_acknowledgement_value, server_status_value, shared_file_response,
+        stats_response,
     };
 
     #[test]
@@ -869,5 +893,19 @@ mod tests {
         assert_eq!(value["currentServer"]["obfuscationTcpPort"], 4665);
         assert_eq!(value["currentServer"]["udpFlags"], 0x331);
         assert_eq!(value["ed2kIdState"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn server_connect_acknowledges_queued_work_before_worker_state_updates() {
+        let core =
+            Arc::new(EmulebbCore::new_in_memory("test", FileIndex::in_memory().unwrap()).unwrap());
+        let status = core.status().await;
+
+        let value = server_connect_acknowledgement_value(&status, &[]);
+
+        assert_eq!(value["connected"], false);
+        assert_eq!(value["connecting"], true);
+        assert_eq!(value["operationQueued"], true);
+        assert!(value["currentServer"].is_null());
     }
 }

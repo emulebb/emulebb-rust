@@ -41,7 +41,7 @@ pub(crate) async fn create_server(
 
 pub(crate) async fn servers_connect(State(state): State<RestState>) -> impl IntoResponse {
     match state.core.connect_ed2k().await {
-        Ok(_status) => api_ok(server_status_response(&state).await).into_response(),
+        Ok(_status) => api_ok(server_connect_acknowledgement(&state).await).into_response(),
         Err(error) => {
             api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
         }
@@ -126,7 +126,7 @@ pub(crate) async fn connect_server(
     Path(server_id): Path<String>,
 ) -> impl IntoResponse {
     match state.core.connect_ed2k_server(&server_id).await {
-        Ok(Some(_status)) => api_ok(server_status_response(&state).await).into_response(),
+        Ok(Some(_status)) => api_ok(server_connect_acknowledgement(&state).await).into_response(),
         Ok(None) => {
             api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "server not found").into_response()
         }
