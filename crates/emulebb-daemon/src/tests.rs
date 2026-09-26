@@ -754,15 +754,18 @@ fn ed2k_network_config_is_absent_without_listener_settings() {
 }
 
 #[test]
-fn ed2k_network_config_requires_configured_bind_ip() {
+fn ed2k_network_config_requires_a_direct_default_route_or_explicit_bind() {
     let temp = tempfile::tempdir().unwrap();
     let profile = profile_with_server(temp.path().to_path_buf(), None);
 
     let error = profile
-        .ed2k_network_config(&metadata_store(&profile))
+        .ed2k_network_config_from_interfaces(
+            &metadata_store(&profile),
+            &[iface("Offline", "192.0.2.10")],
+        )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("p2pBindIp or p2pBindInterface is required"));
+    assert!(error.contains("no default-route IPv4 interface was detected"));
 }
 
 #[test]
