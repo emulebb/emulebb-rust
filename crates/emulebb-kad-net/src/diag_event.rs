@@ -4,9 +4,11 @@
 //! `emulebb-kad-net` does not depend on `emulebb-ed2k` (and must not, to avoid a
 //! dependency cycle), so it carries its own copy of the identical `diag_event_v1`
 //! JSONL format. Every shim in one process writes to the SAME file
-//! `emulebb-rust-diag-<pid>.jsonl` in append mode, so the kad_udp records this
-//! crate emits interleave with the ed2k_tcp/sched records the ed2k+core shim
-//! emits. See `crates/emulebb-ed2k/src/diag_event.rs` for the full rationale.
+//! `emulebb-rust-diag-<pid>.jsonl` in append mode. This module owns the single
+//! process-wide writer; the ed2k+core shim submits its encoded records through
+//! [`append_record_line`] so independent file handles cannot split/interleave a
+//! buffered write on DrvFS. See `crates/emulebb-ed2k/src/diag_event.rs` for the
+//! full layering rationale.
 //!
 //! Gating (schema §5): compiled only with the `packet-diagnostics` Cargo feature,
 //! then runtime-gated by `EMULEBB_RUST_LOG_DIR` for output placement. Regular
@@ -45,15 +47,6 @@ const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
 const DIAG_FLUSH_EVERY: u64 = 256;
 
 static DIAG_EVENT_WRITER: OnceLock<Option<DiagEventWriter>> = OnceLock::new();
-#[cfg(feature = "packet-diagnostics")]
-static SHARED_DIAG_FILE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Serializes all Kad and ED2K append writers sharing one diagnostic JSONL file.
-/// A buffered Kad flush may contain only part of a record on some filesystems.
-#[cfg(feature = "packet-diagnostics")]
-pub fn shared_file_lock() -> &'static Mutex<()> {
-    &SHARED_DIAG_FILE_LOCK
-}
 
 #[derive(Debug)]
 struct DiagEventWriter {
@@ -92,9 +85,6 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) {
-    let Some(writer) = diag_event_writer() else {
-        return;
-    };
     let record = DiagEventRecord {
         schema: "diag_event_v1",
         client: "rust",
@@ -110,32 +100,52 @@ pub fn emit(
         warn!("failed to encode diag_event line");
         return;
     };
-    let Ok(_shared_guard) = shared_file_lock().lock() else {
-        warn!("failed to lock shared diag_event file");
-        return;
+    let _ = append_record_line(&line);
+}
+
+/// Appends one already-encoded JSONL record through the only process-wide file
+/// handle. `emulebb-ed2k` uses this entrypoint as well as the Kad emitter so a
+/// buffered flush cannot race a second append handle on DrvFS.
+#[cfg(feature = "packet-diagnostics")]
+pub fn append_record_line(line: &[u8]) -> bool {
+    // WHY: independent append handles produced a tail-only JSONL fragment under
+    // sustained WSL/DrvFS diagnostics, even when each handle had its own lock.
+    let Some(writer) = diag_event_writer() else {
+        return false;
     };
     let Ok(mut guard) = writer.writer.lock() else {
         warn!("failed to lock diag_event writer");
-        return;
+        return false;
     };
-    if guard.write_all(&line).is_err() {
+    if guard.write_all(line).is_err() {
         warn!(
             "failed to write diag_event line to {}",
             writer.path.display()
         );
-        return;
+        return false;
     }
     // Flush periodically, not per event: a per-event flush() is a blocking write()
     // syscall, and emit() runs per inbound Kad packet (the flood path that starved
-    // the control plane). The shared lock above remains held across any internal
-    // BufWriter flush, which can split a line on DrvFS or other filesystems.
+    // the control plane). The writer lock remains held across any internal
+    // BufWriter flush, so another record cannot enter during a split write.
     static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
     if SINCE_FLUSH
         .fetch_add(1, Ordering::Relaxed)
         .is_multiple_of(DIAG_FLUSH_EVERY)
+        && guard.flush().is_err()
     {
-        let _ = guard.flush();
+        warn!(
+            "failed to flush diag_event writer to {}",
+            writer.path.display()
+        );
+        return false;
     }
+    true
+}
+
+#[cfg(not(feature = "packet-diagnostics"))]
+pub fn append_record_line(_line: &[u8]) -> bool {
+    true
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]

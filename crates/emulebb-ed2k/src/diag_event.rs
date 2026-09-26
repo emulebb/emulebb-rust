@@ -6,13 +6,14 @@
 //! `emulebb-ed2k`, `emulebb-core`, and `emulebb-kad-net`. The only crate all
 //! three share is `emulebb-kad-proto` (a pure codec crate with no serde_json /
 //! chrono), so hosting the writer there would be a bad layering choice. Instead
-//! each crate carries a small emit shim writing the IDENTICAL JSONL format to a
-//! file named `emulebb-rust-diag-<pid>.jsonl` (append mode) so every shim in one
-//! process converges on the SAME file. `emulebb-core` depends on `emulebb-ed2k`
-//! and reuses THIS module directly (so there are only two copies of the format:
-//! this one for ed2k+core, and a twin in `emulebb-kad-net`). `seq` is a
-//! per-module monotonic counter, which the harness treats as client-specific
-//! intra-side ordering only (schema §2), so a per-module counter is sufficient.
+//! each crate carries a small emit shim encoding the IDENTICAL JSONL format.
+//! `emulebb-kad-net` owns the single process-wide buffered file handle, and this
+//! shim submits its complete encoded lines through that writer. `emulebb-core`
+//! depends on `emulebb-ed2k` and reuses THIS module directly (so there are only
+//! two copies of the format: this one for ed2k+core, and a twin in
+//! `emulebb-kad-net`). `seq` is a per-module monotonic counter, which the harness
+//! treats as client-specific intra-side ordering only (schema §2), so a
+//! per-module counter is sufficient.
 //!
 //! Gating (schema §5): the writer is compiled only with the
 //! `packet-diagnostics` Cargo feature, then runtime-gated by
@@ -27,22 +28,12 @@
     )
 )]
 
-use std::{
-    fs,
-    sync::{
-        Mutex as StdMutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "packet-diagnostics")]
 use chrono::SecondsFormat;
 use serde::Serialize;
 use serde_json::Value;
-#[cfg(feature = "packet-diagnostics")]
-use std::io::Write;
-
-const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
 
 /// One `diag_event_v1` envelope (schema §2). `keys` and `body` are arbitrary
 /// JSON objects supplied by the call site so each family maps its own §3 fields.
@@ -64,29 +55,6 @@ fn next_seq() -> u64 {
     NEXT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn open_writer_file() -> Option<fs::File> {
-    std::env::var("EMULEBB_RUST_LOG_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .and_then(|dir| {
-            fs::create_dir_all(&dir).ok()?;
-            let path = dir.join(format!(
-                "{DIAG_EVENT_FILE_PREFIX}{}.jsonl",
-                std::process::id()
-            ));
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        })
-}
-
-fn writer() -> &'static StdMutex<Option<fs::File>> {
-    static DIAG_FILE: OnceLock<StdMutex<Option<fs::File>>> = OnceLock::new();
-    DIAG_FILE.get_or_init(|| StdMutex::new(open_writer_file()))
-}
-
 /// Append one `diag_event_v1` record. `keys` / `body` are pre-built JSON values
 /// (use [`serde_json::json!`]); omit optional fields rather than emitting fake
 /// data. Compiled to a no-op without `packet-diagnostics`; otherwise still
@@ -99,18 +67,6 @@ pub fn emit(
     keys: Value,
     body: Value,
 ) {
-    let Ok(_shared_guard) = emulebb_kad_net::diag_event::shared_file_lock().lock() else {
-        return;
-    };
-    let Ok(mut guard) = writer().lock() else {
-        return;
-    };
-    if guard.is_none() {
-        *guard = open_writer_file();
-    }
-    let Some(file) = guard.as_mut() else {
-        return;
-    };
     let record = DiagEventRecord {
         schema: "diag_event_v1",
         client: "rust",
@@ -125,8 +81,7 @@ pub fn emit(
     let Some(line) = encode_record_line(&record) else {
         return;
     };
-    let _ = file.write_all(&line);
-    let _ = file.flush();
+    let _ = emulebb_kad_net::diag_event::append_record_line(&line);
 }
 
 #[cfg(not(feature = "packet-diagnostics"))]
@@ -147,13 +102,8 @@ fn encode_record_line(record: &DiagEventRecord) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DIAG_EVENT_FILE_PREFIX, DiagEventRecord, encode_record_line};
+    use super::{DiagEventRecord, encode_record_line};
     use serde_json::json;
-
-    #[test]
-    fn diag_event_file_prefix_uses_emulebb_rust_name() {
-        assert_eq!(DIAG_EVENT_FILE_PREFIX, "emulebb-rust-diag-");
-    }
 
     #[test]
     fn encoded_diag_event_line_is_single_json_record_with_newline() {
