@@ -277,7 +277,7 @@ function dataFor(method: string, path: string): unknown {
         ports: {
           tcp: 4662,
           udp: 4672,
-          serverUdp: 4675
+          serverUdp: null
         },
         binding: {
           configuredAddress: "192.0.2.10",

@@ -11,7 +11,7 @@ use crate::{EmulebbCore, VpnGuardStatus, vpn_guard};
 pub struct NetworkBindingStatus {
     pub tcp_port: u16,
     pub udp_port: u16,
-    pub server_udp_port: u16,
+    pub server_udp_port: Option<u16>,
     pub configured_address: String,
     pub configured_interface_id: String,
     pub configured_interface_name: String,
@@ -96,7 +96,7 @@ impl EmulebbCore {
             udp_port: network.kad_bind_addr.port(),
             // Rust currently uses ephemeral bound sockets for eD2K server UDP
             // helpers, so there is no stable user-configured server UDP port.
-            server_udp_port: 0,
+            server_udp_port: None,
             configured_address: configured_address.clone(),
             configured_interface_id: configured_interface.clone(),
             configured_interface_name: configured_interface,

@@ -728,7 +728,7 @@ mod tests {
         let network = NetworkBindingStatus {
             tcp_port: 4662,
             udp_port: 4672,
-            server_udp_port: 0,
+            server_udp_port: None,
             configured_address: "192.0.2.10".to_string(),
             configured_interface_id: "hide.me".to_string(),
             configured_interface_name: "hide.me".to_string(),
@@ -743,7 +743,7 @@ mod tests {
 
         assert_eq!(value["ports"]["tcp"], 4662);
         assert_eq!(value["ports"]["udp"], 4672);
-        assert_eq!(value["ports"]["serverUdp"], 0);
+        assert!(value["ports"]["serverUdp"].is_null());
         assert_eq!(value["binding"]["configuredAddress"], "192.0.2.10");
         assert_eq!(value["binding"]["activeInterfaceIndex"], 17);
         assert_eq!(value["binding"]["resolveResult"], "resolved");

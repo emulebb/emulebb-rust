@@ -733,7 +733,7 @@ async fn network_returns_runtime_binding_status_directly() {
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["ports"]["tcp"], 0);
     assert_eq!(value["data"]["ports"]["udp"], 0);
-    assert_eq!(value["data"]["ports"]["serverUdp"], 0);
+    assert!(value["data"]["ports"]["serverUdp"].is_null());
     assert_eq!(value["data"]["binding"]["resolveResult"], "default");
     assert_eq!(value["data"]["vpnGuard"]["enabled"], false);
 }

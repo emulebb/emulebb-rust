@@ -601,7 +601,7 @@ export type VpnGuardStatus = {
 export type NetworkPorts = {
   tcp?: number;
   udp?: number;
-  serverUdp?: number;
+  serverUdp?: number | null;
   [key: string]: unknown;
 };
 
