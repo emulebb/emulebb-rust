@@ -25,7 +25,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::BufWriter;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Mutex, OnceLock,
@@ -36,22 +36,17 @@ use std::sync::{
 use chrono::SecondsFormat;
 use serde::Serialize;
 use serde_json::Value;
-#[cfg(feature = "packet-diagnostics")]
-use std::io::Write;
 use tracing::warn;
 
 const EMULEBB_RUST_LOG_DIR_ENV: &str = "EMULEBB_RUST_LOG_DIR";
 const DIAG_EVENT_FILE_PREFIX: &str = "emulebb-rust-diag-";
-/// Flush the buffered diag-event writer once per this many records instead of per
-/// event (emit() runs per inbound Kad packet, i.e. on the flood path).
-const DIAG_FLUSH_EVERY: u64 = 256;
 
 static DIAG_EVENT_WRITER: OnceLock<Option<DiagEventWriter>> = OnceLock::new();
 
 #[derive(Debug)]
 struct DiagEventWriter {
     path: PathBuf,
-    writer: Mutex<BufWriter<File>>,
+    writer: Mutex<File>,
 }
 
 /// One `diag_event_v1` envelope (schema §2). `keys` / `body` are arbitrary JSON
@@ -104,15 +99,22 @@ pub fn emit(
 }
 
 /// Appends one already-encoded JSONL record through the only process-wide file
-/// handle. `emulebb-ed2k` uses this entrypoint as well as the Kad emitter so a
-/// buffered flush cannot race a second append handle on DrvFS.
+/// handle. `emulebb-ed2k` uses this entrypoint as well as the Kad emitter so no
+/// second append handle can race a record write on DrvFS.
 #[cfg(feature = "packet-diagnostics")]
 pub fn append_record_line(line: &[u8]) -> bool {
-    // WHY: independent append handles produced a tail-only JSONL fragment under
-    // sustained WSL/DrvFS diagnostics, even when each handle had its own lock.
+    // WHY: independent append handles first produced a tail-only JSONL fragment
+    // under sustained WSL/DrvFS diagnostics. A shared BufWriter then reproduced
+    // the failure exactly at an internal buffer split: the prefix disappeared but
+    // the record suffix and later records survived. Keep one handle and issue one
+    // complete encoded line through it while holding the process-wide lock.
     let Some(writer) = diag_event_writer() else {
         return false;
     };
+    append_record_line_to(writer, line)
+}
+
+fn append_record_line_to(writer: &DiagEventWriter, line: &[u8]) -> bool {
     let Ok(mut guard) = writer.writer.lock() else {
         warn!("failed to lock diag_event writer");
         return false;
@@ -120,22 +122,6 @@ pub fn append_record_line(line: &[u8]) -> bool {
     if guard.write_all(line).is_err() {
         warn!(
             "failed to write diag_event line to {}",
-            writer.path.display()
-        );
-        return false;
-    }
-    // Flush periodically, not per event: a per-event flush() is a blocking write()
-    // syscall, and emit() runs per inbound Kad packet (the flood path that starved
-    // the control plane). The writer lock remains held across any internal
-    // BufWriter flush, so another record cannot enter during a split write.
-    static SINCE_FLUSH: AtomicU64 = AtomicU64::new(0);
-    if SINCE_FLUSH
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(DIAG_FLUSH_EVERY)
-        && guard.flush().is_err()
-    {
-        warn!(
-            "failed to flush diag_event writer to {}",
             writer.path.display()
         );
         return false;
@@ -273,7 +259,7 @@ fn init_diag_event_writer() -> Option<DiagEventWriter> {
     };
     Some(DiagEventWriter {
         path,
-        writer: Mutex::new(BufWriter::new(file)),
+        writer: Mutex::new(file),
     })
 }
 
@@ -318,6 +304,68 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(without_newline).unwrap();
         assert_eq!(decoded["schema"], "diag_event_v1");
         assert_eq!(decoded["family"], "kad_udp");
+    }
+
+    #[test]
+    fn shared_file_writer_preserves_high_volume_variable_length_jsonl() {
+        use super::{DiagEventWriter, append_record_line_to};
+        use std::fs::{self, File};
+        use std::sync::{Arc, Mutex};
+
+        let path = std::env::temp_dir().join(format!(
+            "emulebb-kad-net-diag-writer-{}-{}.jsonl",
+            std::process::id(),
+            super::next_seq()
+        ));
+        let writer = Arc::new(DiagEventWriter {
+            path: path.clone(),
+            writer: Mutex::new(File::create(&path).expect("create diagnostic test file")),
+        });
+        let threads = 8_u64;
+        let records_per_thread = 5_000_u64;
+        let mut workers = Vec::new();
+        for worker in 0..threads {
+            let writer = Arc::clone(&writer);
+            workers.push(std::thread::spawn(move || {
+                for record_index in 0..records_per_thread {
+                    let record = DiagEventRecord {
+                        schema: "diag_event_v1",
+                        client: "rust",
+                        ts: "2026-09-26T00:00:00.000Z".to_string(),
+                        seq: worker * records_per_thread + record_index,
+                        family: "sched",
+                        event: "writer_stress",
+                        severity: "info",
+                        keys: json!({"worker": worker, "record": record_index}),
+                        body: json!({
+                            "padding": "x".repeat(((record_index * 97 + worker) % 1_024) as usize)
+                        }),
+                    };
+                    let line = encode_record_line(&record).expect("encode stress record");
+                    assert!(append_record_line_to(&writer, &line));
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("diagnostic writer worker completes");
+        }
+        drop(writer);
+
+        let bytes = fs::read(&path).expect("read diagnostic test file");
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let mut parsed = 0_u64;
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record: serde_json::Value =
+                serde_json::from_slice(line).expect("every diagnostic line stays valid JSON");
+            assert_eq!(record["schema"], "diag_event_v1");
+            assert_eq!(record["event"], "writer_stress");
+            parsed += 1;
+        }
+        assert_eq!(parsed, threads * records_per_thread);
+        fs::remove_file(path).expect("remove diagnostic test file");
     }
 
     // Cross-crate diag_event_v1 envelope golden (C4): MUST be byte-identical to the
