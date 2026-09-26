@@ -14,7 +14,6 @@ import {
   Settings,
   Share2,
   Shield,
-  Trash2,
   Unlock,
   UploadCloud,
   Users,
@@ -72,6 +71,8 @@ const REFRESH_INTERVAL_MS = 3000;
 const EVENT_STREAM_RETRY_MS = 3000;
 const EVENT_STREAM_REFRESH_THROTTLE_MS = 1000;
 
+type AuthenticationState = "checking" | "authenticated" | "unauthenticated";
+
 type Tab =
   | "overview"
   | "transfers"
@@ -113,8 +114,12 @@ const pollingEventStreamStatus: EventStreamStatus = {
 };
 
 export function App() {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE) ?? "");
+  const [apiKey, setApiKey] = useState(readStoredApiKey);
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
+  const [authState, setAuthState] = useState<AuthenticationState>("checking");
+  const [authError, setAuthError] = useState("");
+  const [authAttempt, setAuthAttempt] = useState(0);
+  const [storageWarning, setStorageWarning] = useState("");
   const [tab, setTab] = useState<Tab>("overview");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
@@ -141,11 +146,70 @@ export function App() {
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [eventStreamStatus, setEventStreamStatus] = useState<EventStreamStatus>(pollingEventStreamStatus);
 
+  const resetProtectedState = useCallback(() => {
+    setSnapshot(null);
+    setAppInfo(null);
+    setCapabilities(null);
+    setRuntimeDiagnostics(null);
+    setNetworkStatus(null);
+    setNatStatus(null);
+    setIpFilterStatus(null);
+    setVpnGuardStatus(null);
+    setSettings(null);
+    setSettingsSurface(null);
+    setCategories([]);
+    setFriends([]);
+    setSharedDirectories(null);
+    setSharedFiles([]);
+    setUploads([]);
+    setUploadQueue([]);
+    setLogs([]);
+    setLatestSearch(null);
+  }, []);
+
   useEffect(() => {
-    client.setApiKey(apiKey);
-  }, [apiKey]);
+    let cancelled = false;
+    const authenticate = async () => {
+      client.setApiKey(apiKey);
+      setError("");
+      if (!apiKey) {
+        resetProtectedState();
+        setAuthState("unauthenticated");
+        setAuthError("Enter the API key printed by emulebb-rust when the daemon starts.");
+        return;
+      }
+
+      setAuthState("checking");
+      setAuthError("");
+      try {
+        const [nextAppInfo, nextCapabilities] = await Promise.all([
+          client.get<AppInfo>("app"),
+          client.get<unknown>("capabilities")
+        ]);
+        if (!cancelled) {
+          setAppInfo(nextAppInfo);
+          setCapabilities(nextCapabilities);
+          setAuthState("authenticated");
+          setMessage(authAttempt > 0 ? "API key verified" : "");
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          resetProtectedState();
+          setAuthState("unauthenticated");
+          setAuthError(`Could not authenticate with the local daemon: ${errorMessage(caught)}`);
+        }
+      }
+    };
+    void authenticate();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, authAttempt, resetProtectedState]);
 
   const refresh = useCallback(async () => {
+    if (authState !== "authenticated") {
+      return;
+    }
     setRefreshing(true);
     setError("");
     try {
@@ -170,40 +234,19 @@ export function App() {
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [authState]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadStaticMetadata = async () => {
-      try {
-        const [nextAppInfo, nextCapabilities] = await Promise.all([
-          client.get<AppInfo>("app"),
-          client.get<unknown>("capabilities")
-        ]);
-        if (!cancelled) {
-          setAppInfo(nextAppInfo);
-          setCapabilities(nextCapabilities);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(errorMessage(caught));
-        }
-      }
-    };
-    void loadStaticMetadata();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
+    if (authState !== "authenticated") {
+      return;
+    }
     void refresh();
     const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [authState, refresh]);
 
   useEffect(() => {
-    if (!["transfers", "search", "categories"].includes(tab)) {
+    if (authState !== "authenticated" || !["transfers", "search", "categories"].includes(tab)) {
       return;
     }
     let cancelled = false;
@@ -223,10 +266,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "friends") {
+    if (authState !== "authenticated" || tab !== "friends") {
       return;
     }
     let cancelled = false;
@@ -246,10 +289,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "sharing") {
+    if (authState !== "authenticated" || tab !== "sharing") {
       return;
     }
     let cancelled = false;
@@ -269,10 +312,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "shared-files") {
+    if (authState !== "authenticated" || tab !== "shared-files") {
       return;
     }
     let cancelled = false;
@@ -292,10 +335,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "uploads") {
+    if (authState !== "authenticated" || tab !== "uploads") {
       return;
     }
     let cancelled = false;
@@ -319,10 +362,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (!["settings", "network"].includes(tab)) {
+    if (authState !== "authenticated" || !["settings", "network"].includes(tab)) {
       return;
     }
     let cancelled = false;
@@ -354,10 +397,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab]);
+  }, [tab, authState]);
 
   useEffect(() => {
-    if (tab !== "diagnostics") {
+    if (authState !== "authenticated" || tab !== "diagnostics") {
       return;
     }
     let cancelled = false;
@@ -383,10 +426,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "logs") {
+    if (authState !== "authenticated" || tab !== "logs") {
       return;
     }
     let cancelled = false;
@@ -406,10 +449,10 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration]);
+  }, [tab, refreshGeneration, authState]);
 
   useEffect(() => {
-    if (tab !== "search") {
+    if (authState !== "authenticated" || tab !== "search") {
       return;
     }
     const recent = snapshot?.searches?.[0];
@@ -435,12 +478,12 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [tab, refreshGeneration, snapshot?.searches]);
+  }, [tab, refreshGeneration, snapshot?.searches, authState]);
 
   const transferSseEnabled = supportsTransferSse(appInfo) || supportsTransferSse(capabilities);
 
   useEffect(() => {
-    if (!transferSseEnabled) {
+    if (authState !== "authenticated" || !transferSseEnabled) {
       setEventStreamStatus(pollingEventStreamStatus);
       return;
     }
@@ -553,20 +596,24 @@ export function App() {
         window.clearTimeout(refreshTimer);
       }
     };
-  }, [apiKey, refresh, transferSseEnabled]);
+  }, [apiKey, authState, refresh, transferSseEnabled]);
 
   const saveApiKey = () => {
     const next = apiKeyInput.trim();
-    localStorage.setItem(API_KEY_STORAGE, next);
+    setMessage("");
+    setError("");
+    setStorageWarning(storeApiKey(next) ? "" : "Browser storage is unavailable; this key will only last for the current page.");
     setApiKey(next);
-    setMessage(next ? "API key saved" : "API key cleared");
+    setAuthAttempt((value) => value + 1);
   };
 
   const clearApiKey = () => {
-    localStorage.removeItem(API_KEY_STORAGE);
+    removeStoredApiKey();
     setApiKey("");
     setApiKeyInput("");
-    setMessage("API key cleared");
+    setStorageWarning("");
+    setMessage("");
+    setAuthAttempt((value) => value + 1);
   };
 
   const run = async (operation: () => Promise<unknown>, success: string) => {
@@ -598,59 +645,98 @@ export function App() {
               <p>{appInfo?.version ?? appInfo?.apiVersion ?? snapshot?.app?.version ?? "REST dashboard"}</p>
             </div>
           </div>
-          <div class="top-actions navbar-nav flex-row order-md-last">
-            <label class="api-key input-icon">
-              <span class="input-icon-addon"><KeyRound size={16} /></span>
-              <input
-                class="form-control"
-                type="password"
-                value={apiKeyInput}
-                placeholder="X-API-Key"
-                onInput={(event) => setApiKeyInput(event.currentTarget.value)}
-              />
-            </label>
-            <button type="button" class="btn btn-primary" onClick={saveApiKey}>
-              {apiKey ? <Unlock size={16} /> : <Lock size={16} />}
-              Save
-            </button>
-            <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Clear API key" onClick={clearApiKey}>
-              <Trash2 size={16} />
-            </button>
-            <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Refresh" onClick={() => void refresh()}>
-              <RefreshCw size={16} class={refreshing ? "spin" : ""} />
-            </button>
-          </div>
+          {authState === "authenticated" && (
+            <div class="top-actions navbar-nav flex-row order-md-last">
+              <span class="badge bg-success-lt"><Unlock size={14} /> API connected</span>
+              <button type="button" class="btn btn-outline-secondary" title="Change API key" onClick={clearApiKey}>
+                <KeyRound size={16} />
+                Change key
+              </button>
+              <button type="button" class="btn btn-icon btn-outline-secondary icon-button" title="Refresh" onClick={() => void refresh()}>
+                <RefreshCw size={16} class={refreshing ? "spin" : ""} />
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
       <div class="page-wrapper">
-        <div class="page-header d-print-none">
-          <div class="container-xl">
-            <nav class="tabs nav nav-pills card p-2" aria-label="Primary views">
-              <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
-              <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
-              <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
-              <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
-              <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
-              <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
-              <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
-              <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
-              <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
-              <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
-              <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
-              <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
-              <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
-              <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
-            </nav>
+        {authState === "authenticated" && (
+          <div class="page-header d-print-none">
+            <div class="container-xl">
+              <nav class="tabs nav nav-pills card p-2" aria-label="Primary views">
+                <TabButton tab="overview" active={tab} setTab={setTab} icon={<Activity size={16} />} label="Overview" />
+                <TabButton tab="transfers" active={tab} setTab={setTab} icon={<Download size={16} />} label="Transfers" />
+                <TabButton tab="search" active={tab} setTab={setTab} icon={<Search size={16} />} label="Search" />
+                <TabButton tab="sharing" active={tab} setTab={setTab} icon={<FolderTree size={16} />} label="Sharing" />
+                <TabButton tab="shared-files" active={tab} setTab={setTab} icon={<Share2 size={16} />} label="Shared Files" />
+                <TabButton tab="uploads" active={tab} setTab={setTab} icon={<UploadCloud size={16} />} label="Uploads" />
+                <TabButton tab="network" active={tab} setTab={setTab} icon={<Network size={16} />} label="Network" />
+                <TabButton tab="servers" active={tab} setTab={setTab} icon={<Server size={16} />} label="Servers" />
+                <TabButton tab="kad" active={tab} setTab={setTab} icon={<Shield size={16} />} label="Kad" />
+                <TabButton tab="categories" active={tab} setTab={setTab} icon={<ListChecks size={16} />} label="Categories" />
+                <TabButton tab="friends" active={tab} setTab={setTab} icon={<Users size={16} />} label="Friends" />
+                <TabButton tab="settings" active={tab} setTab={setTab} icon={<Settings size={16} />} label="Settings" />
+                <TabButton tab="diagnostics" active={tab} setTab={setTab} icon={<Gauge size={16} />} label="Diagnostics" />
+                <TabButton tab="logs" active={tab} setTab={setTab} icon={<FileText size={16} />} label="Logs" />
+              </nav>
+            </div>
           </div>
-        </div>
+        )}
 
         <div class="page-body">
           <div class="container-xl shell">
-            {message && <div class="notice alert alert-success">{message}</div>}
-            {error && <div class="notice alert alert-danger">{error}</div>}
+            {authState !== "authenticated" && (
+              <section class="auth-card card" aria-labelledby="auth-title">
+                <div class="card-body">
+                  <div class="auth-heading">
+                    <span class="brand-mark"><Lock size={18} /></span>
+                    <div>
+                      <h2 id="auth-title">Connect to the local daemon</h2>
+                      <p>The WebUI stays locked until the API key is verified.</p>
+                    </div>
+                  </div>
+                  {authError && <div class="notice alert alert-danger">{authError}</div>}
+                  {storageWarning && <div class="notice alert alert-warning">{storageWarning}</div>}
+                  <form
+                    class="auth-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveApiKey();
+                    }}
+                  >
+                    <label for="webui-api-key">API key</label>
+                    <div class="auth-controls">
+                      <div class="api-key input-icon">
+                        <span class="input-icon-addon"><KeyRound size={16} /></span>
+                        <input
+                          id="webui-api-key"
+                          class="form-control"
+                          type="password"
+                          value={apiKeyInput}
+                          placeholder="X-API-Key"
+                          autoComplete="off"
+                          autofocus
+                          onInput={(event) => setApiKeyInput(event.currentTarget.value)}
+                        />
+                      </div>
+                      <button type="submit" class="btn btn-primary" disabled={authState === "checking" || !apiKeyInput.trim()}>
+                        {authState === "checking" ? <RefreshCw size={16} class="spin" /> : <Unlock size={16} />}
+                        {authState === "checking" ? "Checking…" : "Connect"}
+                      </button>
+                    </div>
+                  </form>
+                  <p class="auth-help">Use the API key printed beside the WebUI address when emulebb-rust starts.</p>
+                </div>
+              </section>
+            )}
 
-            {tab === "overview" && (
+            {authState === "authenticated" && (
+              <>
+                {message && <div class="notice alert alert-success">{message}</div>}
+                {error && <div class="notice alert alert-danger">{error}</div>}
+
+                {tab === "overview" && (
               <Overview
                 snapshot={snapshot}
                 stats={stats}
@@ -721,12 +807,43 @@ export function App() {
               />
             )}
             {tab === "diagnostics" && <DiagnosticsView app={appInfo} capabilities={capabilities} runtimeDiagnostics={runtimeDiagnostics} eventStreamStatus={eventStreamStatus} client={client} run={run} />}
-            {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
+                {tab === "logs" && <LogsView logs={logs} client={client} run={run} />}
+              </>
+            )}
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function readStoredApiKey(): string {
+  try {
+    return window.localStorage.getItem(API_KEY_STORAGE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeApiKey(apiKey: string): boolean {
+  try {
+    if (apiKey) {
+      window.localStorage.setItem(API_KEY_STORAGE, apiKey);
+    } else {
+      window.localStorage.removeItem(API_KEY_STORAGE);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeStoredApiKey(): void {
+  try {
+    window.localStorage.removeItem(API_KEY_STORAGE);
+  } catch {
+    // The in-memory key is still cleared when browser storage is unavailable.
+  }
 }
 
 function supportsTransferSse(value: unknown): boolean {

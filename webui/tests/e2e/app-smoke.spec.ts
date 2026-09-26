@@ -6,7 +6,10 @@ const longSharedRoot =
   "F:\\Sample\\Shared\\Deep Library Root With Long Name\\Album Archive Segment With A Very Long Folder Name\\Leaf Collection";
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.clear());
+  await page.addInitScript(() => {
+    window.localStorage.clear();
+    window.localStorage.setItem("emulebb.webui.apiKey", "sample-key");
+  });
 });
 
 test("loads mocked dashboard data and navigates primary views", async ({ page }) => {
@@ -50,24 +53,45 @@ test("loads mocked dashboard data and navigates primary views", async ({ page })
   expect(requests.some((request) => request.path === "snapshot")).toBe(true);
 });
 
-test("persists the API key and sends it on later API requests", async ({ page }) => {
+test("recovers from a stale API key without a manual refresh", async ({ page }) => {
   const requests: RecordedApiRequest[] = [];
-  await page.route("**/api/v1/**", installMockApi(requests));
+  const mockApi = installMockApi(requests);
+  await page.route("**/api/v1/**", async (route) => {
+    if (route.request().headers()["x-api-key"] !== "fresh-key") {
+      await route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "UNAUTHORIZED", message: "missing or invalid API key" } })
+      });
+      return;
+    }
+    await mockApi(route);
+  });
 
   await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
+  await expect(page.getByText(/Could not authenticate.*missing or invalid API key/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Overview" })).toHaveCount(0);
+
+  await page.getByPlaceholder("X-API-Key").fill("fresh-key");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByText("API key verified")).toBeVisible();
   await expect(page.getByText("Sample Transfer.bin")).toBeVisible();
 
-  await page.getByPlaceholder("X-API-Key").fill("sample-key");
-  await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText("API key saved")).toBeVisible();
-  await page.getByTitle("Refresh").click();
-
   await expect
-    .poll(() => requests.some((request) => request.headers["x-api-key"] === "sample-key"))
+    .poll(() => requests.some((request) => request.path === "snapshot" && request.headers["x-api-key"] === "fresh-key"))
+    .toBe(true);
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBe("fresh-key");
+
+  await page.getByRole("button", { name: "Network" }).click();
+  await expect(page.getByRole("heading", { name: "Network Health" })).toBeVisible();
+  await expect
+    .poll(() => requests.some((request) => request.path === "app/settings" && request.headers["x-api-key"] === "fresh-key"))
     .toBe(true);
 
-  await page.getByTitle("Clear API key").click();
-  await expect(page.getByText("API key cleared")).toBeVisible();
+  await page.getByTitle("Change API key").click();
+  await expect(page.getByRole("heading", { name: "Connect to the local daemon" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("emulebb.webui.apiKey"))).toBeNull();
 });
 
 test("submits a synthetic transfer operation", async ({ page }) => {
