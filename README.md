@@ -11,14 +11,14 @@ are the primary wire-compatibility target. The separate maintained aMule client
 is a cross-platform source and offline-fixture reference in this workspace.
 
 The repository began from earlier Kad and ED2K work, but it is intentionally a
-local client product. The 0.0.x line does not expose a coordinator API.
+local client product. The `0.1.0-beta.1` line does not expose a coordinator API.
 
 Rust development uses the exact toolchain declared in `rust-toolchain.toml`.
 Update that pin, the workspace `rust-version`, and CI together in a dedicated
 toolchain commit after each stable Rust release has passed the full quality
 gate; normal development must not float independently on `stable`.
 
-The 0.0.3 scope is eD2K/Kad protocol-operational parity: configured binding,
+The `0.1.0-beta.1` scope is eD2K/Kad protocol-operational parity: configured binding,
 interoperability, search, sharing, transfers, uploads, queues, persistence,
 local SQLite/FTS indexing, REST controller visibility, and embedded SPA WebUI
 operation. Local API, UI, settings, diagnostics, and scheduling surfaces are
@@ -34,7 +34,7 @@ New contributors should start with [`CONTRIBUTING.md`](CONTRIBUTING.md), the
 public eMuleBB Suite board, and starter issues labeled `good first issue` or
 `help wanted`.
 
-## 0.0.x Shape
+## 0.1.0-beta.1 Shape
 
 - `emulebb-daemon`: CLI, config, logging, and REST listener.
 - `emulebb-rest`: Rust-native `/api/v1` routes, envelopes, and API-key
@@ -135,6 +135,11 @@ Harnesses may use operator-local inputs to create the profile directory and
 write those fixed files, but the Rust client itself only consumes the profile.
 
 ## Beta.1 candidate artifacts
+
+The public [release notes](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md),
+[changelog](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-CHANGELOG.md),
+and [release scope](https://github.com/emulebb/emulebb-tooling/blob/main/docs/products/emulebb-rust/RELEASE-SCOPE.md)
+are the version-specific operator and compatibility references.
 
 The manual [release workflow](.github/workflows/release.yml) retains unsigned
 candidate artifacts for Windows, Linux, and macOS on x64 and ARM64. Native ZIP,

@@ -53,17 +53,17 @@ jobs:
           repository: emulebb/emulebb-build
           ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
           path: .ci/emulebb-build
-      - name: Checkout release scope
+      - name: Checkout pinned release documentation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-tooling
-          ref: aab9ebc3138779540164a5c93afdc3f9ba9dfcf4
+          ref: 59014c6cd3e6c3dc0d7b5e8dafdf15960442b7ab
           path: .ci/emulebb-tooling
       - name: Checkout pinned package smoke harness
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: 603240d4c9d83f9e479da3db9c9e66d25b16a467
+          ref: d7a59c85d8a86ee88ab178d7c1ae1f73e00e210f
           path: .ci/emulebb-build-tests
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
@@ -159,7 +159,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: emulebb/emulebb-build-tests
-          ref: efd723fe82521c1178be713c0cd28a650f0df496
+          ref: d7a59c85d8a86ee88ab178d7c1ae1f73e00e210f
           path: .ci/emulebb-build-tests
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -273,6 +273,12 @@ jobs:
           repository: emulebb/emulebb-build
           ref: ebc13973311f953a16f0c8d8423b857f76ca22fe
           path: emulebb-build
+      - name: Checkout pinned release documentation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: 59014c6cd3e6c3dc0d7b5e8dafdf15960442b7ab
+          path: emulebb-tooling
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -290,9 +296,16 @@ jobs:
         env:
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
         run: python -m emule_workspace assemble-emulebb-rust-release-ci --release-version ${{ env.RELEASE_VERSION }} --assets-dir "${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}"
+      - name: Add versioned release documentation
+        shell: bash
+        run: |
+          release_dir="${{ runner.temp }}/emulebb-rust-out/release/rust-v${RELEASE_VERSION}"
+          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-NOTES.md" "$release_dir/"
+          cp "emulebb-tooling/docs/products/emulebb-rust/RELEASE-${RELEASE_VERSION}-CHANGELOG.md" "$release_dir/"
       - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           prerelease: true
+          body_path: emulebb-tooling/docs/products/emulebb-rust/RELEASE-0.1.0-beta.1-NOTES.md
           files: ${{ runner.temp }}/emulebb-rust-out/release/rust-v${{ env.RELEASE_VERSION }}/*
           fail_on_unmatched_files: true
