@@ -136,6 +136,39 @@ class TestActionPins(unittest.TestCase):
         self.assertFalse(CHECKER.action_ref_is_immutable("a" * 39))
 
 
+class TestLiveRestOpenApiCi(unittest.TestCase):
+    def test_current_workflow_keeps_live_openapi_gate(self) -> None:
+        self.assertEqual(CHECKER.check_live_rest_openapi_ci(), [])
+
+    def test_accepts_tested_artifact_and_pinned_support_repositories(self) -> None:
+        workflow = f"""
+rest-openapi:
+  needs: build-test
+  EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{{{ runner.temp }}}}/emulebb-rust-out
+  repository: emulebb/emulebb-build-tests
+  ref: {'a' * 40}
+  repository: emulebb/emulebb-tooling
+  ref: {'b' * 40}
+  name: emulebb-rust-Linux-X64-${{{{ github.sha }}}}
+  run: python scripts/rust-rest-openapi-ci.py
+  name: rust-rest-openapi-${{{{ github.sha }}}}
+"""
+        self.assertEqual(CHECKER.check_live_rest_openapi_ci(workflow), [])
+
+    def test_rejects_missing_gate_and_mutable_support_refs(self) -> None:
+        workflow = """
+repository: emulebb/emulebb-build-tests
+ref: main
+repository: emulebb/emulebb-tooling
+ref: main
+"""
+        errors = CHECKER.check_live_rest_openapi_ci(workflow)
+
+        self.assertGreaterEqual(len(errors), 8)
+        self.assertTrue(any("live REST/OpenAPI job" in error for error in errors))
+        self.assertTrue(any("must pin emulebb/emulebb-build-tests" in error for error in errors))
+
+
 class TestOmissionRegistry(unittest.TestCase):
     def test_active_registry_rejects_fixed_entries(self) -> None:
         policy = {"protocol": {"omission_registry": "policy/rust-client-omissions.toml"}}

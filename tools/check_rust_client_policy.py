@@ -74,6 +74,7 @@ def main() -> int:
     errors.extend(check_tokio_features())
     errors.extend(check_supply_chain_policy())
     errors.extend(check_github_action_pins())
+    errors.extend(check_live_rest_openapi_ci())
     errors.extend(check_lint_suppressions())
     errors.extend(check_release_output_paths())
     errors.extend(check_ipv4_only(policy))
@@ -441,6 +442,36 @@ def check_github_action_pins() -> list[str]:
 
 def action_ref_is_immutable(reference: str) -> bool:
     return re.fullmatch(r"[0-9a-f]{40}", reference) is not None
+
+
+def check_live_rest_openapi_ci(workflow_text: str | None = None) -> list[str]:
+    """Keep the live Rust response/OpenAPI gate attached to tested Linux bytes."""
+
+    workflow = ROOT / ".github" / "workflows" / "ci.yml"
+    text = workflow.read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    required = {
+        "rest-openapi:": "live REST/OpenAPI job",
+        "needs: build-test": "dependency on the build/test matrix",
+        "name: emulebb-rust-Linux-X64-${{ github.sha }}": "tested Linux daemon artifact",
+        "EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out": "external output root",
+        "python scripts/rust-rest-openapi-ci.py": "live response conformance command",
+        "name: rust-rest-openapi-${{ github.sha }}": "retained conformance evidence",
+    }
+    errors = [
+        f".github/workflows/ci.yml is missing {description} configuration"
+        for fragment, description in required.items()
+        if fragment not in text
+    ]
+    for repository in ("emulebb/emulebb-build-tests", "emulebb/emulebb-tooling"):
+        checkout = re.compile(
+            rf"repository:\s*{re.escape(repository)}\s+ref:\s*([0-9a-f]+)",
+            re.MULTILINE,
+        ).search(text)
+        if checkout is None or not action_ref_is_immutable(checkout.group(1)):
+            errors.append(
+                f".github/workflows/ci.yml must pin {repository} by full commit SHA"
+            )
+    return errors
 
 
 def check_lint_suppressions() -> list[str]:

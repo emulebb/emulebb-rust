@@ -80,6 +80,64 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  rest-openapi:
+    name: live REST/OpenAPI conformance
+    needs: build-test
+    runs-on: ubuntu-latest
+    env:
+      EMULEBB_WORKSPACE_ROOT: ${{ github.workspace }}
+      EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ runner.temp }}/emulebb-rust-out
+      CARGO_TARGET_DIR: ${{ runner.temp }}/emulebb-rust-out/builds/rust/target
+    steps:
+      - name: Checkout emulebb-rust
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: repos/emulebb-rust
+
+      - name: Checkout pinned live conformance harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-build-tests
+          ref: a581b6c6feeae8a9c50fcca038c6f328498bad2c
+          path: repos/emulebb-build-tests
+
+      - name: Checkout pinned Rust OpenAPI contract
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: emulebb/emulebb-tooling
+          ref: b48ddf7d6b78d6e8d1e4e88c4f522462605a5607
+          path: repos/emulebb-tooling
+
+      - name: Download tested Linux daemon
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: emulebb-rust-Linux-X64-${{ github.sha }}
+          path: ${{ runner.temp }}/emulebb-rust-out/tools/emulebb-rust/bin
+
+      - name: Restore daemon execute permission
+        run: chmod +x "${{ runner.temp }}/emulebb-rust-out/tools/emulebb-rust/bin/emulebb-rust"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install live conformance dependencies
+        run: python -m pip install PyYAML==6.0.3 jsonschema==4.26.0
+
+      - name: Gate live REST responses against OpenAPI
+        working-directory: repos/emulebb-build-tests
+        run: python scripts/rust-rest-openapi-ci.py
+
+      - name: Retain live REST/OpenAPI evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-rest-openapi-${{ github.sha }}
+          path: ${{ runner.temp }}/emulebb-rust-out/reports/rust-rest-openapi-ci/
+          if-no-files-found: warn
+          retention-days: 14
+
   quality:
     name: policy + format + clippy
     runs-on: ubuntu-latest
