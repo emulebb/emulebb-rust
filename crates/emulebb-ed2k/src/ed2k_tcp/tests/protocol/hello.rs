@@ -272,6 +272,10 @@ fn hello_misc_options1_advertises_stock_comments_but_not_preview() {
 
 #[test]
 fn hello_answer_matches_truthful_plaintext_profile() {
+    let _guard = HELLO_TAG_COUNT_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set_hello_buddy_snapshot(None);
     let packet = encode_hello_answer(Ed2kHelloIdentity {
         user_hash: [
             0x73, 0xBE, 0xC5, 0x66, 0x14, 0x0E, 0x7E, 0x60, 0x83, 0xC4, 0x50, 0xC9, 0xAF, 0x02,
