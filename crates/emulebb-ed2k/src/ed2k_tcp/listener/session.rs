@@ -49,11 +49,12 @@ use super::super::{
     OP_CHATCAPTCHAREQ, OP_CHATCAPTCHARES, OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER,
     OP_EMULEPROT, OP_END_OF_DOWNLOAD, OP_FILEDESC, OP_FWCHECKUDPREQ, OP_HASHSETREQUEST,
     OP_HASHSETREQUEST2, OP_HELLO, OP_HELLOANSWER, OP_KAD_FWTCPCHECK_ACK, OP_MESSAGE,
-    OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_OUTOFPARTREQS, OP_PORTTEST,
-    OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER, OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK,
-    OP_QUEUERANKING, OP_REASKCALLBACKTCP, OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64,
-    OP_REQUESTPREVIEW, OP_REQUESTSOURCES, OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID,
-    OP_SIGNATURE, OP_STARTUPLOADREQ, apply_server_state, handle_aich_recovery_answer,
+    OP_MULTIPACKET, OP_MULTIPACKET_EXT, OP_MULTIPACKET_EXT2, OP_OUTOFPARTREQS, OP_PEERCACHE_ACK,
+    OP_PEERCACHE_ANSWER, OP_PEERCACHE_QUERY, OP_PORTTEST, OP_PREVIEWANSWER, OP_PUBLICIP_ANSWER,
+    OP_PUBLICIP_REQ, OP_PUBLICKEY, OP_QUEUERANK, OP_QUEUERANKING, OP_REASKCALLBACKTCP,
+    OP_REQUESTFILENAME, OP_REQUESTPARTS, OP_REQUESTPARTS_I64, OP_REQUESTPREVIEW, OP_REQUESTSOURCES,
+    OP_REQUESTSOURCES2, OP_SECIDENTSTATE, OP_SETREQFILEID, OP_SIGNATURE, OP_STARTUPLOADREQ,
+    apply_server_state, handle_aich_recovery_answer,
 };
 
 mod browse;
@@ -1020,6 +1021,19 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     transport.mode,
                 )
                 .await?;
+            }
+            (OP_EMULEPROT, OP_PEERCACHE_QUERY)
+            | (OP_EMULEPROT, OP_PEERCACHE_ANSWER)
+            | (OP_EMULEPROT, OP_PEERCACHE_ACK) => {
+                // PeerCache was removed from stock years ago. Current stock
+                // deliberately tolerates these retired extension packets as
+                // no-ops, so do not classify them as an unknown-packet abuse
+                // signal or tear down an otherwise valid upload connection.
+                debug!(
+                    "ignoring obsolete PeerCache packet from {peer_addr}: opcode=0x{:02X} payload_len={}",
+                    packet.opcode,
+                    packet.payload.len()
+                );
             }
             _ => {
                 // Phase A defensive diagnostic: an inbound peer packet the dispatcher

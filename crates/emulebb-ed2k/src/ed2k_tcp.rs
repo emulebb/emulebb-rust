@@ -190,6 +190,11 @@ const OP_REQUESTPREVIEW: u8 = 0x90;
 const OP_PREVIEWANSWER: u8 = 0x91;
 const OP_MULTIPACKET: u8 = 0x92;
 const OP_MULTIPACKETANSWER: u8 = 0x93;
+// Obsolete PeerCache extension. Stock eMule accepts and ignores these rather
+// than disconnecting the peer; Rust does not implement the retired feature.
+const OP_PEERCACHE_QUERY: u8 = 0x94;
+const OP_PEERCACHE_ANSWER: u8 = 0x95;
+const OP_PEERCACHE_ACK: u8 = 0x96;
 const OP_PUBLICIP_REQ: u8 = 0x97;
 const OP_PUBLICIP_ANSWER: u8 = 0x98;
 const OP_CALLBACK: u8 = 0x99;

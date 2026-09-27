@@ -243,6 +243,19 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     assert_eq!(aich_recovery_answer.file_hash, file_hash);
     assert_eq!(aich_recovery_answer.part, None);
 
+    // Stock ignores the retired PeerCache extension opcodes. Sending every
+    // variant before a request/reply proves the listener keeps the session.
+    for (opcode, payload) in [
+        (OP_PEERCACHE_QUERY, &[0x01, 0x02][..]),
+        (OP_PEERCACHE_ANSWER, &[0x03][..]),
+        (OP_PEERCACHE_ACK, &[][..]),
+    ] {
+        stream
+            .write_all(&super::encode_packet(OP_EMULEPROT, opcode, payload))
+            .await
+            .unwrap();
+    }
+
     stream
         .write_all(&super::encode_packet(OP_EMULEPROT, OP_PUBLICIP_REQ, &[]))
         .await
