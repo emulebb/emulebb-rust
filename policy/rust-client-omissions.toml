@@ -56,15 +56,15 @@ review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRME
 id = "peer-chat-messaging"
 area = "ed2k"
 stock_behavior = "Classic eMule supports interactive peer-to-peer text chat/messaging (OP_MESSAGE) and a chat window."
-rust_behavior = "The Rust client does not send or surface peer chat/messages; it has no chat session state (OP_MESSAGE / the captcha challenge-response are decode-only). It DOES advertise the captcha-support hello bit (CT_EMULE_MISCOPTIONS2 bit 11 = 1) to stay wire-identical to a stock eMule 0.72a client, which hardcodes that bit to 1 (BaseClient.cpp uSupportsCaptcha); only the interactive chat behavior is omitted, not the advertised capability."
-reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface (the REST contract exposes no messaging routes), so the chat session is outside the headless, REST-controllable scope. The advertised capability bit still mirrors stock so the hello is not a non-stock fingerprint (RUST-FIX-035)."
-compatibility = "Does not affect eD2K or Kad wire compatibility; the hello bitfield matches stock eMule, and an unsolicited OP_MESSAGE from a peer is simply not surfaced (as with a stock user who never opens the chat window)."
-disposition = "protocol_defer"
-owner = "core-protocol"
-target = "post-beta only if peer messaging becomes a Rust product feature"
+rust_behavior = "The Rust client does not send or surface peer chat/messages and has no interactive captcha state. CT_EMULE_MISCOPTIONS2 bit 11 is therefore cleared. Unsolicited OP_MESSAGE and captcha packets are bounded, decoded, and ignored without disrupting the peer session."
+reason = "Chat is an interactive UI feature with no eMuleBB /api/v1 surface. Advertising captcha support without a way for the user to see and answer its image challenge is a false capability contract, so the headless client explicitly declines it."
+compatibility = "Does not affect file-transfer or Kad interoperability. Peers see captcha unsupported and do not initiate that optional chat challenge; unsolicited chat/captcha traffic remains tolerated. The optional bit differs from stock's hardcoded value but is semantically honest."
+disposition = "protocol_drop_approved"
+owner = "operator"
+target = "headless no-peer-chat product scope"
 beta_blocker = false
-review_disposition = "defer"
-review_disposition_note = "RUST-PAR-019 round-19 re-audit (2026-07-08): CONFIRMED and wire-verified - rust hardcodes supports_captcha=1<<11 in CT_EMULE_MISCOPTIONS2 (hello.rs:114,124) matching stock uSupportsCaptcha (BaseClient.cpp:1052,1062), regression-tested (tests/protocol/hello.rs). No hello fingerprint; OP_MESSAGE/captcha decode-only. DEFER."
+review_disposition = "permanent-drop"
+review_disposition_note = "RUST-CI-002 roadmap closure (2026-09-27): resolved the advertised-but-unimplemented capability mismatch by clearing CT_EMULE_MISCOPTIONS2 bit 11. Peer chat/captcha remains outside the headless REST product scope; bounded unsolicited packets are still tolerated. PERMANENT DROP."
 
 [[omissions]]
 id = "ed2k-preview"

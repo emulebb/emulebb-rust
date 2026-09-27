@@ -105,13 +105,12 @@ pub(super) fn emule_misc_options2(connect_options: u8, direct_udp_callback: bool
     // Mirror the recent eMule hello profile (sources2/EXT2/hashset-request2).
     let supports_file_identifiers = 1u32;
     let direct_udp_callback = u32::from(direct_udp_callback);
-    // Stock eMule 0.72a hardcodes this bit to 1 (`const UINT uSupportsCaptcha = 1`,
-    // BaseClient.cpp SendHelloTypePacket) — it is NOT config-gated. Advertising 0
-    // is therefore a unique non-stock fingerprint on every handshake, so we send 1
-    // to stay wire-identical to a stock community client. Peer chat itself
-    // (OP_MESSAGE / the captcha challenge) remains a registered decode-only
-    // omission (peer-chat-messaging); only the advertised capability bit matches.
-    let supports_captcha = 1u32;
+    // Captcha is an interactive peer-chat capability: a truthful implementation
+    // needs a message inbox plus user-visible image challenge and answer state.
+    // This headless client intentionally has no peer-chat surface, so do not
+    // advertise a capability it cannot complete. Unsolicited packets remain
+    // safely decoded and ignored for interoperability diagnostics.
+    let supports_captcha = 0u32;
     let supports_source_exchange2 = 1u32;
     let requires_crypt_layer = 0u32;
     let requests_crypt_layer = u32::from((connect_options & EMULE_CRYPT_REQUESTS) != 0);

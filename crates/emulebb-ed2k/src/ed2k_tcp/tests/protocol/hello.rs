@@ -220,7 +220,7 @@ fn hello_answer_decode_keeps_user_hash_leading_type_byte() {
 }
 
 #[test]
-fn hello_misc_options2_advertises_stock_captcha_bit() {
+fn hello_misc_options2_is_truthful_about_implemented_capabilities() {
     let misc_options2 = emule_misc_options2(emule_connect_options(false), false);
 
     assert_eq!(
@@ -228,12 +228,10 @@ fn hello_misc_options2_advertises_stock_captcha_bit() {
         1,
         "file identifiers are implemented"
     );
-    // Stock eMule 0.72a hardcodes uSupportsCaptcha = 1; we mirror it so the hello
-    // is wire-identical to a stock client (advertising 0 is a non-stock tell).
     assert_eq!(
         (misc_options2 >> 11) & 1,
-        1,
-        "captcha bit matches stock eMule (advertised even though peer chat stays a decode-only omission)"
+        0,
+        "captcha is not advertised without an interactive peer-chat response path"
     );
     assert_eq!(
         (misc_options2 >> 10) & 1,
@@ -291,7 +289,7 @@ fn hello_answer_matches_truthful_plaintext_profile() {
     });
 
     let expected = decode(
-            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a2c0000030100fb00200100b07b02ef8810",
+            "e3540000004c73bec566140e7e6083c450c9af026f8395581b524fb606000000020100010500654d756c65030100113c000000030100f951b651b6030100fa16021334030100fe3a240000030100fb00200100b07b02ef8810",
         )
         .unwrap();
 
