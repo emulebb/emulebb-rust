@@ -239,12 +239,11 @@ pub(super) fn encode_udp_source_request_batch(
     targets: &[Ed2kUdpSourceRequestTarget],
 ) -> Option<EncodedUdpSourceRequestBatch> {
     let use_getsources2 = server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES2 != 0;
+    let supports_legacy_batching = server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES != 0;
     let supports_large_files = server.entry.udp_flags & SERVER_UDP_FLAG_LARGEFILES != 0;
     let opcode = if use_getsources2 {
         OP_GLOBGETSOURCES2
     } else {
-        let _supports_legacy_getsources =
-            server.entry.udp_flags & SERVER_UDP_FLAG_EXT_GETSOURCES != 0;
         OP_GLOBGETSOURCES
     };
     let mut payload = Vec::with_capacity(MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES);
@@ -252,7 +251,12 @@ pub(super) fn encode_udp_source_request_batch(
     let mut included_large_files = 0usize;
 
     for target in targets {
-        if is_udp_source_request_batch_full(use_getsources2, included_files, included_large_files) {
+        if is_udp_source_request_batch_full(
+            use_getsources2,
+            supports_legacy_batching,
+            included_files,
+            included_large_files,
+        ) {
             break;
         }
         let is_large_file = target.file_size > u64::from(u32::MAX);
@@ -280,6 +284,7 @@ pub(super) fn encode_udp_source_request_batch(
 
 fn is_udp_source_request_batch_full(
     use_getsources2: bool,
+    supports_legacy_batching: bool,
     included_files: usize,
     included_large_files: usize,
 ) -> bool {
@@ -287,6 +292,12 @@ fn is_udp_source_request_batch_full(
         return true;
     }
     if !use_getsources2 {
+        // WHY: legacy servers without SRV_UDPFLG_EXT_GETSOURCES define one
+        // hash per OP_GLOBGETSOURCES datagram. Appending more hashes changes
+        // the packet grammar and can make the request unusable.
+        if !supports_legacy_batching {
+            return included_files >= 1;
+        }
         return included_files * UDP_SOURCE_REQUEST_G1_BYTES_PER_FILE
             >= MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES;
     }

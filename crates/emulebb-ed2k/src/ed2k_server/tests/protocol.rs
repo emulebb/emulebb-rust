@@ -73,6 +73,28 @@ fn udp_source_request_batch_encodes_legacy_hashes() {
 }
 
 #[test]
+fn udp_source_request_without_legacy_extension_encodes_exactly_one_hash() {
+    let server = test_server(0, 0);
+    let targets = [
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x11; 16]),
+            file_size: 1234,
+        },
+        Ed2kUdpSourceRequestTarget {
+            file_hash: Ed2kHash::from_bytes([0x22; 16]),
+            file_size: 5678,
+        },
+    ];
+
+    let encoded = encode_udp_source_request_batch(&server, &targets).expect("encode source batch");
+
+    assert_eq!(encoded.opcode, OP_GLOBGETSOURCES);
+    assert_eq!(encoded.included_files, 1);
+    assert_eq!(encoded.included_large_files, 0);
+    assert_eq!(encoded.payload, vec![0x11; 16]);
+}
+
+#[test]
 fn udp_source_request_batch_encodes_getsources2_sizes() {
     let server = test_server(
         0,
