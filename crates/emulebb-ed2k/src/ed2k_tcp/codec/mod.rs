@@ -374,6 +374,12 @@ pub(super) fn encode_port_test_answer() -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_PORTTEST, &[0x12])
 }
 
+/// Encode the result sent on the held TCP test connection after the UDP probe
+/// arrives. Stock uses ASCII `'1'` for success.
+pub(super) fn encode_port_test_result(result: u8) -> Vec<u8> {
+    encode_packet(OP_EDONKEYPROT, OP_PORTTEST, &[result])
+}
+
 pub(super) fn encode_start_upload_req(file_hash: &Ed2kHash) -> Vec<u8> {
     encode_packet(OP_EDONKEYPROT, OP_STARTUPLOADREQ, &file_hash.0)
 }

@@ -67,7 +67,8 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
         direct_udp_callback: false,
     };
 
-    let server = spawn_single_listener_connection(
+    let port_test_registry = crate::PortTestRegistry::new();
+    let server = spawn_single_listener_connection_with_port_test_registry(
         listener,
         dht,
         server_state,
@@ -75,6 +76,7 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
         secure_ident,
         Arc::clone(&transfer_runtime),
         hello_identity,
+        port_test_registry.clone(),
     );
 
     let peer_identity = Ed2kHelloIdentity {
@@ -278,6 +280,13 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
     assert_eq!(port_test_answer[0], OP_EDONKEYPROT);
     assert_eq!(port_test_answer[5], OP_PORTTEST);
     assert_eq!(&port_test_answer[6..], &[0x12]);
+
+    assert!(port_test_registry.acknowledge_udp_probe());
+    let port_test_result = read_packet(&mut stream).await;
+    assert_eq!(port_test_result[0], OP_EDONKEYPROT);
+    assert_eq!(port_test_result[5], OP_PORTTEST);
+    assert_eq!(&port_test_result[6..], b"1");
+    assert!(!port_test_registry.acknowledge_udp_probe());
 
     stream
         .write_all(&super::encode_packet(

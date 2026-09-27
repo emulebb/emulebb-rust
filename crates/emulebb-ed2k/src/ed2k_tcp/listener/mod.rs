@@ -46,6 +46,8 @@ pub struct Ed2kListenerOptions {
     /// Persistent Kad buddy-socket registry: a matching inbound buddy connection
     /// is held open so the Kad callback handler can relay OP_CALLBACK down it.
     pub buddy_registry: BuddySocketRegistry,
+    /// Cross-transport TCP/UDP external listener-test association.
+    pub port_test_registry: crate::PortTestRegistry,
 }
 
 /// Run the minimal eD2k TCP listener needed for inbound hello parity and firewall checks.
@@ -62,6 +64,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
         ip_filter,
         reachability,
         buddy_registry,
+        port_test_registry,
     } = options;
     // Resolve the VPN bind interface index once (from the listener's local addr)
     // so each accepted socket can egress-pin to the tunnel (IP_UNICAST_IF) without
@@ -101,6 +104,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
             hello_identity,
             reachability: reachability.clone(),
             buddy_registry: buddy_registry.clone(),
+            port_test_registry: port_test_registry.clone(),
             bind_ip,
             shutdown: Arc::clone(&shutdown),
         }
@@ -159,6 +163,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                 let transfer_runtime = Arc::clone(&transfer_runtime);
                 let reachability = reachability.clone();
                 let buddy_registry = buddy_registry.clone();
+                let port_test_registry = port_test_registry.clone();
                 tokio::spawn(async move {
                     // Hold the admission guard for the whole handler so the
                     // inbound slot is released on every exit path (Drop).
@@ -175,6 +180,7 @@ pub async fn run_ed2k_listener(options: Ed2kListenerOptions) {
                             hello_identity,
                             reachability: &reachability,
                             buddy_registry: &buddy_registry,
+                            port_test_registry: &port_test_registry,
                         },
                     )
                     .await

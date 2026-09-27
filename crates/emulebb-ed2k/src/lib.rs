@@ -30,6 +30,8 @@ pub mod kad_firewall;
 pub mod long_path;
 pub mod nat;
 pub mod networking;
+mod port_test;
+pub use port_test::PortTestRegistry;
 pub mod public_ip_probe;
 pub mod reachability;
 pub mod shared_publish_rank;

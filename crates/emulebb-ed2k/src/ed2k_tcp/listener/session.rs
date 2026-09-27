@@ -20,13 +20,14 @@ use crate::{
     ed2k_server::Ed2kServerState,
     ed2k_transfer::{Ed2kTransferRuntime, Ed2kUploadPeerIdentity, Ed2kUploadPendingPromotion},
     kad_firewall::KadFirewallState,
+    port_test::{PortTestRegistration, PortTestRegistry},
 };
 
 use super::super::codec::{
     decode_aich_recovery_answer_payload, decode_aich_recovery_request_payload,
     decode_exact_file_hash_payload, decode_kad_callback_payload, decode_optional_file_hash_payload,
     encode_aich_recovery_answer, encode_aich_recovery_failure_answer, encode_buddy_pong,
-    encode_port_test_answer, encode_public_ip_answer,
+    encode_port_test_answer, encode_port_test_result, encode_public_ip_answer,
 };
 use super::super::download::{
     DownloadSessionOptions, Ed2kPeerDownloadOutcome, drive_download_session,
@@ -98,6 +99,8 @@ pub(in crate::ed2k_tcp) struct Ed2kConnectionContext<'a> {
     /// Persistent Kad buddy-socket registry: an inbound buddy holds this session
     /// open so `handle_kad_callback_req` can relay `OP_CALLBACK` down it.
     pub(in crate::ed2k_tcp) buddy_registry: &'a BuddySocketRegistry,
+    /// Cross-transport TCP/UDP listener-test association.
+    pub(in crate::ed2k_tcp) port_test_registry: &'a PortTestRegistry,
 }
 
 pub(in crate::ed2k_tcp) async fn handle_connection(
@@ -114,6 +117,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         hello_identity,
         reachability,
         buddy_registry,
+        port_test_registry,
     } = context;
     let kad_udp_port = dht
         .bind_addr()
@@ -211,6 +215,10 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
     // -> KS_CONNECTED_BUDDY). While held, we answer OP_BUDDYPING with OP_BUDDYPONG
     // and forward relayed OP_CALLBACK frames pushed by handle_kad_callback_req.
     let mut buddy_hold: Option<InboundBuddyHold> = None;
+    // Every session subscribes cheaply; only a session armed by TCP OP_PORTTEST
+    // recognizes the generation broadcast by the subsequent UDP probe.
+    let mut port_test_events = port_test_registry.subscribe();
+    let mut port_test_registration: Option<PortTestRegistration> = None;
     // Phase B identity-spoofing guard: the first advertised user hash this
     // connection binds; a later hello presenting a DIFFERENT hash is credit-farming
     // impersonation (rust attributes credit by user hash) and is banned + dropped.
@@ -273,6 +281,16 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         let packet = if let Some(hold) = buddy_hold.as_mut() {
             tokio::select! {
                 biased;
+                event = port_test_events.recv() => {
+                    handle_udp_port_test_event(
+                        event,
+                        &mut port_test_registration,
+                        &mut transport,
+                        peer_addr,
+                    )
+                    .await?;
+                    continue;
+                }
                 relay = hold.relay_rx.recv() => {
                     match relay {
                         Some(frame) => {
@@ -314,22 +332,37 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                 }
             }
         } else {
-            match tokio::time::timeout(read_timeout, transport.read_packet()).await {
-                Ok(packet) => {
-                    packet.with_context(|| format!("failed to read eD2k packet from {peer_addr}"))?
-                }
-                Err(_) => match upload_queue
-                    .poll_on_timeout(
-                        transfer_runtime,
+            tokio::select! {
+                biased;
+                event = port_test_events.recv() => {
+                    handle_udp_port_test_event(
+                        event,
+                        &mut port_test_registration,
                         &mut transport,
                         peer_addr,
-                        last_packet_at.elapsed(),
                     )
-                    .await?
-                {
-                    ListenerQueuePoll::Continue => continue,
-                    ListenerQueuePoll::Close => break Ok(()),
-                },
+                    .await?;
+                    continue;
+                }
+                read = tokio::time::timeout(read_timeout, transport.read_packet()) => {
+                    match read {
+                        Ok(packet) => packet.with_context(|| {
+                            format!("failed to read eD2k packet from {peer_addr}")
+                        })?,
+                        Err(_) => match upload_queue
+                            .poll_on_timeout(
+                                transfer_runtime,
+                                &mut transport,
+                                peer_addr,
+                                last_packet_at.elapsed(),
+                            )
+                            .await?
+                        {
+                            ListenerQueuePoll::Continue => continue,
+                            ListenerQueuePoll::Close => break Ok(()),
+                        },
+                    }
+                }
             }
         };
         let Some(packet) = packet else {
@@ -878,6 +911,7 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
                     transport.mode.as_str()
                 );
                 let reply = encode_port_test_answer();
+                port_test_registration = Some(port_test_registry.arm());
                 dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "port_test", &reply);
                 transport
                     .write_all(&reply)
@@ -1071,6 +1105,32 @@ pub(in crate::ed2k_tcp) async fn handle_connection(
         debug!("released inbound Kad buddy session for {peer_addr}");
     }
     result
+}
+
+async fn handle_udp_port_test_event(
+    event: Result<u64, tokio::sync::broadcast::error::RecvError>,
+    registration: &mut Option<PortTestRegistration>,
+    transport: &mut Ed2kTransport,
+    peer_addr: SocketAddr,
+) -> Result<()> {
+    let Ok(id) = event else {
+        return Ok(());
+    };
+    if !registration
+        .as_ref()
+        .is_some_and(|registration| registration.matches(id))
+    {
+        return Ok(());
+    }
+
+    let reply = encode_port_test_result(b'1');
+    dump_ed2k_tcp_listener_send(peer_addr, transport.mode, "port_test_udp_result", &reply);
+    transport
+        .write_all(&reply)
+        .await
+        .with_context(|| format!("failed to send UDP OP_PORTTEST result to {peer_addr}"))?;
+    *registration = None;
+    Ok(())
 }
 
 /// Oracle `AllowIncomingBuddyPingPong()` cadence (LOWID-G9b): after sending an

@@ -67,6 +67,9 @@ pub(crate) enum ReaskInboundOutcome {
         req: super::codec::DirectCallbackReq,
         from: SocketAddr,
     },
+    /// Valid UDP half of `OP_PORTTEST`; the runtime wakes the associated TCP
+    /// test connection through [`crate::PortTestRegistry`].
+    PortTest { from: SocketAddr },
     /// Not a reask addressed to us (junk, a Kad packet, an unsolicited reply, or
     /// an unknown source) — the caller ignores it.
     Ignored,
@@ -242,6 +245,9 @@ impl ReaskService {
             // verify the firewalled gate and connect out to the requester.
             InboundReaskMessage::DirectCallbackReq(req) => {
                 return ReaskInboundOutcome::DirectCallbackReq { req, from };
+            }
+            InboundReaskMessage::PortTest => {
+                return ReaskInboundOutcome::PortTest { from };
             }
         };
 

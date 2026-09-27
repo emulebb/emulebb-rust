@@ -1,3 +1,4 @@
+use super::codec::encode_port_test_result;
 use super::dump;
 use super::{
     CT_EMULE_BUDDYIP, CT_EMULE_BUDDYUDP, CT_EMULE_MISCOPTIONS1, CT_EMULE_MISCOPTIONS2,
@@ -150,6 +151,7 @@ macro_rules! handle_connection_test {
                 hello_identity: $hello_identity,
                 reachability: &crate::reachability::ExternalReachability::new(),
                 buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
+                port_test_registry: &crate::PortTestRegistry::new(),
             },
         )
     };

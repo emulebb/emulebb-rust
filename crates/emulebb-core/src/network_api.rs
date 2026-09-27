@@ -282,8 +282,11 @@ impl EmulebbCore {
             })?);
         let hello_identity = self.ed2k_hello_identity(&network);
         let mut tasks = Vec::new();
-        if kad_network_enabled {
-            tasks.push(dht.clone().start());
+        // The Kad socket is also the stock eD2K client-UDP socket. Its receive
+        // loop stays active even when Kad routing itself is disabled so
+        // OP_PORTTEST and other client-UDP traffic remain reachable.
+        tasks.push(dht.clone().start());
+        {
             tasks.push(tokio::spawn(run_kad_udp_key_public_ip_sync(
                 dht.clone(),
                 self.ed2k_reachability.clone(),
@@ -416,6 +419,7 @@ impl EmulebbCore {
                 Arc::clone(&shutdown),
             )));
         }
+        let port_test_registry = PortTestRegistry::new();
         tasks.push(tokio::spawn(run_ed2k_listener(Ed2kListenerOptions {
             listener: Arc::clone(&ed2k_listener),
             dht: dht.clone(),
@@ -428,6 +432,7 @@ impl EmulebbCore {
             ip_filter: network.ip_filter.clone(),
             reachability: self.ed2k_reachability.clone(),
             buddy_registry: buddy_registry.clone(),
+            port_test_registry: port_test_registry.clone(),
         })));
         // Learned public-IP cell (eMule theApp public IP), shared by the server
         // loop (sets it from OP_IDCHANGE) and the UDP reask loop (obfuscation key).
@@ -471,12 +476,14 @@ impl EmulebbCore {
             dead_server_retries,
             Arc::clone(&shutdown),
         )));
-        if kad_network_enabled && enable_udp_reask {
-            // Off by default; wire-validate before enabling. udp_version 4 matches
-            // our advertised hello ET_UDPVER. The handle lets the direct download
-            // driver detach queued sources onto the loop over the command channel.
+        {
+            // udp_version 4 matches our advertised hello ET_UDPVER. The client
+            // UDP ingress always runs for OP_PORTTEST; source-reask commands and
+            // ticks remain gated by `enable_udp_reask`.
             let (reask_handle, reask_commands) = reask_command_channel();
-            *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
+            if enable_udp_reask {
+                *self.ed2k_reask_handle.lock().unwrap() = Some(reask_handle);
+            }
             // Typed loop->core event channel (libtorrent-alert style) for re-engage.
             let (reask_events_tx, reask_events_rx) = reask_event_channel();
             tasks.push(tokio::spawn(run_ed2k_udp_reask_loop(
@@ -489,43 +496,53 @@ impl EmulebbCore {
                 ed2k_public_ip.clone(),
                 network.ip_filter.clone(),
                 buddy_registry.clone(),
+                port_test_registry,
+                enable_udp_reask,
                 Arc::clone(&shutdown),
             )));
             // Re-engage consumer: when a reask reports a low queue rank, the loop
             // hands the source back and signals here to reconnect over TCP now.
-            tasks.push(tokio::spawn(run_ed2k_reask_reengage(
-                self.clone(),
-                reask_events_rx,
-                crate::ed2k_net_drivers::ReaskReengageContext {
-                    bind_ip: network.bind_ip,
-                    hello_identity,
-                    ed2k_listener: Arc::clone(&ed2k_listener),
-                    server_state: Arc::clone(&server_state),
-                    kad_firewall: Arc::clone(&kad_firewall),
-                    direct_callback_limiter: Arc::new(
-                        crate::callback_tracker::DirectCallbackRateLimiter::new(),
-                    ),
-                },
-                Arc::clone(&shutdown),
-            )));
+            if enable_udp_reask {
+                tasks.push(tokio::spawn(run_ed2k_reask_reengage(
+                    self.clone(),
+                    reask_events_rx,
+                    crate::ed2k_net_drivers::ReaskReengageContext {
+                        bind_ip: network.bind_ip,
+                        hello_identity,
+                        ed2k_listener: Arc::clone(&ed2k_listener),
+                        server_state: Arc::clone(&server_state),
+                        kad_firewall: Arc::clone(&kad_firewall),
+                        direct_callback_limiter: Arc::new(
+                            crate::callback_tracker::DirectCallbackRateLimiter::new(),
+                        ),
+                    },
+                    Arc::clone(&shutdown),
+                )));
+            } else {
+                drop(reask_events_rx);
+            }
             // Public-IP fallback (H2): the reask obfuscation key is our public IP
             // (eMule EncryptSendClient). It is normally learned from the server
             // (OP_IDCHANGE), but in Kad-only / pre-connect / LowID it is unknown,
             // which would block obfuscated reasks. STUN-probe the data-plane egress
             // and fill it only when still unknown (set_if_unset), so the server
             // path keeps precedence (eMule GetPublicIP order: server, then Kad/STUN).
-            tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
-                network.bind_ip,
-                ed2k_public_ip.clone(),
-                Arc::clone(&shutdown),
-            )));
+            if enable_udp_reask {
+                tasks.push(tokio::spawn(run_ed2k_public_ip_probe(
+                    network.bind_ip,
+                    ed2k_public_ip.clone(),
+                    Arc::clone(&shutdown),
+                )));
+            }
             // One-shot NAT-type health signal (STUN mapping-behavior): logs whether
             // our advertised UDP port will match what peers observe (cone) or is
             // fragile (symmetric). Informational; reask degrades to TCP either way.
-            tasks.push(tokio::spawn(run_ed2k_nat_type_probe(
-                network.bind_ip,
-                Arc::clone(&shutdown),
-            )));
+            if enable_udp_reask {
+                tasks.push(tokio::spawn(run_ed2k_nat_type_probe(
+                    network.bind_ip,
+                    Arc::clone(&shutdown),
+                )));
+            }
         }
         // Requester-side Kad UDP firewall self-check driver (oracle CUDPFirewallTester).
         // Drives FIREWALLED2_REQ-independent OP_FWCHECKUDPREQ rounds against open

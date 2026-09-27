@@ -35,6 +35,9 @@ pub(crate) const OP_REASKCALLBACKUDP: u8 = 0x94;
 /// `<TCPPort u16 LE><Userhash 16><ConnectOptions u8>` (oracle `Opcodes.h` /
 /// `BaseClient.cpp:1481` `OP_DIRECTCALLBACKREQ`).
 pub(crate) const OP_DIRECTCALLBACKREQ: u8 = 0x95;
+/// Stock TCP/UDP listener reachability test. The UDP body must be exactly the
+/// marker byte `0x12`; success is reported over the associated TCP connection.
+pub(crate) const OP_PORTTEST: u8 = 0xFE;
 
 /// Decoded `OP_REASKFILEPING` request (uploader/reciprocity side).
 #[derive(Debug, Clone, PartialEq, Eq)]

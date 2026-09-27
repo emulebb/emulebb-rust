@@ -26,11 +26,13 @@ use emulebb_kad_proto::Ed2kHash;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
+use super::dispatch::{InboundReaskMessage, parse_inbound_reask_datagram};
 use super::service::{ReaskInboundOutcome, ReaskService, ReaskTickPacing, TransferReaskInfo};
 use super::state::{ReaskAction, ReaskSource};
 use crate::buddy_socket::BuddySocketRegistry;
 use crate::ed2k_transfer::Ed2kTransferRuntime;
 use crate::ipfilter::IpFilter;
+use crate::port_test::PortTestRegistry;
 use crate::reachability::ExternalReachability;
 
 /// A command from a download session to the reask loop: detach a just-queued
@@ -282,6 +284,8 @@ pub async fn run_ed2k_udp_reask_loop(
     public_ip: ExternalReachability,
     ip_filter: IpFilter,
     buddy_registry: BuddySocketRegistry,
+    port_test_registry: PortTestRegistry,
+    reask_enabled: bool,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut service = ReaskService::new(user_hash, udp_version, public_ip.clone());
@@ -312,11 +316,12 @@ pub async fn run_ed2k_udp_reask_loop(
                 let Some((data, from)) = maybe else { break };
                 handle_inbound_datagram(
                     &mut service, &dht, &transfer_runtime, &events, &ip_filter,
-                    &buddy_registry, user_hash, public_ip.octets(), &data, from,
+                    &buddy_registry, &port_test_registry, reask_enabled, user_hash,
+                    public_ip.octets(), &data, from,
                 )
                 .await;
             }
-            maybe = commands.recv() => {
+            maybe = commands.recv(), if reask_enabled => {
                 let Some(command) = maybe else { break };
                 // AnswerCallbackTcp / SendDirectCallback need async UDP I/O
                 // (handled here); the rest are sync.
@@ -341,7 +346,7 @@ pub async fn run_ed2k_udp_reask_loop(
                     other => apply_reask_command(&mut service, &events, other),
                 }
             }
-            _ = ticker.tick() => {
+            _ = ticker.tick(), if reask_enabled => {
                 drive_reask_tick(&mut service, &dht, &transfer_runtime, &events).await;
             }
         }
@@ -417,6 +422,8 @@ async fn handle_inbound_datagram(
     events: &ReaskEventSender,
     ip_filter: &IpFilter,
     buddy_registry: &BuddySocketRegistry,
+    port_test_registry: &PortTestRegistry,
+    reask_enabled: bool,
     our_user_hash: [u8; 16],
     our_public_ip: [u8; 4],
     data: &[u8],
@@ -443,7 +450,21 @@ async fn handle_inbound_datagram(
         hex_preview(data)
     );
     super::dump::dump_client_udp_recv(from, &our_user_hash, our_public_ip, data);
-    match service.handle_inbound(data, from, Instant::now()) {
+    if !reask_enabled {
+        let SocketAddr::V4(from_v4) = from else {
+            return;
+        };
+        if matches!(
+            parse_inbound_reask_datagram(data, from_v4.ip().octets(), &our_user_hash, 4),
+            Some(InboundReaskMessage::PortTest)
+        ) {
+            let acknowledged = port_test_registry.acknowledge_udp_probe();
+            debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
+        }
+        return;
+    }
+    let outcome = service.handle_inbound(data, from, Instant::now());
+    match outcome {
         ReaskInboundOutcome::RoutedReply {
             file_hash,
             endpoint,
@@ -509,6 +530,10 @@ async fn handle_inbound_datagram(
                     "ed2k udp reask: dropping OP_DIRECTCALLBACKREQ from non-IPv4 requester {from}"
                 );
             }
+        }
+        ReaskInboundOutcome::PortTest { from } => {
+            let acknowledged = port_test_registry.acknowledge_udp_probe();
+            debug!("ed2k udp port test probe from {from}: tcp_result_sent={acknowledged}");
         }
         ReaskInboundOutcome::Ignored => {}
     }

@@ -17,8 +17,8 @@
 use std::borrow::Cow;
 
 use super::codec::{
-    DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_QUEUEFULL, OP_REASKACK,
-    OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskCallbackUdp, ReaskFilePing,
+    DirectCallbackReq, OP_DIRECTCALLBACKREQ, OP_FILENOTFOUND, OP_PORTTEST, OP_QUEUEFULL,
+    OP_REASKACK, OP_REASKCALLBACKUDP, OP_REASKFILEPING, ReaskAck, ReaskCallbackUdp, ReaskFilePing,
     decode_direct_callback_req, decode_reask_ack, decode_reask_callback_udp,
     decode_reask_file_ping,
 };
@@ -46,6 +46,8 @@ pub(crate) enum InboundReaskMessage {
     /// firewalled LowID side that advertised direct UDP callback) asks us to
     /// connect out to it (oracle `ClientUDPSocket.cpp` `OP_DIRECTCALLBACKREQ`).
     DirectCallbackReq(DirectCallbackReq),
+    /// `OP_PORTTEST 0x12` — complete the UDP half of the external listener test.
+    PortTest,
 }
 
 /// Parse a raw inbound datagram as a client-UDP reask message, or `None` if it
@@ -95,6 +97,7 @@ pub(crate) fn parse_inbound_reask_datagram(
         OP_DIRECTCALLBACKREQ => decode_direct_callback_req(body)
             .ok()
             .map(InboundReaskMessage::DirectCallbackReq),
+        OP_PORTTEST if body == [0x12] => Some(InboundReaskMessage::PortTest),
         _ => None,
     }
 }
@@ -196,6 +199,31 @@ mod tests {
         assert_eq!(
             parse_inbound_reask_datagram(&frame(OP_FILENOTFOUND, &[]), SENDER_IP, &OUR_HASH, 4),
             Some(InboundReaskMessage::FileNotFound)
+        );
+    }
+
+    #[test]
+    fn parses_only_the_exact_stock_port_test_probe() {
+        assert_eq!(
+            parse_inbound_reask_datagram(&frame(OP_PORTTEST, &[0x12]), SENDER_IP, &OUR_HASH, 4),
+            Some(InboundReaskMessage::PortTest)
+        );
+        assert!(
+            parse_inbound_reask_datagram(&frame(OP_PORTTEST, &[]), SENDER_IP, &OUR_HASH, 4)
+                .is_none()
+        );
+        assert!(
+            parse_inbound_reask_datagram(
+                &frame(OP_PORTTEST, &[0x12, 0x00]),
+                SENDER_IP,
+                &OUR_HASH,
+                4
+            )
+            .is_none()
+        );
+        assert!(
+            parse_inbound_reask_datagram(&frame(OP_PORTTEST, &[0x11]), SENDER_IP, &OUR_HASH, 4)
+                .is_none()
         );
     }
 

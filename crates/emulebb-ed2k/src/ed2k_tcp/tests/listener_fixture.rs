@@ -161,6 +161,7 @@ impl ListenerTestRuntime {
             hello_identity: self.hello_identity,
             reachability: crate::reachability::ExternalReachability::new(),
             buddy_registry: crate::buddy_socket::BuddySocketRegistry::new(),
+            port_test_registry: crate::PortTestRegistry::new(),
             bind_ip: test_bind_ip(),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -252,17 +253,44 @@ pub(super) fn spawn_single_listener_connection(
     transfer_runtime: Arc<Ed2kTransferRuntime>,
     hello_identity: Ed2kHelloIdentity,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_single_listener_connection_with_port_test_registry(
+        listener,
+        dht,
+        server_state,
+        kad_firewall,
+        secure_ident,
+        transfer_runtime,
+        hello_identity,
+        crate::PortTestRegistry::new(),
+    )
+}
+
+pub(super) fn spawn_single_listener_connection_with_port_test_registry(
+    listener: TcpListener,
+    dht: DhtNode,
+    server_state: Arc<RwLock<Ed2kServerState>>,
+    kad_firewall: Arc<Mutex<KadFirewallState>>,
+    secure_ident: Arc<Ed2kSecureIdent>,
+    transfer_runtime: Arc<Ed2kTransferRuntime>,
+    hello_identity: Ed2kHelloIdentity,
+    port_test_registry: crate::PortTestRegistry,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let (stream, remote_addr) = listener.accept().await.unwrap();
-        handle_connection_test!(
-            stream,
+        super::handle_connection(
+            super::Ed2kSessionSource::Inbound(stream),
             remote_addr,
-            &dht,
-            &server_state,
-            &kad_firewall,
-            &secure_ident,
-            &transfer_runtime,
-            hello_identity,
+            super::Ed2kConnectionContext {
+                dht: &dht,
+                server_state: &server_state,
+                kad_firewall: &kad_firewall,
+                secure_ident: &secure_ident,
+                transfer_runtime: &transfer_runtime,
+                hello_identity,
+                reachability: &crate::reachability::ExternalReachability::new(),
+                buddy_registry: &crate::buddy_socket::BuddySocketRegistry::new(),
+                port_test_registry: &port_test_registry,
+            },
         )
         .await
         .unwrap();

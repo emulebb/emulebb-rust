@@ -212,6 +212,15 @@ fn port_test_answer_matches_stock_edonkey_ack_shape() {
 }
 
 #[test]
+fn port_test_udp_result_matches_stock_edonkey_shape() {
+    let packet = encode_port_test_result(b'1');
+
+    assert_eq!(packet[0], OP_EDONKEYPROT);
+    assert_eq!(packet[5], OP_PORTTEST);
+    assert_eq!(&packet[6..], b"1");
+}
+
+#[test]
 fn file_description_decodes_stock_rating_and_long_string() {
     let mut payload = vec![4];
     payload.extend_from_slice(&5u32.to_le_bytes());

@@ -19,7 +19,7 @@ use emulebb_ed2k::config::Ed2kUploadQueueRuntimeConfig;
 use emulebb_ed2k::ed2k_server::Ed2kSearchFile;
 pub use emulebb_ed2k::long_path::{long_path, normal_path_display};
 use emulebb_ed2k::{
-    DirectCallbackArgs, NatManager, NatManagerBuilder, ReaskSourceHandle,
+    DirectCallbackArgs, NatManager, NatManagerBuilder, PortTestRegistry, ReaskSourceHandle,
     buddy_socket::{BuddySocketRegistry, ExpectedInboundBuddy},
     built_in_upnp_port_mapping_providers,
     config::Ed2kRuntimeConfig,

@@ -53,6 +53,7 @@ pub(in crate::ed2k_tcp) struct UploadPromoteDriver {
     pub(in crate::ed2k_tcp) hello_identity: Ed2kHelloIdentity,
     pub(in crate::ed2k_tcp) reachability: crate::reachability::ExternalReachability,
     pub(in crate::ed2k_tcp) buddy_registry: BuddySocketRegistry,
+    pub(in crate::ed2k_tcp) port_test_registry: crate::PortTestRegistry,
     /// Local bind address for outbound connects (the listener's VPN-pinned IP).
     pub(in crate::ed2k_tcp) bind_ip: Ipv4Addr,
     pub(in crate::ed2k_tcp) shutdown: Arc<AtomicBool>,
@@ -224,6 +225,7 @@ impl UploadPromoteDriver {
                 hello_identity: self.hello_identity,
                 reachability: &self.reachability,
                 buddy_registry: &self.buddy_registry,
+                port_test_registry: &self.port_test_registry,
             },
         )
         .await
