@@ -540,6 +540,7 @@ impl DhtNode {
             crate::search::NotesSearchRequest {
                 file_hash,
                 file_size,
+                requester_id: self.inner.own_id,
             },
             self.inner.config.notes_result_cap,
             phase2_fanout,

@@ -182,6 +182,32 @@ pub struct SearchNotesReq {
     pub size: u64,
 }
 
+/// Query selector carried by the legacy v2 `KADEMLIA_SEARCH_REQ` opcode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacySearchKind {
+    /// Keyword search. An empty expression writes stock's two-byte `0, 0`
+    /// large-file-capable marker; a non-empty expression writes marker `2`
+    /// followed by the serialized search tree.
+    Keyword { restrictive_payload: Vec<u8> },
+    /// Source search. Legacy v2 carries only marker `1`, with no file size.
+    Source,
+}
+
+/// Legacy v2 keyword/source search request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacySearchReq {
+    pub target: NodeId,
+    pub kind: LegacySearchKind,
+}
+
+/// Legacy v2 notes request. Stock appends its own Kad ID after the target.
+#[derive(BinRead, BinWrite, Debug, Clone, PartialEq, Eq)]
+#[brw(little)]
+pub struct LegacySearchNotesReq {
+    pub target: NodeId,
+    pub requester_id: NodeId,
+}
+
 // ── SearchResultEntry ────────────────────────────────────────────────────────
 //
 // eMule CEntry::WriteTagListInc writes: [tag_count:u8][tags...]
@@ -227,6 +253,14 @@ pub struct SearchRes {
     #[bw(calc = u16::try_from(results.len()).expect("result count exceeds u16"))]
     count: u16,
     #[br(count = count)]
+    pub results: Vec<SearchResultEntry>,
+}
+
+/// Legacy v2 search response. Unlike Kad2 `SEARCH_RES`, this layout has no
+/// sender-ID prefix; the datagram endpoint is the responder identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacySearchRes {
+    pub target: NodeId,
     pub results: Vec<SearchResultEntry>,
 }
 
@@ -309,6 +343,14 @@ pub struct PublishRes {
     /// Optional future-use byte. eMule currently treats bit 0 as a request for
     /// an empty `KADEMLIA2_PUBLISH_RES_ACK` when the response used a UDP key.
     pub options: Option<u8>,
+}
+
+/// Legacy v2/v3 publish response. The load byte is optional on this wire
+/// family and there is no ACK-request option byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyPublishRes {
+    pub target: NodeId,
+    pub load: Option<u8>,
 }
 
 // ── PublishResAck ────────────────────────────────────────────────────────────

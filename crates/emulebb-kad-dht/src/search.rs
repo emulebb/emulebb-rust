@@ -55,6 +55,7 @@ fn acquire_search_permit(concurrency: Option<SearchConcurrency>, target: NodeId)
 pub struct NotesSearchRequest {
     pub file_hash: Ed2kHash,
     pub file_size: u64,
+    pub requester_id: NodeId,
 }
 
 fn map_source_search_result(
@@ -302,6 +303,7 @@ pub(crate) fn search_notes(
             target,
             search_kind: TraversalKind::Notes {
                 size: request.file_size,
+                requester_id: request.requester_id,
             },
             timeout: SEARCH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,

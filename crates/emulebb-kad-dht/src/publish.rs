@@ -9,9 +9,9 @@ use crate::error::DhtError;
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use emulebb_kad_net::{RpcManager, RpcWorkClass};
 use emulebb_kad_proto::constants::{
-    KAD_VERSION_AICH_KEYWORD_PUBLISH, KADEMLIA_VERSION2_47A, SEARCHTOLERANCE,
-    STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS,
-    STORE_STOP_GRACE_SECS,
+    KAD_VERSION_AICH_KEYWORD_PUBLISH, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION4_47C,
+    SEARCHTOLERANCE, STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS,
+    STORE_SOURCE_TIMEOUT_SECS, STORE_STOP_GRACE_SECS,
 };
 use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag, TagName,
@@ -120,11 +120,12 @@ async fn execute_publish_fanout_for_contacts(
             contact,
         };
         join_set.spawn(async move {
+            let expected_opcode = publish_response_opcode(&packet);
             let result = rpc
                 .request_with_class(
                     attempt.contact.addr,
                     &packet,
-                    opcode::PUBLISH_RES,
+                    expected_opcode,
                     PUBLISH_RESPONSE_TIMEOUT,
                     work_class,
                 )
@@ -179,11 +180,12 @@ async fn execute_keyword_publish_fanout(
             let rpc = rpc.clone();
             let addr = contact.addr;
             join_set.spawn(async move {
+                let expected_opcode = publish_response_opcode(&packet);
                 let result = rpc
                     .request_with_class(
                         addr,
                         &packet,
-                        opcode::PUBLISH_RES,
+                        expected_opcode,
                         PUBLISH_RESPONSE_TIMEOUT,
                         work_class,
                     )
@@ -226,6 +228,14 @@ async fn execute_keyword_publish_fanout(
             )
         })
         .collect()
+}
+
+fn publish_response_opcode(packet: &KadPacket) -> u8 {
+    if matches!(packet, KadPacket::LegacyPublishSourceReq(_)) {
+        opcode::PUBLISH_RES_LEGACY
+    } else {
+        opcode::PUBLISH_RES
+    }
 }
 
 fn publish_response_requests_ack(result: &Result<KadPacket, emulebb_kad_net::NetError>) -> bool {
@@ -346,6 +356,19 @@ fn record_publish_success(
             stats.load_responses += 1;
             log_publish_response_ack(family, &attempt, response.target, response.load);
         }
+        KadPacket::LegacyPublishRes(response) => {
+            stats.acked_contacts += 1;
+            if let Some(load) = response.load {
+                stats.total_load += u32::from(load);
+                stats.load_responses += 1;
+            }
+            log_publish_response_ack(
+                family,
+                &attempt,
+                response.target,
+                response.load.unwrap_or_default(),
+            );
+        }
         other => {
             if count_unexpected_as_ack {
                 stats.acked_contacts += 1;
@@ -429,6 +452,19 @@ fn record_keyword_publish_results(
                     stats.total_load += u32::from(response.load);
                     stats.load_responses += 1;
                     log_publish_response_ack("keyword", &attempt, response.target, response.load);
+                }
+                Ok(KadPacket::LegacyPublishRes(response)) => {
+                    raw_acks += 1;
+                    if let Some(load) = response.load {
+                        stats.total_load += u32::from(load);
+                        stats.load_responses += 1;
+                    }
+                    log_publish_response_ack(
+                        "keyword",
+                        &attempt,
+                        response.target,
+                        response.load.unwrap_or_default(),
+                    );
                 }
                 // Keyword publish keeps counting unexpected response opcodes as
                 // acks (same policy as the non-chunked path).
@@ -722,11 +758,16 @@ fn build_source_publish_packet(
             .cloned()
             .collect()
     };
-    KadPacket::PublishSourceReq(PublishSourceReq {
+    let request = PublishSourceReq {
         target,
         publisher_id,
         tags,
-    })
+    };
+    if contact_version < KADEMLIA_VERSION4_47C {
+        KadPacket::LegacyPublishSourceReq(request)
+    } else {
+        KadPacket::PublishSourceReq(request)
+    }
 }
 
 /// Publish a note/rating for a file.

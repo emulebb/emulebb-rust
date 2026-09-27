@@ -99,6 +99,7 @@ fn tracks_outbound_request_opcode(opcode: u8) -> bool {
             | emulebb_kad_proto::constants::opcode::REQ
             | emulebb_kad_proto::constants::opcode::SEARCH_NOTES_REQ
             | emulebb_kad_proto::constants::opcode::SEARCH_NOTES_REQ_LEGACY
+            | emulebb_kad_proto::constants::opcode::PUBLISH_REQ_LEGACY
             | emulebb_kad_proto::constants::opcode::PUBLISH_KEY_REQ
             | emulebb_kad_proto::constants::opcode::PUBLISH_SOURCE_REQ
             | emulebb_kad_proto::constants::opcode::PUBLISH_NOTES_REQ
@@ -164,6 +165,18 @@ mod tests {
         assert!(tracker.contains(
             ip,
             emulebb_kad_proto::constants::opcode::SEARCH_NOTES_REQ_LEGACY,
+            true,
+        ));
+    }
+
+    #[test]
+    fn outbound_request_tracker_tracks_legacy_source_publish_opcode() {
+        let mut tracker = OutboundRequestTracker::new(Duration::from_secs(180));
+        let ip = parse_ip("1.2.3.4");
+        tracker.record(ip, emulebb_kad_proto::constants::opcode::PUBLISH_REQ_LEGACY);
+        assert!(tracker.contains(
+            ip,
+            emulebb_kad_proto::constants::opcode::PUBLISH_REQ_LEGACY,
             true,
         ));
     }

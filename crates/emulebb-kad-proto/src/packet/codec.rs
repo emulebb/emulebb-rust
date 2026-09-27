@@ -7,7 +7,8 @@ use crate::node_id::NodeId;
 use crate::tag::{StringDecodeMode, Tag};
 
 use super::types::{
-    FindBuddyRes, PublishRes, SearchKeyReq, SearchRes, SearchResultEntry, SearchSourceReq,
+    FindBuddyRes, LegacyPublishRes, LegacySearchKind, LegacySearchReq, LegacySearchRes, PublishRes,
+    PublishSourceReq, SearchKeyReq, SearchRes, SearchResultEntry, SearchSourceReq,
 };
 
 fn read_kad_search_entry_id(cursor: &mut Cursor<&[u8]>) -> Result<Ed2kHash, ProtoError> {
@@ -33,6 +34,28 @@ pub(super) fn read_search_res(cursor: &mut Cursor<&[u8]>) -> Result<SearchRes, P
     let sender_id = BinReaderExt::read_le::<NodeId>(cursor)?;
     let target = BinReaderExt::read_le::<NodeId>(cursor)?;
     let count = BinReaderExt::read_le::<u16>(cursor)?;
+    let results = read_search_result_entries(cursor, count)?;
+
+    Ok(SearchRes {
+        sender_id,
+        target,
+        results,
+    })
+}
+
+pub(super) fn read_legacy_search_res(
+    cursor: &mut Cursor<&[u8]>,
+) -> Result<LegacySearchRes, ProtoError> {
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let count = BinReaderExt::read_le::<u16>(cursor)?;
+    let results = read_search_result_entries(cursor, count)?;
+    Ok(LegacySearchRes { target, results })
+}
+
+fn read_search_result_entries(
+    cursor: &mut Cursor<&[u8]>,
+    count: u16,
+) -> Result<Vec<SearchResultEntry>, ProtoError> {
     let mut results = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
@@ -49,11 +72,7 @@ pub(super) fn read_search_res(cursor: &mut Cursor<&[u8]>) -> Result<SearchRes, P
         results.push(SearchResultEntry { entry_id, tags });
     }
 
-    Ok(SearchRes {
-        sender_id,
-        target,
-        results,
-    })
+    Ok(results)
 }
 
 pub(super) fn write_search_res(
@@ -61,6 +80,23 @@ pub(super) fn write_search_res(
     packet: &SearchRes,
 ) -> Result<(), ProtoError> {
     cursor.write_le(&packet.sender_id)?;
+    cursor.write_le(&packet.target)?;
+    cursor
+        .write_le(&u16::try_from(packet.results.len()).expect("search result count exceeds u16"))?;
+    for result in &packet.results {
+        write_kad_search_entry_id(cursor, &result.entry_id)?;
+        cursor.write_le(&u8::try_from(result.tags.len()).expect("tag count exceeds u8"))?;
+        for tag in &result.tags {
+            cursor.write_le(tag)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_legacy_search_res(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &LegacySearchRes,
+) -> Result<(), ProtoError> {
     cursor.write_le(&packet.target)?;
     cursor
         .write_le(&u16::try_from(packet.results.len()).expect("search result count exceeds u16"))?;
@@ -129,6 +165,68 @@ pub(super) fn write_publish_res(
     cursor.write_le(&packet.load)?;
     if let Some(options) = packet.options {
         cursor.write_le(&options)?;
+    }
+    Ok(())
+}
+
+pub(super) fn read_legacy_publish_res(
+    cursor: &mut Cursor<&[u8]>,
+) -> Result<LegacyPublishRes, ProtoError> {
+    let target = BinReaderExt::read_le::<NodeId>(cursor)?;
+    let load = if cursor.position() < cursor.get_ref().len() as u64 {
+        Some(BinReaderExt::read_le::<u8>(cursor)?)
+    } else {
+        None
+    };
+    Ok(LegacyPublishRes { target, load })
+}
+
+pub(super) fn write_legacy_publish_res(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &LegacyPublishRes,
+) -> Result<(), ProtoError> {
+    cursor.write_le(&packet.target)?;
+    if let Some(load) = packet.load {
+        cursor.write_le(&load)?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_legacy_publish_source_req(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &PublishSourceReq,
+) -> Result<(), ProtoError> {
+    cursor.write_le(&packet.target)?;
+    cursor.write_le(&1u16)?;
+    cursor.write_le(&packet.publisher_id)?;
+    cursor.write_le(&u8::try_from(packet.tags.len()).expect("tag count exceeds u8"))?;
+    for tag in &packet.tags {
+        cursor.write_le(tag)?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_legacy_search_req(
+    cursor: &mut Cursor<Vec<u8>>,
+    packet: &LegacySearchReq,
+) -> Result<(), ProtoError> {
+    cursor.write_le(&packet.target)?;
+    match &packet.kind {
+        LegacySearchKind::Keyword {
+            restrictive_payload,
+        } if restrictive_payload.is_empty() => {
+            cursor.write_le(&0u8)?;
+            cursor.write_le(&0u8)?;
+        }
+        LegacySearchKind::Keyword {
+            restrictive_payload,
+        } => {
+            cursor.write_le(&2u8)?;
+            cursor
+                .write_all(restrictive_payload)
+                .map_err(ProtoError::Io)?;
+        }
+        LegacySearchKind::Source => cursor.write_le(&1u8)?,
     }
     Ok(())
 }

@@ -38,6 +38,13 @@ pub(super) fn inspect_inbound_packet(packet: &KadPacket) -> InboundKadPacketInfo
             peer_id: Some(res.sender_id),
             kad_version: None,
         },
+        KadPacket::LegacySearchRes(_) | KadPacket::LegacySearchNotesRes(_) => {
+            InboundKadPacketInfo {
+                tracker_bucket: Some(PacketTrackerBucket::SearchRes),
+                peer_id: None,
+                kad_version: None,
+            }
+        }
         _ => InboundKadPacketInfo {
             tracker_bucket: tracker_bucket_for_opcode(packet.opcode()),
             peer_id: None,
@@ -64,6 +71,9 @@ fn tracker_bucket_for_opcode(opcode_value: u8) -> Option<PacketTrackerBucket> {
         opcode::CALLBACK_REQ => Some(PacketTrackerBucket::CallbackReq),
         opcode::PING => Some(PacketTrackerBucket::PingReq),
         opcode::SEARCH_RES => Some(PacketTrackerBucket::SearchRes),
+        opcode::SEARCH_RES_LEGACY | opcode::SEARCH_NOTES_RES_LEGACY => {
+            Some(PacketTrackerBucket::SearchRes)
+        }
         _ => None,
     }
 }
@@ -71,7 +81,9 @@ fn tracker_bucket_for_opcode(opcode_value: u8) -> Option<PacketTrackerBucket> {
 pub(super) fn is_publish_opcode(opcode_value: u8) -> bool {
     matches!(
         opcode_value,
-        opcode::PUBLISH_KEY_REQ
+        opcode::PUBLISH_REQ_LEGACY
+            | opcode::PUBLISH_RES_LEGACY
+            | opcode::PUBLISH_KEY_REQ
             | opcode::PUBLISH_SOURCE_REQ
             | opcode::PUBLISH_NOTES_REQ
             | opcode::PUBLISH_RES
@@ -119,10 +131,13 @@ pub(super) fn should_log_unsolicited_opcode(opcode_value: u8) -> bool {
             | opcode::SEARCH_SOURCE_REQ
             | opcode::SEARCH_NOTES_REQ
             | opcode::SEARCH_RES
+            | opcode::SEARCH_RES_LEGACY
+            | opcode::SEARCH_NOTES_RES_LEGACY
             | opcode::PUBLISH_KEY_REQ
             | opcode::PUBLISH_SOURCE_REQ
             | opcode::PUBLISH_NOTES_REQ
             | opcode::PUBLISH_RES
+            | opcode::PUBLISH_RES_LEGACY
             | opcode::PUBLISH_RES_ACK
             | opcode::FIREWALLED_REQ
             | opcode::FIREWALLED2_REQ
@@ -154,7 +169,9 @@ pub(super) fn is_tracked_response_opcode(opcode_value: u8) -> bool {
             | opcode::HELLO_RES_ACK
             | opcode::RES
             | opcode::PUBLISH_RES
+            | opcode::PUBLISH_RES_LEGACY
             | opcode::PUBLISH_RES_ACK
+            | opcode::SEARCH_NOTES_RES_LEGACY
             | opcode::FINDBUDDY_RES
             | opcode::PONG
     )
@@ -175,10 +192,16 @@ pub(super) fn opcode_name(opcode_value: u8) -> &'static str {
         opcode::SEARCH_SOURCE_REQ => "KADEMLIA2_SEARCH_SOURCE_REQ",
         opcode::SEARCH_NOTES_REQ => "KADEMLIA2_SEARCH_NOTES_REQ",
         opcode::SEARCH_RES => "KADEMLIA2_SEARCH_RES",
+        opcode::SEARCH_REQ_LEGACY => "KADEMLIA_SEARCH_REQ",
+        opcode::SEARCH_NOTES_REQ_LEGACY => "KADEMLIA_SEARCH_NOTES_REQ",
+        opcode::SEARCH_RES_LEGACY => "KADEMLIA_SEARCH_RES",
+        opcode::SEARCH_NOTES_RES_LEGACY => "KADEMLIA_SEARCH_NOTES_RES",
         opcode::PUBLISH_KEY_REQ => "KADEMLIA2_PUBLISH_KEY_REQ",
         opcode::PUBLISH_SOURCE_REQ => "KADEMLIA2_PUBLISH_SOURCE_REQ",
         opcode::PUBLISH_NOTES_REQ => "KADEMLIA2_PUBLISH_NOTES_REQ",
         opcode::PUBLISH_RES => "KADEMLIA2_PUBLISH_RES",
+        opcode::PUBLISH_REQ_LEGACY => "KADEMLIA_PUBLISH_REQ",
+        opcode::PUBLISH_RES_LEGACY => "KADEMLIA_PUBLISH_RES",
         opcode::PUBLISH_RES_ACK => "KADEMLIA2_PUBLISH_RES_ACK",
         opcode::FIREWALLED_REQ => "KADEMLIA_FIREWALLED_REQ",
         opcode::FIREWALLED2_REQ => "KADEMLIA2_FIREWALLED2_REQ",
@@ -242,7 +265,10 @@ fn is_response_opcode(opcode_value: u8) -> bool {
             | opcode::HELLO_RES_ACK
             | opcode::RES
             | opcode::SEARCH_RES
+            | opcode::SEARCH_RES_LEGACY
+            | opcode::SEARCH_NOTES_RES_LEGACY
             | opcode::PUBLISH_RES
+            | opcode::PUBLISH_RES_LEGACY
             | opcode::PUBLISH_RES_ACK
             | opcode::FIREWALLED_RES
             | opcode::FIREWALLED_ACK_RES
@@ -288,6 +314,14 @@ pub(super) fn tracked_request_opcode_for_response(
             let _ = tracker.contains(ip, matched, true);
             Some(matched)
         }
+        opcode::PUBLISH_RES_LEGACY => {
+            let matched = tracker.find_any(ip, &[opcode::PUBLISH_REQ_LEGACY], false)?;
+            let _ = tracker.contains(ip, matched, true);
+            Some(matched)
+        }
+        opcode::SEARCH_NOTES_RES_LEGACY => {
+            tracker.find_any(ip, &[opcode::SEARCH_NOTES_REQ_LEGACY], false)
+        }
         // FIREWALLED_RES / FIREWALLED_ACK_RES are deliberately not out-tracked
         // (the oracle validates them against the firewall-check-IP list instead),
         // so there is never a matching tracked request here.
@@ -301,7 +335,7 @@ pub(super) fn tracked_request_opcode_for_response(
 
 #[cfg(test)]
 mod tests {
-    use super::opcode_name;
+    use super::{is_publish_opcode, is_tracked_response_opcode, opcode_name};
     use emulebb_kad_proto::constants::opcode;
 
     // Regression (2026-07-06 parity audit): an unknown/legacy inbound Kad opcode
@@ -331,5 +365,25 @@ mod tests {
             opcode_name(opcode::HELLO_RES_DEPRECATED),
             "KADEMLIA_HELLO_RES_DEPRECATED"
         );
+    }
+
+    #[test]
+    fn legacy_v2_v3_search_and_publish_opcodes_are_classified() {
+        assert_eq!(
+            opcode_name(opcode::SEARCH_REQ_LEGACY),
+            "KADEMLIA_SEARCH_REQ"
+        );
+        assert_eq!(
+            opcode_name(opcode::SEARCH_RES_LEGACY),
+            "KADEMLIA_SEARCH_RES"
+        );
+        assert_eq!(
+            opcode_name(opcode::SEARCH_NOTES_RES_LEGACY),
+            "KADEMLIA_SEARCH_NOTES_RES"
+        );
+        assert!(is_publish_opcode(opcode::PUBLISH_REQ_LEGACY));
+        assert!(is_publish_opcode(opcode::PUBLISH_RES_LEGACY));
+        assert!(is_tracked_response_opcode(opcode::PUBLISH_RES_LEGACY));
+        assert!(is_tracked_response_opcode(opcode::SEARCH_NOTES_RES_LEGACY));
     }
 }

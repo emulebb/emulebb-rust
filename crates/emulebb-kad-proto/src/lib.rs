@@ -24,8 +24,9 @@ pub use node_id::NodeId;
 pub use packet::{
     BootstrapRes, CallbackReq, ContactEntry, FindBuddyReq, FindBuddyRes, FirewallUdp,
     Firewalled2Req, FirewalledAckRes, FirewalledReq, FirewalledRes, HelloReq, HelloRes,
-    HelloResAck, KadPacket, Ping, Pong, PublishEntry, PublishKeyReq, PublishNotesReq, PublishRes,
-    PublishResAck, PublishSourceReq, Req, Res, SearchKeyReq, SearchNotesReq, SearchRes,
+    HelloResAck, KadPacket, LegacyPublishRes, LegacySearchKind, LegacySearchNotesReq,
+    LegacySearchReq, LegacySearchRes, Ping, Pong, PublishEntry, PublishKeyReq, PublishNotesReq,
+    PublishRes, PublishResAck, PublishSourceReq, Req, Res, SearchKeyReq, SearchNotesReq, SearchRes,
     SearchResultEntry, SearchSourceReq, pack_kad_packet,
 };
 pub use tag::{Tag, TagName, TagValue};

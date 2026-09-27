@@ -899,6 +899,108 @@ fn test_search_notes_req_roundtrip() {
 }
 
 #[test]
+fn legacy_v2_search_requests_match_stock_wire_shapes() {
+    let target = NodeId::from_bytes([0x11; 16]);
+
+    let plain_keyword = KadPacket::LegacySearchReq(LegacySearchReq {
+        target,
+        kind: LegacySearchKind::Keyword {
+            restrictive_payload: Vec::new(),
+        },
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(
+        plain_keyword[0..2],
+        [OP_KADEMLIAHEADER, opcode::SEARCH_REQ_LEGACY]
+    );
+    assert_eq!(&plain_keyword[18..], &[0, 0]);
+
+    let restrictive = KadPacket::LegacySearchReq(LegacySearchReq {
+        target,
+        kind: LegacySearchKind::Keyword {
+            restrictive_payload: vec![0xAA, 0xBB],
+        },
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(&restrictive[18..], &[2, 0xAA, 0xBB]);
+
+    let source = KadPacket::LegacySearchReq(LegacySearchReq {
+        target,
+        kind: LegacySearchKind::Source,
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(&source[18..], &[1]);
+
+    let requester_id = NodeId::from_bytes([0x22; 16]);
+    let notes = KadPacket::LegacySearchNotesReq(LegacySearchNotesReq {
+        target,
+        requester_id,
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(
+        notes[0..2],
+        [OP_KADEMLIAHEADER, opcode::SEARCH_NOTES_REQ_LEGACY]
+    );
+    assert_eq!(notes.len(), 34);
+}
+
+#[test]
+fn legacy_v2_v3_source_publish_matches_stock_counted_layout() {
+    let packet = KadPacket::LegacyPublishSourceReq(PublishSourceReq {
+        target: NodeId::from_bytes([0x11; 16]),
+        publisher_id: NodeId::from_bytes([0x22; 16]),
+        tags: vec![Tag::sources(7)],
+    });
+    let bytes = packet.encode().unwrap();
+    assert_eq!(bytes[0..2], [OP_KADEMLIAHEADER, opcode::PUBLISH_REQ_LEGACY]);
+    assert_eq!(&bytes[18..20], &1u16.to_le_bytes());
+    assert_eq!(bytes[36], 1, "one source entry must carry one tag");
+}
+
+#[test]
+fn legacy_search_and_publish_responses_roundtrip() {
+    let search = KadPacket::LegacySearchRes(LegacySearchRes {
+        target: NodeId::from_bytes([0x11; 16]),
+        results: vec![SearchResultEntry {
+            entry_id: Ed2kHash::from_bytes([0x22; 16]),
+            tags: vec![Tag::filename("legacy.bin")],
+        }],
+    });
+    let bytes = search.encode().unwrap();
+    assert_eq!(bytes[1], opcode::SEARCH_RES_LEGACY);
+    let KadPacket::LegacySearchRes(decoded) = KadPacket::decode(&bytes).unwrap() else {
+        panic!("expected legacy search response");
+    };
+    assert_eq!(decoded.target, NodeId::from_bytes([0x11; 16]));
+    assert_eq!(decoded.results.len(), 1);
+
+    for load in [None, Some(73)] {
+        let publish = KadPacket::LegacyPublishRes(LegacyPublishRes {
+            target: NodeId::from_bytes([0x33; 16]),
+            load,
+        });
+        let bytes = publish.encode().unwrap();
+        assert_eq!(bytes[1], opcode::PUBLISH_RES_LEGACY);
+        let KadPacket::LegacyPublishRes(decoded) = KadPacket::decode(&bytes).unwrap() else {
+            panic!("expected legacy publish response");
+        };
+        assert_eq!(decoded.load, load);
+    }
+}
+
+#[test]
+fn legacy_search_response_enforces_stock_minimum_size() {
+    let mut bytes = vec![OP_KADEMLIAHEADER, opcode::SEARCH_RES_LEGACY];
+    bytes.extend_from_slice(&[0; 16]);
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    assert!(KadPacket::decode(&bytes).is_err());
+}
+
+#[test]
 fn test_contact_entry_ip_addr() {
     // Store as little-endian u32: 192.168.1.1 = 0xC0A80101
     // to_be_bytes() of 0xC0A80101 = [0xC0, 0xA8, 0x01, 0x01]

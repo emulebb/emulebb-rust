@@ -63,10 +63,71 @@ fn find_source_uses_value_lookup_and_callback_packet() {
     };
 
     assert_eq!(req_count_for_kind(&kind), KADEMLIA_FIND_VALUE);
-    let KadPacket::CallbackReq(sent) = search_phase_packet(&kind, target) else {
+    let KadPacket::CallbackReq(sent) = search_phase_packet(&kind, target, 10) else {
         panic!("expected KADEMLIA_CALLBACK_REQ");
     };
     assert_eq!(sent, request);
+}
+
+#[test]
+fn search_phase_selects_stock_packet_family_for_versions_two_through_ten() {
+    let target = NodeId::from_bytes([0x31; 16]);
+    let requester_id = NodeId::from_bytes([0x42; 16]);
+    let keyword = TraversalKind::Keyword {
+        request: SearchKeyReq {
+            target,
+            start_position: 0x8000,
+            restrictive_payload: vec![0xAA, 0xBB],
+        },
+    };
+    let source = TraversalKind::Source {
+        request: SearchSourceReq {
+            target,
+            start_position: 7,
+            size: 0x1_0000_0000,
+        },
+    };
+    let notes = TraversalKind::Notes {
+        size: 1234,
+        requester_id,
+    };
+
+    assert!(matches!(
+        search_phase_packet(&keyword, target, 2),
+        KadPacket::LegacySearchReq(LegacySearchReq {
+            kind: LegacySearchKind::Keyword { restrictive_payload },
+            ..
+        }) if restrictive_payload == vec![0xAA, 0xBB]
+    ));
+    assert!(matches!(
+        search_phase_packet(&source, target, 2),
+        KadPacket::LegacySearchReq(LegacySearchReq {
+            kind: LegacySearchKind::Source,
+            ..
+        })
+    ));
+    assert!(matches!(
+        search_phase_packet(&notes, target, 2),
+        KadPacket::LegacySearchNotesReq(LegacySearchNotesReq {
+            requester_id: id,
+            ..
+        }) if id == requester_id
+    ));
+
+    for version in 3..=10 {
+        assert!(matches!(
+            search_phase_packet(&keyword, target, version),
+            KadPacket::SearchKeyReq(_)
+        ));
+        assert!(matches!(
+            search_phase_packet(&source, target, version),
+            KadPacket::SearchSourceReq(_)
+        ));
+        assert!(matches!(
+            search_phase_packet(&notes, target, version),
+            KadPacket::SearchNotesReq(_)
+        ));
+    }
 }
 
 #[test]

@@ -10,7 +10,8 @@ mod types;
 pub use types::{
     BootstrapReq, BootstrapRes, CallbackReq, ContactEntry, FindBuddyReq, FindBuddyRes, FirewallUdp,
     Firewalled2Req, FirewalledAckRes, FirewalledReq, FirewalledRes, HelloReq, HelloRes,
-    HelloResAck, Ping, Pong, PublishEntry, PublishKeyReq, PublishNotesReq, PublishRes,
+    HelloResAck, LegacyPublishRes, LegacySearchKind, LegacySearchNotesReq, LegacySearchReq,
+    LegacySearchRes, Ping, Pong, PublishEntry, PublishKeyReq, PublishNotesReq, PublishRes,
     PublishResAck, PublishSourceReq, Req, Res, SearchKeyReq, SearchNotesReq, SearchRes,
     SearchResultEntry, SearchSourceReq,
 };
@@ -25,9 +26,11 @@ use crate::hash::Ed2kHash;
 #[cfg(test)]
 use crate::node_id::NodeId;
 use codec::{
-    read_find_buddy_res, read_publish_res, read_search_key_req, read_search_res,
-    read_search_source_req, write_find_buddy_res, write_publish_res, write_search_key_req,
-    write_search_res, write_search_source_req,
+    read_find_buddy_res, read_legacy_publish_res, read_legacy_search_res, read_publish_res,
+    read_search_key_req, read_search_res, read_search_source_req, write_find_buddy_res,
+    write_legacy_publish_res, write_legacy_publish_source_req, write_legacy_search_req,
+    write_legacy_search_res, write_publish_res, write_search_key_req, write_search_res,
+    write_search_source_req,
 };
 
 /// Hard cap on the inflated size of a `0xE5` (OP_KADEMLIAPACKEDPROT) Kad2
@@ -114,11 +117,17 @@ pub enum KadPacket {
     SearchKeyReq(SearchKeyReq),
     SearchSourceReq(SearchSourceReq),
     SearchNotesReq(SearchNotesReq),
+    LegacySearchReq(LegacySearchReq),
+    LegacySearchNotesReq(LegacySearchNotesReq),
     SearchRes(SearchRes),
+    LegacySearchRes(LegacySearchRes),
+    LegacySearchNotesRes(LegacySearchRes),
     PublishKeyReq(PublishKeyReq),
     PublishSourceReq(PublishSourceReq),
+    LegacyPublishSourceReq(PublishSourceReq),
     PublishNotesReq(PublishNotesReq),
     PublishRes(PublishRes),
+    LegacyPublishRes(LegacyPublishRes),
     PublishResAck,
     FirewalledReq(FirewalledReq),
     Firewalled2Req(Firewalled2Req),
@@ -214,6 +223,16 @@ impl KadPacket {
                 let p = BinReaderExt::read_le::<SearchNotesReq>(&mut cursor)?;
                 KadPacket::SearchNotesReq(p)
             }
+            opcode::SEARCH_RES_LEGACY => {
+                require_min_body_len(op, body, 37)?;
+                let p = read_legacy_search_res(&mut cursor)?;
+                KadPacket::LegacySearchRes(p)
+            }
+            opcode::SEARCH_NOTES_RES_LEGACY => {
+                require_min_body_len(op, body, 37)?;
+                let p = read_legacy_search_res(&mut cursor)?;
+                KadPacket::LegacySearchNotesRes(p)
+            }
             opcode::SEARCH_RES => {
                 let p = read_search_res(&mut cursor)?;
                 KadPacket::SearchRes(p)
@@ -234,6 +253,11 @@ impl KadPacket {
                 require_min_body_len(op, body, 17)?;
                 let p = read_publish_res(&mut cursor)?;
                 KadPacket::PublishRes(p)
+            }
+            opcode::PUBLISH_RES_LEGACY => {
+                require_min_body_len(op, body, 16)?;
+                let p = read_legacy_publish_res(&mut cursor)?;
+                KadPacket::LegacyPublishRes(p)
             }
             opcode::PUBLISH_RES_ACK => KadPacket::PublishResAck,
             opcode::FIREWALLED_REQ => {
@@ -310,11 +334,18 @@ impl KadPacket {
             KadPacket::SearchKeyReq(p) => write_search_key_req(&mut buf, p)?,
             KadPacket::SearchSourceReq(p) => write_search_source_req(&mut buf, p)?,
             KadPacket::SearchNotesReq(p) => buf.write_le(p)?,
+            KadPacket::LegacySearchReq(p) => write_legacy_search_req(&mut buf, p)?,
+            KadPacket::LegacySearchNotesReq(p) => buf.write_le(p)?,
             KadPacket::SearchRes(p) => write_search_res(&mut buf, p)?,
+            KadPacket::LegacySearchRes(p) | KadPacket::LegacySearchNotesRes(p) => {
+                write_legacy_search_res(&mut buf, p)?;
+            }
             KadPacket::PublishKeyReq(p) => buf.write_le(p)?,
             KadPacket::PublishSourceReq(p) => buf.write_le(p)?,
+            KadPacket::LegacyPublishSourceReq(p) => write_legacy_publish_source_req(&mut buf, p)?,
             KadPacket::PublishNotesReq(p) => buf.write_le(p)?,
             KadPacket::PublishRes(p) => write_publish_res(&mut buf, p)?,
+            KadPacket::LegacyPublishRes(p) => write_legacy_publish_res(&mut buf, p)?,
             KadPacket::FirewalledReq(p) => buf.write_le(p)?,
             KadPacket::Firewalled2Req(p) => buf.write_le(p)?,
             KadPacket::FirewalledRes(p) => buf.write_le(p)?,
@@ -349,11 +380,17 @@ impl KadPacket {
             KadPacket::SearchKeyReq(_) => opcode::SEARCH_KEY_REQ,
             KadPacket::SearchSourceReq(_) => opcode::SEARCH_SOURCE_REQ,
             KadPacket::SearchNotesReq(_) => opcode::SEARCH_NOTES_REQ,
+            KadPacket::LegacySearchReq(_) => opcode::SEARCH_REQ_LEGACY,
+            KadPacket::LegacySearchNotesReq(_) => opcode::SEARCH_NOTES_REQ_LEGACY,
             KadPacket::SearchRes(_) => opcode::SEARCH_RES,
+            KadPacket::LegacySearchRes(_) => opcode::SEARCH_RES_LEGACY,
+            KadPacket::LegacySearchNotesRes(_) => opcode::SEARCH_NOTES_RES_LEGACY,
             KadPacket::PublishKeyReq(_) => opcode::PUBLISH_KEY_REQ,
             KadPacket::PublishSourceReq(_) => opcode::PUBLISH_SOURCE_REQ,
+            KadPacket::LegacyPublishSourceReq(_) => opcode::PUBLISH_REQ_LEGACY,
             KadPacket::PublishNotesReq(_) => opcode::PUBLISH_NOTES_REQ,
             KadPacket::PublishRes(_) => opcode::PUBLISH_RES,
+            KadPacket::LegacyPublishRes(_) => opcode::PUBLISH_RES_LEGACY,
             KadPacket::PublishResAck => opcode::PUBLISH_RES_ACK,
             KadPacket::FirewalledReq(_) => opcode::FIREWALLED_REQ,
             KadPacket::Firewalled2Req(_) => opcode::FIREWALLED2_REQ,

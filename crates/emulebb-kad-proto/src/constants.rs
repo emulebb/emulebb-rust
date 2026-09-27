@@ -14,6 +14,10 @@ pub const KAD_VERSION_AICH_KEYWORD_PUBLISH: u8 = 9;
 /// Lowest accepted Kad2 contact version (`KADEMLIA_VERSION2_47a`); Kad1 nodes
 /// (version < 2) are ignored.
 pub const KADEMLIA_VERSION2_47A: u8 = 2;
+/// First contact version using Kad2 search request layouts.
+pub const KADEMLIA_VERSION3_47B: u8 = 3;
+/// First contact version using `KADEMLIA2_PUBLISH_SOURCE_REQ`.
+pub const KADEMLIA_VERSION4_47C: u8 = 4;
 /// Highest pre-obfuscation Kad version (`KADEMLIA_VERSION5_48a`); a contact on
 /// UDP port 53 is only accepted above this ("No DNS Port without encryption").
 pub const KADEMLIA_VERSION5_48A: u8 = 5;
@@ -93,14 +97,24 @@ pub mod opcode {
     pub const SEARCH_KEY_REQ: u8 = 0x33;
     pub const SEARCH_SOURCE_REQ: u8 = 0x34;
     pub const SEARCH_NOTES_REQ: u8 = 0x35;
+    /// Legacy v2 keyword/source search request.
+    pub const SEARCH_REQ_LEGACY: u8 = 0x30;
     /// Legacy (pre-Kad2) notes-search request (oracle `KADEMLIA_SEARCH_NOTES_REQ`,
     /// 0x32). Out-tracked alongside the Kad2 variant so a legacy notes response is
     /// not dropped as unrequested (oracle `IsTrackedOutListRequestPacket`).
     pub const SEARCH_NOTES_REQ_LEGACY: u8 = 0x32;
+    /// Legacy v2 keyword/source search response.
+    pub const SEARCH_RES_LEGACY: u8 = 0x38;
+    /// Legacy v2 notes-search response.
+    pub const SEARCH_NOTES_RES_LEGACY: u8 = 0x3A;
     pub const SEARCH_RES: u8 = 0x3B;
     pub const PUBLISH_KEY_REQ: u8 = 0x43;
     pub const PUBLISH_SOURCE_REQ: u8 = 0x44;
     pub const PUBLISH_NOTES_REQ: u8 = 0x45;
+    /// Legacy v2/v3 source-publish request.
+    pub const PUBLISH_REQ_LEGACY: u8 = 0x40;
+    /// Legacy v2/v3 publish response.
+    pub const PUBLISH_RES_LEGACY: u8 = 0x48;
     pub const PUBLISH_RES: u8 = 0x4B;
     pub const PUBLISH_RES_ACK: u8 = 0x4C;
     pub const FIREWALLED_REQ: u8 = 0x50;
@@ -176,13 +190,27 @@ mod tests {
             ("REQ", opcode::REQ, 0x21),
             ("HELLO_RES_ACK", opcode::HELLO_RES_ACK, 0x22),
             ("RES", opcode::RES, 0x29),
+            ("SEARCH_REQ_LEGACY", opcode::SEARCH_REQ_LEGACY, 0x30),
+            (
+                "SEARCH_NOTES_REQ_LEGACY",
+                opcode::SEARCH_NOTES_REQ_LEGACY,
+                0x32,
+            ),
             ("SEARCH_KEY_REQ", opcode::SEARCH_KEY_REQ, 0x33),
             ("SEARCH_SOURCE_REQ", opcode::SEARCH_SOURCE_REQ, 0x34),
             ("SEARCH_NOTES_REQ", opcode::SEARCH_NOTES_REQ, 0x35),
+            ("SEARCH_RES_LEGACY", opcode::SEARCH_RES_LEGACY, 0x38),
+            (
+                "SEARCH_NOTES_RES_LEGACY",
+                opcode::SEARCH_NOTES_RES_LEGACY,
+                0x3A,
+            ),
             ("SEARCH_RES", opcode::SEARCH_RES, 0x3B),
+            ("PUBLISH_REQ_LEGACY", opcode::PUBLISH_REQ_LEGACY, 0x40),
             ("PUBLISH_KEY_REQ", opcode::PUBLISH_KEY_REQ, 0x43),
             ("PUBLISH_SOURCE_REQ", opcode::PUBLISH_SOURCE_REQ, 0x44),
             ("PUBLISH_NOTES_REQ", opcode::PUBLISH_NOTES_REQ, 0x45),
+            ("PUBLISH_RES_LEGACY", opcode::PUBLISH_RES_LEGACY, 0x48),
             ("PUBLISH_RES", opcode::PUBLISH_RES, 0x4B),
             ("PUBLISH_RES_ACK", opcode::PUBLISH_RES_ACK, 0x4C),
             ("FIREWALLED_REQ", opcode::FIREWALLED_REQ, 0x50),

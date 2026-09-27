@@ -3,7 +3,7 @@ use super::{
     PUBLISH_NOTES_LOOKUP_TIMEOUT, PUBLISH_SOURCE_LOOKUP_TIMEOUT, PublishAttempt,
     PublishAttemptStats, build_keyword_publish_packet, build_keyword_publish_packets,
     build_notes_publish_packet, build_source_publish_packet, keyword_publish_chunk_count,
-    publish_response_requests_ack, publish_target_is_within_tolerance,
+    publish_response_opcode, publish_response_requests_ack, publish_target_is_within_tolerance,
     record_keyword_publish_results, select_publish_contacts,
 };
 use crate::traversal::TraversalContact;
@@ -13,6 +13,7 @@ use emulebb_kad_proto::{
         STORE_KEYWORD_TIMEOUT_SECS, STORE_NOTES_TIMEOUT_SECS, STORE_SOURCE_TIMEOUT_SECS,
         STORE_STOP_GRACE_SECS,
     },
+    opcode,
     packet::{PublishKeyReq, PublishRes},
     tag_name,
 };
@@ -183,8 +184,8 @@ fn build_source_publish_packet_skips_filesize_for_pre_47a_contacts() {
         1,
     );
 
-    let KadPacket::PublishSourceReq(request) = packet else {
-        panic!("expected publish source packet");
+    let KadPacket::LegacyPublishSourceReq(request) = packet else {
+        panic!("expected legacy publish source packet");
     };
     // Identical to the full set with only the FILESIZE tag removed in place.
     assert_eq!(
@@ -209,10 +210,44 @@ fn build_source_publish_packet_keeps_filesize_for_47a_contacts() {
         2,
     );
 
-    let KadPacket::PublishSourceReq(request) = packet else {
-        panic!("expected publish source packet");
+    let KadPacket::LegacyPublishSourceReq(request) = packet else {
+        panic!("expected legacy publish source packet");
     };
     assert_eq!(request.tags, full_source_publish_tags());
+}
+
+#[test]
+fn build_source_publish_packet_uses_kad2_layout_for_v4_contacts() {
+    let packet = build_source_publish_packet(
+        NodeId::from_bytes([1; 16]),
+        NodeId::from_bytes([2; 16]),
+        &full_source_publish_tags(),
+        4,
+    );
+
+    let KadPacket::PublishSourceReq(request) = packet else {
+        panic!("expected Kad2 publish source packet");
+    };
+    assert_eq!(request.tags, full_source_publish_tags());
+}
+
+#[test]
+fn source_publish_selects_stock_packet_family_for_versions_two_through_ten() {
+    for version in 2..=10 {
+        let packet = build_source_publish_packet(
+            NodeId::from_bytes([1; 16]),
+            NodeId::from_bytes([2; 16]),
+            &full_source_publish_tags(),
+            version,
+        );
+        if version <= 3 {
+            assert!(matches!(packet, KadPacket::LegacyPublishSourceReq(_)));
+            assert_eq!(publish_response_opcode(&packet), opcode::PUBLISH_RES_LEGACY);
+        } else {
+            assert!(matches!(packet, KadPacket::PublishSourceReq(_)));
+            assert_eq!(publish_response_opcode(&packet), opcode::PUBLISH_RES);
+        }
+    }
 }
 
 /// A full notes tag set in the order `CSearch::StorePacket` STORENOTES emits it

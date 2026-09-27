@@ -15,11 +15,13 @@ use emulebb_kad_proto::{
     Ed2kHash, KadPacket, NodeId, Tag,
     constants::{
         ALPHA, K, KADEMLIA_FIND_NODE, KADEMLIA_FIND_VALUE, KADEMLIA_FIND_VALUE_MORE,
-        KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION5_48A, SEARCHTOLERANCE,
+        KADEMLIA_STORE, KADEMLIA_VERSION2_47A, KADEMLIA_VERSION3_47B, KADEMLIA_VERSION5_48A,
+        SEARCHTOLERANCE,
     },
     opcode,
     packet::{
-        CallbackReq, ContactEntry, FindBuddyReq, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq,
+        CallbackReq, ContactEntry, FindBuddyReq, LegacySearchKind, LegacySearchNotesReq,
+        LegacySearchReq, Req, SearchKeyReq, SearchNotesReq, SearchSourceReq,
     },
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -103,7 +105,7 @@ pub enum TraversalKind {
     /// Source search — after traversal, send the provided SearchSourceReq to close nodes.
     Source { request: SearchSourceReq },
     /// Notes search — after traversal, send SearchNotesReq to close nodes.
-    Notes { size: u64 },
+    Notes { size: u64, requester_id: NodeId },
     /// FINDBUDDY walk — after traversal, send the provided FindBuddyReq to each
     /// tolerance-passing responded contact (oracle `CSearch` type FINDBUDDY,
     /// `Search.cpp:864-896`).
@@ -858,7 +860,7 @@ async fn emit_next_search_packet(
 ) -> Option<Instant> {
     let contact = pending_contacts.pop_front()?;
     register_traversal_identity(rpc, contact);
-    let packet = search_phase_packet(kind, target);
+    let packet = search_phase_packet(kind, target, contact.version);
 
     debug!(
         "traversal phase2: jump-start send to {} remaining_contacts={}",
@@ -872,11 +874,31 @@ async fn emit_next_search_packet(
     Some(Instant::now() + jumpstart_tick)
 }
 
-fn search_phase_packet(kind: &TraversalKind, target: NodeId) -> KadPacket {
+fn search_phase_packet(kind: &TraversalKind, target: NodeId, contact_version: u8) -> KadPacket {
     match kind {
+        TraversalKind::Keyword { request } if contact_version < KADEMLIA_VERSION3_47B => {
+            KadPacket::LegacySearchReq(LegacySearchReq {
+                target,
+                kind: LegacySearchKind::Keyword {
+                    restrictive_payload: request.restrictive_payload.clone(),
+                },
+            })
+        }
         TraversalKind::Keyword { request } => KadPacket::SearchKeyReq(request.clone()),
+        TraversalKind::Source { .. } if contact_version < KADEMLIA_VERSION3_47B => {
+            KadPacket::LegacySearchReq(LegacySearchReq {
+                target,
+                kind: LegacySearchKind::Source,
+            })
+        }
         TraversalKind::Source { request } => KadPacket::SearchSourceReq(request.clone()),
-        TraversalKind::Notes { size } => KadPacket::SearchNotesReq(SearchNotesReq {
+        TraversalKind::Notes { requester_id, .. } if contact_version < KADEMLIA_VERSION3_47B => {
+            KadPacket::LegacySearchNotesReq(LegacySearchNotesReq {
+                target,
+                requester_id: *requester_id,
+            })
+        }
+        TraversalKind::Notes { size, .. } => KadPacket::SearchNotesReq(SearchNotesReq {
             target,
             size: *size,
         }),
@@ -992,6 +1014,19 @@ async fn handle_search_phase_packet(
             )
             .await;
         }
+        KadPacket::LegacySearchRes(response) | KadPacket::LegacySearchNotesRes(response) => {
+            handle_search_response_entries(
+                response.target,
+                response.results,
+                from,
+                target,
+                queried_addrs,
+                result_tx,
+                collect_search_entries,
+                search_entries,
+            )
+            .await;
+        }
         other if queried_addrs.contains(&from) => {
             trace!(
                 "search phase unexpected packet opcode=0x{:02X} from {}",
@@ -1012,16 +1047,42 @@ async fn handle_search_response(
     collect_search_entries: bool,
     search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
 ) {
-    if !search_response_matches(response.target, from, target, queried_addrs) {
-        return;
-    }
-
     debug!(
         "search phase got SearchRes: {} results from sender {}",
         response.results.len(),
         response.sender_id
     );
-    for entry in response.results {
+    handle_search_response_entries(
+        response.target,
+        response.results,
+        from,
+        target,
+        queried_addrs,
+        result_tx,
+        collect_search_entries,
+        search_entries,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat protocol or runtime boundary"
+)]
+async fn handle_search_response_entries(
+    response_target: NodeId,
+    results: Vec<emulebb_kad_proto::SearchResultEntry>,
+    from: SocketAddr,
+    target: NodeId,
+    queried_addrs: &HashSet<SocketAddr>,
+    result_tx: &Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    collect_search_entries: bool,
+    search_entries: &mut Vec<(Ed2kHash, Vec<Tag>)>,
+) {
+    if !search_response_matches(response_target, from, target, queried_addrs) {
+        return;
+    }
+    for entry in results {
         forward_search_result_entry(entry, result_tx, collect_search_entries, search_entries).await;
     }
 }
