@@ -305,7 +305,7 @@ async fn settings_patch_preserves_unspecified_section_fields() {
                 .header("X-API-Key", "secret")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"nat":{"backendOrder":["upnp_miniupnpc"],"leaseDurationSecs":7200,"externalIpOverride":"198.51.100.24"}}"#,
+                    r#"{"nat":{"backendOrder":["upnp_miniupnpc","upnp_igd"],"leaseDurationSecs":7200,"externalIpOverride":"198.51.100.24"}}"#,
                 ))
                 .unwrap(),
         )
@@ -331,7 +331,7 @@ async fn settings_patch_preserves_unspecified_section_fields() {
     assert_eq!(value["data"]["nat"]["enabled"], true);
     assert_eq!(
         value["data"]["nat"]["backendOrder"],
-        json!(["upnp_miniupnpc"])
+        json!(["upnp_miniupnpc", "upnp_igd"])
     );
     assert_eq!(value["data"]["nat"]["leaseDurationSecs"], 7200);
     assert_eq!(value["data"]["nat"]["externalIpOverride"], "198.51.100.24");

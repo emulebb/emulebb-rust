@@ -515,7 +515,7 @@ fn load_rejects_retired_nat_backend_from_db_runtime_config() {
         "unexpected error: {error:#}"
     );
     assert!(
-        format!("{error:#}").contains("remove retired backend \"upnp_rupnp\""),
+        format!("{error:#}").contains("remove unsupported backend \"upnp_rupnp\""),
         "unexpected error: {error:#}"
     );
 }

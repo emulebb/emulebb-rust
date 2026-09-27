@@ -7,10 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulebb_ed2k::{
-    MappedEndpoint, MappingExposure, MappingSpec, MiniupnpcPortMappingProvider, NatConfig,
-    NatStatus, NatStatusSnapshot, PortMappingProvider, TransportProtocol, UPNP_MINIUPNPC_BACKEND,
+    IgdPortMappingProvider, MappedEndpoint, MappingExposure, MappingSpec,
+    MiniupnpcPortMappingProvider, NatConfig, NatStatus, NatStatusSnapshot, PortMappingProvider,
+    TransportProtocol, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND,
 };
 use tokio::{sync::RwLock, time::sleep};
 use tracing::info;
@@ -31,8 +32,35 @@ enum Command {
     Cleanup(CleanupArgs),
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum NatBackend {
+    #[default]
+    #[value(name = "upnp_miniupnpc")]
+    Miniupnpc,
+    #[value(name = "upnp_igd")]
+    Igd,
+}
+
+impl NatBackend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Miniupnpc => UPNP_MINIUPNPC_BACKEND,
+            Self::Igd => UPNP_IGD_BACKEND,
+        }
+    }
+
+    fn provider(self) -> Arc<dyn PortMappingProvider> {
+        match self {
+            Self::Miniupnpc => Arc::new(MiniupnpcPortMappingProvider),
+            Self::Igd => Arc::new(IgdPortMappingProvider),
+        }
+    }
+}
+
 #[derive(Debug, Args, Clone)]
 struct SharedArgs {
+    #[arg(long, value_enum, default_value_t = NatBackend::default())]
+    backend: NatBackend,
     #[arg(long)]
     bind_ip: Option<String>,
     #[arg(long)]
@@ -98,7 +126,7 @@ fn init_tracing() {
     reason = "linear protocol orchestration flow"
 )]
 async fn run_map(args: MapArgs) -> Result<()> {
-    let provider: Arc<dyn PortMappingProvider> = Arc::new(MiniupnpcPortMappingProvider);
+    let provider = args.shared.backend.provider();
     let config = build_config(&args.shared);
     let mappings = build_mappings(args.shared.udp_port, args.shared.tcp_port);
     let status = Arc::new(RwLock::new(NatStatus::default()));
@@ -117,7 +145,9 @@ async fn run_map(args: MapArgs) -> Result<()> {
 
     info!(
         "reconciling backend={} bind_ip={:?} igd_ip={:?}",
-        UPNP_MINIUPNPC_BACKEND, args.shared.bind_ip, args.shared.igd_ip
+        provider.name(),
+        args.shared.bind_ip,
+        args.shared.igd_ip
     );
     provider
         .reconcile(&config, &mappings, Arc::clone(&status))
@@ -144,7 +174,7 @@ async fn run_map(args: MapArgs) -> Result<()> {
 }
 
 async fn run_cleanup(args: CleanupArgs) -> Result<()> {
-    let provider: Arc<dyn PortMappingProvider> = Arc::new(MiniupnpcPortMappingProvider);
+    let provider = args.shared.backend.provider();
     let config = build_config(&args.shared);
     let status = Arc::new(RwLock::new(NatStatus::default()));
 
@@ -164,7 +194,7 @@ fn build_config(args: &SharedArgs) -> NatConfig {
     NatConfig {
         enabled: true,
         require_initial_mapping: true,
-        backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
+        backend_order: vec![args.backend.name().to_string()],
         bind_ip: args.bind_ip.clone(),
         igd_ip: args.igd_ip.clone(),
         minissdpd_socket: args.minissdpd_socket.clone(),
@@ -235,12 +265,13 @@ fn print_snapshot(label: &str, snapshot: &NatStatusSnapshot) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedArgs, build_config, build_mappings, dummy_mapping};
+    use super::{NatBackend, SharedArgs, build_config, build_mappings, dummy_mapping};
     use emulebb_ed2k::TransportProtocol;
 
     #[test]
     fn build_config_maps_cli_fields_to_nat_config() {
         let config = build_config(&SharedArgs {
+            backend: NatBackend::Igd,
             bind_ip: Some("192.0.2.10".to_string()),
             igd_ip: Some("192.0.2.1".to_string()),
             minissdpd_socket: Some("minissdpd.sock".to_string()),
@@ -254,7 +285,7 @@ mod tests {
         });
 
         assert!(config.enabled);
-        assert_eq!(config.backend_order, ["upnp_miniupnpc"]);
+        assert_eq!(config.backend_order, ["upnp_igd"]);
         assert_eq!(config.bind_ip.as_deref(), Some("192.0.2.10"));
         assert_eq!(config.igd_ip.as_deref(), Some("192.0.2.1"));
         assert_eq!(config.minissdpd_socket.as_deref(), Some("minissdpd.sock"));

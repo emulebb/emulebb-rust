@@ -76,10 +76,13 @@ fn sample_mapping() -> MappingSpec {
 }
 
 #[test]
-fn default_nat_config_prefers_miniupnpc_only() {
+fn default_nat_config_prefers_miniupnpc_then_independent_igd() {
     assert_eq!(
         NatConfig::default().backend_order,
-        vec![UPNP_MINIUPNPC_BACKEND.to_string()]
+        vec![
+            UPNP_MINIUPNPC_BACKEND.to_string(),
+            UPNP_IGD_BACKEND.to_string()
+        ]
     );
 }
 
@@ -90,7 +93,13 @@ fn built_in_providers_use_explicit_backend_ids() {
         .map(|provider| provider.name().to_string())
         .collect::<Vec<_>>();
 
-    assert_eq!(provider_names, [UPNP_MINIUPNPC_BACKEND.to_string()]);
+    assert_eq!(
+        provider_names,
+        [
+            UPNP_MINIUPNPC_BACKEND.to_string(),
+            UPNP_IGD_BACKEND.to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -148,6 +157,42 @@ async fn reconcile_once_empty_backend_order_uses_miniupnpc() {
 }
 
 #[tokio::test]
+async fn reconcile_once_falls_back_to_independent_igd_backend() {
+    let miniupnpc = Arc::new(FakeProvider {
+        name: UPNP_MINIUPNPC_BACKEND,
+        failures_before_success: AtomicUsize::new(1),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let igd = Arc::new(FakeProvider {
+        name: UPNP_IGD_BACKEND,
+        failures_before_success: AtomicUsize::new(0),
+        reconcile_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+    });
+    let status = Arc::new(RwLock::new(NatStatus::default()));
+
+    reconcile_once(
+        &NatConfig {
+            enabled: true,
+            ..NatConfig::default()
+        },
+        &[sample_mapping()],
+        &[miniupnpc.clone(), igd.clone()],
+        Arc::clone(&status),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(miniupnpc.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(igd.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        status.read().await.backend.as_deref(),
+        Some(UPNP_IGD_BACKEND)
+    );
+}
+
+#[tokio::test]
 async fn reconcile_once_rejects_retired_backend() {
     let status = Arc::new(RwLock::new(NatStatus::default()));
     let config = NatConfig {
@@ -162,7 +207,7 @@ async fn reconcile_once_rejects_retired_backend() {
 
     assert_eq!(
         error.to_string(),
-        "nat.backendOrder supports only upnp_miniupnpc; remove retired backend \"upnp_rupnp\" from the configuration"
+        "nat.backendOrder supports only upnp_miniupnpc and upnp_igd; remove unsupported backend \"upnp_rupnp\" from the configuration"
     );
 }
 

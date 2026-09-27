@@ -110,7 +110,8 @@ const NAT_SETTINGS_FIELDS: &[&str] = &[
 const VPN_GUARD_SETTINGS_FIELDS: &[&str] = &["enabled", "mode", "allowedPublicIpCidrs"];
 const IP_FILTER_SETTINGS_FIELDS: &[&str] = &["enabled", "path", "level"];
 const NAT_BACKEND_UPNP_MINIUPNPC: &str = "upnp_miniupnpc";
-const NAT_BACKENDS: &[&str] = &[NAT_BACKEND_UPNP_MINIUPNPC];
+const NAT_BACKEND_UPNP_IGD: &str = "upnp_igd";
+const NAT_BACKENDS: &[&str] = &[NAT_BACKEND_UPNP_MINIUPNPC, NAT_BACKEND_UPNP_IGD];
 const VPN_GUARD_MODES: &[&str] = &["off", "block"];
 
 pub(super) fn validate_search_create_body_fields(object: &JsonObject) -> Result<(), Box<Response>> {
@@ -559,8 +560,8 @@ fn validate_nat_settings_patch_body_fields(object: &JsonObject) -> Result<(), Bo
 
 fn invalid_nat_backend_order_error() -> Box<Response> {
     invalid_body_error(format!(
-        "settings.nat.backendOrder must contain only {}",
-        NAT_BACKEND_UPNP_MINIUPNPC
+        "settings.nat.backendOrder must contain only {} and {}",
+        NAT_BACKEND_UPNP_MINIUPNPC, NAT_BACKEND_UPNP_IGD
     ))
 }
 

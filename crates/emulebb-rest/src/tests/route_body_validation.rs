@@ -583,15 +583,15 @@ async fn core_settings_patch_body_uses_canonical_validation() {
         ),
         (
             r#"{"nat":{"backendOrder":"upnp_miniupnpc"}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
         ),
         (
             r#"{"nat":{"backendOrder":["upnp_miniupnpc",7]}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
         ),
         (
             r#"{"nat":{"backendOrder":["natpmp"]}}"#,
-            "settings.nat.backendOrder must contain only upnp_miniupnpc",
+            "settings.nat.backendOrder must contain only upnp_miniupnpc and upnp_igd",
         ),
         (
             r#"{"nat":{"discoveryTimeoutSecs":0}}"#,

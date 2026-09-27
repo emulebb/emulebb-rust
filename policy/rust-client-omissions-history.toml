@@ -4,6 +4,20 @@
 # only contains current omissions and approved protocol drops.
 
 [[resolved_omissions]]
+id = "alternate-upnp-igd-implementation"
+area = "nat"
+stock_behavior = "eMuleBB can use more than one UPnP/IGD implementation path so one discovery or control-stack failure does not make an otherwise compatible gateway unreachable."
+rust_behavior = "IMPLEMENTED: MiniUPnPc remains the preferred provider and the independent in-tree upnp_igd fallback performs bind-pinned SSDP discovery, bounded device-description parsing, WANIPConnection/WANPPPConnection selection, GetExternalIPAddress, AddPortMapping, existing-mapping verification, rollback, and DeletePortMapping over bounded SOAP/HTTP. Both providers are accepted by settings, REST validation, the embedded SPA backend-order control, and the NAT diagnostic CLI."
+reason = "The earlier forked rupnp compatibility backend was retired with its dependency stack. A small separately implemented SSDP/SOAP provider restores real backend diversity without reviving those dependencies or sharing MiniUPnPc failure modes."
+compatibility = "MiniUPnPc remains first in the default order. The fallback uses the same IPv4/VPN bind policy and permanent-lease AddPortMapping shape as the maintained MFC path, preserves IGD fault codes, and reuses an already-correct mapping after conflict responses."
+disposition = "fixed"
+owner = "network-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented and wired the independent upnp_igd provider with parser, SOAP wire, VPN address selection, provider-order fallback, settings, REST, and build coverage. No longer deferred."
+
+[[resolved_omissions]]
 id = "upload-duplicate-queued-intra-packet"
 area = "ed2k"
 stock_behavior = "eMule keeps accepted upload request keys in m_BlockRequests_keys while its disk-I/O queue owns them, so a duplicate in the same or immediately following OP_REQUESTPARTS packet is classified as upload_duplicate_queued_block_rejected; after dequeue it is classified against m_DoneBlocks_keys instead."

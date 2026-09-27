@@ -59,6 +59,7 @@ parking_lot = "0.12"
 percent-encoding = "2.3"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }
+roxmltree = "0.21"
 rsa = "0.9"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

@@ -17,9 +17,12 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
+#[path = "nat/igd.rs"]
+mod igd;
 #[path = "nat/miniupnpc.rs"]
 mod miniupnpc;
 
+pub use igd::IgdPortMappingProvider;
 pub use miniupnpc::MiniupnpcPortMappingProvider;
 
 mod types {
@@ -155,6 +158,8 @@ pub use types::{
 
 /// MiniUPnPc backend identifier inherited from the original Rust agent.
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
+/// Independent in-tree SSDP + UPnP IGD SOAP backend identifier.
+pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
 /// NAT traversal configuration loaded from the daemon config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -193,15 +198,15 @@ impl Default for NatConfig {
 impl NatConfig {
     /// Validate the bounded migration form of `nat.backendOrder`.
     ///
-    /// MiniUPnPc is the only supported provider. An explicitly empty list keeps
-    /// the default, while retired or unknown provider names fail with a concrete
-    /// migration message instead of being ignored or silently falling back.
+    /// An explicitly empty list keeps the default. Retired or unknown provider
+    /// names fail instead of being ignored or silently falling back.
     pub fn validate(&self) -> Result<()> {
         for backend in &self.backend_order {
-            if backend != UPNP_MINIUPNPC_BACKEND {
+            if ![UPNP_MINIUPNPC_BACKEND, UPNP_IGD_BACKEND].contains(&backend.as_str()) {
                 bail!(
-                    "nat.backendOrder supports only {}; remove retired backend {:?} from the configuration",
+                    "nat.backendOrder supports only {} and {}; remove unsupported backend {:?} from the configuration",
                     UPNP_MINIUPNPC_BACKEND,
+                    UPNP_IGD_BACKEND,
                     backend
                 );
             }
@@ -258,16 +263,22 @@ pub struct NoopReachabilityStrategy;
 #[async_trait]
 impl ReachabilityStrategy for NoopReachabilityStrategy {}
 
-/// Returns the sole supported UPnP backend.
+/// Returns the preferred UPnP providers, with the battle-tested native backend first.
 #[must_use]
 pub fn default_upnp_backend_order() -> Vec<String> {
-    vec![UPNP_MINIUPNPC_BACKEND.to_string()]
+    vec![
+        UPNP_MINIUPNPC_BACKEND.to_string(),
+        UPNP_IGD_BACKEND.to_string(),
+    ]
 }
 
 /// Returns compiled-in port mapping providers.
 #[must_use]
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
-    vec![Arc::new(MiniupnpcPortMappingProvider)]
+    vec![
+        Arc::new(MiniupnpcPortMappingProvider),
+        Arc::new(IgdPortMappingProvider),
+    ]
 }
 
 /// Builder for one NAT manager instance.

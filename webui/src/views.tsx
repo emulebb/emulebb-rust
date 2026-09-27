@@ -2210,6 +2210,7 @@ type SettingsBooleanKey = {
 }[keyof SettingsForm];
 
 const NAT_BACKEND_UPNP_MINIUPNPC = "upnp_miniupnpc";
+const NAT_BACKEND_UPNP_IGD = "upnp_igd";
 const CORE_I32_MAX = 2147483647;
 const CORE_U32_MAX = 4294967295;
 const CORE_U32_MAX_MINUS_ONE = 4294967294;
@@ -2949,8 +2950,8 @@ function parseIpv4Address(value: string): number[] | null {
 
 function validateNatBackendOrder(errors: Map<SettingsTextKey, string>, form: SettingsForm) {
   for (const backend of commaList(form.natBackendOrder)) {
-    if (backend !== NAT_BACKEND_UPNP_MINIUPNPC) {
-      errors.set("natBackendOrder", `NAT backend order must contain only ${NAT_BACKEND_UPNP_MINIUPNPC}.`);
+    if (backend !== NAT_BACKEND_UPNP_MINIUPNPC && backend !== NAT_BACKEND_UPNP_IGD) {
+      errors.set("natBackendOrder", `NAT backend order must contain only ${NAT_BACKEND_UPNP_MINIUPNPC} and ${NAT_BACKEND_UPNP_IGD}.`);
       return;
     }
   }

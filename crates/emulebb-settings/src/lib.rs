@@ -21,6 +21,7 @@ pub const SECTION_IP_FILTER: &str = "ip.filter";
 pub const DEFAULT_IP_FILTER_LEVEL: u32 = 127;
 pub const DEFAULT_KAD_PUBLISH_CONTACT_FANOUT: usize = 10;
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
+pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
 
 pub const FIELD_UPLOAD_LIMIT_KIBPS: &str = "uploadLimitKiBps";
 pub const FIELD_DOWNLOAD_LIMIT_KIBPS: &str = "downloadLimitKiBps";
@@ -1022,7 +1023,10 @@ impl Default for NatSettings {
         Self {
             enabled: false,
             require_initial_mapping: true,
-            backend_order: vec![UPNP_MINIUPNPC_BACKEND.to_string()],
+            backend_order: vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_IGD_BACKEND.to_string(),
+            ],
             bind_ip: None,
             igd_ip: None,
             minissdpd_socket: None,
