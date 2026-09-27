@@ -679,6 +679,8 @@ mod tests {
             size_bytes: 1024,
             sources: 2,
             complete_sources: 1,
+            source_client_id: None,
+            source_client_port: None,
             file_type: "doc".to_string(),
             complete: true,
             directory: String::new(),

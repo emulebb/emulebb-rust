@@ -55,13 +55,14 @@ fn search_results_decoder_extracts_count_and_names() {
 }
 
 #[test]
-fn search_results_decoder_extracts_size_type_and_sources() {
+fn search_results_decoder_preserves_source_identity_and_metadata() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&[0x22; 16]);
-    payload.extend_from_slice(&0u32.to_le_bytes());
+    let client_id = u32::from_le_bytes([10, 20, 30, 40]);
+    payload.extend_from_slice(&client_id.to_le_bytes());
     payload.extend_from_slice(&4662u16.to_le_bytes());
-    payload.extend_from_slice(&4u32.to_le_bytes());
+    payload.extend_from_slice(&5u32.to_le_bytes());
     payload.push(TAG_SHORT_NAME_MASK | (super::TAGTYPE_STR1 + 9));
     payload.push(FT_FILENAME);
     payload.extend_from_slice(b"ubuntu.iso");
@@ -76,16 +77,23 @@ fn search_results_decoder_extracts_size_type_and_sources() {
     payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(FT_SOURCES);
     payload.extend_from_slice(&12u32.to_le_bytes());
+    payload.push(TAGTYPE_UINT32);
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.push(FT_COMPLETE_SOURCES);
+    payload.extend_from_slice(&7u32.to_le_bytes());
     payload.push(0x01);
 
     let page = decode_search_result_page(&payload).unwrap();
     let files = page.files;
 
     assert_eq!(files.len(), 1);
+    assert_eq!(files[0].client_id, client_id);
+    assert_eq!(files[0].client_port, 4662);
     assert_eq!(files[0].file_name.as_deref(), Some("ubuntu.iso"));
     assert_eq!(files[0].file_size, Some(4_294_967_300));
     assert_eq!(files[0].file_type.as_deref(), Some("Video"));
     assert_eq!(files[0].source_count, Some(12));
+    assert_eq!(files[0].complete_source_count, Some(7));
     assert!(page.more_results_available);
 }
 

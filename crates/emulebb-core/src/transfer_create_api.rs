@@ -25,15 +25,25 @@ impl EmulebbCore {
         let Some(result) = result else {
             return Ok(None);
         };
-        self.upsert_transfer_from_parts(
-            result.hash,
-            result.name,
-            result.size_bytes,
-            transfer_create_state_name(request.paused),
-            Some(category),
-        )
-        .await
-        .map(Some)
+        let source_hint = search_result_source_hint(&result);
+        let transfer = self
+            .upsert_transfer_from_parts(
+                result.hash,
+                result.name,
+                result.size_bytes,
+                transfer_create_state_name(request.paused),
+                Some(category),
+            )
+            .await?;
+        if let Some(source_hint) = source_hint {
+            // WHY: server search entries carry an immediately usable source
+            // endpoint. Dropping it forces a redundant source-discovery round
+            // after the operator starts the result download.
+            self.ed2k_transfers
+                .remember_source(&transfer.hash, source_hint)
+                .await?;
+        }
+        Ok(Some(transfer))
     }
 
     pub async fn create_transfer(&self, request: TransferCreate) -> Result<Transfer> {
@@ -129,5 +139,63 @@ impl EmulebbCore {
         transfer.parts_available = self
             .ed2k_transfers
             .available_part_count(hash, transfer.parts_total);
+    }
+}
+
+fn search_result_source_hint(result: &SearchResult) -> Option<Ed2kSourceHint> {
+    let (Some(client_id), Some(tcp_port)) = (result.source_client_id, result.source_client_port)
+    else {
+        return None;
+    };
+    if client_id < 0x0100_0000 || tcp_port == 0 {
+        return None;
+    }
+    Some(Ed2kSourceHint {
+        ip: std::net::Ipv4Addr::from(client_id.to_le_bytes()).to_string(),
+        tcp_port,
+        user_hash: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_result_source_hint;
+    use crate::SearchResult;
+
+    fn result(client_id: Option<u32>, client_port: Option<u16>) -> SearchResult {
+        SearchResult {
+            search_id: "1".to_string(),
+            method: "server".to_string(),
+            r#type: String::new(),
+            hash: "00112233445566778899aabbccddeeff".to_string(),
+            name: "Synthetic.bin".to_string(),
+            size_bytes: 1,
+            sources: 1,
+            complete_sources: 0,
+            source_client_id: client_id,
+            source_client_port: client_port,
+            file_type: String::new(),
+            complete: false,
+            directory: String::new(),
+        }
+    }
+
+    #[test]
+    fn high_id_search_source_becomes_immediate_transfer_hint() {
+        let hint = search_result_source_hint(&result(
+            Some(u32::from_le_bytes([10, 20, 30, 40])),
+            Some(4662),
+        ))
+        .unwrap();
+
+        assert_eq!(hint.ip, "10.20.30.40");
+        assert_eq!(hint.tcp_port, 4662);
+        assert_eq!(hint.user_hash, None);
+    }
+
+    #[test]
+    fn low_id_or_incomplete_search_source_is_not_dialed_directly() {
+        assert!(search_result_source_hint(&result(Some(42), Some(4662))).is_none());
+        assert!(search_result_source_hint(&result(Some(0x2800_000A), None)).is_none());
     }
 }

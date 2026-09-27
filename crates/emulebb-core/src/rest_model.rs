@@ -242,6 +242,13 @@ pub struct SearchResult {
     pub size_bytes: u64,
     pub sources: u32,
     pub complete_sources: u32,
+    /// ED2K source identity embedded in a server search result. Kept internal
+    /// so downloading that result can seed the transfer immediately.
+    #[serde(default, skip_serializing)]
+    pub source_client_id: Option<u32>,
+    /// TCP port paired with `source_client_id`.
+    #[serde(default, skip_serializing)]
+    pub source_client_port: Option<u16>,
     pub file_type: String,
     pub complete: bool,
     pub directory: String,

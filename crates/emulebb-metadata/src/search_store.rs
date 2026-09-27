@@ -7,6 +7,8 @@ use crate::{
     text::normalize_search_text,
 };
 
+const ED2K_SEARCH_SOURCE_METADATA_MAGIC: &[u8; 4] = b"ESR1";
+
 impl super::MetadataStore {
     pub fn upsert_search(&self, search: &MetadataSearch) -> Result<()> {
         let now = unix_ms();
@@ -66,9 +68,9 @@ impl super::MetadataStore {
                 INSERT INTO search_results(
                     session_id, known_file_id, network, file_hash, name, size_bytes,
                     source_count, complete_source_count, file_type, complete, directory,
-                    observed_at_ms
+                    raw_metadata, observed_at_ms
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
                 params![
                     session_id,
@@ -82,6 +84,7 @@ impl super::MetadataStore {
                     result.file_type,
                     bool_to_i64(result.complete),
                     result.directory,
+                    encode_ed2k_search_source_metadata(result),
                     if result.observed_at_ms > 0 {
                         result.observed_at_ms
                     } else {
@@ -155,13 +158,15 @@ fn load_search_results(
         SELECT network,
                CASE WHEN file_hash IS NULL THEN '' ELSE lower(hex(file_hash)) END,
                name, size_bytes, source_count, complete_source_count, file_type,
-               complete, directory, observed_at_ms
+               complete, directory, raw_metadata, observed_at_ms
         FROM search_results
         WHERE session_id = ?1
         ORDER BY id
         "#,
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        let (source_client_id, source_client_port) =
+            decode_ed2k_search_source_metadata(row.get::<_, Option<Vec<u8>>>(9)?);
         Ok(MetadataSearchResult {
             network: row.get(0)?,
             file_hash: row.get(1)?,
@@ -169,14 +174,41 @@ fn load_search_results(
             size_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or_default() as u64,
             source_count: row.get::<_, i64>(4)? as u32,
             complete_source_count: row.get::<_, i64>(5)? as u32,
+            source_client_id,
+            source_client_port,
             file_type: row.get(6)?,
             complete: row.get::<_, i64>(7)? != 0,
             directory: row.get(8)?,
-            observed_at_ms: row.get(9)?,
+            observed_at_ms: row.get(10)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn encode_ed2k_search_source_metadata(result: &MetadataSearchResult) -> Option<Vec<u8>> {
+    let (Some(client_id), Some(client_port)) = (result.source_client_id, result.source_client_port)
+    else {
+        return None;
+    };
+    let mut encoded = Vec::with_capacity(10);
+    encoded.extend_from_slice(ED2K_SEARCH_SOURCE_METADATA_MAGIC);
+    encoded.extend_from_slice(&client_id.to_le_bytes());
+    encoded.extend_from_slice(&client_port.to_le_bytes());
+    Some(encoded)
+}
+
+fn decode_ed2k_search_source_metadata(raw_metadata: Option<Vec<u8>>) -> (Option<u32>, Option<u16>) {
+    let Some(raw_metadata) = raw_metadata else {
+        return (None, None);
+    };
+    if raw_metadata.len() != 10 || &raw_metadata[..4] != ED2K_SEARCH_SOURCE_METADATA_MAGIC {
+        return (None, None);
+    }
+    (
+        Some(u32::from_le_bytes(raw_metadata[4..8].try_into().unwrap())),
+        Some(u16::from_le_bytes(raw_metadata[8..10].try_into().unwrap())),
+    )
 }
 
 fn optional_ed2k_hash(value: &str) -> Result<Option<Vec<u8>>> {
@@ -207,6 +239,11 @@ mod tests {
         assert_eq!(searches[0].public_id, "search-one");
         assert_eq!(searches[0].results.len(), 1);
         assert_eq!(searches[0].results[0].name, "Zażółć Sample.bin");
+        assert_eq!(
+            searches[0].results[0].source_client_id,
+            Some(u32::from_le_bytes([10, 20, 30, 40]))
+        );
+        assert_eq!(searches[0].results[0].source_client_port, Some(4662));
     }
 
     #[test]
@@ -242,6 +279,8 @@ mod tests {
                 size_bytes: 123,
                 source_count: 4,
                 complete_source_count: 3,
+                source_client_id: Some(u32::from_le_bytes([10, 20, 30, 40])),
+                source_client_port: Some(4662),
                 file_type: "video".to_string(),
                 complete: false,
                 directory: String::new(),

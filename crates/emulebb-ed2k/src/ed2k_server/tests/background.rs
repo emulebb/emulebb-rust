@@ -92,10 +92,13 @@ async fn background_search_channel_round_trips_results() {
     let cancel = CancellationToken::new();
     let expected = Ed2kSearchFile {
         file_hash: Ed2kHash([0x44; 16]),
+        client_id: 0,
+        client_port: 0,
         file_name: Some("ubuntu.iso".to_string()),
         file_size: Some(123),
         file_type: Some("Doc".to_string()),
         source_count: Some(7),
+        complete_source_count: Some(3),
     };
     let expected_for_task = expected.clone();
 

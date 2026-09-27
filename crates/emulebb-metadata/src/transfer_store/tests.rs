@@ -558,6 +558,8 @@ fn delete_transfer_manifest_clears_soft_known_file_references() {
                 size_bytes: 1,
                 source_count: 1,
                 complete_source_count: 1,
+                source_client_id: None,
+                source_client_port: None,
                 file_type: String::new(),
                 complete: false,
                 directory: String::new(),

@@ -126,6 +126,8 @@ pub(crate) fn search_result_from_indexed(
         size_bytes: file.size_bytes,
         sources: file.availability_score.max(0) as u32,
         complete_sources: 0,
+        source_client_id: None,
+        source_client_port: None,
         file_type: file.content_type.clone(),
         complete: false,
         directory: String::new(),
@@ -138,6 +140,8 @@ pub(crate) fn search_result_from_ed2k(
     file: Ed2kSearchFile,
 ) -> SearchResult {
     let file_type = file.file_type.unwrap_or_else(|| "unknown".to_string());
+    let source_client_id = (file.client_id != 0).then_some(file.client_id);
+    let source_client_port = (file.client_port != 0).then_some(file.client_port);
     SearchResult {
         search_id: search_id.to_string(),
         method: request.method.clone(),
@@ -146,7 +150,9 @@ pub(crate) fn search_result_from_ed2k(
         name: file.file_name.unwrap_or_else(|| file.file_hash.to_string()),
         size_bytes: file.file_size.unwrap_or_default(),
         sources: file.source_count.unwrap_or_default(),
-        complete_sources: file.source_count.unwrap_or_default(),
+        complete_sources: file.complete_source_count.unwrap_or_default(),
+        source_client_id,
+        source_client_port,
         file_type: file_type.clone(),
         complete: false,
         directory: String::new(),
@@ -173,6 +179,8 @@ pub(crate) fn search_result_from_kad(
         size_bytes: result.size.unwrap_or_default(),
         sources: result.source_count.unwrap_or_default(),
         complete_sources: result.source_count.unwrap_or_default(),
+        source_client_id: None,
+        source_client_port: None,
         file_type: "unknown".to_string(),
         complete: false,
         directory: String::new(),
@@ -194,6 +202,8 @@ mod tests {
             size_bytes,
             sources,
             complete_sources: 0,
+            source_client_id: None,
+            source_client_port: None,
             file_type: String::new(),
             complete: false,
             directory: String::new(),
@@ -299,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn ed2k_result_maps_network_source_tag_to_complete_sources() {
+    fn ed2k_result_maps_source_identity_and_complete_sources() {
         let req = request();
         let file_hash = Ed2kHash::from_bytes([0x22; 16]);
         let result = search_result_from_ed2k(
@@ -307,17 +317,25 @@ mod tests {
             &req,
             Ed2kSearchFile {
                 file_hash,
+                client_id: u32::from_le_bytes([10, 20, 30, 40]),
+                client_port: 4662,
                 file_name: Some("Server Result.pdf".to_string()),
                 file_size: Some(4096),
                 file_type: Some("doc".to_string()),
                 source_count: Some(5),
+                complete_source_count: Some(3),
             },
         );
 
         assert_eq!(result.search_id, "43");
         assert_eq!(result.hash, file_hash.to_string());
         assert_eq!(result.sources, 5);
-        assert_eq!(result.complete_sources, 5);
+        assert_eq!(result.complete_sources, 3);
+        assert_eq!(
+            result.source_client_id,
+            Some(u32::from_le_bytes([10, 20, 30, 40]))
+        );
+        assert_eq!(result.source_client_port, Some(4662));
         assert_eq!(result.file_type, "doc");
     }
 }

@@ -4,8 +4,8 @@ use emulebb_kad_proto::Ed2kHash;
 use super::flags::is_low_id;
 use super::tag_codec::{DecodedTagValue, decode_tag_value};
 use super::{
-    Ed2kFoundSource, Ed2kSearchFile, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI, FT_FILETYPE,
-    FT_SOURCES, OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
+    Ed2kFoundSource, Ed2kSearchFile, FT_COMPLETE_SOURCES, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI,
+    FT_FILETYPE, FT_SOURCES, OP_EDONKEYPROT, OP_GLOBFOUNDSOURCES, OP_GLOBSEARCHRES,
     SOURCE_OBFUSCATION_USER_HASH_PRESENT, ipv4_from_client_id,
 };
 
@@ -150,9 +150,9 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
         anyhow::bail!("short ED2K search result entry");
     }
     let file_hash = Ed2kHash(payload[..16].try_into().unwrap());
-    let mut cursor = &payload[16..];
-    cursor = &cursor[4..];
-    cursor = &cursor[2..];
+    let client_id = u32::from_le_bytes(payload[16..20].try_into().unwrap());
+    let client_port = u16::from_le_bytes(payload[20..22].try_into().unwrap());
+    let mut cursor = &payload[22..];
     let tag_count = u32::from_le_bytes(cursor[..4].try_into().unwrap());
     cursor = &cursor[4..];
     let mut name = None;
@@ -160,6 +160,7 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     let mut size_hi = None;
     let mut file_type = None;
     let mut source_count = None;
+    let mut complete_source_count = None;
     for _ in 0..tag_count {
         let (tag_name, tag_value, rest) = decode_tag_value(cursor)?;
         cursor = rest;
@@ -179,6 +180,10 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
             (Some(FT_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
                 source_count = Some(u32::try_from(value).context("ED2K source count overflow")?);
             }
+            (Some(FT_COMPLETE_SOURCES), Some(DecodedTagValue::Unsigned(value))) => {
+                complete_source_count =
+                    Some(u32::try_from(value).context("ED2K complete source count overflow")?);
+            }
             _ => {}
         }
     }
@@ -193,10 +198,13 @@ fn decode_search_result_entry(payload: &[u8]) -> Result<(Ed2kSearchFile, &[u8])>
     Ok((
         Ed2kSearchFile {
             file_hash,
+            client_id,
+            client_port,
             file_name: name,
             file_size,
             file_type,
             source_count,
+            complete_source_count,
         },
         cursor,
     ))

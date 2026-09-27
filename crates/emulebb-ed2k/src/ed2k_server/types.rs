@@ -103,6 +103,10 @@ pub(super) struct ServerUdpPacket {
 pub struct Ed2kSearchFile {
     /// File hash reported by the ED2K server.
     pub file_hash: Ed2kHash,
+    /// Source client ID embedded in the server result entry.
+    pub client_id: u32,
+    /// Source TCP port embedded in the server result entry.
+    pub client_port: u16,
     /// File name tag, when present.
     pub file_name: Option<String>,
     /// File size tag, when present.
@@ -111,6 +115,8 @@ pub struct Ed2kSearchFile {
     pub file_type: Option<String>,
     /// Server-reported source availability, when present.
     pub source_count: Option<u32>,
+    /// Server-reported complete-source availability, when present.
+    pub complete_source_count: Option<u32>,
 }
 
 /// One decoded ED2K server source-search entry.

@@ -20,6 +20,8 @@ pub struct MetadataSearchResult {
     pub size_bytes: u64,
     pub source_count: u32,
     pub complete_source_count: u32,
+    pub source_client_id: Option<u32>,
+    pub source_client_port: Option<u16>,
     pub file_type: String,
     pub complete: bool,
     pub directory: String,
