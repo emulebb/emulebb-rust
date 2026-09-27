@@ -308,6 +308,7 @@ fn validate_path_parameters(method: &str, path: &str) -> Result<(), Box<Response
         | ("GET" | "PATCH" | "DELETE", ["transfers", hash])
         | ("DELETE", ["transfers", hash, "files"])
         | ("GET", ["transfers", hash, "details"])
+        | ("GET", ["transfers", hash, "comments"])
         | ("GET", ["transfers", hash, "sources"])
         | ("POST", ["transfers", hash, "operations", _]) => {
             validate_lowercase_md4_hex(hash, "hash")?
@@ -554,6 +555,7 @@ fn route_query_fields_for_parameterized(
         | ("PATCH", ["transfers", _])
         | ("DELETE", ["transfers", _])
         | ("GET", ["transfers", _, "details"])
+        | ("GET", ["transfers", _, "comments"])
         | ("GET", ["transfers", _, "sources"])
         | ("GET", ["transfers", _, "sources", _])
         | ("GET", ["uploads", _])

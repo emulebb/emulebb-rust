@@ -104,6 +104,28 @@ impl EmulebbCore {
         Ok(Some(sources))
     }
 
+    pub async fn transfer_comments(&self, hash: &str) -> Result<Option<Vec<TransferComment>>> {
+        let Some(transfer) = self.transfer(hash).await else {
+            return Ok(None);
+        };
+        let Some(sources) = self.transfer_sources(hash).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            sources
+                .into_iter()
+                .filter(|source| !source.file_comment.is_empty() || source.file_rating > 0)
+                .map(|source| TransferComment {
+                    source: source.client_id,
+                    user_name: Some(source.user_name),
+                    file_name: transfer.name.clone(),
+                    comment: source.file_comment,
+                    rating: source.file_rating,
+                })
+                .collect(),
+        ))
+    }
+
     /// Transfer details: the transfer plus its per-part breakdown and source
     /// list, mirroring the master `BuildTransferDetailsJson` shape.
     pub async fn transfer_details(&self, hash: &str) -> Result<Option<TransferDetails>> {

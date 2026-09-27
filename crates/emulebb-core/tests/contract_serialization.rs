@@ -27,6 +27,8 @@ fn populated_transfer_source() -> TransferSource {
         ip: "192.0.2.10".to_string(),
         tcp_port: 4662,
         endpoint: "192.0.2.10:4662".to_string(),
+        file_comment: "helpful".to_string(),
+        file_rating: 4,
         banned: true,
         status: "remembered".to_string(),
         // Contract fields.

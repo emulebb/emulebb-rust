@@ -1,6 +1,42 @@
 use crate::rest_test_support::*;
 
 #[tokio::test]
+async fn transfer_comments_route_returns_the_canonical_collection() {
+    let app = test_router();
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/transfers")
+                .header("X-API-Key", "secret")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"link":"ed2k://|file|Comments.bin|4096|00112233445566778899aabbccddeeff|/"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/transfers/00112233445566778899aabbccddeeff/comments")
+                .header("X-API-Key", "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["items"], json!([]));
+}
+
+#[tokio::test]
 async fn stopped_transfer_resume_returns_bad_request() {
     let app = test_router();
     let create_response = app

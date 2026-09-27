@@ -74,6 +74,8 @@ pub async fn download_file_from_peer(
                 tcp_port: peer.tcp_port,
                 user_hash: peer.user_hash.map(hex::encode),
                 connect_options: peer.obfuscation_options,
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await?;

@@ -659,6 +659,12 @@ pub struct TransferSource {
     pub port: u16,
     #[serde(skip_serializing)]
     pub endpoint: String,
+    /// Per-source file description received through OP_FILEDESC. Exposed via
+    /// the dedicated transfer-comments collection, not the source contract.
+    #[serde(skip_serializing)]
+    pub file_comment: String,
+    #[serde(skip_serializing)]
+    pub file_rating: u8,
     pub user_hash: Option<String>,
     pub user_name: String,
     pub client_software: String,
@@ -678,6 +684,17 @@ pub struct TransferSource {
     pub banned: bool,
     #[serde(skip_serializing)]
     pub status: String,
+}
+
+/// One remote source's persisted file comment/rating for a transfer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferComment {
+    pub source: String,
+    pub user_name: Option<String>,
+    pub file_name: String,
+    pub comment: String,
+    pub rating: u8,
 }
 
 /// One ED2K part's live download geometry/progress for the transfer details view.

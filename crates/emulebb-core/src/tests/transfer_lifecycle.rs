@@ -287,6 +287,31 @@ async fn create_transfer_remembers_ed2k_link_source_hints() {
         sources[0].user_hash.as_deref(),
         Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
+
+    core.ed2k_transfers
+        .remember_source_file_description(
+            &transfer.hash,
+            Ed2kSourceHint {
+                ip: "192.0.2.10".to_string(),
+                tcp_port: 4662,
+                user_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+                connect_options: None,
+                file_comment: "trusted release".to_string(),
+                file_rating: 5,
+            },
+        )
+        .await
+        .unwrap();
+    let comments = core
+        .transfer_comments(&transfer.hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].source, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(comments[0].file_name, "Seeded.Link.bin");
+    assert_eq!(comments[0].comment, "trusted release");
+    assert_eq!(comments[0].rating, 5);
 }
 
 #[test]

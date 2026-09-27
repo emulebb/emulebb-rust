@@ -155,6 +155,8 @@ fn search_result_source_hint(result: &SearchResult) -> Option<Ed2kSourceHint> {
         tcp_port,
         user_hash: None,
         connect_options: None,
+        file_comment: String::new(),
+        file_rating: 0,
     })
 }
 

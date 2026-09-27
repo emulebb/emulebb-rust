@@ -43,6 +43,8 @@ async fn listener_upload_startup_tolerates_source_exchange_and_aich_probe() {
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x61; 16])),
                 connect_options: Some(0x03),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -498,6 +500,8 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
                 tcp_port: 5001,
                 user_hash: Some(hex::encode([0x71; 16])),
                 connect_options: Some(0x01),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -511,6 +515,8 @@ async fn listener_source_exchange_excludes_the_requesting_peer() {
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x62; 16])),
                 connect_options: Some(0x07),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -734,6 +740,8 @@ async fn listener_source_exchange_returns_only_parts_useful_to_requester() {
                 tcp_port: 4663,
                 user_hash: Some(hex::encode([0x65; 16])),
                 connect_options: Some(0x03),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -821,6 +829,8 @@ async fn listener_multipacket_ext2_source_only_returns_identifier_answer() {
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x64; 16])),
                 connect_options: Some(0x05),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await

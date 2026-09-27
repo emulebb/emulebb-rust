@@ -157,6 +157,7 @@ pub fn router_with_shutdown(
             delete(transfer_delete_files),
         )
         .route("/api/v1/transfers/{hash}/details", get(transfer_details))
+        .route("/api/v1/transfers/{hash}/comments", get(transfer_comments))
         .route("/api/v1/transfers/{hash}/sources", get(transfer_sources))
         .route(
             "/api/v1/transfers/{hash}/sources/{clientId}",

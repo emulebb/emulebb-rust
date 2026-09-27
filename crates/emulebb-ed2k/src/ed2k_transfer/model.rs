@@ -192,6 +192,12 @@ pub struct Ed2kSourceHint {
     /// is a real advertised value and must not be conflated with unknown.
     #[serde(default)]
     pub connect_options: Option<u8>,
+    /// File comment received from this source via `OP_FILEDESC`.
+    #[serde(default)]
+    pub file_comment: String,
+    /// File rating received from this source via `OP_FILEDESC`.
+    #[serde(default)]
+    pub file_rating: u8,
 }
 
 /// Canonical AICH master hash plus per-part hashes for one file.

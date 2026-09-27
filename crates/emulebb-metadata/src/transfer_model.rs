@@ -183,4 +183,6 @@ pub struct MetadataTransferSource {
     pub tcp_port: u16,
     pub user_hash: Option<String>,
     pub connect_options: Option<u8>,
+    pub file_comment: String,
+    pub file_rating: u8,
 }

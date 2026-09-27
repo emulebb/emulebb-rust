@@ -21,6 +21,8 @@ async fn remembered_source_plaintext_fallback_preserves_single_endpoint_hint() {
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x44; 16])),
                 connect_options: Some(0x07),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -33,6 +35,8 @@ async fn remembered_source_plaintext_fallback_preserves_single_endpoint_hint() {
                 tcp_port: 4662,
                 user_hash: None,
                 connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -65,6 +69,8 @@ async fn remembered_source_late_user_hash_upgrades_endpoint_hint() {
                 tcp_port: 4662,
                 user_hash: None,
                 connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -77,6 +83,8 @@ async fn remembered_source_late_user_hash_upgrades_endpoint_hint() {
                 tcp_port: 4662,
                 user_hash: Some(hex::encode([0x45; 16])),
                 connect_options: Some(0x05),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -108,6 +116,8 @@ async fn remembered_source_roundtrips_every_crypt_bit_combination() {
                     tcp_port: 4662,
                     user_hash: Some(hex::encode([connect_options; 16])),
                     connect_options: Some(connect_options),
+                    file_comment: String::new(),
+                    file_rating: 0,
                 },
             )
             .await
@@ -122,4 +132,71 @@ async fn remembered_source_roundtrips_every_crypt_bit_combination() {
                 && source.connect_options == Some(connect_options)
         }));
     }
+}
+
+#[tokio::test]
+async fn source_file_description_matches_identity_and_survives_rediscovery_and_reload() {
+    let root = unique_test_dir("ed2k-transfer-source-file-description");
+    let runtime = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let file_hash = Ed2kHash::from_bytes([0x68; 16]);
+    let job = new_transfer_job(file_hash, "source-description.bin".to_string(), 1024);
+    let user_hash = hex::encode([0x48; 16]);
+    runtime.ensure_job(&job).await.unwrap();
+
+    runtime
+        .remember_source(
+            &job.file_hash,
+            Ed2kSourceHint {
+                ip: "198.51.100.48".to_string(),
+                tcp_port: 4662,
+                user_hash: Some(user_hash.clone()),
+                connect_options: Some(0x07),
+                file_comment: String::new(),
+                file_rating: 0,
+            },
+        )
+        .await
+        .unwrap();
+    // An inbound callback's socket uses an ephemeral port. Match the already
+    // remembered public source by user hash instead of creating a second row.
+    runtime
+        .remember_source_file_description(
+            &job.file_hash,
+            Ed2kSourceHint {
+                ip: "198.51.100.48".to_string(),
+                tcp_port: 53001,
+                user_hash: Some(user_hash.clone()),
+                connect_options: Some(0x03),
+                file_comment: "verified source comment".to_string(),
+                file_rating: 5,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .remember_source(
+            &job.file_hash,
+            Ed2kSourceHint {
+                ip: "198.51.100.48".to_string(),
+                tcp_port: 4662,
+                user_hash: None,
+                connect_options: None,
+                file_comment: String::new(),
+                file_rating: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+    let manifest = runtime.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.sources.len(), 1);
+    assert_eq!(manifest.sources[0].tcp_port, 4662);
+    assert_eq!(manifest.sources[0].file_comment, "verified source comment");
+    assert_eq!(manifest.sources[0].file_rating, 5);
+    drop(runtime);
+
+    let reloaded = Ed2kTransferRuntime::load_or_create(&root).unwrap();
+    let manifest = reloaded.manifest(&job.file_hash).await.unwrap();
+    assert_eq!(manifest.sources[0].file_comment, "verified source comment");
+    assert_eq!(manifest.sources[0].file_rating, 5);
 }

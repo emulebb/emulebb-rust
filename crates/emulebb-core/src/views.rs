@@ -301,6 +301,8 @@ pub(crate) fn transfer_sources_from_manifest(
                 ip: source.ip.clone(),
                 tcp_port: source.tcp_port,
                 port: source.tcp_port,
+                file_comment: source.file_comment.clone(),
+                file_rating: source.file_rating,
                 user_hash: source.user_hash.clone(),
                 user_name: endpoint.clone(),
                 client_software: "unknown".to_string(),

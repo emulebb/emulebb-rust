@@ -702,6 +702,8 @@ fn remembered_source_hint_becomes_direct_dial_source() {
             tcp_port: 4662,
             user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
             connect_options: Some(0x07),
+            file_comment: String::new(),
+            file_rating: 0,
         },
     )
     .unwrap();
@@ -726,6 +728,8 @@ fn remembered_source_hint_does_not_fabricate_crypt_options_from_user_hash() {
         tcp_port: 4662,
         user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
         connect_options: None,
+        file_comment: String::new(),
+        file_rating: 0,
     };
     let source = found_source_from_hint(file_hash, &hint).unwrap();
 
@@ -746,6 +750,8 @@ fn remembered_source_hint_preserves_every_crypt_bit_combination() {
                 tcp_port: 4662,
                 user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
                 connect_options: Some(connect_options),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .unwrap();

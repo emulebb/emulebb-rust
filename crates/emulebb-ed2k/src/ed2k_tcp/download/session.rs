@@ -95,6 +95,8 @@ async fn remember_connected_peer_source(
                 tcp_port: peer_addr.port(),
                 user_hash: Some(hex::encode(user_hash)),
                 connect_options: Some(connect_options),
+                file_comment: String::new(),
+                file_rating: 0,
             },
         )
         .await
@@ -1068,7 +1070,16 @@ pub(in crate::ed2k_tcp) async fn drive_download_session(
                     );
                 }
                 (OP_EMULEPROT, OP_FILEDESC) => {
-                    notify::handle_file_desc(transport, peer_addr, file_hash_hex, &packet.payload)?;
+                    notify::handle_file_desc(
+                        transport,
+                        peer_addr,
+                        transfer_runtime,
+                        file_hash_hex,
+                        session_state.peer_user_hash,
+                        session_state.peer_connect_options,
+                        &packet.payload,
+                    )
+                    .await?;
                 }
                 (OP_EMULEPROT, OP_REQUESTPREVIEW) => {
                     notify::handle_preview_request(transport, peer_addr, &packet.payload)?;
@@ -1287,6 +1298,8 @@ async fn remember_source_exchange_sources(
                     tcp_port: source.tcp_port,
                     user_hash: source.user_hash.map(hex::encode),
                     connect_options: Some(source.connect_options),
+                    file_comment: String::new(),
+                    file_rating: 0,
                 },
             )
             .await?;

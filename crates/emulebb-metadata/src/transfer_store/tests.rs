@@ -41,6 +41,8 @@ fn transfer_manifest_roundtrips_sql_tables() {
             tcp_port: 4662,
             user_hash: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
             connect_options: Some(0x07),
+            file_comment: "useful source".to_string(),
+            file_rating: 4,
         }],
         upload_priority: "high".to_string(),
         auto_upload_priority: true,

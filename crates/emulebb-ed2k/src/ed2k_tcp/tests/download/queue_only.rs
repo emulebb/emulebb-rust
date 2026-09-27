@@ -332,6 +332,13 @@ async fn queued_peer_waits_past_read_timeout_for_late_accept_upload() {
     assert!(reask_rx.try_recv().is_err());
     let manifest = transfer_runtime.manifest(&file_hash_hex).await.unwrap();
     assert!(manifest.completed);
+    let source = manifest
+        .sources
+        .iter()
+        .find(|source| source.user_hash.as_deref() == Some(hex::encode([0x42; 16]).as_str()))
+        .unwrap();
+    assert_eq!(source.file_comment, "queue");
+    assert_eq!(source.file_rating, 5);
     server.await.unwrap();
 }
 

@@ -152,6 +152,21 @@ pub(crate) async fn transfer_sources(
     }
 }
 
+pub(crate) async fn transfer_comments(
+    State(state): State<RestState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.core.transfer_comments(&hash).await {
+        Ok(Some(comments)) => api_collection(comments).into_response(),
+        Ok(None) => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "transfer not found").into_response()
+        }
+        Err(error) => {
+            api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()).into_response()
+        }
+    }
+}
+
 pub(crate) async fn transfer_source(
     State(state): State<RestState>,
     Path((hash, client_id)): Path<(String, String)>,

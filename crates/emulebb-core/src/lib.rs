@@ -259,10 +259,10 @@ pub use rest_model::{
     HostNameResolution, IndexingStatus, IpFilterStatus, KadNode, LocalShare, LocalShareCreate,
     NetworkStatus, NullableStringField, NullableU32Field, Search, SearchCreate, SearchResult,
     SearchResultDownloadCreate, ServerCreate, ServerInfo, ServerUpdate, SharedFileUpdate, Status,
-    Transfer, TransferCreate, TransferDetails, TransferEvent, TransferEventDiagnostics,
-    TransferEventResetReason, TransferEventType, TransferPart, TransferSource, TransferStats,
-    TransferThroughputStats, TransferUpdate, Upload, UploadPolicyMetrics, UploadScoreBreakdown,
-    VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
+    Transfer, TransferComment, TransferCreate, TransferDetails, TransferEvent,
+    TransferEventDiagnostics, TransferEventResetReason, TransferEventType, TransferPart,
+    TransferSource, TransferStats, TransferThroughputStats, TransferUpdate, Upload,
+    UploadPolicyMetrics, UploadScoreBreakdown, VpnGuardConfig, VpnGuardProbeStatus, VpnGuardStatus,
 };
 use views::{
     ServerLiveDetails, apply_server_update, default_transfer_category_name,
@@ -1196,6 +1196,8 @@ impl EmulebbCore {
                             tcp_port: source.tcp_port,
                             user_hash: source.user_hash.map(hex::encode),
                             connect_options: source.obfuscation_options,
+                            file_comment: String::new(),
+                            file_rating: 0,
                         },
                     })
                     .await;
@@ -2329,6 +2331,8 @@ impl EmulebbCore {
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
                         connect_options: source.obfuscation_options,
+                        file_comment: String::new(),
+                        file_rating: 0,
                     },
                 )
                 .await?;
@@ -2531,6 +2535,8 @@ impl EmulebbCore {
                         tcp_port: source.tcp_port,
                         user_hash: source.user_hash.map(hex::encode),
                         connect_options: source.obfuscation_options,
+                        file_comment: String::new(),
+                        file_rating: 0,
                     },
                 })
                 .await;
@@ -6334,6 +6340,8 @@ fn parse_ed2k_link_sources<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<E
                     tcp_port,
                     user_hash,
                     connect_options: None,
+                    file_comment: String::new(),
+                    file_rating: 0,
                 });
             }
         }

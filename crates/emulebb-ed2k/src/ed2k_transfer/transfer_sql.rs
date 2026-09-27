@@ -38,6 +38,8 @@ pub(super) fn manifest_to_metadata(manifest: &Ed2kResumeManifest) -> MetadataTra
                 tcp_port: source.tcp_port,
                 user_hash: source.user_hash.clone(),
                 connect_options: source.connect_options,
+                file_comment: source.file_comment.clone(),
+                file_rating: source.file_rating,
             })
             .collect(),
         upload_priority: manifest.upload_priority.clone(),
@@ -119,6 +121,8 @@ pub(super) fn manifest_from_metadata(
                 tcp_port: source.tcp_port,
                 user_hash: source.user_hash,
                 connect_options: source.connect_options,
+                file_comment: source.file_comment,
+                file_rating: source.file_rating,
             })
             .collect(),
         upload_priority: manifest.upload_priority,

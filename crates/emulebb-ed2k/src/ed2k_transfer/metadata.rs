@@ -321,6 +321,17 @@ impl Ed2kTransferRuntime {
                 existing.connect_options = source.connect_options;
                 changed = true;
             }
+            // A normal rediscovery carries empty description defaults and must
+            // not erase a previously received OP_FILEDESC. Like stock, only a
+            // non-empty comment or non-zero rating constitutes an update.
+            if (!source.file_comment.is_empty() || source.file_rating > 0)
+                && (existing.file_comment != source.file_comment
+                    || existing.file_rating != source.file_rating)
+            {
+                existing.file_comment = source.file_comment;
+                existing.file_rating = source.file_rating;
+                changed = true;
+            }
         } else {
             manifest.sources.push(source);
             changed = true;
@@ -329,6 +340,38 @@ impl Ed2kTransferRuntime {
             self.store_manifest_unlocked(&manifest).await?;
         }
         Ok(())
+    }
+
+    /// Persist one peer's `OP_FILEDESC` comment/rating against its source row.
+    /// Stock retains descriptions only when at least one field is meaningful;
+    /// an all-empty packet does not clear an earlier description.
+    pub async fn remember_source_file_description(
+        &self,
+        file_hash: &str,
+        source: Ed2kSourceHint,
+    ) -> Result<()> {
+        if source.file_comment.is_empty() && source.file_rating == 0 {
+            return Ok(());
+        }
+        let _guard = self.lock_manifest(file_hash).await;
+        let mut manifest = self.load_manifest_unlocked(file_hash).await?;
+        let matching_source = manifest.sources.iter_mut().find(|existing| {
+            (existing.ip == source.ip && existing.tcp_port == source.tcp_port)
+                || source.user_hash.is_some() && existing.user_hash == source.user_hash
+        });
+        if let Some(existing) = matching_source {
+            existing.file_comment = source.file_comment;
+            existing.file_rating = source.file_rating;
+            if existing.user_hash.is_none() {
+                existing.user_hash = source.user_hash;
+            }
+            if existing.connect_options.is_none() {
+                existing.connect_options = source.connect_options;
+            }
+        } else {
+            manifest.sources.push(source);
+        }
+        self.store_manifest_unlocked(&manifest).await
     }
 
     /// Remove one remembered source hint by public source selector.

@@ -1,8 +1,8 @@
 //! Download-session decode-and-log handlers for inbound eMule notification
 //! opcodes that carry no download-state effect (public-IP answer, Kad
 //! callback/reask-callback, chat captcha req/res, Kad firewall TCP ack, buddy
-//! ping/pong, file description, preview request/answer). Each decodes its
-//! payload for the diagnostic packet dump only.
+//! ping/pong, preview request/answer). Most decode only for diagnostics;
+//! file descriptions additionally update durable per-source metadata.
 
 use std::net::SocketAddr;
 
@@ -14,6 +14,9 @@ use crate::ed2k_tcp::{
     decode_preview_request_payload, decode_public_ip_answer_payload,
     decode_reask_callback_tcp_payload, dump_ed2k_tcp_download_meta,
 };
+use crate::ed2k_transfer::{Ed2kSourceHint, Ed2kTransferRuntime};
+
+const MAX_FILE_COMMENT_CHARS: usize = 128;
 
 /// OP_PUBLICIP_ANSWER: the peer reported the external IP it sees for us.
 pub(super) fn handle_public_ip_answer(
@@ -127,20 +130,41 @@ pub(super) fn handle_buddy_ping_pong(transport: &Ed2kTransport, peer_addr: Socke
 }
 
 /// OP_FILEDESC: the peer's file rating/comment description.
-pub(super) fn handle_file_desc(
+pub(super) async fn handle_file_desc(
     transport: &Ed2kTransport,
     peer_addr: SocketAddr,
+    transfer_runtime: &Ed2kTransferRuntime,
     file_hash_hex: &str,
+    peer_user_hash: Option<[u8; 16]>,
+    peer_connect_options: Option<u8>,
     payload: &[u8],
 ) -> Result<()> {
     let file_desc = decode_file_description_payload(payload)?;
+    let comment: String = file_desc
+        .comment
+        .chars()
+        .take(MAX_FILE_COMMENT_CHARS)
+        .collect();
     dump_ed2k_tcp_download_meta(peer_addr, Some(transport.mode), "file_desc", || {
         format!(
             "file_hash={file_hash_hex} rating={} comment_len={}",
             file_desc.rating,
-            file_desc.comment.len()
+            comment.chars().count()
         )
     });
+    transfer_runtime
+        .remember_source_file_description(
+            file_hash_hex,
+            Ed2kSourceHint {
+                ip: peer_addr.ip().to_string(),
+                tcp_port: peer_addr.port(),
+                user_hash: peer_user_hash.map(hex::encode),
+                connect_options: peer_connect_options,
+                file_comment: comment,
+                file_rating: file_desc.rating,
+            },
+        )
+        .await?;
     Ok(())
 }
 
