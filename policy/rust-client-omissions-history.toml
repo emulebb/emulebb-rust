@@ -144,6 +144,34 @@ review_disposition = "fix"
 review_disposition_note = "2026-09-27: added four libFuzzer targets spanning ED2K server/TCP/client-UDP and Kad parsers, documented Windows/MSVC sanitizer runtime requirements, and completed sanitized campaigns. No longer deferred."
 
 [[resolved_omissions]]
+id = "legacy-server-udp-global-callback"
+area = "ed2k"
+stock_behavior = "The legacy ED2K server-UDP surface defines OP_GLOBCALLBACKREQ (0x9C) as requester IPv4, requester TCP port, and target LowID client ID. It lets a reachable client ask the server owning a remote LowID source to relay the normal TCP connect-back without logging into that server."
+rust_behavior = "IMPLEMENTED: same-server LowID sources continue through the connected TCP OP_CALLBACKREQUEST lane; a LowID source attributed to another server now uses a VPN-bound OP_GLOBCALLBACKREQ datagram carrying the learned public IPv4, advertised external TCP port, and source client ID. LowID-self callers are suppressed, missing public identity is rejected, and persisted UDP keys are used only when bound to the current public IPv4."
+reason = "This closes the only callback variant for a server-attributed LowID source outside the current TCP server session without creating a non-stock ad-hoc server login."
+compatibility = "The datagram and endpoint selection match the retained stock/aMule opcode contract; plaintext and keyed server-UDP framing reuse the existing bounded codec. Exact-layout, live loopback wire, route-selection, and full core/ED2K tests pass."
+disposition = "fixed"
+owner = "server-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented cross-server global UDP callback routing with HighID/public-endpoint gates, stale-key suppression, exact codec tests, and a live datagram test."
+
+[[resolved_omissions]]
+id = "legacy-server-udp-list-exchange"
+area = "ed2k"
+stock_behavior = "Legacy ED2K distinguishes server-to-server OP_SERVER_LIST_REQ (0xA0, announcing IP/port) from the client-safe empty OP_SERVER_LIST_REQ2 (0xA4); both receive OP_SERVER_LIST_RES (0xA1) containing a one-byte count and IPv4/port entries."
+rust_behavior = "IMPLEMENTED: codecs cover both request variants, while the client correctly emits only OP_SERVER_LIST_REQ2 during its paced UDP server-metadata walk when AddServersFromServer is enabled. OP_SERVER_LIST_RES is structurally bounded, deduplicated, filtered, and delivered through the existing persisted server-store event path. The default-off preference sends and accepts no discovery traffic."
+reason = "Supporting the client request/response exchange closes the genuine legacy discovery variant without falsely announcing the client as a peer server via OP_SERVER_LIST_REQ."
+compatibility = "Opcode diagnostics cover all three messages. A live loopback transaction proves 0xA4 empty-request framing, 0xA1 decoding, preference gating, and discovery-event emission; full ED2K/core suites pass."
+disposition = "fixed"
+owner = "server-runtime"
+target = "implemented"
+beta_blocker = false
+review_disposition = "fix"
+review_disposition_note = "2026-09-27: implemented both request codecs and the preference-gated client 0xA4 -> 0xA1 live path with persisted discovery integration."
+
+[[resolved_omissions]]
 id = "upload-slow-cooldown-suppression"
 area = "ed2k"
 stock_behavior = "eMule holds a slow-rate-recycled upload peer in a cooldown window (SetSlowUploadCooldownUntil / IsInSlowUploadCooldown gates FindBestClientInQueue, UploadQueue.cpp:228) and suppresses its queue score (bCooldownSuppressed, UploadClient.cpp:497), re-promoting it only via the broadband cooldown-probe path when capacity would otherwise idle."

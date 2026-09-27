@@ -127,7 +127,7 @@ fn server_callback_claim_is_per_client_file_and_uses_twenty_minute_gate() {
 }
 
 #[test]
-fn server_callback_requires_self_high_id_and_same_server() {
+fn server_callback_requires_self_high_id_and_a_source_server() {
     use std::net::SocketAddr;
 
     let connected: SocketAddr = "203.0.113.5:4661".parse().unwrap();
@@ -147,18 +147,19 @@ fn server_callback_requires_self_high_id_and_same_server() {
         Some(connected),
         Some(connected)
     ));
-    // HighID but the source is on a different server: TryToConnect never enters
-    // the server-callback branch (IsLocalServer is false).
-    assert!(!ed2k_server_callback_permitted(
+    // A different source server uses the legacy global UDP callback lane.
+    assert!(ed2k_server_callback_permitted(
         false,
         Some(other),
         Some(connected)
     ));
-    // No connected server at all -> unavailable.
+    // Global UDP does not require a current TCP server session.
+    assert!(ed2k_server_callback_permitted(false, Some(connected), None));
+    // Without source-server provenance neither relay can be addressed.
     assert!(!ed2k_server_callback_permitted(
         false,
-        Some(connected),
-        None
+        None,
+        Some(connected)
     ));
 }
 

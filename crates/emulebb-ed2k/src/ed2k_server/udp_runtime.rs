@@ -10,9 +10,10 @@ use super::{
     Ed2kUdpSourceRequestTarget, OP_EDONKEYPROT, OP_GLOBSERVSTATREQ, OP_SERVER_DESC_REQ,
     ResolvedServerEntry, ServerUdpPacket, decode_server_udp_datagram,
     decode_server_udp_datagram_with_key, diagnostics::dump_ed2k_server_udp_packet,
-    encode_server_udp_crypt_ping, encode_server_udp_datagram, encode_udp_search_request,
-    encode_udp_source_request_batch, server_description::server_description_challenge,
-    server_status::server_status_challenge, server_udp_crypt_ping_endpoint,
+    encode_server_list_request, encode_server_udp_crypt_ping, encode_server_udp_datagram,
+    encode_udp_search_request, encode_udp_source_request_batch, legacy_udp::ServerListRequest,
+    server_description::server_description_challenge, server_status::server_status_challenge,
+    server_udp_crypt_ping_endpoint,
 };
 
 pub(super) async fn bind_server_udp_socket(bind_ip: Ipv4Addr) -> Result<UdpSocket> {
@@ -38,7 +39,7 @@ pub(super) async fn send_server_udp_description_request(
     Ok(challenge)
 }
 
-async fn send_server_udp_packet(
+pub(super) async fn send_server_udp_packet(
     socket: &UdpSocket,
     server: &ResolvedServerEntry,
     opcode: u8,
@@ -58,6 +59,18 @@ async fn send_server_udp_packet(
         )
     })?;
     Ok(())
+}
+
+/// Request the server's peer list using the client-safe `OP_SERVER_LIST_REQ2`
+/// empty body. `OP_SERVER_LIST_REQ` is reserved for servers announcing their
+/// own endpoint and is covered by the codec without making this client pretend
+/// to be a server.
+pub(super) async fn send_server_udp_list_request(
+    socket: &UdpSocket,
+    server: &ResolvedServerEntry,
+) -> Result<()> {
+    let (opcode, payload) = encode_server_list_request(ServerListRequest::Client);
+    send_server_udp_packet(socket, server, opcode, &payload).await
 }
 
 /// Send `OP_GLOBSERVSTATREQ` with a fresh 4-byte challenge and return it so the

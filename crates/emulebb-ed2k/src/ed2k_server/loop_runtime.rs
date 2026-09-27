@@ -94,6 +94,7 @@ pub async fn run_ed2k_server_loop(options: Ed2kServerLoopOptions) {
         Arc::clone(&state),
         session_context.public_ip.clone(),
         session_context.hello_identity.connect_options & 0x01 != 0,
+        session_context.add_servers_from_server,
         Arc::clone(&shutdown),
         session_context.server_list_events.clone(),
     ));

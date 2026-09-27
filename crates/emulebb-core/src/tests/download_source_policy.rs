@@ -561,7 +561,7 @@ fn server_udp_source_supplement_runs_below_the_udp_source_cap() {
 }
 
 #[test]
-fn callback_route_uses_only_matching_connected_server() {
+fn callback_route_uses_connected_tcp_or_cross_server_udp() {
     let connected_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 10), 4661));
     let other_server = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 11), 4661));
 
@@ -571,7 +571,7 @@ fn callback_route_uses_only_matching_connected_server() {
     );
     assert_eq!(
         ed2k_server_callback_route(Some(other_server), Some(connected_server)),
-        Ed2kServerCallbackRoute::Unavailable
+        Ed2kServerCallbackRoute::GlobalUdp
     );
     assert_eq!(
         ed2k_server_callback_route(None, Some(connected_server)),
@@ -579,7 +579,7 @@ fn callback_route_uses_only_matching_connected_server() {
     );
     assert_eq!(
         ed2k_server_callback_route(Some(connected_server), None),
-        Ed2kServerCallbackRoute::Unavailable
+        Ed2kServerCallbackRoute::GlobalUdp
     );
 }
 

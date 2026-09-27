@@ -16,13 +16,14 @@ use crate::reachability::ExternalReachability;
 use super::server_entry::ConfiguredServerEntry;
 use super::{
     Ed2kServerListEvent, Ed2kServerListEventSender, Ed2kServerState, OP_GLOBSERVSTATRES,
-    OP_SERVER_DESC_RES, ResolvedServerEntry, resolve_server_entry,
+    OP_SERVER_DESC_RES, OP_SERVER_LIST_RES, ResolvedServerEntry, decode_server_list,
+    resolve_server_entry,
     server_description::decode_server_description_response,
     server_status::decode_server_status_response,
     udp_runtime::{
         bind_server_udp_socket, read_server_udp_packet_with_key,
         send_server_udp_crypt_status_request, send_server_udp_description_request,
-        send_server_udp_status_request,
+        send_server_udp_list_request, send_server_udp_status_request,
     },
 };
 
@@ -37,6 +38,7 @@ pub(super) async fn poll_server_descriptions(
     state: Arc<RwLock<Ed2kServerState>>,
     public_ip: ExternalReachability,
     crypt_enabled: bool,
+    add_servers_from_server: bool,
     shutdown: Arc<AtomicBool>,
     events: Option<Ed2kServerListEventSender>,
 ) {
@@ -88,6 +90,7 @@ pub(super) async fn poll_server_descriptions(
             &mut server,
             public_ip.get(),
             crypt_enabled,
+            add_servers_from_server,
             &events,
         )
         .await
@@ -106,6 +109,7 @@ async fn poll_one_server(
     server: &mut ResolvedServerEntry,
     public_ip: Option<std::net::Ipv4Addr>,
     crypt_enabled: bool,
+    add_servers_from_server: bool,
     events: &Ed2kServerListEventSender,
 ) -> anyhow::Result<()> {
     poll_one_server_with_timeouts(
@@ -113,6 +117,7 @@ async fn poll_one_server(
         server,
         public_ip,
         crypt_enabled,
+        add_servers_from_server,
         events,
         SERVER_CRYPT_PING_RESPONSE_TIMEOUT,
         SERVER_METADATA_RESPONSE_TIMEOUT,
@@ -129,10 +134,14 @@ async fn poll_one_server_with_timeouts(
     server: &mut ResolvedServerEntry,
     public_ip: Option<std::net::Ipv4Addr>,
     crypt_enabled: bool,
+    add_servers_from_server: bool,
     events: &Ed2kServerListEventSender,
     crypt_timeout: Duration,
     response_timeout: Duration,
 ) -> anyhow::Result<()> {
+    if !server.entry.udp_key_is_valid_for(public_ip) {
+        server.entry.udp_key = 0;
+    }
     let crypt_discovery = public_ip.is_some() && crypt_enabled;
     let (status_challenge, status_packet, status_started) = if crypt_discovery {
         let challenge = send_server_udp_crypt_status_request(socket, server).await?;
@@ -199,6 +208,26 @@ async fn poll_one_server_with_timeouts(
         obfuscation_port_tcp: status.obfuscation_port_tcp,
         obfuscation_port_udp: status.obfuscation_port_udp,
     });
+
+    if add_servers_from_server {
+        let list_result = async {
+            send_server_udp_list_request(socket, server).await?;
+            receive_opcode(socket, server, OP_SERVER_LIST_RES, None, response_timeout).await
+        }
+        .await;
+        match list_result {
+            Ok(packet) => {
+                let discovered = decode_server_list(&packet.payload);
+                if !discovered.is_empty() {
+                    let _ = events.send(Ed2kServerListEvent::DiscoveredServers(discovered));
+                }
+            }
+            Err(error) => debug!(
+                "UDP server-list request failed for {}: {error}",
+                server.base_endpoint()
+            ),
+        }
+    }
 
     let description_challenge = send_server_udp_description_request(socket, server).await?;
     let description_packet =
@@ -332,6 +361,7 @@ mod tests {
             &mut server,
             Some(Ipv4Addr::new(198, 51, 100, 9)),
             true,
+            false,
             &events,
             Duration::from_millis(25),
             Duration::from_secs(1),
@@ -380,5 +410,84 @@ mod tests {
                 auxiliary_ports: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn udp_server_list_request_is_opt_in_and_emits_discovery() {
+        let (base_port, plain, _crypt) = bind_plain_and_crypt_ports().await;
+        let configured =
+            ConfiguredServerEntry::from_endpoint_text(&format!("127.0.0.1:{base_port}")).unwrap();
+        let mut server = ResolvedServerEntry {
+            entry: configured,
+            ip: Ipv4Addr::LOCALHOST,
+        };
+        let responder = tokio::spawn(async move {
+            let mut buffer = [0u8; 256];
+            let (status_len, client) = plain.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(status_len, 6);
+            assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_GLOBSERVSTATREQ]);
+            let challenge = u32::from_le_bytes(buffer[2..6].try_into().unwrap());
+            let mut status = challenge.to_le_bytes().to_vec();
+            status.extend_from_slice(&123u32.to_le_bytes());
+            status.extend_from_slice(&456u32.to_le_bytes());
+            status.extend_from_slice(&[0u8; 12]);
+            plain
+                .send_to(&framed(OP_GLOBSERVSTATRES, &status), client)
+                .await
+                .unwrap();
+
+            let (list_len, client) = plain.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(list_len, 2);
+            assert_eq!(
+                buffer[..2],
+                [OP_EDONKEYPROT, crate::ed2k_server::OP_SERVER_LIST_REQ2]
+            );
+            let list = [1, 198, 51, 100, 8, 0x35, 0x12];
+            plain
+                .send_to(&framed(OP_SERVER_LIST_RES, &list), client)
+                .await
+                .unwrap();
+
+            let (description_len, client) = plain.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(description_len, 6);
+            assert_eq!(buffer[..2], [OP_EDONKEYPROT, OP_SERVER_DESC_REQ]);
+            let mut description = 6u16.to_le_bytes().to_vec();
+            description.extend_from_slice(b"Server");
+            description.extend_from_slice(&4u16.to_le_bytes());
+            description.extend_from_slice(b"Desc");
+            plain
+                .send_to(&framed(OP_SERVER_DESC_RES, &description), client)
+                .await
+                .unwrap();
+        });
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (events, mut inbox) = ed2k_server_list_event_channel();
+
+        poll_one_server_with_timeouts(
+            &client,
+            &mut server,
+            None,
+            false,
+            true,
+            &events,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        responder.await.unwrap();
+
+        assert!(matches!(
+            inbox.try_recv().unwrap(),
+            Ed2kServerListEvent::StatusUpdated { .. }
+        ));
+        assert_eq!(
+            inbox.try_recv().unwrap(),
+            Ed2kServerListEvent::DiscoveredServers(vec![(Ipv4Addr::new(198, 51, 100, 8), 4661)])
+        );
+        assert!(matches!(
+            inbox.try_recv().unwrap(),
+            Ed2kServerListEvent::MetadataUpdated { .. }
+        ));
     }
 }

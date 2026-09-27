@@ -25,10 +25,11 @@ use emulebb_ed2k::{
     config::Ed2kRuntimeConfig,
     ed2k_server::{
         Ed2kBackgroundSearchInterrupted, Ed2kFoundSource, Ed2kServerLoopOptions,
-        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpKeywordSearchOptions,
-        Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats, SearchCriteria,
-        ed2k_server_list_event_channel, new_ed2k_server_search_channel, parse_server_met,
-        publish_shared_catalog_via_background_session, request_callback_via_background_session,
+        Ed2kServerSearchHandle, Ed2kServerState, Ed2kUdpCallbackRequestOptions,
+        Ed2kUdpKeywordSearchOptions, Ed2kUdpSourceBatchSearchOptions, OfferFilesPublishStats,
+        SearchCriteria, ed2k_server_list_event_channel, new_ed2k_server_search_channel,
+        parse_server_met, publish_shared_catalog_via_background_session,
+        request_callback_via_background_session, request_callback_via_udp_server,
         run_ed2k_server_loop, search_keyword_udp_servers, search_keyword_via_background_session,
         search_source_batch_via_background_session, search_source_udp_server_batches,
     },
@@ -1148,9 +1149,8 @@ impl EmulebbCore {
                 }
                 let callback_route =
                     ed2k_server_callback_route(source.source_server, connected_server_endpoint);
-                // TryToConnect reaches CCS_SERVERCALLBACK only for a same-server
-                // source AND only after CanDoCallback passed (HighID). Suppress
-                // both the wrong-server route and the LowID-self case here.
+                // Both TCP server callback and legacy cross-server global UDP
+                // callback require us to be HighID/reachable.
                 if !ed2k_server_callback_permitted(
                     self_tcp_firewalled,
                     source.source_server,
@@ -1229,6 +1229,29 @@ impl EmulebbCore {
                             Err(anyhow::anyhow!(
                                 "ED2K callback needs a connected background server session"
                             ))
+                        }
+                    }
+                    Ed2kServerCallbackRoute::GlobalUdp => {
+                        match (self.ed2k_reachability.get(), source.source_server) {
+                            (Some(requester_public_ip), Some(server_endpoint)) => {
+                                request_callback_via_udp_server(Ed2kUdpCallbackRequestOptions {
+                                    bind_ip: network.bind_ip,
+                                    config: &config,
+                                    requester_public_ip,
+                                    requester_tcp_port: self
+                                        .ed2k_reachability
+                                        .advertised_tcp_port(network.listen_port),
+                                    server_endpoint,
+                                    target_client_id: source.client_id,
+                                })
+                                .await
+                            }
+                            (None, _) => Err(anyhow::anyhow!(
+                                "ED2K global callback requires a known public IPv4"
+                            )),
+                            (_, None) => Err(anyhow::anyhow!(
+                                "ED2K global callback source has no server endpoint"
+                            )),
                         }
                     }
                     Ed2kServerCallbackRoute::Unavailable => Ok(()),

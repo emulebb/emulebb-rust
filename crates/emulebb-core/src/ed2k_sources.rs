@@ -35,6 +35,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ed2kServerCallbackRoute {
     BackgroundSession,
+    GlobalUdp,
     Unavailable,
 }
 
@@ -1334,34 +1335,32 @@ pub(crate) fn ed2k_server_callback_route(
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
 ) -> Ed2kServerCallbackRoute {
-    // WHY: stock eMule only sends OP_CALLBACKREQUEST through the currently
-    // connected server when the LowID source is registered there. It does not
-    // open ad-hoc TCP logins to another server just to relay a callback.
+    // The ordinary TCP OP_CALLBACKREQUEST is valid only through the connected
+    // server which owns the LowID. The legacy UDP OP_GLOBCALLBACKREQ exists for
+    // a LowID learned from any other server and avoids an ad-hoc TCP login.
     match (source_server, connected_server) {
         (Some(source_server), Some(connected_server)) if source_server == connected_server => {
             Ed2kServerCallbackRoute::BackgroundSession
         }
+        (Some(_), _) => Ed2kServerCallbackRoute::GlobalUdp,
         _ => Ed2kServerCallbackRoute::Unavailable,
     }
 }
 
 /// Whether we may emit a server `OP_CALLBACKREQUEST` for a LowID source,
-/// mirroring `CanDoCallback` (emule.cpp:2952-2969) restricted to the
-/// server-callback branch that `TryToConnect` reaches (BaseClient.cpp:1507-1516,
-/// `CCS_SERVERCALLBACK`). That branch is only entered for a source registered on
-/// our currently connected server, and `CanDoCallback` forbids it entirely
-/// unless WE are HighID on the ed2k server (`ed2k && !eLow`). A firewalled
-/// (LowID) node asking its own server to relay a callback to a same-server LowID
-/// source "breaks the protocol and will get us banned", so we suppress it.
+/// mirroring `CanDoCallback` (emule.cpp:2952-2969) for both the connected TCP
+/// server and legacy global-UDP relay lanes. Both require us to be reachable:
+/// a firewalled (LowID) node asking a server to relay a callback to another
+/// LowID cannot receive the connect-back and is suppressed.
 pub(crate) fn ed2k_server_callback_permitted(
     self_tcp_firewalled: bool,
     source_server: Option<SocketAddr>,
     connected_server: Option<SocketAddr>,
 ) -> bool {
     !self_tcp_firewalled
-        && matches!(
+        && !matches!(
             ed2k_server_callback_route(source_server, connected_server),
-            Ed2kServerCallbackRoute::BackgroundSession
+            Ed2kServerCallbackRoute::Unavailable
         )
 }
 
