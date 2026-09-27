@@ -263,8 +263,10 @@ const TAGTYPE_BOOLARRAY: u8 = 0x06;
 const TAGTYPE_BLOB: u8 = 0x07;
 const TAGTYPE_UINT16: u8 = 0x08;
 const TAGTYPE_UINT8: u8 = 0x09;
+const TAGTYPE_BSOB: u8 = 0x0A;
 const TAGTYPE_UINT64: u8 = 0x0B;
 const TAGTYPE_STR1: u8 = 0x11;
+const TAGTYPE_STR22: u8 = 0x26;
 const TAG_SHORT_NAME_MASK: u8 = 0x80;
 
 const CT_NAME: u8 = 0x01;

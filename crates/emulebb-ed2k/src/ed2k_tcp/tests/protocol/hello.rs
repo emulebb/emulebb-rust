@@ -349,6 +349,107 @@ fn emule_info_decode_preserves_stock_capability_tags() {
     assert!(!profile.supports_preview);
 }
 
+fn hello_answer_payload_with_raw_tags(tag_count: u32, raw_tags: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(26 + raw_tags.len());
+    payload.extend_from_slice(&[0x55; 16]);
+    payload.extend_from_slice(&0x521B_5895u32.to_le_bytes());
+    payload.extend_from_slice(&4662u16.to_le_bytes());
+    payload.extend_from_slice(&tag_count.to_le_bytes());
+    payload.extend_from_slice(raw_tags);
+    payload
+}
+
+fn push_unknown_short_hello_tag(raw: &mut Vec<u8>, tag_type: u8, encoded_value: &[u8]) {
+    raw.push(0x80 | tag_type);
+    raw.push(0xF0);
+    raw.extend_from_slice(encoded_value);
+}
+
+fn push_emule_version_sentinel(raw: &mut Vec<u8>) {
+    raw.push(0x80 | TAGTYPE_UINT32);
+    raw.push(CT_EMULE_VERSION);
+    raw.extend_from_slice(&emule_version_tag().to_le_bytes());
+}
+
+#[test]
+fn hello_binary_corpus_skips_every_stock_tag_representation() {
+    const TAGTYPE_NONE: u8 = 0x00;
+    const TAGTYPE_HASH: u8 = 0x01;
+    const TAGTYPE_FLOAT32: u8 = 0x04;
+    const TAGTYPE_BOOL: u8 = 0x05;
+    const TAGTYPE_BOOLARRAY: u8 = 0x06;
+    const TAGTYPE_BLOB: u8 = 0x07;
+    const TAGTYPE_UINT16: u8 = 0x08;
+    const TAGTYPE_UINT8: u8 = 0x09;
+    const TAGTYPE_BSOB: u8 = 0x0A;
+    const TAGTYPE_UINT64: u8 = 0x0B;
+    const TAGTYPE_STR1: u8 = 0x11;
+    const TAGTYPE_STR22: u8 = 0x26;
+
+    let mut raw = Vec::new();
+    let mut tag_count = 0u32;
+    let mut push = |tag_type, value: &[u8]| {
+        push_unknown_short_hello_tag(&mut raw, tag_type, value);
+        tag_count += 1;
+    };
+    push(TAGTYPE_NONE, &[]);
+    push(TAGTYPE_HASH, &[0x11; 16]);
+    push(TAGTYPE_STRING, &[3, 0, b'a', b'b', b'c']);
+    push(TAGTYPE_UINT32, &0x1122_3344u32.to_le_bytes());
+    push(TAGTYPE_FLOAT32, &1.5f32.to_le_bytes());
+    push(TAGTYPE_BOOL, &[1]);
+    // Stock's historical formula consumes (bit_len / 8) + 1 bytes.
+    push(TAGTYPE_BOOLARRAY, &[9, 0, 0xAA, 0x01]);
+    push(TAGTYPE_BLOB, &[3, 0, 0, 0, 0x10, 0x20, 0x30]);
+    push(TAGTYPE_UINT16, &0x5566u16.to_le_bytes());
+    push(TAGTYPE_UINT8, &[0x77]);
+    push(TAGTYPE_BSOB, &[3, 0x40, 0x50, 0x60]);
+    push(TAGTYPE_UINT64, &0x0102_0304_0506_0708u64.to_le_bytes());
+    for tag_type in TAGTYPE_STR1..=TAGTYPE_STR22 {
+        let len = usize::from(tag_type - TAGTYPE_STR1 + 1);
+        push(tag_type, &vec![tag_type; len]);
+    }
+    drop(push);
+    push_emule_version_sentinel(&mut raw);
+    tag_count += 1;
+
+    let profile =
+        decode_hello_answer_profile(&hello_answer_payload_with_raw_tags(tag_count, &raw)).unwrap();
+    assert!(profile.is_mule_hello);
+}
+
+#[test]
+fn hello_ignores_unknown_long_tag_names_for_stock_valid_values() {
+    const TAGTYPE_BSOB: u8 = 0x0A;
+    let mut raw = Vec::new();
+    raw.push(TAGTYPE_BSOB);
+    raw.extend_from_slice(&7u16.to_le_bytes());
+    raw.extend_from_slice(b"unknown");
+    raw.extend_from_slice(&[4, 1, 2, 3, 4]);
+    push_emule_version_sentinel(&mut raw);
+
+    let profile =
+        decode_hello_answer_profile(&hello_answer_payload_with_raw_tags(2, &raw)).unwrap();
+    assert!(profile.is_mule_hello);
+}
+
+#[test]
+fn hello_rejects_truncated_variable_width_stock_tags() {
+    for raw in [
+        vec![0x80 | TAGTYPE_STRING, 0xF0, 4, 0, b'a', b'b', b'c'],
+        vec![0x80 | 0x06, 0xF0, 16, 0, 0xAA, 0xBB],
+        vec![0x80 | 0x07, 0xF0, 5, 0, 0, 0, 1, 2, 3, 4],
+        vec![0x80 | 0x0A, 0xF0, 4, 1, 2, 3],
+        {
+            let mut raw = vec![0x80 | 0x26, 0xF0];
+            raw.extend_from_slice(&[0x11; 21]);
+            raw
+        },
+    ] {
+        assert!(decode_hello_answer_profile(&hello_answer_payload_with_raw_tags(1, &raw)).is_err());
+    }
+}
+
 #[test]
 fn emule_info_answer_uses_expected_protocol_and_tag_count() {
     let packet = encode_emule_info_answer(41000);

@@ -14,9 +14,9 @@ use super::{
     EMULE_VERSION_SHORT, EMULE_VERSION_UPDATE, ET_COMMENTS, ET_COMPRESSION, ET_EXTENDEDREQUEST,
     ET_FEATURES, ET_SOURCEEXCHANGE, ET_UDPPORT, ET_UDPVER, Ed2kHelloIdentity, HELLO_NICKNAME,
     OP_EDONKEYPROT, OP_EMULEINFO, OP_EMULEINFOANSWER, OP_EMULEPROT, OP_HELLO, OP_HELLOANSWER,
-    TAG_SHORT_NAME_MASK, TAGTYPE_BLOB, TAGTYPE_BOOL, TAGTYPE_BOOLARRAY, TAGTYPE_FLOAT32,
-    TAGTYPE_STR1, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16, TAGTYPE_UINT32, TAGTYPE_UINT64,
-    encode_packet,
+    TAG_SHORT_NAME_MASK, TAGTYPE_BLOB, TAGTYPE_BOOL, TAGTYPE_BOOLARRAY, TAGTYPE_BSOB,
+    TAGTYPE_FLOAT32, TAGTYPE_STR1, TAGTYPE_STR22, TAGTYPE_STRING, TAGTYPE_UINT8, TAGTYPE_UINT16,
+    TAGTYPE_UINT32, TAGTYPE_UINT64, encode_packet,
 };
 
 pub(super) fn encode_hello_request(identity: Ed2kHelloIdentity) -> Vec<u8> {
@@ -305,7 +305,9 @@ fn decode_hello_tag(mut bytes: &[u8]) -> Result<DecodedHelloTag<'_>> {
             }
             (&bytes[2..2 + len], &bytes[2 + len..])
         }
-        TAGTYPE_STR1..=0x20 => {
+        // Stock's receive vocabulary includes the historical STR17..STR22
+        // values even though current writers compact only strings up to STR16.
+        TAGTYPE_STR1..=TAGTYPE_STR22 => {
             let len = usize::from(base_type - TAGTYPE_STR1 + 1);
             if bytes.len() < len {
                 anyhow::bail!("short eD2k hello compact string tag value");
@@ -358,6 +360,19 @@ fn decode_hello_tag(mut bytes: &[u8]) -> Result<DecodedHelloTag<'_>> {
             }
             (&bytes[4..4 + blob_len], &bytes[4 + blob_len..])
         }
+        TAGTYPE_BSOB => {
+            let Some((&len, value_bytes)) = bytes.split_first() else {
+                anyhow::bail!("short eD2k hello BSOB tag length");
+            };
+            let len = usize::from(len);
+            if value_bytes.len() < len {
+                anyhow::bail!("short eD2k hello BSOB tag value");
+            }
+            (&value_bytes[..len], &value_bytes[len..])
+        }
+        // TAGTYPE_NONE carries no value. It is part of the stock enum and can
+        // be skipped safely because the next byte is unambiguously the next tag.
+        0x00 => (&bytes[..0], bytes),
         0x01 => {
             if bytes.len() < 16 {
                 anyhow::bail!("short eD2k hello hash tag value");
