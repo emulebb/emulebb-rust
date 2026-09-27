@@ -143,7 +143,7 @@ impl EmulebbCore {
         // Resume GRADUALLY. Queuing dozens of downloads at once (39 observed on the
         // soak profile) thunder-herds the state lock and the source coordinator on
         // top of the large-library shared reload, starving REST at startup (the
-        // control plane wedged in a live test). Let the post-connect startup burst
+        // control plane wedged in a live test). Let the network startup burst
         // settle, then stagger each resume — eMule's CDownloadQueue likewise drives
         // incomplete files a few at a time, not all in one tick.
         tokio::time::sleep(Duration::from_secs(RESUME_DOWNLOADS_INITIAL_DELAY_SECS)).await;

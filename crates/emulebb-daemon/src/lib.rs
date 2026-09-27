@@ -711,6 +711,17 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
         tokio::spawn(vpn_guard_monitor::run(Arc::clone(&core), monitor));
     }
     if ed2k_network_configured {
+        // Hydrate persisted downloads independently of server reachability. The
+        // core applies its own startup delay before queueing them, which gives
+        // ED2K/Kad initialization room to settle without making an unreachable
+        // auto-connect target hide the operator's persisted transfer list.
+        let resume_core = Arc::clone(&core);
+        tokio::spawn(async move {
+            let resumed = resume_core.resume_persisted_downloads().await;
+            if resumed > 0 {
+                info!(resumed, "resumed persisted incomplete downloads on startup");
+            }
+        });
         let connect_core = Arc::clone(&core);
         tokio::spawn(async move {
             if !connect_core.core_settings().await.auto_connect {
@@ -726,13 +737,6 @@ pub async fn run(profile: DaemonProfile) -> Result<()> {
                     %error,
                     "automatic ED2K/Kad startup failed; REST connect remains available"
                 ),
-            }
-            // Resume persisted incomplete downloads now that ED2K/Kad are up so
-            // source acquisition can succeed. In-progress downloads from a prior
-            // run are otherwise abandoned (state.transfers starts empty).
-            let resumed = connect_core.resume_persisted_downloads().await;
-            if resumed > 0 {
-                info!(resumed, "resumed persisted incomplete downloads on startup");
             }
         });
     }
