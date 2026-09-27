@@ -3267,18 +3267,17 @@ fn shared_file_notes_changed(
 
 /// Whether a shared-file mutation changed a field that alters the eD2k
 /// OP_OFFERFILES set or per-file offer content, and therefore warrants re-running
-/// the rate-limited shared-catalog offer session. Only the SET of offered files
-/// (a share/unshare) or a file's completion state is offer content; a file's
-/// name/size/hash are fixed and cannot be edited. A regular priority PATCH only
-/// reorders a future full offer (oracle `CKnownFile::SetUpPriority` emits no
-/// re-offer, KnownFile.cpp:1395-1402), but toggling not-published changes the
-/// offer candidate set.
+/// the rate-limited shared-catalog offer session. The set, completion sentinel,
+/// non-zero rating tag, and not-published status affect the packet. A regular
+/// priority PATCH only reorders a future full offer (oracle
+/// `CKnownFile::SetUpPriority` emits no re-offer, KnownFile.cpp:1395-1402).
 fn shared_file_change_requires_ed2k_reoffer(
     share_status_changed: bool,
     completion_changed: bool,
     publish_status_changed: bool,
+    rating_changed: bool,
 ) -> bool {
-    share_status_changed || completion_changed || publish_status_changed
+    share_status_changed || completion_changed || publish_status_changed || rating_changed
 }
 
 /// Drain the pending NOTES-reset queue into the loop-local schedule, resetting

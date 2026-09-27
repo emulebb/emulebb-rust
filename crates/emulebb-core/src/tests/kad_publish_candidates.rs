@@ -720,16 +720,25 @@ fn comment_edit_marks_notes_dirty_but_priority_only_edit_does_not() {
 
 #[test]
 fn only_offer_relevant_changes_queue_the_ed2k_reoffer() {
-    // Publish-G3: a regular priority/comment/rating PATCH changes neither the
-    // offered SET nor a file's offer content.
+    // A regular priority/comment PATCH changes neither the offered SET nor a
+    // file's offer content.
     assert!(!shared_file_change_requires_ed2k_reoffer(
-        false, false, false
+        false, false, false, false
     ));
-    // A genuinely offer-relevant change (share/unshare, completion, or toggling
-    // not-published) does.
-    assert!(shared_file_change_requires_ed2k_reoffer(true, false, false));
-    assert!(shared_file_change_requires_ed2k_reoffer(false, true, false));
-    assert!(shared_file_change_requires_ed2k_reoffer(false, false, true));
+    // A genuinely offer-relevant change (share/unshare, completion,
+    // not-published, or the server-published rating) does.
+    assert!(shared_file_change_requires_ed2k_reoffer(
+        true, false, false, false
+    ));
+    assert!(shared_file_change_requires_ed2k_reoffer(
+        false, true, false, false
+    ));
+    assert!(shared_file_change_requires_ed2k_reoffer(
+        false, false, true, false
+    ));
+    assert!(shared_file_change_requires_ed2k_reoffer(
+        false, false, false, true
+    ));
 }
 
 #[test]

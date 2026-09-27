@@ -26,16 +26,18 @@ use super::{
     CT_EMULE_VERSION, CT_NAME, CT_SERVER_FLAGS, CT_SERVER_UDPSEARCH_FLAGS, CT_VERSION,
     ED2K_FILETYPE_ANY, ED2K_FILETYPE_AUDIO, ED2K_FILETYPE_DOCUMENT, ED2K_FILETYPE_IMAGE,
     ED2K_FILETYPE_PROGRAM, ED2K_FILETYPE_VIDEO, EDONKEY_VERSION, EMULE_VERSION_MAJOR,
-    EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILESIZE, FT_FILESIZE_HI,
-    FT_FILETYPE, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
-    OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST, OP_GETSOURCES, OP_GETSOURCES_OBFU,
-    OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ, OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3,
-    OP_OFFERFILES, ResolvedServerEntry, SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES,
-    SERVER_TCP_FLAG_TCPOBFUSCATION, SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES,
-    SERVER_UDP_FLAG_EXT_GETSOURCES, SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES,
-    SRVCAP_LARGEFILES, SRVCAP_NEWTAGS, SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT,
-    SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES, SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession,
-    ServerSessionPhase, dump_ed2k_server_meta, is_low_id,
+    EMULE_VERSION_MINOR, EMULE_VERSION_UPDATE, FT_FILENAME, FT_FILERATING, FT_FILESIZE,
+    FT_FILESIZE_HI, FT_FILETYPE, OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
+    OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID,
+    OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT, OFFER_FILE_SEARCH_SETTLE_DELAY, OP_GETSERVERLIST,
+    OP_GETSOURCES, OP_GETSOURCES_OBFU, OP_GLOBGETSOURCES, OP_GLOBGETSOURCES2, OP_GLOBSEARCHREQ,
+    OP_GLOBSEARCHREQ2, OP_GLOBSEARCHREQ3, OP_OFFERFILES, ResolvedServerEntry,
+    SERVER_TCP_FLAG_COMPRESSION, SERVER_TCP_FLAG_LARGEFILES, SERVER_TCP_FLAG_TCPOBFUSCATION,
+    SERVER_TCP_FLAG_TYPETAGINTEGER, SERVER_UDP_FLAG_EXT_GETFILES, SERVER_UDP_FLAG_EXT_GETSOURCES,
+    SERVER_UDP_FLAG_EXT_GETSOURCES2, SERVER_UDP_FLAG_LARGEFILES, SRVCAP_LARGEFILES, SRVCAP_NEWTAGS,
+    SRVCAP_REQUESTCRYPT, SRVCAP_REQUIRECRYPT, SRVCAP_SUPPORTCRYPT, SRVCAP_UDP_NEWTAGS_LARGEFILES,
+    SRVCAP_UNICODE, SRVCAP_ZLIB, ServerSession, ServerSessionPhase, dump_ed2k_server_meta,
+    is_low_id,
 };
 
 const MAX_UDP_SOURCE_REQUEST_PAYLOAD_BYTES: usize = 510;
@@ -123,8 +125,6 @@ fn encode_offer_files_payload_at_cursor(
     server_flags: Option<u32>,
     max_offer_files: usize,
 ) -> EncodedOfferFilesPayload {
-    let (advertised_client_id, advertised_client_port) =
-        advertised_client_endpoint_for_offer_file(client_id, tcp_port, server_flags);
     // eMule offers a >4GB file only to a server advertising LARGEFILES TCP
     // support (SharedFileList.cpp:2649); otherwise the file is excluded from the
     // candidate set (and thus from pagination) entirely.
@@ -152,7 +152,16 @@ fn encode_offer_files_payload_at_cursor(
             .to_le_bytes(),
     );
     let use_integer_type = server_flags.unwrap_or_default() & SERVER_TCP_FLAG_TYPETAGINTEGER != 0;
-    for (file_hash, file_name, file_size, file_type) in &offered_files.entries {
+    for (file_hash, file_name, file_size, file_type, verified_complete, rating) in
+        &offered_files.entries
+    {
+        let (advertised_client_id, advertised_client_port) =
+            advertised_client_endpoint_for_offer_file(
+                client_id,
+                tcp_port,
+                server_flags,
+                *verified_complete,
+            );
         let lower_file_size = *file_size as u32;
         let upper_file_size = u32::try_from(file_size >> 32).unwrap_or(u32::MAX);
         // FT_FILETYPE per stock (SharedFileList::CreateOfferedFilePacket): an
@@ -164,6 +173,9 @@ fn encode_offer_files_payload_at_cursor(
             tag_count += 1;
         }
         if has_type_tag {
+            tag_count += 1;
+        }
+        if *rating != 0 {
             tag_count += 1;
         }
         payload.extend_from_slice(file_hash);
@@ -184,6 +196,11 @@ fn encode_offer_files_payload_at_cursor(
                 push_short_string_tag(&mut payload, FT_FILETYPE, term);
             }
         }
+        // eServer 17.6+ accepts the local 1..5 rating without a capability
+        // bit. Stock always publishes a non-zero rating to servers.
+        if *rating != 0 {
+            push_short_int_tag(&mut payload, FT_FILERATING, u64::from((*rating).min(5)));
+        }
     }
     EncodedOfferFilesPayload {
         payload,
@@ -197,12 +214,20 @@ fn advertised_client_endpoint_for_offer_file(
     client_id: Option<u32>,
     tcp_port: u16,
     server_flags: Option<u32>,
+    verified_complete: bool,
 ) -> (u32, u16) {
     if server_flags.unwrap_or_default() & SERVER_TCP_FLAG_COMPRESSION != 0 {
-        return (
-            OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
-            OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
-        );
+        return if verified_complete {
+            (
+                OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID,
+                OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT,
+            )
+        } else {
+            (
+                OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID,
+                OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT,
+            )
+        };
     }
     match client_id {
         // WHY: this server-assigned HighID is the public endpoint identity the
@@ -349,7 +374,7 @@ pub(super) fn source_request_opcode(connect_options: u8, server_flags: Option<u3
 
 #[derive(Debug)]
 struct OfferedFilesCatalog {
-    entries: Vec<([u8; 16], String, u64, u8)>,
+    entries: Vec<([u8; 16], String, u64, u8, bool, u8)>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -357,7 +382,7 @@ struct OfferedFilesCatalog {
 #[derive(Debug)]
 struct EncodedOfferFilesPayload {
     payload: Vec<u8>,
-    entries: Vec<([u8; 16], String, u64, u8)>,
+    entries: Vec<([u8; 16], String, u64, u8, bool, u8)>,
     next_cursor: usize,
     total_entries: usize,
 }
@@ -465,7 +490,7 @@ pub(super) fn offer_files_catalog_fingerprint(shared_catalog: &[Ed2kSharedEntry]
     hasher.finish()
 }
 
-fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8)]) -> u64 {
+fn offer_files_entries_fingerprint(entries: &[([u8; 16], String, u64, u8, bool, u8)]) -> u64 {
     let mut hasher = DefaultHasher::new();
     entries.hash(&mut hasher);
     hasher.finish()
@@ -492,20 +517,24 @@ fn offer_files_cursor_wrapped(
         || next_cursor <= (current_cursor % total_entries.max(1))
 }
 
-fn popular_hash_offer_file(hash: &Ed2kSharedEntry) -> Option<([u8; 16], String, u64, u8)> {
+fn popular_hash_offer_file(
+    hash: &Ed2kSharedEntry,
+) -> Option<([u8; 16], String, u64, u8, bool, u8)> {
     let file_hash = hash.parsed_hash().ok()?;
     Some((
         file_hash.0,
         hash.display_name.clone(),
         hash.file_size,
         ed2k_offer_file_type(&hash.display_name),
+        hash.verified_complete,
+        hash.rating,
     ))
 }
 
 fn ranked_offer_files(
     shared_catalog: &[Ed2kSharedEntry],
     server_supports_large_files: bool,
-) -> Vec<([u8; 16], String, u64, u8)> {
+) -> Vec<([u8; 16], String, u64, u8, bool, u8)> {
     let now_unix_ms = unix_time_ms();
     let mut ranked = shared_catalog
         .iter()
@@ -687,7 +716,7 @@ pub(super) async fn send_offer_files_advertisement(
     session.offer_files_sent_at = Some(Instant::now());
     session.offer_files_catalog_fingerprint = Some(catalog_fingerprint);
     session.offer_files_catalog_cursor = encoded.next_cursor;
-    for (file_hash, _, _, _) in &encoded.entries {
+    for (file_hash, _, _, _, _, _) in &encoded.entries {
         session.offer_files_published_hashes.insert(*file_hash);
     }
     mark_offer_files_published(shared_catalog, &encoded.entries, unix_time_ms()).await;
@@ -720,12 +749,12 @@ pub(super) async fn send_offer_files_advertisement(
 
 async fn mark_offer_files_published(
     shared_catalog: &Ed2kSharedCatalog,
-    entries: &[([u8; 16], String, u64, u8)],
+    entries: &[([u8; 16], String, u64, u8, bool, u8)],
     published_at_ms: i64,
 ) {
     let published = entries
         .iter()
-        .map(|(file_hash, _, _, _)| hex::encode(file_hash))
+        .map(|(file_hash, _, _, _, _, _)| hex::encode(file_hash))
         .collect::<HashSet<_>>();
     let mut catalog = shared_catalog.write().await;
     catalog.mutate_all(|entry| {
@@ -747,7 +776,7 @@ fn log_shared_publish_offer_batch(
         .entries
         .iter()
         .take(16)
-        .map(|(file_hash, _, _, _)| hex::encode(file_hash))
+        .map(|(file_hash, _, _, _, _, _)| hex::encode(file_hash))
         .collect::<Vec<_>>();
     crate::ed2k_transfer::diag_sched::shared_publish_offer_batch(
         &session.endpoint.to_string(),

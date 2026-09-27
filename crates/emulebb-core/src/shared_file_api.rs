@@ -172,6 +172,9 @@ impl EmulebbCore {
                 .as_ref()
                 .map(|(comment, rating)| (comment.as_str(), *rating)),
         );
+        let rating_changed = comment_rating
+            .as_ref()
+            .is_some_and(|(_, rating)| *rating != share.rating);
         self.ed2k_transfers
             .update_shared_file_metadata(
                 hash,
@@ -205,9 +208,14 @@ impl EmulebbCore {
                 }
             }
         }
-        // A regular priority-only PATCH only reorders a future full offer, but
-        // toggling not-published changes the offer candidate set.
-        if shared_file_change_requires_ed2k_reoffer(false, false, publish_status_changed) {
+        // A regular priority/comment-only PATCH leaves the server offer intact;
+        // toggling not-published or changing the published rating does not.
+        if shared_file_change_requires_ed2k_reoffer(
+            false,
+            false,
+            publish_status_changed,
+            rating_changed,
+        ) {
             self.queue_ed2k_shared_catalog_publish();
         }
         Ok(self.share(hash).await)

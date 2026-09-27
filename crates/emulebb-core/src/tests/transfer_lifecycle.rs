@@ -461,12 +461,10 @@ async fn unshare_file_removes_live_shared_catalog_entry() {
 }
 
 #[tokio::test]
-async fn update_shared_file_does_not_queue_redundant_ed2k_reoffer() {
-    // Publish-G3: a regular metadata PATCH mutates only priority/comment/rating,
-    // none of which are in the eD2k OP_OFFERFILES set/content, so it must apply
-    // the metadata without spinning up a redundant shared-catalog re-offer
-    // (oracle `CKnownFile::SetUpPriority` emits no re-offer,
-    // KnownFile.cpp:1395-1402).
+async fn update_shared_file_priority_and_comment_do_not_queue_redundant_ed2k_reoffer() {
+    // Priority/comment do not change OP_OFFERFILES content, so apply them
+    // without spinning up a redundant shared-catalog re-offer (oracle
+    // `CKnownFile::SetUpPriority` emits no re-offer, KnownFile.cpp:1395-1402).
     let runtime_dir = unique_runtime_dir("emulebb-core-update-shared-republish");
     let transfer_root = runtime_dir.join("transfers");
     let shared_path = runtime_dir.join("shared-metadata.bin");
@@ -488,7 +486,7 @@ async fn update_shared_file_does_not_queue_redundant_ed2k_reoffer() {
             SharedFileUpdate {
                 priority: Some("high".to_string()),
                 comment: Some("synthetic note".to_string()),
-                rating: Some(4),
+                rating: Some(0),
             },
         )
         .await
@@ -498,9 +496,46 @@ async fn update_shared_file_does_not_queue_redundant_ed2k_reoffer() {
     // The metadata is still applied over REST.
     assert_eq!(updated.priority, "high");
     assert_eq!(updated.comment, "synthetic note");
-    assert_eq!(updated.rating, 4);
-    // ...but no eD2k re-offer session was queued (net-nil delta before G3).
+    assert_eq!(updated.rating, 0);
+    // ...but no eD2k re-offer session was queued.
     assert_eq!(core.ed2k_publish_diagnostics().queued_count, queued_before);
+}
+
+#[tokio::test]
+async fn update_shared_file_rating_queues_ed2k_reoffer() {
+    let runtime_dir = unique_runtime_dir("emulebb-core-update-shared-rating");
+    let transfer_root = runtime_dir.join("transfers");
+    let shared_path = runtime_dir.join("shared-rating.bin");
+    fs::write(&shared_path, b"shared rating update payload").unwrap();
+    let core = EmulebbCore::new("test", FileIndex::in_memory().unwrap(), &transfer_root).unwrap();
+
+    let share = core
+        .share_local_file(LocalShareCreate {
+            path: shared_path.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let queued_before = core.ed2k_publish_diagnostics().queued_count;
+
+    let updated = core
+        .update_shared_file(
+            &share.hash,
+            SharedFileUpdate {
+                priority: None,
+                comment: Some(String::new()),
+                rating: Some(4),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(updated.rating, 4);
+    assert_eq!(
+        core.ed2k_publish_diagnostics().queued_count,
+        queued_before + 1
+    );
 }
 
 #[tokio::test]

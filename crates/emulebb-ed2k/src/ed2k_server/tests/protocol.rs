@@ -791,7 +791,7 @@ fn offer_files_payload_matches_oracle_search_session_sample() {
     // Server has no SRV_TCPFLG_TYPETAGINTEGER, so FT_FILETYPE is the STRING term
     // for a .iso (CD-image folds to PROGRAM = "Pro"), not an integer.
     let expected = decode(
-            "e34c00000015010000009f3c23db7651efbac9a837a8a0ae3ed9fbfbfbfbfbfb0300000082011e007562756e74752d6c696e75782d6f7261636c652d73616d706c652e69736f830200002000930350726f",
+            "e34c00000015010000009f3c23db7651efbac9a837a8a0ae3ed9fcfcfcfcfcfc0300000082011e007562756e74752d6c696e75782d6f7261636c652d73616d706c652e69736f830200002000930350726f",
         )
         .unwrap();
 

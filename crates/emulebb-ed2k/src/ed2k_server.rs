@@ -226,6 +226,7 @@ const FT_FILETYPE: u8 = 0x03;
 const FT_SOURCES: u8 = 0x15;
 const FT_COMPLETE_SOURCES: u8 = 0x30;
 const FT_FILESIZE_HI: u8 = 0x3A;
+const FT_FILERATING: u8 = 0xF7;
 // ED2K search-ID file types (eserver 17.6+, OtherFunctions.h `ED2KFT_*`): the
 // integer FT_FILETYPE value published in OP_OFFERFILES. `GetED2KFileTypeSearchID`
 // folds Archive/CD-image to PROGRAM ("Pro"); an unknown type (ANY) publishes no
@@ -240,6 +241,8 @@ const ED2K_FILETYPE_DOCUMENT: u8 = 5;
 
 const OFFER_FILE_COMPLETE_SENTINEL_CLIENT_ID: u32 = 0xFBFB_FBFB;
 const OFFER_FILE_COMPLETE_SENTINEL_CLIENT_PORT: u16 = 0xFBFB;
+const OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID: u32 = 0xFCFC_FCFC;
+const OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT: u16 = 0xFCFC;
 const OFFER_FILE_SAMPLE_HASH: [u8; 16] = [
     0x9F, 0x3C, 0x23, 0xDB, 0x76, 0x51, 0xEF, 0xBA, 0xC9, 0xA8, 0x37, 0xA8, 0xA0, 0xAE, 0x3E, 0xD9,
 ];

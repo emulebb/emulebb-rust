@@ -146,6 +146,60 @@ fn offer_files_preserves_complete_sentinel_for_compression_servers() {
 }
 
 #[test]
+fn offer_files_uses_incomplete_sentinel_for_part_files() {
+    let mut entry = one_entry();
+    entry.verified_complete = false;
+    entry.complete_parts = vec![true, false];
+    let payload = encode_offer_files_payload(
+        &[entry],
+        Some(u32::from_le_bytes([192, 168, 1, 210])),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        Some(SERVER_TCP_FLAG_COMPRESSION),
+    );
+
+    assert_eq!(
+        u32::from_le_bytes(payload[20..24].try_into().unwrap()),
+        OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_ID
+    );
+    assert_eq!(
+        u16::from_le_bytes(payload[24..26].try_into().unwrap()),
+        OFFER_FILE_INCOMPLETE_SENTINEL_CLIENT_PORT
+    );
+}
+
+#[test]
+fn offer_files_publishes_nonzero_rating() {
+    let mut entry = one_entry();
+    entry.rating = 4;
+    let payload = encode_offer_files_payload(
+        &[entry],
+        Some(u32::from_le_bytes([192, 168, 1, 210])),
+        Ipv4Addr::new(192, 168, 1, 210),
+        4662,
+        Some(SERVER_TCP_FLAG_COMPRESSION),
+    );
+
+    let tag_count_offset = 26;
+    let tag_count = u32::from_le_bytes(
+        payload[tag_count_offset..tag_count_offset + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(tag_count, 4);
+    let mut tags = &payload[tag_count_offset + 4..];
+    let mut rating = None;
+    for _ in 0..tag_count {
+        let (name, value, rest) = decode_tag_value(tags).unwrap();
+        if name == Some(FT_FILERATING) {
+            rating = value;
+        }
+        tags = rest;
+    }
+    assert_eq!(rating, Some(DecodedTagValue::Unsigned(4)));
+}
+
+#[test]
 fn offer_files_preserves_unicode_filename_tag() {
     let mut entry = one_entry();
     entry.display_name = "unicode-\u{00e9}-\u{6f22}.bin".to_string();
